@@ -58,31 +58,6 @@ const FORMAT_OPTIONS: FormatOption[] = [
   },
 ];
 
-const VoidspaceLogo: React.FC<{ className?: string }> = ({ className = "" }) => (
-  <svg
-    viewBox="0 0 490 490"
-    fill="none"
-    xmlns="http://www.w3.org/2000/svg"
-    className={className}
-  >
-    <defs>
-      <linearGradient id="voidGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-        <stop offset="0%" stopColor="#a855f7" />
-        <stop offset="100%" stopColor="#7c3aed" />
-      </linearGradient>
-    </defs>
-    <circle cx="245" cy="245" r="220" stroke="url(#voidGrad)" strokeWidth="28" fill="none" />
-    <path
-      d="M165 150 L245 350 L325 150"
-      stroke="currentColor"
-      strokeWidth="38"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      fill="none"
-    />
-  </svg>
-);
-
 type ViewMode = "home" | "templates" | "recent";
 
 interface WelcomeScreenProps {
@@ -199,18 +174,20 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ initialTab }) => {
 
   return (
     <div className="fixed inset-0 z-50 bg-background overflow-hidden">
-      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,rgba(124,58,237,0.08),transparent_60%)]" />
-      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_bottom_right,rgba(168,85,247,0.05),transparent_50%)]" />
+      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,rgba(99,102,241,0.08),transparent_60%)]" />
+      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_bottom_right,rgba(139,92,246,0.05),transparent_50%)]" />
 
       <div className="relative h-full flex flex-col items-center justify-center px-6">
         <div className="w-full max-w-3xl">
           <div className="flex flex-col items-center text-center mb-12">
             <div className="flex items-center gap-3 mb-6">
-              <div className="w-12 h-12 text-primary">
-                <VoidspaceLogo className="w-full h-full" />
-              </div>
-              <span className="text-xl font-semibold text-text-primary tracking-tight">
-                Voidspace Studio
+              <img
+                src="/studio/images/logo.png"
+                alt="Voidspace"
+                className="w-12 h-12"
+              />
+              <span className="text-xl font-bold text-text-primary tracking-widest" style={{ fontFamily: "'DM Sans', 'Inter', sans-serif" }}>
+                VOIDSPACE
               </span>
             </div>
 

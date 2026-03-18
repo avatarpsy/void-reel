@@ -22,6 +22,7 @@ import {
   LayoutGrid,
   Grid2x2,
   List,
+  Cloud,
 } from "lucide-react";
 import {
   BACKGROUND_PRESETS,
@@ -34,6 +35,7 @@ import { useUIStore } from "../../stores/ui-store";
 import type { MediaItem } from "@openreel/core";
 import { AspectRatioMatchDialog } from "./dialogs/AspectRatioMatchDialog";
 import { AIGenTab } from "./AIGenTab";
+import { VoidspaceMediaPanel } from "./VoidspaceMediaPanel";
 import { useTtsAudioStore } from "../../stores/tts-store";
 import { toast } from "../../stores/notification-store";
 import { IconButton, Input, ScrollArea } from "@openreel/ui";
@@ -361,11 +363,11 @@ export const AssetsPanel: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTabRaw] = useState<
-    "media" | "text" | "graphics" | "ai"
+    "media" | "text" | "graphics" | "ai" | "voidspace"
   >("media");
   const ttsHasUnsaved = useTtsAudioStore((s) => s.generatedAudio !== null && !s.isAudioSaved);
 
-  const setActiveTab = useCallback((tab: "media" | "text" | "graphics" | "ai") => {
+  const setActiveTab = useCallback((tab: "media" | "text" | "graphics" | "ai" | "voidspace") => {
     if (activeTab === "ai" && tab !== "ai" && ttsHasUnsaved) {
       toast.warning("Unsaved audio discarded", "Save to media or download next time to keep it.");
     }
@@ -653,7 +655,7 @@ export const AssetsPanel: React.FC = () => {
         >
           Media
           {activeTab === "media" && (
-            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-t-full shadow-[0_-2px_8px_rgba(34,197,94,0.5)]" />
+            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-t-full shadow-[0_-2px_8px_rgba(99,102,241,0.5)]" />
           )}
         </button>
         <button
@@ -666,7 +668,7 @@ export const AssetsPanel: React.FC = () => {
         >
           Text
           {activeTab === "text" && (
-            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-t-full shadow-[0_-2px_8px_rgba(34,197,94,0.5)]" />
+            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-t-full shadow-[0_-2px_8px_rgba(99,102,241,0.5)]" />
           )}
         </button>
         <button
@@ -679,7 +681,7 @@ export const AssetsPanel: React.FC = () => {
         >
           Graphics
           {activeTab === "graphics" && (
-            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-t-full shadow-[0_-2px_8px_rgba(34,197,94,0.5)]" />
+            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-t-full shadow-[0_-2px_8px_rgba(99,102,241,0.5)]" />
           )}
         </button>
         <button
@@ -692,7 +694,21 @@ export const AssetsPanel: React.FC = () => {
         >
           AI Gen
           {activeTab === "ai" && (
-            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-t-full shadow-[0_-2px_8px_rgba(34,197,94,0.5)]" />
+            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-t-full shadow-[0_-2px_8px_rgba(99,102,241,0.5)]" />
+          )}
+        </button>
+        <button
+          onClick={() => setActiveTab("voidspace")}
+          className={`pb-3 transition-all relative flex items-center gap-1.5 ${
+            activeTab === "voidspace"
+              ? "text-text-primary"
+              : "hover:text-text-secondary"
+          }`}
+        >
+          <Cloud size={12} />
+          Cloud
+          {activeTab === "voidspace" && (
+            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-t-full shadow-[0_-2px_8px_rgba(99,102,241,0.5)]" />
           )}
         </button>
       </div>
@@ -1165,6 +1181,9 @@ export const AssetsPanel: React.FC = () => {
 
       {/* AI Tab Content */}
       {activeTab === "ai" && <AIGenTab />}
+
+      {/* Voidspace Cloud Media Tab */}
+      {activeTab === "voidspace" && <VoidspaceMediaPanel />}
 
       {aspectRatioDialogData && (
         <AspectRatioMatchDialog
