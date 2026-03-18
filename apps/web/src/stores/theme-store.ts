@@ -53,7 +53,7 @@ export const useThemeStore = create<ThemeState>()(
       },
     }),
     {
-      name: "openreel-theme",
+      name: "voidspace-studio-theme",
       onRehydrateStorage: () => (state) => {
         if (state) {
           const isDark = calculateIsDark(state.mode);

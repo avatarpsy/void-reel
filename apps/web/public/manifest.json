@@ -1,7 +1,7 @@
 {
-  "name": "OpenReel",
-  "short_name": "OpenReel",
-  "description": "Professional browser-based video, audio, and photo editing application",
+  "name": "Voidspace Studio",
+  "short_name": "Voidspace",
+  "description": "Voidspace AI Video Editor - Edit your AI-generated videos in the browser",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0f172a",
