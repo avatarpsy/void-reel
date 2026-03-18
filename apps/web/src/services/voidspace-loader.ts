@@ -103,12 +103,23 @@ interface SceneNarrationData {
 // Auth helpers
 // ────────────────────────────────────────────
 
-export function waitForAuth(): Promise<string | null> {
+export function waitForAuth(timeoutMs = 15000): Promise<string | null> {
   return new Promise((resolve) => {
+    let resolved = false;
     const unsubscribe = onAuthStateChanged(auth, (user) => {
+      if (resolved) return;
+      resolved = true;
       unsubscribe();
       resolve(user?.uid ?? null);
     });
+    // Timeout: resolve null if auth state never fires
+    setTimeout(() => {
+      if (resolved) return;
+      resolved = true;
+      unsubscribe();
+      console.warn("[waitForAuth] Timed out waiting for auth state");
+      resolve(null);
+    }, timeoutMs);
   });
 }
 
@@ -137,7 +148,7 @@ export async function fetchSceneLists(
 async function fetchScenes(
   userId: string,
   sceneListId: string,
-): Promise<SceneData[]> {
+): Promise<Array<SceneData & { _docId: string }>> {
   const ref = collection(
     db,
     "users",
@@ -148,7 +159,7 @@ async function fetchScenes(
   );
   const q = query(ref, orderBy("scene_number"));
   const snapshot = await getDocs(q);
-  return snapshot.docs.map((d) => d.data() as SceneData);
+  return snapshot.docs.map((d) => ({ _docId: d.id, ...(d.data() as SceneData) }));
 }
 
 async function fetchSceneVideos(
@@ -283,23 +294,30 @@ export async function loadSceneListAsProject(
   userId: string,
   sceneListId: string,
 ): Promise<Project> {
+  console.log(`[voidspace-loader] Loading scene list: ${sceneListId} for user: ${userId}`);
+
   // 1) Fetch scene list metadata
   const slDoc = await getDoc(
     doc(db, "users", userId, "scene_lists", sceneListId),
   );
-  const slData = slDoc.exists() ? slDoc.data() : {};
+  if (!slDoc.exists()) {
+    throw new Error(`Scene list "${sceneListId}" not found`);
+  }
+  const slData = slDoc.data();
+  console.log(`[voidspace-loader] Scene list found: ${slData.name || sceneListId}`);
 
   // 2) Fetch all scenes
   const scenes = await fetchScenes(userId, sceneListId);
+  console.log(`[voidspace-loader] Fetched ${scenes.length} scenes (doc IDs: ${scenes.map(s => s._docId).join(', ')})`);
 
   // 3) For each scene, fetch media in parallel
   const sceneMedia = await Promise.all(
     scenes.map(async (scene) => {
-      const num = String(scene.scene_number);
+      const docId = scene._docId;
       const [videos, images, narrations] = await Promise.all([
-        fetchSceneVideos(userId, sceneListId, num),
-        fetchSceneImages(userId, sceneListId, num),
-        fetchSceneNarrations(userId, sceneListId, num),
+        fetchSceneVideos(userId, sceneListId, docId),
+        fetchSceneImages(userId, sceneListId, docId),
+        fetchSceneNarrations(userId, sceneListId, docId),
       ]);
       return { scene, videos, images, narrations };
     }),

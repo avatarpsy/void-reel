@@ -44,7 +44,11 @@ function App() {
   const createNewProject = useProjectStore((state) => state.createNewProject);
   const loadProject = useProjectStore((state) => state.loadProject);
   const { showDialog, availableSaves, recover, dismiss, clearAll } = useProjectRecovery();
-  const [voidspaceLoading, setVoidspaceLoading] = useState(false);
+  const [voidspaceLoading, setVoidspaceLoading] = useState(() => {
+    const sp = new URLSearchParams(window.location.search);
+    return sp.has("sceneListId");
+  });
+  const [voidspaceError, setVoidspaceError] = useState<string | null>(null);
 
   const { route, params, navigate, parsedDimensions, fps } = useRouter();
   const hasHandledInitialRoute = useRef(false);
@@ -64,9 +68,10 @@ function App() {
 
     (async () => {
       try {
-        const userId = await waitForAuth();
+        const userId = await waitForAuth(10000);
         if (!userId) {
           console.error("[Voidspace] No authenticated user");
+          setVoidspaceError("Not signed in. Please sign in and try again.");
           setVoidspaceLoading(false);
           return;
         }
@@ -80,6 +85,9 @@ function App() {
         );
       } catch (err) {
         console.error("[Voidspace] Failed to load scene list:", err);
+        setVoidspaceError(
+          err instanceof Error ? err.message : "Failed to load project",
+        );
       } finally {
         setVoidspaceLoading(false);
       }
@@ -178,6 +186,16 @@ function App() {
         <MobileBlocker />
         {voidspaceLoading ? (
           <LoadingSpinner message="Loading your Voidspace project..." />
+        ) : voidspaceError ? (
+          <div className="h-screen w-screen bg-background flex flex-col items-center justify-center gap-3">
+            <p className="text-sm text-destructive">{voidspaceError}</p>
+            <button
+              onClick={() => window.location.reload()}
+              className="text-sm text-primary hover:underline"
+            >
+              Retry
+            </button>
+          </div>
         ) : isSharePage ? (
           <SharePage shareId={params.shareId!} />
         ) : showWelcome ? (

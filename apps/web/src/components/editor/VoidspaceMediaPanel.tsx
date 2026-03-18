@@ -396,7 +396,7 @@ export function VoidspaceMediaPanel() {
 
     (async () => {
       try {
-        const uid = await waitForAuth();
+        const uid = await waitForAuth(10000);
         if (!uid) {
           setError("Sign in to access your Voidspace media");
           setLoading(false);
