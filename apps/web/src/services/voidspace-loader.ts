@@ -534,7 +534,7 @@ export async function loadSceneListAsProject(
             fontFamily: "Anton",
             fontSize: 48,
             color: "#FFFFFF",
-            background: "rgba(0,0,0,0.5)",
+            backgroundColor: "rgba(0,0,0,0.5)",
             position: "bottom",
           },
         });

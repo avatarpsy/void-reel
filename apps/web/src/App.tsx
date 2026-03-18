@@ -86,9 +86,6 @@ function App() {
     })();
   }, [loadProject, navigate]);
 
-  const { route, params, navigate, parsedDimensions, fps } = useRouter();
-  const hasHandledInitialRoute = useRef(false);
-
   useEffect(() => {
     if (hasHandledInitialRoute.current) return;
 
