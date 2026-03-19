@@ -24,10 +24,20 @@ import {
   fetchSceneLists,
 } from "../../services/voidspace-loader";
 import { db } from "../../config/firebase-config";
-import { collection, getDocs, query, orderBy } from "firebase/firestore";
+import {
+  collection,
+  getDocs,
+  query,
+  orderBy,
+  where,
+  limit,
+  doc,
+  getDoc,
+} from "firebase/firestore";
 import { useProjectStore } from "../../stores/project-store";
 import { useUIStore } from "../../stores/ui-store";
 import type { MediaItem, MediaMetadata } from "@openreel/core";
+import type { Project } from "@openreel/core";
 
 // ─── Types ───────────────────────────────────────────
 
@@ -46,6 +56,25 @@ interface VoidspaceAsset {
 }
 
 type AssetCategory = "videos" | "images" | "music" | "narrations";
+
+interface AvatarContext {
+  sceneListId: string | null;
+  avatarId: string | null;
+  avatarName: string | null;
+}
+
+interface PanelSceneList {
+  id: string;
+  name?: string;
+  avatar_id?: string;
+  avatar_name?: string;
+  music_url?: string;
+  music_title?: string;
+}
+
+const CLOUD_PAGE_SIZE = 8;
+const MAX_SCENES_PER_LIST = 25;
+const QUERY_TIMEOUT_MS = 12000;
 
 // ─── Helpers ─────────────────────────────────────────
 
@@ -83,8 +112,102 @@ function assetToMediaItem(asset: VoidspaceAsset): MediaItem {
 
 // ─── Fetcher: collect ALL assets across all scene lists ──
 
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`[VoidspaceMediaPanel] Timeout: ${label}`));
+    }, timeoutMs);
+    promise
+      .then((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
+}
+
+function getSceneListIdFromProject(project: Project | null): string | null {
+  if (!project?.id) return null;
+  if (!project.id.startsWith("voidspace-")) return null;
+  return project.id.replace(/^voidspace-/, "");
+}
+
+async function resolveAvatarContext(
+  userId: string,
+  project: Project | null,
+): Promise<AvatarContext> {
+  const sceneListId = getSceneListIdFromProject(project);
+  if (!sceneListId) {
+    return { sceneListId: null, avatarId: null, avatarName: null };
+  }
+
+  try {
+    const slRef = doc(db, "users", userId, "scene_lists", sceneListId);
+    const slSnap = await withTimeout(getDoc(slRef), QUERY_TIMEOUT_MS, "sceneList metadata");
+    if (!slSnap.exists()) {
+      return { sceneListId, avatarId: null, avatarName: null };
+    }
+    const data = slSnap.data() as Record<string, unknown>;
+    return {
+      sceneListId,
+      avatarId: (data.avatar_id as string) || null,
+      avatarName: (data.avatar_name as string) || null,
+    };
+  } catch (err) {
+    console.warn("[VoidspaceMediaPanel] Could not resolve avatar context", err);
+    return { sceneListId, avatarId: null, avatarName: null };
+  }
+}
+
+async function fetchAvatarSceneLists(
+  userId: string,
+  avatarId: string | null,
+  pageSize: number,
+): Promise<PanelSceneList[]> {
+  const sceneListsRef = collection(db, "users", userId, "scene_lists");
+
+  // Fast path: indexed query by avatar_id
+  if (avatarId) {
+    try {
+      const q = query(
+        sceneListsRef,
+        where("avatar_id", "==", avatarId),
+        orderBy("updated_at", "desc"),
+        limit(pageSize),
+      );
+      const snap = await withTimeout(getDocs(q), QUERY_TIMEOUT_MS, "avatar scene lists query");
+      return snap.docs.map((d) => {
+        const data = d.data() as PanelSceneList;
+        const { id: _unusedId, ...rest } = data;
+        return { id: d.id, ...rest };
+      });
+    } catch (err) {
+      console.warn("[VoidspaceMediaPanel] avatar_id query failed, using fallback", err);
+    }
+  }
+
+  // Fallback path: latest scene lists, client filter
+  const allSceneLists = await fetchSceneLists(userId);
+  const filtered = avatarId
+    ? allSceneLists.filter((sl) => sl.avatar_id === avatarId)
+    : allSceneLists;
+  return filtered.slice(0, pageSize).map((sl) => ({
+    id: sl.id,
+    name: sl.name,
+    avatar_id: sl.avatar_id,
+    avatar_name: sl.avatar_name,
+    music_url: sl.music_url,
+    music_title: sl.music_title,
+  }));
+}
+
 async function fetchAllUserAssets(
   userId: string,
+  avatarContext: AvatarContext,
+  pageSize = CLOUD_PAGE_SIZE,
 ): Promise<Record<AssetCategory, VoidspaceAsset[]>> {
   const result: Record<AssetCategory, VoidspaceAsset[]> = {
     videos: [],
@@ -93,20 +216,26 @@ async function fetchAllUserAssets(
     narrations: [],
   };
   const seenUrls = new Set<string>();
-
-  const sceneLists = await fetchSceneLists(userId);
+  const sceneLists = await fetchAvatarSceneLists(
+    userId,
+    avatarContext.avatarId,
+    pageSize,
+  );
 
   for (const sl of sceneLists) {
     const slName = sl.name || sl.music_title || "Untitled";
+    const slId = String(sl.id || "");
+    if (!slId) continue;
 
     // Global music from the scene list itself
-    if (sl.music_url && !seenUrls.has(sl.music_url)) {
-      seenUrls.add(sl.music_url);
+    const sceneListMusicUrl = sl.music_url || "";
+    if (sceneListMusicUrl && !seenUrls.has(sceneListMusicUrl)) {
+      seenUrls.add(sceneListMusicUrl);
       result.music.push({
-        id: `music-${sl.id}`,
+        id: `music-${slId}`,
         name: sl.music_title || `Music - ${slName}`,
         type: "audio",
-        url: sl.music_url,
+        url: sceneListMusicUrl,
         tag: "music",
         sceneListName: slName,
       });
@@ -118,19 +247,21 @@ async function fetchAllUserAssets(
       "users",
       userId,
       "scene_lists",
-      sl.id,
+      slId,
       "scenes",
     );
     let scenes: Array<{ id: string; data: Record<string, unknown> }>;
     try {
       const q = query(scenesRef, orderBy("scene_number"));
-      const snap = await getDocs(q);
+      const snap = await withTimeout(getDocs(q), QUERY_TIMEOUT_MS, `scenes query ${slId}`);
       scenes = snap.docs.map((d) => ({ id: d.id, data: d.data() }));
-    } catch {
+    } catch (err) {
+      console.warn(`[VoidspaceMediaPanel] Failed to load scenes for ${slId}`, err);
       continue;
     }
 
-    for (const scene of scenes) {
+    const scenesToScan = scenes.slice(0, MAX_SCENES_PER_LIST);
+    for (const scene of scenesToScan) {
       const sceneNum = scene.id;
       const sd = scene.data;
       const sn = (sd.scene_number as number) || 0;
@@ -141,7 +272,7 @@ async function fetchAllUserAssets(
       if (narrationUrl && !seenUrls.has(narrationUrl)) {
         seenUrls.add(narrationUrl);
         result.narrations.push({
-          id: `narr-${sl.id}-${sceneNum}`,
+          id: `narr-${slId}-${sceneNum}`,
           name: `Narration S${sn} - ${slName}`,
           type: "audio",
           url: narrationUrl,
@@ -157,7 +288,7 @@ async function fetchAllUserAssets(
       if (sceneMusicUrl && !seenUrls.has(sceneMusicUrl)) {
         seenUrls.add(sceneMusicUrl);
         result.music.push({
-          id: `smusic-${sl.id}-${sceneNum}`,
+          id: `smusic-${slId}-${sceneNum}`,
           name:
             (sd.music_title as string) || `Scene Music S${sn} - ${slName}`,
           type: "audio",
@@ -170,17 +301,21 @@ async function fetchAllUserAssets(
 
       // Sub-collections: videos
       try {
-        const vSnap = await getDocs(
+        const vSnap = await withTimeout(
+          getDocs(
           collection(
             db,
             "users",
             userId,
             "scene_lists",
-            sl.id,
+            slId,
             "scenes",
             sceneNum,
             "videos",
           ),
+          ),
+          QUERY_TIMEOUT_MS,
+          `videos query ${slId}/${sceneNum}`,
         );
         for (const vDoc of vSnap.docs) {
           const v = vDoc.data();
@@ -205,17 +340,21 @@ async function fetchAllUserAssets(
 
       // Sub-collections: images
       try {
-        const iSnap = await getDocs(
+        const iSnap = await withTimeout(
+          getDocs(
           collection(
             db,
             "users",
             userId,
             "scene_lists",
-            sl.id,
+            slId,
             "scenes",
             sceneNum,
             "images",
           ),
+          ),
+          QUERY_TIMEOUT_MS,
+          `images query ${slId}/${sceneNum}`,
         );
         for (const iDoc of iSnap.docs) {
           const im = iDoc.data();
@@ -241,17 +380,21 @@ async function fetchAllUserAssets(
 
       // Sub-collections: narrations
       try {
-        const nSnap = await getDocs(
+        const nSnap = await withTimeout(
+          getDocs(
           collection(
             db,
             "users",
             userId,
             "scene_lists",
-            sl.id,
+            slId,
             "scenes",
             sceneNum,
             "narrations",
           ),
+          ),
+          QUERY_TIMEOUT_MS,
+          `narrations query ${slId}/${sceneNum}`,
         );
         for (const nDoc of nSnap.docs) {
           const n = nDoc.data();
@@ -275,6 +418,52 @@ async function fetchAllUserAssets(
         /* no narrations sub-collection */
       }
     }
+  }
+
+  // Include published videos/images for this avatar (or latest if no avatar context)
+  try {
+    const pubRef = collection(db, "users", userId, "published_posts");
+    const pubQ = query(pubRef, orderBy("created_at", "desc"), limit(30));
+    const pubSnap = await withTimeout(getDocs(pubQ), QUERY_TIMEOUT_MS, "published_posts query");
+    for (const p of pubSnap.docs) {
+      const data = p.data() as Record<string, unknown>;
+      const postAvatarId = (data.avatar_id as string) || null;
+      if (avatarContext.avatarId && postAvatarId && postAvatarId !== avatarContext.avatarId) {
+        continue;
+      }
+
+      const postName = (data.title as string) || (data.caption as string) || "Published post";
+      const vUrl = (data.video_url as string) || "";
+      const thumb = (data.thumbnail_url as string) || (data.image_url as string) || undefined;
+      if (vUrl && !seenUrls.has(vUrl)) {
+        seenUrls.add(vUrl);
+        result.videos.push({
+          id: `pubv-${p.id}`,
+          name: postName,
+          type: "video",
+          url: vUrl,
+          thumbnailUrl: thumb,
+          tag: "published",
+          sceneListName: avatarContext.avatarName || "Published",
+        });
+      }
+
+      const imgUrl = (data.image_url as string) || "";
+      if (imgUrl && !seenUrls.has(imgUrl)) {
+        seenUrls.add(imgUrl);
+        result.images.push({
+          id: `pubi-${p.id}`,
+          name: `${postName} Image`,
+          type: "image",
+          url: imgUrl,
+          thumbnailUrl: imgUrl,
+          tag: "published",
+          sceneListName: avatarContext.avatarName || "Published",
+        });
+      }
+    }
+  } catch (err) {
+    console.warn("[VoidspaceMediaPanel] published_posts query skipped", err);
   }
 
   return result;
@@ -384,6 +573,11 @@ export function VoidspaceMediaPanel() {
     },
   );
   const [userId, setUserId] = useState<string | null>(null);
+  const [avatarContext, setAvatarContext] = useState<AvatarContext>({
+    sceneListId: null,
+    avatarId: null,
+    avatarName: null,
+  });
   const hasLoaded = useRef(false);
 
   const project = useProjectStore((s) => s.project);
@@ -403,7 +597,12 @@ export function VoidspaceMediaPanel() {
           return;
         }
         setUserId(uid);
-        const data = await fetchAllUserAssets(uid);
+        const context = await resolveAvatarContext(
+          uid,
+          useProjectStore.getState().project,
+        );
+        setAvatarContext(context);
+        const data = await fetchAllUserAssets(uid, context);
         setAssets(data);
       } catch (err) {
         console.error("[VoidspaceMediaPanel] Fetch error:", err);
@@ -419,14 +618,20 @@ export function VoidspaceMediaPanel() {
     setLoading(true);
     setError(null);
     try {
-      const data = await fetchAllUserAssets(userId);
+      const context = avatarContext.avatarId
+        ? avatarContext
+        : await resolveAvatarContext(userId, useProjectStore.getState().project);
+      if (!avatarContext.avatarId && context.avatarId) {
+        setAvatarContext(context);
+      }
+      const data = await fetchAllUserAssets(userId, context);
       setAssets(data);
     } catch {
       setError("Failed to refresh");
     } finally {
       setLoading(false);
     }
-  }, [userId]);
+  }, [userId, avatarContext]);
 
   // Add asset to the project's media library
   const addToMediaLibrary = useCallback(
