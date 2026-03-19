@@ -89,7 +89,6 @@ interface CloudCacheEntry {
 const CLOUD_PAGE_SIZE = 8;
 const MAX_SCENES_PER_LIST = 25;
 const QUERY_TIMEOUT_MS = 12000;
-const CACHE_TTL_MS = 5 * 60 * 1000;
 
 const cloudMediaCache = new Map<string, CloudCacheEntry>();
 
@@ -675,7 +674,7 @@ export function VoidspaceMediaPanel() {
 
         const cacheKey = getCacheKey(uid, context);
         const cached = cloudMediaCache.get(cacheKey);
-        if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+        if (cached) {
           setAssets(cached.assets);
           return;
         }
