@@ -3,8 +3,9 @@
  * into OpenReel Project objects for the video editor timeline.
  */
 
-import { auth, db } from "../config/firebase-config";
+import { auth, db, storage } from "../config/firebase-config";
 import { onAuthStateChanged } from "firebase/auth";
+import { getDownloadURL, ref as storageRef } from "firebase/storage";
 import {
   collection,
   getDocs,
@@ -48,6 +49,11 @@ interface SceneData {
   scene_text?: string;
   narration_text?: string;
   visual_description?: string;
+  video_url?: string;
+  url?: string;
+  image_url?: string;
+  first_frame_url?: string;
+  preview_image_url?: string;
   music_start_ms?: number;
   music_end_ms?: number;
   music_url?: string;
@@ -76,6 +82,85 @@ interface SceneVideoData {
   voice_mode?: string;
   has_embedded_audio?: boolean;
   word_timestamps?: Array<{ word: string; start: number; end: number }>;
+}
+
+const resolvedUrlCache = new Map<string, string>();
+const mediaBlobCache = new Map<string, Blob>();
+
+async function resolveMediaUrl(rawUrl?: string | null): Promise<string | null> {
+  if (!rawUrl) return null;
+  const url = String(rawUrl).trim();
+  if (!url) return null;
+
+  if (resolvedUrlCache.has(url)) {
+    return resolvedUrlCache.get(url)!;
+  }
+
+  // Already a browser-usable URL
+  if (/^https?:\/\//i.test(url) || /^blob:/i.test(url) || /^data:/i.test(url)) {
+    resolvedUrlCache.set(url, url);
+    return url;
+  }
+
+  try {
+    const downloadUrl = await getDownloadURL(storageRef(storage, url));
+    resolvedUrlCache.set(url, downloadUrl);
+    return downloadUrl;
+  } catch (e) {
+    console.warn("[voidspace-loader] Could not resolve storage URL, using raw value:", url, e);
+    resolvedUrlCache.set(url, url);
+    return url;
+  }
+}
+
+async function fetchMediaBlob(
+  url: string | null,
+  timeoutMs = 15000,
+): Promise<Blob | null> {
+  if (!url) return null;
+  if (mediaBlobCache.has(url)) return mediaBlobCache.get(url)!;
+
+  const tryFetch = async (targetUrl: string): Promise<Blob | null> => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(targetUrl, {
+        method: "GET",
+        mode: "cors",
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        console.warn(
+          `[voidspace-loader] Blob fetch failed (${res.status}) for ${targetUrl}`,
+        );
+        return null;
+      }
+      const blob = await res.blob();
+      if (blob.size > 0) {
+        mediaBlobCache.set(url, blob);
+        return blob;
+      }
+      return null;
+    } catch (e) {
+      console.warn(`[voidspace-loader] Blob fetch error for ${targetUrl}:`, e);
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  // First attempt with raw URL
+  let blob = await tryFetch(url);
+  if (blob) return blob;
+
+  // Retry with encoded URL for paths containing spaces/special chars
+  if (url.includes(" ")) {
+    blob = await tryFetch(encodeURI(url));
+    if (blob) return blob;
+  }
+
+  return null;
 }
 
 interface SceneImageData {
@@ -336,7 +421,9 @@ export async function loadSceneListAsProject(
 
   // Track the global music URL so we create one media item for it
   const globalMusicUrl =
-    slData.music_url ?? scenes.find((s) => s.music_url)?.music_url ?? null;
+    (await resolveMediaUrl(
+      slData.music_url ?? scenes.find((s) => s.music_url)?.music_url ?? null,
+    )) ?? null;
 
   if (globalMusicUrl) {
     musicMediaId = uuidv4();
@@ -354,10 +441,20 @@ export async function loadSceneListAsProject(
   }
 
   for (const { scene, videos, images, narrations } of sceneMedia) {
+    const sceneFallbackVideoUrl = await resolveMediaUrl(
+      scene.video_url ?? scene.url ?? null,
+    );
+    const sceneFallbackImageUrl = await resolveMediaUrl(
+      scene.image_url ?? scene.first_frame_url ?? scene.preview_image_url ?? null,
+    );
+
     // Pick the primary video (or first available)
+    const videosWithUrls = videos.filter((v) => v.url || v.video_url);
     const primaryVideo =
-      videos.find((v) => v.tag === "primary") ?? videos[0] ?? null;
-    const videoUrl = primaryVideo?.url ?? primaryVideo?.video_url ?? null;
+      videosWithUrls.find((v) => v.tag === "primary") ?? videosWithUrls[0] ?? null;
+    const videoUrl = await resolveMediaUrl(
+      primaryVideo?.url ?? primaryVideo?.video_url ?? sceneFallbackVideoUrl ?? null,
+    );
 
     // Pick the primary image (first_frame or first available)
     const primaryImage =
@@ -365,15 +462,19 @@ export async function loadSceneListAsProject(
       images.find((i) => i.tag === "generated_first_frame") ??
       images[0] ??
       null;
-    const imageUrl = primaryImage?.url ?? primaryImage?.image_url ?? null;
+    const imageUrl = await resolveMediaUrl(
+      primaryImage?.url ?? primaryImage?.image_url ?? sceneFallbackImageUrl ?? null,
+    );
 
     // Pick narration
     const narration = narrations[0] ?? null;
     const narrationUrl =
-      narration?.narration_url ??
-      narration?.url ??
-      scene.narration_url ??
-      null;
+      (await resolveMediaUrl(
+        narration?.narration_url ??
+          narration?.url ??
+          scene.narration_url ??
+          null,
+      )) ?? null;
 
     // Compute scene duration from available timing data
     let sceneDuration = DEFAULT_SCENE_DURATION;
@@ -393,15 +494,19 @@ export async function loadSceneListAsProject(
 
     // ── Video clip ──
     if (videoUrl) {
+      const videoBlob = await fetchMediaBlob(videoUrl);
       const mediaId = uuidv4();
       mediaItems.push({
         id: mediaId,
         name: `Scene ${scene.scene_number} Video`,
         type: "video",
         fileHandle: null,
-        blob: null,
-        metadata: makeMediaMeta({ duration: sceneDuration }),
-        thumbnailUrl: null,
+        blob: videoBlob,
+        metadata: makeMediaMeta({
+          duration: sceneDuration,
+          fileSize: videoBlob?.size || 0,
+        }),
+        thumbnailUrl: imageUrl,
         waveformData: null,
         originalUrl: videoUrl,
       });
@@ -451,9 +556,24 @@ export async function loadSceneListAsProject(
       });
     }
 
+    // Always add the primary scene image to media library for editing use.
+    if (imageUrl) {
+      mediaItems.push({
+        id: uuidv4(),
+        name: `Scene ${scene.scene_number} Image`,
+        type: "image",
+        fileHandle: null,
+        blob: null,
+        metadata: makeMediaMeta({ duration: sceneDuration }),
+        thumbnailUrl: imageUrl,
+        waveformData: null,
+        originalUrl: imageUrl,
+      });
+    }
+
     // ── Additional images as media library items ──
     for (const img of images) {
-      const imgUrl = img.url ?? img.image_url;
+      const imgUrl = await resolveMediaUrl(img.url ?? img.image_url ?? null);
       if (!imgUrl || imgUrl === imageUrl) continue; // skip primary, already added
       mediaItems.push({
         id: uuidv4(),
@@ -471,7 +591,7 @@ export async function loadSceneListAsProject(
     // ── Additional videos as media library items ──
     for (const vid of videos) {
       if (vid === primaryVideo) continue;
-      const vUrl = vid.url ?? vid.video_url;
+      const vUrl = await resolveMediaUrl(vid.url ?? vid.video_url ?? null);
       if (!vUrl) continue;
       mediaItems.push({
         id: uuidv4(),
@@ -480,7 +600,7 @@ export async function loadSceneListAsProject(
         fileHandle: null,
         blob: null,
         metadata: makeMediaMeta({ duration: (vid.duration_ms ?? 0) / 1000 }),
-        thumbnailUrl: null,
+        thumbnailUrl: imageUrl,
         waveformData: null,
         originalUrl: vUrl,
       });
