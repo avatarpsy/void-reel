@@ -70,11 +70,28 @@ interface PanelSceneList {
   avatar_name?: string;
   music_url?: string;
   music_title?: string;
+  updated_at?: { seconds?: number };
+  created_at?: { seconds?: number };
+}
+
+interface FetchAssetsResult {
+  assets: Record<AssetCategory, VoidspaceAsset[]>;
+  sceneListSignature: string;
+}
+
+interface CloudCacheEntry {
+  assets: Record<AssetCategory, VoidspaceAsset[]>;
+  avatarContext: AvatarContext;
+  sceneListSignature: string;
+  fetchedAt: number;
 }
 
 const CLOUD_PAGE_SIZE = 8;
 const MAX_SCENES_PER_LIST = 25;
 const QUERY_TIMEOUT_MS = 12000;
+const CACHE_TTL_MS = 5 * 60 * 1000;
+
+const cloudMediaCache = new Map<string, CloudCacheEntry>();
 
 // ─── Helpers ─────────────────────────────────────────
 
@@ -133,6 +150,24 @@ function getSceneListIdFromProject(project: Project | null): string | null {
   if (!project?.id) return null;
   if (!project.id.startsWith("voidspace-")) return null;
   return project.id.replace(/^voidspace-/, "");
+}
+
+function getCacheKey(userId: string, avatarContext: AvatarContext): string {
+  return `${userId}::${avatarContext.avatarId || "all"}`;
+}
+
+function getSceneListTimestamp(sl: PanelSceneList): number {
+  return (
+    sl.updated_at?.seconds ||
+    sl.created_at?.seconds ||
+    0
+  );
+}
+
+function buildSceneListSignature(sceneLists: PanelSceneList[]): string {
+  return sceneLists
+    .map((sl) => `${sl.id}:${getSceneListTimestamp(sl)}:${sl.music_url || ""}`)
+    .join("|");
 }
 
 async function resolveAvatarContext(
@@ -201,14 +236,29 @@ async function fetchAvatarSceneLists(
     avatar_name: sl.avatar_name,
     music_url: sl.music_url,
     music_title: sl.music_title,
+    updated_at: sl.updated_at,
+    created_at: sl.created_at,
   }));
+}
+
+async function fetchLightweightSceneListSignature(
+  userId: string,
+  avatarContext: AvatarContext,
+  pageSize = CLOUD_PAGE_SIZE,
+): Promise<string> {
+  const sceneLists = await fetchAvatarSceneLists(
+    userId,
+    avatarContext.avatarId,
+    pageSize,
+  );
+  return buildSceneListSignature(sceneLists);
 }
 
 async function fetchAllUserAssets(
   userId: string,
   avatarContext: AvatarContext,
   pageSize = CLOUD_PAGE_SIZE,
-): Promise<Record<AssetCategory, VoidspaceAsset[]>> {
+): Promise<FetchAssetsResult> {
   const result: Record<AssetCategory, VoidspaceAsset[]> = {
     videos: [],
     images: [],
@@ -221,6 +271,7 @@ async function fetchAllUserAssets(
     avatarContext.avatarId,
     pageSize,
   );
+  const sceneListSignature = buildSceneListSignature(sceneLists);
 
   for (const sl of sceneLists) {
     const slName = sl.name || sl.music_title || "Untitled";
@@ -265,6 +316,11 @@ async function fetchAllUserAssets(
       const sceneNum = scene.id;
       const sd = scene.data;
       const sn = (sd.scene_number as number) || 0;
+      let scenePrimaryImageUrl =
+        (sd.first_frame_url as string) ||
+        (sd.preview_image_url as string) ||
+        (sd.image_url as string) ||
+        "";
 
       // Scene-level narration URL
       const narrationUrl =
@@ -299,45 +355,6 @@ async function fetchAllUserAssets(
         });
       }
 
-      // Sub-collections: videos
-      try {
-        const vSnap = await withTimeout(
-          getDocs(
-          collection(
-            db,
-            "users",
-            userId,
-            "scene_lists",
-            slId,
-            "scenes",
-            sceneNum,
-            "videos",
-          ),
-          ),
-          QUERY_TIMEOUT_MS,
-          `videos query ${slId}/${sceneNum}`,
-        );
-        for (const vDoc of vSnap.docs) {
-          const v = vDoc.data();
-          const vUrl = (v.url as string) || (v.video_url as string) || "";
-          if (vUrl && !seenUrls.has(vUrl)) {
-            seenUrls.add(vUrl);
-            result.videos.push({
-              id: `vid-${vDoc.id}`,
-              name: `Scene ${sn} Video - ${slName}`,
-              type: "video",
-              url: vUrl,
-              duration: ((v.duration_ms as number) || 0) / 1000,
-              tag: (v.tag as string) || "ai-generated",
-              sceneListName: slName,
-              sceneNumber: sn,
-            });
-          }
-        }
-      } catch {
-        /* no videos sub-collection */
-      }
-
       // Sub-collections: images
       try {
         const iSnap = await withTimeout(
@@ -362,6 +379,9 @@ async function fetchAllUserAssets(
             (im.url as string) || (im.image_url as string) || "";
           if (iUrl && !seenUrls.has(iUrl)) {
             seenUrls.add(iUrl);
+            if (!scenePrimaryImageUrl) {
+              scenePrimaryImageUrl = iUrl;
+            }
             result.images.push({
               id: `img-${iDoc.id}`,
               name: `Scene ${sn} Image - ${slName}`,
@@ -376,6 +396,53 @@ async function fetchAllUserAssets(
         }
       } catch {
         /* no images sub-collection */
+      }
+
+      // Sub-collections: videos
+      try {
+        const vSnap = await withTimeout(
+          getDocs(
+            collection(
+              db,
+              "users",
+              userId,
+              "scene_lists",
+              slId,
+              "scenes",
+              sceneNum,
+              "videos",
+            ),
+          ),
+          QUERY_TIMEOUT_MS,
+          `videos query ${slId}/${sceneNum}`,
+        );
+        for (const vDoc of vSnap.docs) {
+          const v = vDoc.data();
+          const vUrl = (v.url as string) || (v.video_url as string) || "";
+          const vThumb =
+            (v.thumbnail_url as string) ||
+            (v.thumbnailUrl as string) ||
+            (v.poster_url as string) ||
+            (v.posterUrl as string) ||
+            scenePrimaryImageUrl ||
+            undefined;
+          if (vUrl && !seenUrls.has(vUrl)) {
+            seenUrls.add(vUrl);
+            result.videos.push({
+              id: `vid-${vDoc.id}`,
+              name: `Scene ${sn} Video - ${slName}`,
+              type: "video",
+              url: vUrl,
+              thumbnailUrl: vThumb,
+              duration: ((v.duration_ms as number) || 0) / 1000,
+              tag: (v.tag as string) || "ai-generated",
+              sceneListName: slName,
+              sceneNumber: sn,
+            });
+          }
+        }
+      } catch {
+        /* no videos sub-collection */
       }
 
       // Sub-collections: narrations
@@ -466,7 +533,10 @@ async function fetchAllUserAssets(
     console.warn("[VoidspaceMediaPanel] published_posts query skipped", err);
   }
 
-  return result;
+  return {
+    assets: result,
+    sceneListSignature,
+  };
 }
 
 // ─── Component ───────────────────────────────────────
@@ -602,8 +672,22 @@ export function VoidspaceMediaPanel() {
           useProjectStore.getState().project,
         );
         setAvatarContext(context);
-        const data = await fetchAllUserAssets(uid, context);
-        setAssets(data);
+
+        const cacheKey = getCacheKey(uid, context);
+        const cached = cloudMediaCache.get(cacheKey);
+        if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+          setAssets(cached.assets);
+          return;
+        }
+
+        const fetched = await fetchAllUserAssets(uid, context);
+        setAssets(fetched.assets);
+        cloudMediaCache.set(cacheKey, {
+          assets: fetched.assets,
+          avatarContext: context,
+          sceneListSignature: fetched.sceneListSignature,
+          fetchedAt: Date.now(),
+        });
       } catch (err) {
         console.error("[VoidspaceMediaPanel] Fetch error:", err);
         setError("Failed to load Voidspace media");
@@ -624,8 +708,28 @@ export function VoidspaceMediaPanel() {
       if (!avatarContext.avatarId && context.avatarId) {
         setAvatarContext(context);
       }
-      const data = await fetchAllUserAssets(userId, context);
-      setAssets(data);
+      const cacheKey = getCacheKey(userId, context);
+      const cached = cloudMediaCache.get(cacheKey);
+
+      // Smart refresh: lightweight signature check first.
+      const latestSignature = await fetchLightweightSceneListSignature(userId, context);
+      if (cached && cached.sceneListSignature === latestSignature) {
+        setAssets(cached.assets);
+        cloudMediaCache.set(cacheKey, {
+          ...cached,
+          fetchedAt: Date.now(),
+        });
+        return;
+      }
+
+      const fetched = await fetchAllUserAssets(userId, context);
+      setAssets(fetched.assets);
+      cloudMediaCache.set(cacheKey, {
+        assets: fetched.assets,
+        avatarContext: context,
+        sceneListSignature: fetched.sceneListSignature,
+        fetchedAt: Date.now(),
+      });
     } catch {
       setError("Failed to refresh");
     } finally {
