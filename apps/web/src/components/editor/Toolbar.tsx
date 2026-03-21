@@ -1,4 +1,4 @@
-import React, { useCallback, useState, useEffect } from "react";
+import React, { useCallback, useState, useEffect, useRef } from "react";
 import {
   Search,
   Command,
@@ -21,11 +21,12 @@ import {
   Diamond,
   Sparkles,
   Play,
+  Send,
+  Download,
 } from "lucide-react";
 import { useProjectStore } from "../../stores/project-store";
 import { useUIStore } from "../../stores/ui-store";
 import { useThemeStore } from "../../stores/theme-store";
-import { useRouter } from "../../hooks/use-router";
 import {
   getExportEngine,
   getDeviceProfile,
@@ -37,9 +38,9 @@ import {
   type TimeEstimate,
 } from "@openreel/core";
 import { ExportDialog } from "./ExportDialog";
+import { PublishDialog } from "./PublishDialog";
 import { ScreenRecorder } from "./ScreenRecorder";
 import { HistoryPanel } from "./inspector/HistoryPanel";
-import { ProjectSwitcher } from "./ProjectSwitcher";
 import { SettingsDialog } from "./settings/SettingsDialog";
 import { toast } from "../../stores/notification-store";
 import { useSettingsStore } from "../../stores/settings-store";
@@ -89,12 +90,14 @@ export const Toolbar: React.FC = () => {
     togglePanel,
   } = useUIStore();
   const { mode: themeMode, toggleTheme } = useThemeStore();
-  const { navigate } = useRouter();
   const { openSettings } = useSettingsStore();
   const [isExportOpen, setIsExportOpen] = useState(false);
   const [isExportDialogOpen, setIsExportDialogOpen] = useState(false);
   const [isRecorderOpen, setIsRecorderOpen] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [isPublishDialogOpen, setIsPublishDialogOpen] = useState(false);
+  const [publishBlob, setPublishBlob] = useState<Blob | null>(null);
+  const [publishFilename, setPublishFilename] = useState("");
   const { importMedia } = useProjectStore();
   const { track } = useAnalytics();
 
@@ -293,6 +296,146 @@ export const Toolbar: React.FC = () => {
     } as unknown as FileSystemWritableFileStream;
   }, []);
 
+  const createMirroredWritable = useCallback(
+    (
+      target: FileSystemWritableFileStream,
+      mimeType: string,
+      onBlobReady: (blob: Blob) => void,
+    ): FileSystemWritableFileStream => {
+      let mirrorBuffer = new Uint8Array(16 * 1024 * 1024);
+      let mirrorLength = 0;
+      let cursor = 0;
+
+      const ensureCapacity = (needed: number) => {
+        if (needed <= mirrorBuffer.length) return;
+        let nextSize = mirrorBuffer.length;
+        while (nextSize < needed) {
+          nextSize *= 2;
+        }
+        const next = new Uint8Array(nextSize);
+        next.set(mirrorBuffer.subarray(0, mirrorLength));
+        mirrorBuffer = next;
+      };
+
+      const writeMirrorBytes = (bytes: Uint8Array, position: number) => {
+        const end = position + bytes.byteLength;
+        ensureCapacity(end);
+        mirrorBuffer.set(bytes, position);
+        if (end > mirrorLength) {
+          mirrorLength = end;
+        }
+      };
+
+      const toBytes = (data: unknown): Uint8Array | null => {
+        if (data instanceof ArrayBuffer) {
+          return new Uint8Array(data);
+        }
+        if (ArrayBuffer.isView(data)) {
+          return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+        }
+        return null;
+      };
+
+      return {
+        seek(position: number) {
+          cursor = position;
+          return target.seek(position);
+        },
+        write(data: unknown) {
+          const bytes = toBytes(data);
+          if (bytes) {
+            writeMirrorBytes(bytes, cursor);
+            cursor += bytes.byteLength;
+          }
+          return target.write(data as never);
+        },
+        close() {
+          const blob = new Blob([mirrorBuffer.slice(0, mirrorLength)], { type: mimeType });
+          onBlobReady(blob);
+          return target.close();
+        },
+        abort() {
+          return target.abort();
+        },
+        truncate(size: number) {
+          return target.truncate(size);
+        },
+      } as FileSystemWritableFileStream;
+    },
+    [],
+  );
+
+  const createMemoryWritable = useCallback(
+    (
+      mimeType: string,
+      onBlobReady: (blob: Blob) => void,
+    ): FileSystemWritableFileStream => {
+      let buffer = new Uint8Array(16 * 1024 * 1024);
+      let length = 0;
+      let cursor = 0;
+
+      const ensureCapacity = (needed: number) => {
+        if (needed <= buffer.length) return;
+        let nextSize = buffer.length;
+        while (nextSize < needed) {
+          nextSize *= 2;
+        }
+        const next = new Uint8Array(nextSize);
+        next.set(buffer.subarray(0, length));
+        buffer = next;
+      };
+
+      const writeBytes = (bytes: Uint8Array, position: number) => {
+        const end = position + bytes.byteLength;
+        ensureCapacity(end);
+        buffer.set(bytes, position);
+        if (end > length) {
+          length = end;
+        }
+      };
+
+      const toBytes = (data: unknown): Uint8Array | null => {
+        if (data instanceof ArrayBuffer) {
+          return new Uint8Array(data);
+        }
+        if (ArrayBuffer.isView(data)) {
+          return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+        }
+        return null;
+      };
+
+      return {
+        seek(position: number) {
+          cursor = position;
+          return Promise.resolve();
+        },
+        write(data: unknown) {
+          const bytes = toBytes(data);
+          if (bytes) {
+            writeBytes(bytes, cursor);
+            cursor += bytes.byteLength;
+          }
+          return Promise.resolve();
+        },
+        close() {
+          const blob = new Blob([buffer.slice(0, length)], { type: mimeType });
+          onBlobReady(blob);
+          return Promise.resolve();
+        },
+        abort() {
+          return Promise.resolve();
+        },
+        truncate(size: number) {
+          if (size < length) {
+            length = size;
+          }
+          return Promise.resolve();
+        },
+      } as FileSystemWritableFileStream;
+    },
+    [],
+  );
+
   const handleExport = useCallback(
     async (type: ExportType) => {
       setIsExportOpen(false);
@@ -378,7 +521,21 @@ export const Toolbar: React.FC = () => {
           };
 
           const preset = presets[type] ?? presets.mp4;
-          const writable = await showSavePicker(`${project.name || "export"}.${preset.ext}`, preset.ext);
+          const outputFilename = `${project.name || "export"}.${preset.ext}`;
+          const writable = await showSavePicker(outputFilename, preset.ext);
+          const mimeMap: Record<string, string> = {
+            mp4: "video/mp4",
+            webm: "video/webm",
+            mov: "video/quicktime",
+          };
+          const mirroredWritable = createMirroredWritable(
+            writable,
+            mimeMap[preset.ext] || "video/mp4",
+            (blob) => {
+              setPublishBlob(blob);
+              setPublishFilename(outputFilename);
+            },
+          );
 
           setExportState({
             isExporting: true,
@@ -388,7 +545,7 @@ export const Toolbar: React.FC = () => {
             complete: false,
           });
 
-          await runExport(preset.settings, preset.ext, writable);
+          await runExport(preset.settings, preset.ext, mirroredWritable);
         }
 
         setTimeout(() => {
@@ -411,6 +568,10 @@ export const Toolbar: React.FC = () => {
   const handleCancelExport = useCallback(() => {
     const engine = getExportEngine();
     engine.cancel();
+    if (exportToBlobRef.current) {
+      exportToBlobRef.current.abort();
+      exportToBlobRef.current = null;
+    }
     setExportState({
       isExporting: false,
       progress: 0,
@@ -426,7 +587,21 @@ export const Toolbar: React.FC = () => {
 
       try {
         const ext = settings.format === "mov" ? "mov" : settings.format === "webm" ? "webm" : "mp4";
-        const writable = await showSavePicker(`${project.name || "export"}.${ext}`, ext);
+          const outputFilename = `${project.name || "export"}.${ext}`;
+          const writable = await showSavePicker(outputFilename, ext);
+          const mimeMap: Record<string, string> = {
+            mp4: "video/mp4",
+            webm: "video/webm",
+            mov: "video/quicktime",
+          };
+          const mirroredWritable = createMirroredWritable(
+            writable,
+            mimeMap[ext] || "video/mp4",
+            (blob) => {
+              setPublishBlob(blob);
+              setPublishFilename(outputFilename);
+            },
+          );
 
         setExportState({
           isExporting: true,
@@ -448,7 +623,7 @@ export const Toolbar: React.FC = () => {
               : undefined,
         };
 
-        await runExport(exportSettings, ext, writable);
+        await runExport(exportSettings, ext, mirroredWritable);
 
         track(AnalyticsEvents.PROJECT_EXPORTED, {
           format: settings.format,
@@ -475,9 +650,77 @@ export const Toolbar: React.FC = () => {
         }));
       }
     },
-    [project, track, runExport, showSavePicker],
+    [project, track, runExport, showSavePicker, createMirroredWritable],
   );
 
+
+  const exportToBlobRef = useRef<AbortController | null>(null);
+
+  const handlePublish = useCallback(
+    async () => {
+      setIsExportOpen(false);
+
+      const outputFilename = `${project.name || "export"}.mp4`;
+      setPublishFilename(outputFilename);
+
+      if (publishBlob && publishBlob.size > 0) {
+        setIsPublishDialogOpen(true);
+        return;
+      }
+
+      try {
+        setExportState({
+          isExporting: true,
+          progress: 0,
+          phase: "Rendering for publish...",
+          error: null,
+          complete: false,
+        });
+
+        const renderedBlobRef: { current: Blob | null } = { current: null };
+        const writable = createMemoryWritable("video/mp4", (blob) => {
+          renderedBlobRef.current = blob;
+          setPublishBlob(blob);
+          setPublishFilename(outputFilename);
+        });
+
+        const publishSettings: Partial<VideoExportSettings> = {
+          width: project.settings.width,
+          height: project.settings.height,
+          frameRate: project.settings.frameRate,
+          format: "mp4",
+          codec: "h264",
+          bitrate: 12000,
+          quality: 90,
+        };
+
+        await runExport(publishSettings, "mp4", writable);
+
+        if (!renderedBlobRef.current || renderedBlobRef.current.size === 0) {
+          throw new Error("Render completed but produced no publishable video.");
+        }
+
+        setExportState({
+          isExporting: false,
+          progress: 0,
+          phase: "",
+          error: null,
+          complete: false,
+        });
+        setIsPublishDialogOpen(true);
+      } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") {
+          return;
+        }
+        setExportState((prev) => ({
+          ...prev,
+          isExporting: false,
+          error: error instanceof Error ? error.message : "Publish render failed",
+        }));
+      }
+    },
+    [project, publishBlob, createMemoryWritable, runExport],
+  );
 
   const handleRecordingComplete = useCallback(
     async (screenBlob: Blob, webcamBlob?: Blob) => {
@@ -598,9 +841,15 @@ export const Toolbar: React.FC = () => {
         <Tooltip>
           <TooltipTrigger asChild>
             <button
-              onClick={() => navigate("welcome")}
+              onClick={() => {
+                if (window.top && window.top !== window) {
+                  window.top.location.href = "/video-editor";
+                  return;
+                }
+                window.location.href = "/video-editor";
+              }}
               className="flex items-center gap-3 hover:opacity-80 transition-opacity"
-              title="Back to Home"
+              title="Back to Studio Projects"
             >
               <img
                 src="/studio/images/logo.png"
@@ -612,10 +861,22 @@ export const Toolbar: React.FC = () => {
               </span>
             </button>
           </TooltipTrigger>
-          <TooltipContent>Back to Home</TooltipContent>
+          <TooltipContent>Back to Studio Projects</TooltipContent>
         </Tooltip>
         <div className="h-6 w-px bg-border hidden md:block" />
-        <ProjectSwitcher />
+        <button
+          onClick={() => {
+            if (window.top && window.top !== window) {
+              window.top.location.href = "/video-editor";
+              return;
+            }
+            window.location.href = "/video-editor";
+          }}
+          className="h-9 px-3 rounded-lg border border-border bg-background-secondary text-sm text-text-secondary hover:text-text-primary hover:bg-background-elevated transition-colors"
+          title="Back to Studio Projects"
+        >
+          Back to Projects
+        </button>
       </div>
 
       <div className="flex-1 max-w-2xl mx-12 relative group">
@@ -843,22 +1104,36 @@ export const Toolbar: React.FC = () => {
               <span className="text-xs text-primary">Downloaded!</span>
             </div>
           ) : (
-            <DropdownMenu open={isExportOpen} onOpenChange={setIsExportOpen}>
-              <DropdownMenuTrigger asChild>
-                <button
-                  className={`h-10 px-4 bg-primary hover:bg-primary-hover active:bg-primary-active text-white font-bold rounded-lg flex items-center gap-2 transition-all shadow-[0_0_20px_rgba(34,197,94,0.3)] hover:shadow-[0_0_30px_rgba(34,197,94,0.5)] transform hover:-translate-y-0.5 ${
-                    isExportOpen ? "translate-y-0 shadow-none" : ""
-                  }`}
-                >
-                  <span className="text-sm tracking-wider">EXPORT</span>
-                  <ChevronDown
-                    size={14}
-                    className={`transition-transform duration-200 ${
-                      isExportOpen ? "rotate-180" : ""
+            <div className="flex items-center gap-2">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    onClick={handlePublish}
+                    className="h-10 px-4 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-bold rounded-lg flex items-center gap-2 transition-all shadow-[0_0_20px_rgba(59,130,246,0.3)] hover:shadow-[0_0_30px_rgba(59,130,246,0.5)] transform hover:-translate-y-0.5"
+                  >
+                    <Send size={14} />
+                    <span className="text-sm tracking-wider">PUBLISH</span>
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>Publish to your social platforms</TooltipContent>
+              </Tooltip>
+              <DropdownMenu open={isExportOpen} onOpenChange={setIsExportOpen}>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    className={`h-10 px-4 bg-background-secondary border border-border hover:bg-background-elevated text-text-primary font-medium rounded-lg flex items-center gap-2 transition-all ${
+                      isExportOpen ? "" : "hover:-translate-y-0.5"
                     }`}
-                  />
-                </button>
-              </DropdownMenuTrigger>
+                  >
+                    <Download size={14} />
+                    <span className="text-sm tracking-wider">RENDER</span>
+                    <ChevronDown
+                      size={14}
+                      className={`transition-transform duration-200 ${
+                        isExportOpen ? "rotate-180" : ""
+                      }`}
+                    />
+                  </button>
+                </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-72 p-0 rounded-xl bg-background-secondary border-border">
                 <div className="p-3 space-y-1 max-h-[400px] overflow-y-auto">
                   {exportOptions.map((option, index) =>
@@ -939,6 +1214,7 @@ export const Toolbar: React.FC = () => {
                 </div>
               </DropdownMenuContent>
             </DropdownMenu>
+            </div>
           )}
         </div>
       </div>
@@ -950,6 +1226,31 @@ export const Toolbar: React.FC = () => {
         duration={project.timeline?.duration ?? 0}
         projectWidth={project.settings?.width ?? 1920}
         projectHeight={project.settings?.height ?? 1080}
+      />
+
+      <PublishDialog
+        isOpen={isPublishDialogOpen}
+        onClose={() => {
+          setIsPublishDialogOpen(false);
+          setPublishBlob(null);
+          setPublishFilename("");
+        }}
+        videoBlob={publishBlob}
+        videoFilename={publishFilename}
+        projectWidth={project.settings?.width ?? 1920}
+        projectHeight={project.settings?.height ?? 1080}
+        onDownload={() => {
+          if (publishBlob) {
+            const url = URL.createObjectURL(publishBlob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = publishFilename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+          }
+        }}
       />
 
       <ScreenRecorder

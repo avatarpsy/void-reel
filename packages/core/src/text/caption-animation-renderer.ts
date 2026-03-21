@@ -57,12 +57,12 @@ function renderWordHighlight(
     return renderNone(subtitle);
   }
 
-  const highlightColor = subtitle.style?.highlightColor || "#ffff00";
+  const highlightColor = subtitle.style?.highlightColor || "#FF0000";
   const upcomingColor = subtitle.style?.upcomingColor;
 
   const segments: WordSegment[] = subtitle.words.map((word) => {
     const isActive =
-      currentTime >= word.startTime && currentTime < word.endTime;
+      currentTime >= word.startTime && currentTime <= word.endTime + 0.1;
     const isPast = currentTime >= word.endTime;
     const isUpcoming = currentTime < word.startTime;
 
@@ -77,8 +77,8 @@ function renderWordHighlight(
       text: word.text,
       style: isActive ? "highlighted" : isPast ? "normal" : "normal",
       opacity: 1,
-      scale: isActive ? 1.15 : 1,
-      offsetY: isActive ? -2 : 0,
+      scale: 1,
+      offsetY: 0,
       color,
     };
   });

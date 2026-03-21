@@ -1,6 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
 import {
-  Clock,
   Layers,
   ArrowRight,
   Smartphone,
@@ -8,12 +7,10 @@ import {
   Square,
   FolderOpen,
 } from "lucide-react";
-import { Button, Switch, Label } from "@openreel/ui";
+import { Button } from "@openreel/ui";
 import { useProjectStore } from "../../stores/project-store";
-import { useUIStore } from "../../stores/ui-store";
 import { SOCIAL_MEDIA_PRESETS, type SocialMediaCategory } from "@openreel/core";
-import { TemplateGallery } from "./TemplateGallery";
-import { RecentProjects } from "./RecentProjects";
+import { VoidspaceTemplateGallery } from "./VoidspaceTemplateGallery";
 import { useRouter } from "../../hooks/use-router";
 import { useEditorPreload } from "../../hooks/useEditorPreload";
 import { useAnalytics, AnalyticsEvents } from "../../hooks/useAnalytics";
@@ -58,23 +55,22 @@ const FORMAT_OPTIONS: FormatOption[] = [
   },
 ];
 
-type ViewMode = "home" | "templates" | "recent";
+type ViewMode = "home" | "templates";
 
 interface WelcomeScreenProps {
-  initialTab?: "templates" | "recent";
+  initialTab?: "templates";
 }
 
 export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ initialTab }) => {
-  const setSkipWelcomeScreen = useUIStore(
-    (state) => state.setSkipWelcomeScreen,
-  );
-  const skipWelcomeScreen = useUIStore((state) => state.skipWelcomeScreen);
   const createNewProject = useProjectStore((state) => state.createNewProject);
   const { navigate } = useRouter();
   const { track } = useAnalytics();
 
   const [viewMode, setViewMode] = useState<ViewMode>(initialTab ?? "home");
   const [hoveredFormat, setHoveredFormat] = useState<string | null>(null);
+
+  // When initialTab="templates" (embedded from Nuxt page), hide the inner header
+  const isEmbedded = initialTab === "templates";
 
   useEditorPreload(true);
 
@@ -98,20 +94,6 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ initialTab }) => {
     [createNewProject, navigate, track],
   );
 
-  const handleTemplateApplied = useCallback(() => {
-    navigate("editor");
-  }, [navigate]);
-
-  const handleProjectSelected = useCallback(() => {
-    navigate("editor");
-  }, [navigate]);
-
-  useEffect(() => {
-    if (skipWelcomeScreen) {
-      navigate("editor");
-    }
-  }, [skipWelcomeScreen, navigate]);
-
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -129,44 +111,23 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ initialTab }) => {
   if (viewMode === "templates") {
     return (
       <div className="fixed inset-0 z-50 bg-background flex flex-col">
-        <header className="flex items-center justify-between px-6 py-4 border-b border-border">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setViewMode("home")}
-          >
-            <ArrowRight className="rotate-180" size={16} />
-            Back
-          </Button>
-          <h2 className="text-sm font-medium text-text-primary">Templates</h2>
-          <div className="w-16" />
-        </header>
+        {/* Only show inner header when navigated from home (standalone Studio mode) */}
+        {!isEmbedded && (
+          <header className="flex items-center justify-between px-6 py-4 border-b border-border">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setViewMode("home")}
+            >
+              <ArrowRight className="rotate-180" size={16} />
+              Back
+            </Button>
+            <h2 className="text-sm font-medium text-text-primary">Voidspace Templates</h2>
+            <div className="w-16" />
+          </header>
+        )}
         <div className="flex-1 overflow-y-auto p-6">
-          <TemplateGallery onTemplateApplied={handleTemplateApplied} />
-        </div>
-      </div>
-    );
-  }
-
-  if (viewMode === "recent") {
-    return (
-      <div className="fixed inset-0 z-50 bg-background flex flex-col">
-        <header className="flex items-center justify-between px-6 py-4 border-b border-border">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setViewMode("home")}
-          >
-            <ArrowRight className="rotate-180" size={16} />
-            Back
-          </Button>
-          <h2 className="text-sm font-medium text-text-primary">
-            Recent Projects
-          </h2>
-          <div className="w-16" />
-        </header>
-        <div className="flex-1 overflow-y-auto p-6">
-          <RecentProjects onProjectSelected={handleProjectSelected} />
+          <VoidspaceTemplateGallery />
         </div>
       </div>
     );
@@ -186,9 +147,6 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ initialTab }) => {
                 alt="Voidspace"
                 className="w-12 h-12"
               />
-              <span className="text-xl font-bold text-text-primary tracking-widest" style={{ fontFamily: "'DM Sans', 'Inter', sans-serif" }}>
-                VOIDSPACE
-              </span>
             </div>
 
             <h1 className="text-4xl sm:text-5xl font-bold text-text-primary tracking-tight mb-3">
@@ -280,14 +238,6 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ initialTab }) => {
             </Button>
             <Button
               variant="outline"
-              onClick={() => setViewMode("recent")}
-              className="rounded-xl"
-            >
-              <Clock size={16} />
-              Recent projects
-            </Button>
-            <Button
-              variant="outline"
               onClick={() => navigate("editor")}
               className="rounded-xl"
             >
@@ -297,30 +247,8 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ initialTab }) => {
           </div>
         </div>
 
-        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 flex items-center gap-4">
-          <div className="flex items-center gap-2">
-            <Switch
-              id="skip-welcome"
-              checked={skipWelcomeScreen}
-              onCheckedChange={setSkipWelcomeScreen}
-            />
-            <Label
-              htmlFor="skip-welcome"
-              className="text-xs text-text-muted cursor-pointer"
-            >
-              Skip on startup
-            </Label>
-          </div>
-
-          <span className="text-text-muted/30">·</span>
-
-          <p className="text-xs text-text-muted/60">
-            Press{" "}
-            <kbd className="px-1.5 py-0.5 bg-background-tertiary border border-border rounded text-text-muted font-mono text-[10px]">
-              Esc
-            </kbd>{" "}
-            to skip
-          </p>
+        <div className="absolute bottom-6 left-1/2 -translate-x-1/2">
+          <p className="text-xs text-text-muted/45">Choose a format to start creating</p>
         </div>
       </div>
     </div>

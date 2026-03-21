@@ -310,6 +310,34 @@ class AutoSaveManager {
 
       const project = JSON.parse(record.data) as Project;
 
+      // Sanitize media items: Blob objects become {} after JSON round-trip.
+      // Anything that isn't a real Blob must be nulled so the editor
+      // falls back to re-fetching from originalUrl instead of crashing
+      // in URL.createObjectURL.
+      if (project.mediaLibrary?.items) {
+        const sanitizedItems = project.mediaLibrary.items.map((item) => {
+          const needsBlobFix = item.blob && !(item.blob instanceof Blob);
+          const needsThumbFix =
+            typeof item.thumbnailUrl === "string" &&
+            item.thumbnailUrl.startsWith("blob:");
+
+          if (!needsBlobFix && !needsThumbFix) return item;
+
+          return {
+            ...item,
+            blob: needsBlobFix ? null : item.blob,
+            thumbnailUrl: needsThumbFix
+              ? item.originalUrl ?? null
+              : item.thumbnailUrl,
+          };
+        });
+
+        (project as unknown as Record<string, unknown>).mediaLibrary = {
+          ...project.mediaLibrary,
+          items: sanitizedItems,
+        };
+      }
+
       this.emit("restored", { project, timestamp: record.timestamp });
       return project;
     } catch (error) {

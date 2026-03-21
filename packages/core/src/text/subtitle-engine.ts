@@ -59,6 +59,14 @@ export const SUBTITLE_STYLE_PRESETS: Record<string, SubtitleStyle> = {
     backgroundColor: "rgba(0, 0, 0, 0.75)",
     position: "center",
   },
+  voidspaceRemotion: {
+    fontFamily: "Anton",
+    fontSize: 80,
+    color: "#ffffff",
+    backgroundColor: "transparent",
+    position: "center",
+    highlightColor: "#ff0000",
+  },
 };
 
 export interface SRTParseResult {

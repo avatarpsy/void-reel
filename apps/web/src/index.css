@@ -1,6 +1,7 @@
 @import url("https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap");
 @import url("https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap");
 @import url("https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Anton&display=swap");
 
 @tailwind base;
 @tailwind components;
@@ -56,38 +57,38 @@
 
   .dark {
     /* Voidspace custom colors */
-    --color-background: 15 15 17;
-    --color-background-secondary: 24 24 27;
-    --color-background-tertiary: 39 39 42;
-    --color-background-elevated: 63 63 70;
+    --color-background: 7 8 15;
+    --color-background-secondary: 15 15 35;
+    --color-background-tertiary: 24 24 52;
+    --color-background-elevated: 34 35 70;
 
-    --color-text-primary: 244 244 245;
-    --color-text-secondary: 161 161 170;
-    --color-text-muted: 113 113 122;
+    --color-text-primary: 240 242 255;
+    --color-text-secondary: 196 204 233;
+    --color-text-muted: 145 156 197;
 
-    --color-border: 39 39 42;
-    --color-border-hover: 63 63 70;
-    --color-border-active: 82 82 91;
+    --color-border: 56 62 100;
+    --color-border-hover: 84 94 146;
+    --color-border-active: 120 133 192;
 
     /* shadcn/ui CSS variables */
-    --background: 240 6% 6%;
-    --foreground: 0 0% 95%;
-    --card: 240 6% 10%;
-    --card-foreground: 0 0% 95%;
-    --popover: 240 6% 10%;
-    --popover-foreground: 0 0% 95%;
+    --background: 234 36% 4%;
+    --foreground: 229 100% 97%;
+    --card: 236 36% 10%;
+    --card-foreground: 229 100% 97%;
+    --popover: 236 36% 10%;
+    --popover-foreground: 229 100% 97%;
     --primary: 239 84% 67%;
     --primary-foreground: 0 0% 100%;
-    --secondary: 240 4% 16%;
-    --secondary-foreground: 0 0% 95%;
-    --muted: 240 4% 16%;
-    --muted-foreground: 240 5% 65%;
-    --accent: 240 4% 16%;
-    --accent-foreground: 0 0% 95%;
+    --secondary: 236 30% 16%;
+    --secondary-foreground: 229 100% 97%;
+    --muted: 236 30% 16%;
+    --muted-foreground: 230 30% 72%;
+    --accent: 189 85% 42%;
+    --accent-foreground: 229 100% 97%;
     --destructive: 0 62% 50%;
     --destructive-foreground: 0 0% 95%;
-    --border: 240 4% 20%;
-    --input: 240 4% 20%;
+    --border: 236 28% 28%;
+    --input: 236 28% 28%;
     --ring: 239 84% 67%;
 
     color-scheme: dark;
@@ -140,8 +141,8 @@ textarea {
 input:focus,
 select:focus,
 textarea:focus {
-  border-color: #22c55e;
-  box-shadow: 0 0 0 1px #22c55e;
+  border-color: hsl(var(--ring));
+  box-shadow: 0 0 0 1px hsl(var(--ring));
 }
 
 button {

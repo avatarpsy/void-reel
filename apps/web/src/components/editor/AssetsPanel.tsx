@@ -34,10 +34,7 @@ import { useProjectStore } from "../../stores/project-store";
 import { useUIStore } from "../../stores/ui-store";
 import type { MediaItem } from "@openreel/core";
 import { AspectRatioMatchDialog } from "./dialogs/AspectRatioMatchDialog";
-import { AIGenTab } from "./AIGenTab";
 import { VoidspaceMediaPanel } from "./VoidspaceMediaPanel";
-import { useTtsAudioStore } from "../../stores/tts-store";
-import { toast } from "../../stores/notification-store";
 import { IconButton, Input, ScrollArea } from "@openreel/ui";
 
 const formatDuration = (seconds: number): string => {
@@ -363,16 +360,11 @@ export const AssetsPanel: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTabRaw] = useState<
-    "media" | "text" | "graphics" | "ai" | "voidspace"
+    "media" | "text" | "graphics" | "voidspace"
   >("media");
-  const ttsHasUnsaved = useTtsAudioStore((s) => s.generatedAudio !== null && !s.isAudioSaved);
-
-  const setActiveTab = useCallback((tab: "media" | "text" | "graphics" | "ai" | "voidspace") => {
-    if (activeTab === "ai" && tab !== "ai" && ttsHasUnsaved) {
-      toast.warning("Unsaved audio discarded", "Save to media or download next time to keep it.");
-    }
+  const setActiveTab = useCallback((tab: "media" | "text" | "graphics" | "voidspace") => {
     setActiveTabRaw(tab);
-  }, [activeTab, ttsHasUnsaved]);
+  }, []);
 
   const [isDragOver, setIsDragOver] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
@@ -681,19 +673,6 @@ export const AssetsPanel: React.FC = () => {
         >
           Graphics
           {activeTab === "graphics" && (
-            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-t-full shadow-[0_-2px_8px_rgba(99,102,241,0.5)]" />
-          )}
-        </button>
-        <button
-          onClick={() => setActiveTab("ai")}
-          className={`pb-3 transition-all relative ${
-            activeTab === "ai"
-              ? "text-primary"
-              : "text-primary/70 hover:text-primary"
-          }`}
-        >
-          AI Gen
-          {activeTab === "ai" && (
             <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-t-full shadow-[0_-2px_8px_rgba(99,102,241,0.5)]" />
           )}
         </button>
@@ -1178,9 +1157,6 @@ export const AssetsPanel: React.FC = () => {
           </div>
         </ScrollArea>
       )}
-
-      {/* AI Tab Content */}
-      {activeTab === "ai" && <AIGenTab />}
 
       {/* Voidspace Cloud Media Tab */}
       {activeTab === "voidspace" && <VoidspaceMediaPanel />}

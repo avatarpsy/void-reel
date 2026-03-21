@@ -21,6 +21,11 @@ const CAPTION_STYLE_PRESETS = [
     name: "Default",
     description: "White text on dark background",
   },
+  {
+    id: "voidspaceRemotion",
+    name: "Voidspace Remotion",
+    description: "Anton, center placement, red active-word highlight",
+  },
   { id: "modern", name: "Modern", description: "Clean, minimal style" },
   { id: "bold", name: "Bold", description: "Large, impactful text" },
   { id: "cinematic", name: "Cinematic", description: "Film-style captions" },

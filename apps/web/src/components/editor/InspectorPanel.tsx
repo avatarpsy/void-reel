@@ -1209,6 +1209,25 @@ export const InspectorPanel: React.FC = () => {
                 {selectedSubtitle.startTime.toFixed(2)}s -{" "}
                 {selectedSubtitle.endTime.toFixed(2)}s
               </p>
+              <button
+                onClick={() =>
+                  updateSubtitle(selectedSubtitle.id, {
+                    animationStyle: "word-highlight",
+                    style: {
+                      ...(selectedSubtitle.style || {}),
+                      fontFamily: "Anton",
+                      fontSize: 80,
+                      color: "#ffffff",
+                      backgroundColor: "transparent",
+                      position: "center",
+                      highlightColor: "#ff0000",
+                    } as typeof selectedSubtitle.style,
+                  })
+                }
+                className="mt-2 w-full py-1.5 bg-primary hover:bg-primary/80 text-black rounded text-[10px] font-semibold transition-colors"
+              >
+                Apply Remotion Match
+              </button>
             </div>
 
             {/* Subtitle Text Editor */}
@@ -1469,13 +1488,13 @@ export const InspectorPanel: React.FC = () => {
                   <Input
                     type="number"
                     min={12}
-                    max={72}
-                    value={selectedSubtitle.style?.fontSize || 24}
+                    max={120}
+                    value={selectedSubtitle.style?.fontSize || 80}
                     onChange={(e) =>
                       updateSubtitle(selectedSubtitle.id, {
                         style: {
                           ...(selectedSubtitle.style || {}),
-                          fontSize: parseInt(e.target.value) || 24,
+                          fontSize: parseInt(e.target.value) || 80,
                         } as typeof selectedSubtitle.style,
                       })
                     }

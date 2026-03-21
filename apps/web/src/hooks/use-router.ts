@@ -15,6 +15,7 @@ export interface RouteParams {
   height?: string;
   fps?: string;
   tab?: string;
+  forceWelcome?: string;
   shareId?: string;
 }
 

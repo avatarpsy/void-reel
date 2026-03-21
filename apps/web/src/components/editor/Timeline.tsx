@@ -22,6 +22,7 @@ import {
   Plus,
   ChevronDown as ChevronDownIcon,
   Magnet,
+  Info,
 } from "lucide-react";
 import { useProjectStore } from "../../stores/project-store";
 import { useTimelineStore } from "../../stores/timeline-store";
@@ -626,20 +627,38 @@ export const Timeline: React.FC = () => {
       if (!clip) return;
 
       const oldDuration = clip.duration;
-      const newDuration =
-        edge === "left"
-          ? Math.max(0.1, clip.startTime + clip.duration - newTime)
-          : Math.max(0.1, newTime - clip.startTime);
+      const oldInPoint = clip.inPoint ?? 0;
+      const oldOutPoint = clip.outPoint ?? oldInPoint + clip.duration;
 
-      const updates =
-        edge === "left"
-          ? {
-              startTime: newTime,
-              duration: newDuration,
-            }
-          : {
-              duration: newDuration,
-            };
+      let updates: {
+        startTime?: number;
+        duration: number;
+        inPoint?: number;
+        outPoint?: number;
+      };
+
+      if (edge === "left") {
+        const trimDelta = newTime - clip.startTime;
+        const nextInPoint = Math.max(0, oldInPoint + trimDelta);
+        const nextDuration = Math.max(0.1, oldOutPoint - nextInPoint);
+
+        updates = {
+          startTime: newTime,
+          inPoint: nextInPoint,
+          outPoint: oldOutPoint,
+          duration: nextDuration,
+        };
+      } else {
+        const nextDuration = Math.max(0.1, newTime - clip.startTime);
+        const nextOutPoint = oldInPoint + nextDuration;
+
+        updates = {
+          outPoint: nextOutPoint,
+          duration: nextDuration,
+        };
+      }
+
+      const newDuration = updates.duration;
 
       const adjustedKeyframes = clip.keyframes.map((kf) => {
         if (kf.id.startsWith("kf-exit-")) {
@@ -852,6 +871,32 @@ export const Timeline: React.FC = () => {
             <Magnet size={14} />
             <span className="text-[10px] font-medium tracking-wide">SNAP</span>
           </button>
+
+          <Popover>
+            <PopoverTrigger asChild>
+              <button
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg hover:bg-background-elevated text-text-muted hover:text-text-secondary transition-colors"
+                title="Timeline behavior help"
+              >
+                <Info size={14} />
+                <span className="text-[10px] font-medium tracking-wide">INFO</span>
+              </button>
+            </PopoverTrigger>
+            <PopoverContent side="top" align="start" sideOffset={8} className="w-80 p-3">
+              <div className="space-y-2">
+                <h4 className="text-xs font-semibold text-text-primary">How Timeline Editing Works</h4>
+                <p className="text-xs text-text-secondary leading-relaxed">
+                  Drag a clip body to move it on the timeline. Drag clip edges to trim content.
+                </p>
+                <p className="text-xs text-text-secondary leading-relaxed">
+                  Edge trim does not change playback speed. It cuts from the start or end and keeps the same media rate.
+                </p>
+                <p className="text-xs text-text-secondary leading-relaxed">
+                  Snap aligns moves to nearby clip edges, the playhead, and timeline markers.
+                </p>
+              </div>
+            </PopoverContent>
+          </Popover>
         </div>
 
         <div className="font-mono text-primary text-sm font-bold tracking-wider bg-background-tertiary px-4 py-1.5 rounded-lg border border-primary/20 shadow-[0_0_12px_rgba(34,197,94,0.15)]">

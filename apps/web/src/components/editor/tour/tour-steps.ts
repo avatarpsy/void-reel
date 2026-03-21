@@ -19,10 +19,9 @@ export const TOUR_STEPS: TourStep[] = [
     id: "assets",
     target: "[data-tour='assets']",
     title: "Assets Panel",
-    description: "Your creative toolkit. Import media, generate AI content, add shapes, stickers, and custom SVGs.",
+    description: "Your creative toolkit. Import media, add text and graphics, and use stickers and custom SVGs.",
     tips: [
       "Drag & drop videos, audio, images",
-      "AI Gen tab: generate images & backgrounds with AI",
       "Shapes & custom SVG imports",
       "Stickers, backgrounds & overlays",
     ],

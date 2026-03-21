@@ -4,7 +4,7 @@ export async function generateThumbnailFromBlob(
   blob: Blob,
   type: "video" | "audio" | "image",
 ): Promise<string | null> {
-  if (type === "audio") {
+  if (type === "audio" || !(blob instanceof Blob)) {
     return null;
   }
 
@@ -81,7 +81,7 @@ export async function restoreMediaItem(
 ): Promise<MediaItem> {
   const blob = storedBlob || item.blob;
 
-  if (!blob) {
+  if (!blob || !(blob instanceof Blob)) {
     return item;
   }
 

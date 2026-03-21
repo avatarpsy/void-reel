@@ -6,6 +6,8 @@
 import { auth, db, storage } from "../config/firebase-config";
 import { onAuthStateChanged } from "firebase/auth";
 import { getDownloadURL, ref as storageRef } from "firebase/storage";
+import { useVoidspaceStore } from "../stores/voidspace-store";
+import { buildVoidspaceProjectId } from "./voidspace-project-id";
 import {
   collection,
   getDocs,
@@ -24,6 +26,7 @@ import type {
   Track,
   Clip,
   Subtitle,
+  TextClip,
 } from "@openreel/core";
 
 // ────────────────────────────────────────────
@@ -42,6 +45,14 @@ export interface VoidspaceSceneList {
   music_url?: string;
   music_title?: string;
   content_type?: string;
+  video_url?: string;
+  loop_description?: string;
+  description?: string;
+  content?: string;
+  caption?: string;
+  post_description?: string;
+  thumbnail_url?: string;
+  review_id?: string;
 }
 
 interface SceneData {
@@ -348,6 +359,68 @@ const DEFAULT_FPS = 30;
 const DEFAULT_WIDTH = 1080;
 const DEFAULT_HEIGHT = 1920;
 
+const REMOTION_NARRATION_SUBTITLE_STYLE = {
+  fontFamily: "Anton",
+  fontSize: 80,
+  color: "#FFFFFF",
+  backgroundColor: "transparent",
+  position: "center" as const,
+  highlightColor: "#FF0000",
+};
+
+const REMOTION_LYRICS_SUBTITLE_STYLE = {
+  fontFamily: "Anton",
+  fontSize: 72,
+  color: "#FFFFFF",
+  backgroundColor: "transparent",
+  position: "center" as const,
+  highlightColor: "#FF0000",
+};
+
+function subtitleStyleToTextStyle(style?: Subtitle["style"]) {
+  return {
+    fontFamily: style?.fontFamily ?? "Anton",
+    fontSize: style?.fontSize ?? 72,
+    fontWeight: "bold" as const,
+    fontStyle: "normal" as const,
+    color: style?.color ?? "#FFFFFF",
+    backgroundColor: style?.backgroundColor ?? undefined,
+    textAlign: "center" as const,
+    verticalAlign: "middle" as const,
+    lineHeight: 1.2,
+    letterSpacing: 0,
+  };
+}
+
+function buildEvenWordTimings(
+  text: string,
+  startTime: number,
+  endTime: number,
+): Array<{ text: string; startTime: number; endTime: number }> {
+  const words = text
+    .split(/\s+/)
+    .map((w) => w.trim())
+    .filter((w) => w.length > 0)
+    .map((w) => w.toUpperCase());
+
+  if (words.length === 0 || endTime <= startTime) {
+    return [];
+  }
+
+  const totalDuration = endTime - startTime;
+  const step = totalDuration / words.length;
+
+  return words.map((word, index) => {
+    const wordStart = startTime + step * index;
+    const wordEnd = index === words.length - 1 ? endTime : startTime + step * (index + 1);
+    return {
+      text: word,
+      startTime: wordStart,
+      endTime: wordEnd,
+    };
+  });
+}
+
 function makeMediaMeta(overrides: Partial<MediaMetadata> = {}): MediaMetadata {
   return {
     duration: 0,
@@ -372,6 +445,184 @@ function makeDefaultTransform() {
   };
 }
 
+function parseTimestampToSeconds(value: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  const simple = Number(trimmed);
+  if (Number.isFinite(simple)) {
+    if (simple > 1000) return simple / 1000;
+    return simple;
+  }
+
+  const parts = trimmed.split(":").map((part) => Number(part));
+  if (parts.some((part) => !Number.isFinite(part))) return null;
+
+  if (parts.length === 3) {
+    return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  }
+  if (parts.length === 2) {
+    return parts[0] * 60 + parts[1];
+  }
+  return null;
+}
+
+function parseNumericTime(value: unknown, assumeMs = false): number | null {
+  if (value == null) return null;
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    if (assumeMs) return value / 1000;
+    if (value > 1000) return value / 1000;
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const parsed = parseTimestampToSeconds(value);
+    if (parsed != null) return parsed;
+  }
+
+  return null;
+}
+
+function parseLyricsJsonSegments(raw: string): Array<{ text: string; start: number; end?: number }> {
+  try {
+    const parsed = JSON.parse(raw);
+
+    const candidates: unknown[] = Array.isArray(parsed)
+      ? parsed
+      : Array.isArray(parsed?.lyrics)
+        ? parsed.lyrics
+        : Array.isArray(parsed?.lines)
+          ? parsed.lines
+          : Array.isArray(parsed?.segments)
+            ? parsed.segments
+            : Array.isArray(parsed?.words)
+              ? parsed.words
+              : [];
+
+    const segments: Array<{ text: string; start: number; end?: number }> = [];
+
+    for (const candidate of candidates) {
+      if (!candidate || typeof candidate !== "object") continue;
+      const row = candidate as Record<string, unknown>;
+
+      const text = [row.text, row.lyric, row.line, row.caption]
+        .find((v) => typeof v === "string" && v.trim().length > 0) as string | undefined;
+
+      if (!text) continue;
+
+      const start =
+        parseNumericTime(row.start_ms, true) ??
+        parseNumericTime(row.startTime) ??
+        parseNumericTime(row.start_time) ??
+        parseNumericTime(row.start) ??
+        parseNumericTime(row.time) ??
+        parseNumericTime(row.timestamp);
+
+      const end =
+        parseNumericTime(row.end_ms, true) ??
+        parseNumericTime(row.endTime) ??
+        parseNumericTime(row.end_time) ??
+        parseNumericTime(row.end);
+
+      if (start == null) continue;
+
+      segments.push({ text: text.trim(), start, end: end ?? undefined });
+    }
+
+    return segments.sort((a, b) => a.start - b.start);
+  } catch {
+    return [];
+  }
+}
+
+function parseLrcSegments(raw: string): Array<{ text: string; start: number }> {
+  const lines = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const segments: Array<{ text: string; start: number }> = [];
+
+  for (const line of lines) {
+    const matches = [...line.matchAll(/\[(\d{1,2}:\d{2}(?:\.\d{1,3})?)\]/g)];
+    if (!matches.length) continue;
+
+    const text = line.replace(/\[(\d{1,2}:\d{2}(?:\.\d{1,3})?)\]/g, "").trim();
+    if (!text) continue;
+
+    for (const match of matches) {
+      const ts = parseTimestampToSeconds(match[1]);
+      if (ts == null) continue;
+      segments.push({ text, start: ts });
+    }
+  }
+
+  return segments.sort((a, b) => a.start - b.start);
+}
+
+function setSceneListContext(
+  sceneListId: string,
+  slData: Record<string, unknown>,
+) {
+  const caption =
+    (slData.loop_description as string | undefined) ||
+    (slData.description as string | undefined) ||
+    (slData.content as string | undefined) ||
+    (slData.caption as string | undefined) ||
+    (slData.post_description as string | undefined) ||
+    undefined;
+
+  useVoidspaceStore.getState().setSceneList({
+    sceneListId,
+    name: slData.name as string | undefined,
+    videoUrl: slData.video_url as string | undefined,
+    thumbnailUrl:
+      (slData.thumbnail_url as string | undefined) ||
+      (slData.preview_image_url as string | undefined) ||
+      (slData.first_frame_url as string | undefined) ||
+      (slData.image_url as string | undefined) ||
+      undefined,
+    avatarId: slData.avatar_id as string | undefined,
+    avatarName: slData.avatar_name as string | undefined,
+    reviewId: slData.review_id as string | undefined,
+    caption,
+  });
+}
+
+export async function fetchSceneListContext(
+  userId: string,
+  sceneListId: string,
+): Promise<void> {
+  const slDoc = await getDoc(doc(db, "users", userId, "scene_lists", sceneListId));
+  if (!slDoc.exists()) return;
+  const slData = slDoc.data() as Record<string, unknown>;
+
+  // If the scene list has a review_id and no caption fields, fetch the review
+  // document's description to use as the caption.
+  const hasCaption =
+    slData.loop_description || slData.description || slData.content ||
+    slData.caption || slData.post_description;
+
+  if (!hasCaption && slData.review_id) {
+    try {
+      const reviewDoc = await getDoc(
+        doc(db, "users", userId, "reviews", slData.review_id as string),
+      );
+      if (reviewDoc.exists()) {
+        const reviewData = reviewDoc.data() as Record<string, unknown>;
+        if (reviewData.description) {
+          slData.description = reviewData.description;
+        }
+      }
+    } catch (err) {
+      console.warn("[voidspace-loader] Failed to fetch review caption:", err);
+    }
+  }
+
+  setSceneListContext(sceneListId, slData);
+}
+
 /**
  * Load a Voidspace scene list and build a complete OpenReel Project.
  */
@@ -390,6 +641,9 @@ export async function loadSceneListAsProject(
   }
   const slData = slDoc.data();
   console.log(`[voidspace-loader] Scene list found: ${slData.name || sceneListId}`);
+
+  // Populate scene list context in Voidspace store
+  setSceneListContext(sceneListId, slData as Record<string, unknown>);
 
   // 2) Fetch all scenes
   const scenes = await fetchScenes(userId, sceneListId);
@@ -414,6 +668,7 @@ export async function loadSceneListAsProject(
   const narrationTrackClips: Clip[] = [];
   const musicTrackClips: Clip[] = [];
   const subtitles: Subtitle[] = [];
+  const textClips: TextClip[] = [];
 
   let currentTime = 0; // running timeline position in seconds
   let musicMediaId: string | null = null;
@@ -656,26 +911,81 @@ export async function loadSceneListAsProject(
       null;
 
     if (wordTs && wordTs.length > 0) {
-      // Group words into subtitle segments (~5 words each)
-      const WORDS_PER_CHUNK = 5;
+      // Group words into subtitle segments to match Remotion-style phrase pacing.
+      const WORDS_PER_CHUNK = 4;
       for (let i = 0; i < wordTs.length; i += WORDS_PER_CHUNK) {
-        const chunk = wordTs.slice(i, i + WORDS_PER_CHUNK);
-        const text = chunk.map((w) => w.word).join(" ");
-        const startSec = chunk[0].start + currentTime;
-        const endSec = chunk[chunk.length - 1].end + currentTime;
+        const chunk = wordTs
+          .slice(i, i + WORDS_PER_CHUNK)
+          .filter((w) => typeof w.word === "string" && w.word.trim().length > 0)
+          .map((w) => ({
+            text: w.word.trim().toUpperCase(),
+            startTime: w.start + currentTime,
+            endTime: w.end + currentTime,
+          }));
+        if (chunk.length === 0) continue;
+
+        const text = chunk.map((w) => w.text).join(" ");
+        const startSec = chunk[0].startTime;
+        const endSec = chunk[chunk.length - 1].endTime;
         subtitles.push({
           id: uuidv4(),
           text,
           startTime: startSec,
           endTime: endSec,
-          style: {
-            fontFamily: "Anton",
-            fontSize: 48,
-            color: "#FFFFFF",
-            backgroundColor: "rgba(0,0,0,0.5)",
-            position: "bottom",
-          },
+          style: REMOTION_NARRATION_SUBTITLE_STYLE,
+          animationStyle: "word-highlight",
+          words: chunk,
         });
+      }
+    } else {
+      const jsonSegments = scene.lyrics_json
+        ? parseLyricsJsonSegments(scene.lyrics_json)
+        : [];
+
+      if (jsonSegments.length > 0) {
+        for (let i = 0; i < jsonSegments.length; i += 1) {
+          const segment = jsonSegments[i];
+          const next = jsonSegments[i + 1];
+          const fallbackEnd = next?.start ?? Math.min(sceneDuration, segment.start + 2.5);
+          const end = segment.end ?? fallbackEnd;
+          if (end <= segment.start) continue;
+
+          subtitles.push({
+            id: uuidv4(),
+            text: segment.text.toUpperCase(),
+            startTime: currentTime + segment.start,
+            endTime: currentTime + end,
+            style: REMOTION_LYRICS_SUBTITLE_STYLE,
+            animationStyle: "word-highlight",
+            words: buildEvenWordTimings(
+              segment.text,
+              currentTime + segment.start,
+              currentTime + end,
+            ),
+          });
+        }
+      } else if (scene.lyrics_lrc) {
+        const lrcSegments = parseLrcSegments(scene.lyrics_lrc);
+        for (let i = 0; i < lrcSegments.length; i += 1) {
+          const segment = lrcSegments[i];
+          const next = lrcSegments[i + 1];
+          const fallbackEnd = next?.start ?? Math.min(sceneDuration, segment.start + 2.5);
+          if (fallbackEnd <= segment.start) continue;
+
+          subtitles.push({
+            id: uuidv4(),
+            text: segment.text.toUpperCase(),
+            startTime: currentTime + segment.start,
+            endTime: currentTime + fallbackEnd,
+            style: REMOTION_LYRICS_SUBTITLE_STYLE,
+            animationStyle: "word-highlight",
+            words: buildEvenWordTimings(
+              segment.text,
+              currentTime + segment.start,
+              currentTime + fallbackEnd,
+            ),
+          });
+        }
       }
     }
 
@@ -709,6 +1019,23 @@ export async function loadSceneListAsProject(
     });
   }
 
+  // Build text clips from subtitle segments so captions are visible on the timeline.
+  if (subtitles.length > 0) {
+    for (const subtitle of subtitles) {
+      const duration = Math.max(0.1, subtitle.endTime - subtitle.startTime);
+      textClips.push({
+        id: subtitle.id,
+        trackId: "track-captions",
+        startTime: subtitle.startTime,
+        duration,
+        text: subtitle.text,
+        style: subtitleStyleToTextStyle(subtitle.style),
+        transform: makeDefaultTransform(),
+        keyframes: [],
+      });
+    }
+  }
+
   // 5) Assemble tracks
   const tracks: Track[] = [
     {
@@ -733,7 +1060,24 @@ export async function loadSceneListAsProject(
       muted: false,
       solo: false,
     },
-    {
+  ];
+
+  if (textClips.length > 0) {
+    tracks.push({
+      id: "track-captions",
+      type: "text",
+      name: "Captions",
+      clips: [],
+      transitions: [],
+      locked: false,
+      hidden: false,
+      muted: false,
+      solo: false,
+    });
+  }
+
+  if (musicTrackClips.length > 0) {
+    tracks.push({
       id: "track-music",
       type: "audio",
       name: "Background Music",
@@ -743,8 +1087,8 @@ export async function loadSceneListAsProject(
       hidden: false,
       muted: false,
       solo: false,
-    },
-  ];
+    });
+  }
 
   const timeline: Timeline = {
     tracks,
@@ -764,7 +1108,7 @@ export async function loadSceneListAsProject(
   const now = Date.now();
 
   const project: Project = {
-    id: `voidspace-${sceneListId}`,
+    id: buildVoidspaceProjectId(userId, sceneListId, slData.avatar_id as string | undefined),
     name: slData.name || slData.avatar_name || "Voidspace Project",
     createdAt: slData.created_at?.seconds
       ? slData.created_at.seconds * 1000
@@ -775,6 +1119,7 @@ export async function loadSceneListAsProject(
     settings,
     mediaLibrary: { items: mediaItems },
     timeline,
+    textClips,
   };
 
   return project;

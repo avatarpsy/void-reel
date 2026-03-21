@@ -404,20 +404,40 @@ export class ExportEngine {
       const mediaEngine = getMediaEngine();
       const videoMediaIds: string[] = [];
       for (const track of project.timeline.tracks) {
-        if (track.type !== "video") continue;
+        if (track.type !== "video" && track.type !== "image") continue;
         for (const clip of track.clips) {
           const mediaItem = project.mediaLibrary.items.find(
             (m) => m.id === clip.mediaId,
           );
-          if (mediaItem?.blob && !videoMediaIds.includes(mediaItem.id)) {
-            videoMediaIds.push(mediaItem.id);
+          if (!mediaItem || videoMediaIds.includes(mediaItem.id)) continue;
+
+          let blob = mediaItem.blob instanceof Blob ? mediaItem.blob : null;
+
+          // Fetch from originalUrl when blob is missing (e.g. Voidspace remote media)
+          if (!blob && mediaItem.originalUrl) {
             try {
-              await mediaEngine.createExportDecoder(
-                mediaItem.id,
-                mediaItem.blob,
-                fullSettings.width,
-              );
-            } catch {}
+              const resp = await fetch(mediaItem.originalUrl, { mode: "cors" });
+              if (resp.ok) blob = await resp.blob();
+            } catch {
+              console.warn(`[export-engine] Failed to fetch media blob for ${mediaItem.id}`);
+            }
+          }
+
+          if (blob) {
+            // Write blob back to mediaItem so renderFrame() can use it directly
+            if (!(mediaItem.blob instanceof Blob)) {
+              (mediaItem as { blob: Blob | null }).blob = blob;
+            }
+            videoMediaIds.push(mediaItem.id);
+            if (track.type === "video") {
+              try {
+                await mediaEngine.createExportDecoder(
+                  mediaItem.id,
+                  blob,
+                  fullSettings.width,
+                );
+              } catch {}
+            }
           }
         }
       }

@@ -272,6 +272,7 @@ export const Preview: React.FC = () => {
   const videoElementCacheRef = useRef<
     Map<string, { video: HTMLVideoElement; url: string; lastUsed: number }>
   >(new Map());
+  const remoteBlobCacheRef = useRef<Map<string, Blob>>(new Map());
 
   // Persistent decoder cache for efficient playback (legacy - kept for fallback)
   const decoderCacheRef = useRef<
@@ -311,11 +312,37 @@ export const Preview: React.FC = () => {
   const project = useProjectStore((state) => state.project);
   const getMediaItem = useProjectStore((state) => state.getMediaItem);
 
+  const resolveMediaBlob = useCallback(
+    async (
+      mediaItem: ReturnType<typeof getMediaItem>,
+    ): Promise<Blob | null> => {
+      if (!mediaItem) return null;
+      if (mediaItem.blob instanceof Blob) return mediaItem.blob;
+      if (!mediaItem.originalUrl) return null;
+
+      const cached = remoteBlobCacheRef.current.get(mediaItem.id);
+      if (cached) return cached;
+
+      try {
+        const response = await fetch(mediaItem.originalUrl, { mode: "cors" });
+        if (!response.ok) return null;
+        const blob = await response.blob();
+        remoteBlobCacheRef.current.set(mediaItem.id, blob);
+        return blob;
+      } catch {
+        return null;
+      }
+    },
+    [],
+  );
+
   // Get text clips from TitleEngine
   const getTitleEngine = useEngineStore((state) => state.getTitleEngine);
   const allTextClips = useMemo(() => {
     const titleEngine = getTitleEngine();
-    return titleEngine?.getAllTextClips() || [];
+    return (titleEngine?.getAllTextClips() || []).filter(
+      (clip) => clip.trackId !== "track-captions",
+    );
   }, [getTitleEngine, project.modifiedAt]);
 
   const getGraphicsEngine = useEngineStore((state) => state.getGraphicsEngine);
@@ -813,6 +840,7 @@ export const Preview: React.FC = () => {
       const videoTracks = tracks.filter(
         (t) => (t.type === "video" || t.type === "image") && !t.hidden,
       );
+      const tracksWithAudio = [...audioTracks, ...videoTracks];
 
       if (!audioGraphRef.current) {
         audioGraphRef.current = getRealtimeAudioGraph();
@@ -824,7 +852,7 @@ export const Preview: React.FC = () => {
       const speedEngine = getSpeedEngine();
       const scheduledClips: AudioClipSchedule[] = [];
 
-      for (const audioTrack of audioTracks) {
+      for (const audioTrack of tracksWithAudio) {
         audioGraph.createTrack({
           trackId: audioTrack.id,
           volume: 1,
@@ -846,8 +874,25 @@ export const Preview: React.FC = () => {
             timelinePosition < clipEnd
           ) {
             const mediaItem = getMediaItem(audioClip.mediaId);
-            if (!mediaItem?.blob) {
+            if (!mediaItem) {
               continue;
+            }
+
+            const mediaBlob = await resolveMediaBlob(mediaItem);
+            if (!mediaBlob) continue;
+
+            // Prefer dedicated audio-track clips over linked video-track clones.
+            if (audioTrack.type !== "audio") {
+              const linkedAudioClipExists = audioTracks.some((at) =>
+                at.clips.some(
+                  (ac) =>
+                    ac.mediaId === audioClip.mediaId &&
+                    Math.abs(ac.startTime - audioClip.startTime) < 0.01,
+                ),
+              );
+              if (linkedAudioClipExists) {
+                continue;
+              }
             }
 
             let audioBuffer = audioBufferCacheRef.current.get(
@@ -856,7 +901,7 @@ export const Preview: React.FC = () => {
             if (!audioBuffer) {
               try {
                 const audioContext = audioGraph.getAudioContext();
-                const arrayBuffer = await mediaItem.blob.arrayBuffer();
+                const arrayBuffer = await mediaBlob.arrayBuffer();
                 audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
                 audioBufferCacheRef.current.set(audioClip.mediaId, audioBuffer);
               } catch (error) {
@@ -926,7 +971,7 @@ export const Preview: React.FC = () => {
         audioGraph.scheduleClips(scheduledClips);
       }
     },
-    [getMediaItem, isMuted],
+    [getMediaItem, isMuted, resolveMediaBlob],
   );
 
   const preDecodeAllAudioBuffers = useCallback(async (): Promise<void> => {
@@ -951,19 +996,22 @@ export const Preview: React.FC = () => {
         }
 
         const mediaItem = getMediaItem(clip.mediaId);
-        if (!mediaItem?.blob) {
+        if (!mediaItem) {
           continue;
         }
 
+        const mediaBlob = await resolveMediaBlob(mediaItem);
+        if (!mediaBlob) continue;
+
         try {
-          const arrayBuffer = await mediaItem.blob.arrayBuffer();
+          const arrayBuffer = await mediaBlob.arrayBuffer();
           const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
           audioBufferCacheRef.current.set(clip.mediaId, audioBuffer);
         } catch {
         }
       }
     }
-  }, [getMediaItem]);
+  }, [getMediaItem, resolveMediaBlob]);
 
   const getAudioClipsForScheduler = useCallback(
     (time: number): AudioClipSchedule[] => {
@@ -1028,11 +1076,13 @@ export const Preview: React.FC = () => {
       canvasHeight: number,
     ): Promise<ImageBitmap | null> => {
       const mediaItem = getMediaItem(clip.mediaId);
-      if (!mediaItem?.blob) return null;
+      if (!mediaItem) return null;
+      const mediaBlob = await resolveMediaBlob(mediaItem);
+      if (!mediaBlob) return null;
 
       if (mediaItem.type === "image") {
         try {
-          return await createImageBitmap(mediaItem.blob);
+          return await createImageBitmap(mediaBlob);
         } catch {
           return null;
         }
@@ -1051,7 +1101,7 @@ export const Preview: React.FC = () => {
         let cached = videoElementCacheRef.current.get(cacheKey);
 
         if (!cached) {
-          const url = URL.createObjectURL(mediaItem.blob);
+          const url = URL.createObjectURL(mediaBlob);
           const video = document.createElement("video");
           video.src = url;
           video.muted = true;
@@ -1146,13 +1196,15 @@ export const Preview: React.FC = () => {
         const cached = videoElementCacheRef.current.get(clip.mediaId);
         if (cached) {
           cached.video.src = "";
-          URL.revokeObjectURL(cached.url);
+          if (cached.url.startsWith("blob:")) {
+            URL.revokeObjectURL(cached.url);
+          }
           videoElementCacheRef.current.delete(clip.mediaId);
         }
         return null;
       }
     },
-    [getMediaItem],
+    [getMediaItem, resolveMediaBlob],
   );
 
   // Render a single frame using MediaBunny (for scrubbing/seeking)
@@ -1753,7 +1805,12 @@ export const Preview: React.FC = () => {
         for (const clip of track.clips) {
           if (clip.startTime + clip.duration > startPosition) {
             const mediaItem = getMediaItem(clip.mediaId);
-            if (mediaItem?.blob && mediaItem.type === "video") {
+            const hasPlayableSource =
+              mediaItem?.blob instanceof Blob ||
+              (typeof mediaItem?.originalUrl === "string" &&
+                mediaItem.originalUrl.length > 0);
+
+            if (mediaItem?.type === "video" && hasPlayableSource) {
               const clipSpeed = speedEngine.getClipSpeed(clip.id);
               const isReverse = speedEngine.isReverse(clip.id);
               if (clipSpeed !== 1 || isReverse) {
@@ -1831,9 +1888,10 @@ export const Preview: React.FC = () => {
       const imageBitmapCache = new Map<string, ImageBitmap>();
       for (const { clip } of imageClips) {
         const mediaItem = getMediaItem(clip.mediaId);
-        if (mediaItem?.type === "image" && mediaItem.blob) {
+        const mediaBlob = await resolveMediaBlob(mediaItem);
+        if (mediaItem?.type === "image" && mediaBlob) {
           try {
-            const bitmap = await createImageBitmap(mediaItem.blob);
+            const bitmap = await createImageBitmap(mediaBlob);
             imageBitmapCache.set(clip.id, bitmap);
           } catch (error) {
             console.warn(`Failed to cache image bitmap for ${clip.id}:`, error);
@@ -1850,13 +1908,19 @@ export const Preview: React.FC = () => {
       const loadPromises: Promise<void>[] = [];
 
       for (const { clip, mediaItem } of clips) {
-        if (!videoCache.has(clip.mediaId) && mediaItem.blob) {
-          const url = URL.createObjectURL(mediaItem.blob);
+        if (!videoCache.has(clip.mediaId)) {
+          const mediaBlob = await resolveMediaBlob(mediaItem);
+          const url = mediaBlob
+            ? URL.createObjectURL(mediaBlob)
+            : mediaItem.originalUrl || "";
+          if (!url) continue;
+
           const video = document.createElement("video");
           video.src = url;
           video.muted = true;
           video.playsInline = true;
           video.preload = "auto";
+          video.crossOrigin = "anonymous";
 
           videoCache.set(clip.mediaId, { video, url });
 
@@ -2215,7 +2279,9 @@ export const Preview: React.FC = () => {
         for (const [, { video, url }] of videoCache) {
           video.pause();
           video.src = "";
-          URL.revokeObjectURL(url);
+          if (url.startsWith("blob:")) {
+            URL.revokeObjectURL(url);
+          }
         }
         videoCache.clear();
 
@@ -2314,7 +2380,8 @@ export const Preview: React.FC = () => {
     ) => {
       try {
         const mediaItem = getMediaItem(clip.mediaId);
-        if (!mediaItem?.blob) {
+        const mediaBlob = await resolveMediaBlob(mediaItem);
+        if (!mediaBlob) {
           const clipEndTime = clip.startTime + clip.duration;
           const nextResult = findClipAtTime(clipEndTime);
           if (nextResult && clipEndTime < actualEndTime && isActive) {
@@ -2334,7 +2401,7 @@ export const Preview: React.FC = () => {
           const { Input, ALL_FORMATS, BlobSource, CanvasSink } = mediabunny;
 
           const input = new Input({
-            source: new BlobSource(mediaItem.blob),
+            source: new BlobSource(mediaBlob),
             formats: ALL_FORMATS,
           });
 
@@ -2372,11 +2439,21 @@ export const Preview: React.FC = () => {
             return;
           }
 
+          // Performance: cap preview decode resolution during real-time playback.
+          // This keeps editor preview responsive while preserving export quality.
+          const PREVIEW_MAX_DIMENSION = 960;
+          const scale = Math.min(
+            1,
+            PREVIEW_MAX_DIMENSION / Math.max(sinkWidth, sinkHeight),
+          );
+          const previewWidth = Math.max(2, Math.round(sinkWidth * scale));
+          const previewHeight = Math.max(2, Math.round(sinkHeight * scale));
+
           const sink = new CanvasSink(videoTrack, {
-            width: sinkWidth,
-            height: sinkHeight,
+            width: previewWidth,
+            height: previewHeight,
             fit: "contain",
-            poolSize: getAdaptivePoolSize(sinkWidth, sinkHeight),
+            poolSize: getAdaptivePoolSize(previewWidth, previewHeight),
           });
 
           const speedEngine = getSpeedEngine();
@@ -4605,7 +4682,7 @@ export const Preview: React.FC = () => {
     if (!mediaItem) return null;
 
     let src: string | null = null;
-    if (mediaItem.blob) {
+    if (mediaItem.blob instanceof Blob) {
       src = URL.createObjectURL(mediaItem.blob);
     } else if (mediaItem.originalUrl) {
       src = mediaItem.originalUrl;

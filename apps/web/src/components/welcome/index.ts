@@ -6,3 +6,4 @@ export { CategoryTabs } from "./CategoryTabs";
 export { TemplatePreviewModal } from "./TemplatePreviewModal";
 export { StartFromScratch } from "./StartFromScratch";
 export { RecentProjects } from "./RecentProjects";
+export { VoidspaceTemplateGallery } from "./VoidspaceTemplateGallery";

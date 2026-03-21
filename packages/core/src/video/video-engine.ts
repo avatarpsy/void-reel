@@ -44,6 +44,7 @@ import {
   isAnimatedGif,
 } from "../media/gif-decoder";
 import { getParticleEngine } from "../effects/particle-engine";
+import { renderSubtitleToCanvasCtx as sharedRenderSubtitle } from "../text/subtitle-canvas-renderer";
 
 const DEFAULT_CACHE_CONFIG: FrameCacheConfig = {
   maxFrames: 100,
@@ -90,6 +91,7 @@ export class VideoEngine {
     string,
     { video: HTMLVideoElement; url: string }
   > = new Map();
+  private originalBlobFetchCache: Map<string, Promise<Blob | null>> = new Map();
 
   private gpuCompositor: GPUCompositor | null = null;
   private gpuRenderer: Renderer | null = null;
@@ -454,17 +456,23 @@ export class VideoEngine {
           const mediaItem = mediaLibrary.items.find(
             (m) => m.id === clipInfo.mediaId,
           );
-          if (!mediaItem?.blob) continue;
+          if (!mediaItem) continue;
+          if (!mediaItem.blob) {
+            const hydrated = await this.hydrateMediaBlob(mediaItem);
+            if (!hydrated) continue;
+          }
+          const mediaBlob = mediaItem.blob;
+          if (!mediaBlob) continue;
 
           let bitmap: ImageBitmap | null = null;
           let bitmapFromCache = false;
 
           if (mediaItem.type === "image") {
             try {
-              if (isAnimatedGif(mediaItem.blob)) {
+              if (isAnimatedGif(mediaBlob)) {
                 let gifCache = this.gifFrameCache.get(mediaItem.id);
                 if (!gifCache) {
-                  const newCache = await createGifFrameCache(mediaItem.blob);
+                  const newCache = await createGifFrameCache(mediaBlob);
                   if (newCache) {
                     this.gifFrameCache.set(mediaItem.id, newCache);
                     gifCache = newCache;
@@ -479,7 +487,7 @@ export class VideoEngine {
                   bitmap = gifCache.frames[frameIndex];
                   bitmapFromCache = true;
                 } else {
-                  bitmap = await createImageBitmap(mediaItem.blob);
+                  bitmap = await createImageBitmap(mediaBlob);
                 }
               } else {
                 const cached = this.staticImageCache.get(mediaItem.id);
@@ -487,7 +495,7 @@ export class VideoEngine {
                   bitmap = cached;
                   bitmapFromCache = true;
                 } else {
-                  bitmap = await createImageBitmap(mediaItem.blob);
+                  bitmap = await createImageBitmap(mediaBlob);
                   this.staticImageCache.set(mediaItem.id, bitmap);
                   bitmapFromCache = true;
                 }
@@ -500,7 +508,7 @@ export class VideoEngine {
             }
           } else {
             bitmap = await this.decodeFrameWithMediaBunny(
-              mediaItem.blob,
+              mediaBlob,
               clipInfo.sourceTime,
               settings.width,
               settings.height,
@@ -509,7 +517,7 @@ export class VideoEngine {
             if (!bitmap) {
               bitmap = await this.decodeFrameWithVideoElement(
                 mediaItem.id,
-                mediaItem.blob,
+                mediaBlob,
                 clipInfo.sourceTime,
                 settings.width,
                 settings.height,
@@ -665,7 +673,7 @@ export class VideoEngine {
     this.renderParticlesToContext(ctx, time, width, height);
 
     for (const subtitle of activeSubtitles) {
-      this.renderSubtitleToCanvasCtx(ctx, subtitle, width, height);
+      this.renderSubtitleToCanvasCtx(ctx, subtitle, width, height, time);
     }
 
     const imageBitmap = await createImageBitmap(canvas);
@@ -949,57 +957,9 @@ export class VideoEngine {
     subtitle: Subtitle,
     canvasWidth: number,
     canvasHeight: number,
+    currentTime: number,
   ): void {
-    const { text, style } = subtitle;
-    if (!text || text.trim().length === 0) return;
-
-    ctx.save();
-
-    const fontSize = style?.fontSize || 24;
-    const fontFamily = style?.fontFamily || "Inter";
-    const color = style?.color || "#ffffff";
-    const backgroundColor = style?.backgroundColor || "rgba(0, 0, 0, 0.7)";
-    const position = style?.position || "bottom";
-
-    ctx.font = `bold ${fontSize}px "${fontFamily}"`;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-
-    const lines = text.split("\n");
-    const lineHeight = fontSize * 1.3;
-    const totalHeight = lines.length * lineHeight;
-
-    let baseY: number;
-    if (position === "top") {
-      baseY = fontSize * 2;
-    } else if (position === "center") {
-      baseY = canvasHeight / 2 - totalHeight / 2;
-    } else {
-      baseY = canvasHeight - fontSize * 2 - totalHeight;
-    }
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim();
-      if (line.length === 0) continue;
-
-      const y = baseY + i * lineHeight + lineHeight / 2;
-      const metrics = ctx.measureText(line);
-      const bgWidth = metrics.width + 20;
-      const bgHeight = lineHeight;
-
-      ctx.fillStyle = backgroundColor;
-      ctx.fillRect(
-        canvasWidth / 2 - bgWidth / 2,
-        y - bgHeight / 2,
-        bgWidth,
-        bgHeight,
-      );
-
-      ctx.fillStyle = color;
-      ctx.fillText(line, canvasWidth / 2, y);
-    }
-
-    ctx.restore();
+    sharedRenderSubtitle(ctx, subtitle, canvasWidth, canvasHeight, currentTime);
   }
 
   private getClipsAtTime(track: Track, time: number): Clip[] {
@@ -1581,14 +1541,21 @@ export class VideoEngine {
     time: number,
   ): Promise<ImageBitmap | null> {
     if (!mediaItem.blob) {
-      console.warn(`No blob available for media item ${mediaItem.id}`);
+      const hydrated = await this.hydrateMediaBlob(mediaItem);
+      if (!hydrated) {
+        console.warn(`No blob available for media item ${mediaItem.id}`);
+        return null;
+      }
+    }
+    const mediaBlob = mediaItem.blob;
+    if (!mediaBlob) {
       return null;
     }
 
     // Special handling for static images - they don't need mediabunny
     if (mediaItem.type === "image") {
       try {
-        return await createImageBitmap(mediaItem.blob);
+        return await createImageBitmap(mediaBlob);
       } catch (error) {
         console.warn(`Failed to create ImageBitmap from image: ${error}`);
         return null;
@@ -1601,7 +1568,7 @@ export class VideoEngine {
       this.mediabunny!;
 
     const input = new Input({
-      source: new BlobSource(mediaItem.blob),
+      source: new BlobSource(mediaBlob),
       formats: ALL_FORMATS,
     });
 
@@ -1677,6 +1644,52 @@ export class VideoEngine {
     }
   }
 
+  private async hydrateMediaBlob(mediaItem: MediaItem): Promise<Blob | null> {
+    if (mediaItem.blob) {
+      return mediaItem.blob;
+    }
+
+    const sourceUrl = mediaItem.originalUrl;
+    if (!sourceUrl) {
+      return null;
+    }
+
+    const cachedPromise = this.originalBlobFetchCache.get(sourceUrl);
+    if (cachedPromise) {
+      const cachedBlob = await cachedPromise;
+      if (cachedBlob) {
+        (mediaItem as { blob: Blob | null }).blob = cachedBlob;
+      }
+      return cachedBlob;
+    }
+
+    const fetchPromise = (async (): Promise<Blob | null> => {
+      try {
+        const response = await fetch(sourceUrl, { mode: "cors" });
+        if (!response.ok) {
+          return null;
+        }
+        const blob = await response.blob();
+        if (!blob || blob.size === 0) {
+          return null;
+        }
+        return blob;
+      } catch {
+        return null;
+      }
+    })();
+
+    this.originalBlobFetchCache.set(sourceUrl, fetchPromise);
+    const blob = await fetchPromise;
+    if (blob) {
+      (mediaItem as { blob: Blob | null }).blob = blob;
+      return blob;
+    }
+
+    this.originalBlobFetchCache.delete(sourceUrl);
+    return null;
+  }
+
   async decodeFrameToCanvas(
     mediaItem: MediaItem,
     time: number,
@@ -1688,11 +1701,18 @@ export class VideoEngine {
     const { Input, ALL_FORMATS, BlobSource, CanvasSink } = this.mediabunny!;
 
     if (!mediaItem.blob) {
+      const hydrated = await this.hydrateMediaBlob(mediaItem);
+      if (!hydrated) {
+        return null;
+      }
+    }
+    const mediaBlob = mediaItem.blob;
+    if (!mediaBlob) {
       return null;
     }
 
     const input = new Input({
-      source: new BlobSource(mediaItem.blob),
+      source: new BlobSource(mediaBlob),
       formats: ALL_FORMATS,
     });
 

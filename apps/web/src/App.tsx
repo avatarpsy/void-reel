@@ -4,18 +4,24 @@ import { ScriptViewDialog } from "./components/editor/ScriptViewDialog";
 import { SearchModal } from "./components/editor/SearchModal";
 import { MobileBlocker } from "./components/MobileBlocker";
 import { WelcomeScreen } from "./components/welcome";
-import { RecoveryDialog } from "./components/welcome/RecoveryDialog";
 import { SharePage } from "./pages/SharePage";
 import { useUIStore } from "./stores/ui-store";
 import { useProjectStore } from "./stores/project-store";
+import { useVoidspaceStore } from "./stores/voidspace-store";
 import { useRouter } from "./hooks/use-router";
-import { useProjectRecovery } from "./hooks/useProjectRecovery";
 import { SOCIAL_MEDIA_PRESETS, type SocialMediaCategory } from "@openreel/core";
 import { TooltipProvider } from "@openreel/ui";
 import {
   waitForAuth,
+  fetchSceneListContext,
   loadSceneListAsProject,
 } from "./services/voidspace-loader";
+import { autoSaveManager } from "./services/auto-save";
+import {
+  buildLegacyVoidspaceProjectId,
+  buildUserScopedVoidspaceProjectId,
+  buildVoidspaceProjectId,
+} from "./services/voidspace-project-id";
 
 const EditorInterface = lazy(() =>
   import("./components/editor/EditorInterface").then((m) => ({
@@ -39,11 +45,11 @@ const PRESET_DIMENSIONS: Record<string, SocialMediaCategory> = {
 };
 
 function App() {
-  const { activeModal, closeModal, skipWelcomeScreen } = useUIStore();
+  const { activeModal, closeModal } = useUIStore();
   const { openModal: openSearchModal } = useUIStore();
   const createNewProject = useProjectStore((state) => state.createNewProject);
   const loadProject = useProjectStore((state) => state.loadProject);
-  const { showDialog, availableSaves, recover, dismiss, clearAll } = useProjectRecovery();
+  const forceSave = useProjectStore((state) => state.forceSave);
   const [voidspaceLoading, setVoidspaceLoading] = useState(() => {
     const sp = new URLSearchParams(window.location.search);
     return sp.has("sceneListId");
@@ -76,6 +82,71 @@ function App() {
           return;
         }
 
+        // Refresh scene list metadata first so we can scope local cache by avatar.
+        try {
+          await fetchSceneListContext(userId, sceneListId);
+        } catch (contextErr) {
+          console.warn("[Voidspace] Failed to preload scene list context:", contextErr);
+        }
+
+        const avatarId = useVoidspaceStore.getState().sceneList?.avatarId;
+
+        // Check for a locally saved copy first (edited in Studio previously).
+        // New key is scoped by user + avatar + sceneList to avoid cross-avatar collisions.
+        const localProjectId = buildVoidspaceProjectId(userId, sceneListId, avatarId);
+        const userScopedLegacyProjectId = buildUserScopedVoidspaceProjectId(userId, sceneListId);
+        const legacyLocalProjectId = buildLegacyVoidspaceProjectId(sceneListId);
+        await autoSaveManager.initialize();
+
+        const saveCandidates = (
+          await Promise.all([
+            autoSaveManager.getMostRecentSave(localProjectId),
+            autoSaveManager.getMostRecentSave(userScopedLegacyProjectId),
+            autoSaveManager.getMostRecentSave(legacyLocalProjectId),
+          ])
+        ).filter((s): s is NonNullable<typeof s> => Boolean(s));
+
+        const localSave = saveCandidates
+          .sort((a, b) => b.timestamp - a.timestamp)[0] || null;
+
+        if (localSave) {
+          console.log(`[Voidspace] Found local copy for ${sceneListId}, recovering...`);
+          const recovered = await useProjectStore.getState().recoverFromAutoSave(localSave.id);
+          if (recovered) {
+            if (
+              localSave.projectId === legacyLocalProjectId ||
+              localSave.projectId === userScopedLegacyProjectId
+            ) {
+              const currentProject = useProjectStore.getState().project;
+              if (
+                currentProject.id === legacyLocalProjectId ||
+                currentProject.id === userScopedLegacyProjectId
+              ) {
+                loadProject({
+                  ...currentProject,
+                  id: localProjectId,
+                  modifiedAt: Date.now(),
+                });
+                await forceSave();
+                console.log(
+                  `[Voidspace] Migrated local project id to scoped key: ${localProjectId}`,
+                );
+              }
+            }
+            try {
+              await fetchSceneListContext(userId, sceneListId);
+            } catch (contextErr) {
+              console.warn("[Voidspace] Failed to refresh scene list context:", contextErr);
+            }
+            navigate("editor");
+            console.log(`[Voidspace] Restored local project: ${localSave.projectName}`);
+            setVoidspaceLoading(false);
+            return;
+          }
+          console.warn("[Voidspace] Local recovery failed, falling back to Firestore import");
+        }
+
+        // No local copy — import fresh from Firestore
         console.log(`[Voidspace] Loading scene list: ${sceneListId}`);
         const project = await loadSceneListAsProject(userId, sceneListId);
         loadProject(project);
@@ -92,7 +163,7 @@ function App() {
         setVoidspaceLoading(false);
       }
     })();
-  }, [loadProject, navigate]);
+  }, [forceSave, loadProject, navigate]);
 
   useEffect(() => {
     if (hasHandledInitialRoute.current) return;
@@ -137,9 +208,7 @@ function App() {
 
       createNewProject(projectName, { width, height, frameRate });
       navigate("editor");
-    } else if (route === "editor" && skipWelcomeScreen) {
-      hasHandledInitialRoute.current = true;
-    } else if (["welcome", "templates", "recent"].includes(route)) {
+    } else if (["welcome", "templates", "editor"].includes(route)) {
       hasHandledInitialRoute.current = true;
     }
   }, [
@@ -149,7 +218,6 @@ function App() {
     fps,
     createNewProject,
     navigate,
-    skipWelcomeScreen,
   ]);
 
   const handleKeyDown = useCallback(
@@ -170,14 +238,15 @@ function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [handleKeyDown]);
 
+  const forceWelcome =
+    params.forceWelcome === "1" ||
+    new URLSearchParams(window.location.search).get("forceWelcome") === "1";
   const showWelcome =
-    ["welcome", "templates", "recent"].includes(route) && !skipWelcomeScreen;
+    ["welcome", "templates"].includes(route) || forceWelcome;
   const initialTab =
     route === "templates"
       ? "templates"
-      : route === "recent"
-        ? "recent"
-        : undefined;
+      : undefined;
   const isSharePage = route === "share" && params.shareId;
 
   return (
@@ -211,17 +280,6 @@ function App() {
           onClose={closeModal}
         />
         <SearchModal isOpen={activeModal === "search"} onClose={closeModal} />
-        {showDialog && availableSaves.length > 0 && (
-          <RecoveryDialog
-            saves={availableSaves}
-            onRecover={async (saveId) => {
-              const success = await recover(saveId);
-              if (success) navigate("editor");
-            }}
-            onDismiss={dismiss}
-            onClearAll={clearAll}
-          />
-        )}
       </div>
     </TooltipProvider>
   );

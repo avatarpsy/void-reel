@@ -23,6 +23,7 @@ import {
   waitForAuth,
   fetchSceneLists,
 } from "../../services/voidspace-loader";
+import { parseVoidspaceProjectId } from "../../services/voidspace-project-id";
 import { db } from "../../config/firebase-config";
 import {
   collection,
@@ -147,8 +148,8 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): 
 
 function getSceneListIdFromProject(project: Project | null): string | null {
   if (!project?.id) return null;
-  if (!project.id.startsWith("voidspace-")) return null;
-  return project.id.replace(/^voidspace-/, "");
+  const parsed = parseVoidspaceProjectId(project.id);
+  return parsed?.sceneListId ?? null;
 }
 
 function getCacheKey(userId: string, avatarContext: AvatarContext): string {
