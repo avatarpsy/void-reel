@@ -3,14 +3,22 @@ import { getAuth } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 import { getStorage } from "firebase/storage";
 
+const requireEnv = (key: string): string => {
+  const value = (import.meta.env as Record<string, string | undefined>)[key];
+  if (!value) {
+    throw new Error(`Missing required environment variable: ${key}`);
+  }
+  return value;
+};
+
 const firebaseConfig = {
-  apiKey: "AIzaSyCsrhvcQPWIBhtkZbnP-yASJ6t7eOvHqSg",
-  authDomain: "voidspace-v1.firebaseapp.com",
-  projectId: "voidspace-v1",
-  storageBucket: "voidspace-v1.appspot.com",
-  messagingSenderId: "140263423615",
-  appId: "1:140263423615:web:dd3ba582bd09915bca094a",
-  measurementId: "G-406K622DGQ",
+  apiKey: requireEnv("VITE_FIREBASE_API_KEY"),
+  authDomain: requireEnv("VITE_FIREBASE_AUTH_DOMAIN"),
+  projectId: requireEnv("VITE_FIREBASE_PROJECT_ID"),
+  storageBucket: requireEnv("VITE_FIREBASE_STORAGE_BUCKET"),
+  messagingSenderId: requireEnv("VITE_FIREBASE_MESSAGING_SENDER_ID"),
+  appId: requireEnv("VITE_FIREBASE_APP_ID"),
+  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID,
 };
 
 // Reuse existing Firebase app if already initialized (shared auth with parent page)
