@@ -468,6 +468,7 @@ class KeyboardShortcutsManager {
   private handlers: Map<string, Set<ShortcutHandler>> = new Map();
   private activePreset: string = "openreel";
   private isListening: boolean = false;
+  private nonRepeatableActions: Set<string> = new Set(["playback.playPause"]);
 
   constructor() {
     this.loadShortcuts();
@@ -523,20 +524,45 @@ class KeyboardShortcutsManager {
   }
 
   private handleKeyDown = (e: KeyboardEvent): void => {
-    if (
-      e.target instanceof HTMLInputElement ||
-      e.target instanceof HTMLTextAreaElement
-    ) {
+    if (e.defaultPrevented || this.shouldIgnoreTarget(e.target)) {
       return;
     }
 
     const matchedShortcut = this.findMatchingShortcut(e);
     if (matchedShortcut) {
+      if (e.repeat && this.nonRepeatableActions.has(matchedShortcut.action)) {
+        return;
+      }
       e.preventDefault();
       e.stopPropagation();
       this.executeAction(matchedShortcut.action, e);
     }
   };
+
+  private shouldIgnoreTarget(target: EventTarget | null): boolean {
+    if (!(target instanceof HTMLElement)) {
+      return false;
+    }
+
+    if (
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      target instanceof HTMLSelectElement ||
+      target instanceof HTMLButtonElement
+    ) {
+      return true;
+    }
+
+    if (target.isContentEditable) {
+      return true;
+    }
+
+    return Boolean(
+      target.closest(
+        "[contenteditable='true'], [role='textbox'], [data-shortcuts='off']",
+      ),
+    );
+  }
 
   private findMatchingShortcut(e: KeyboardEvent): ShortcutDefinition | null {
     const isMeta = e.metaKey || e.ctrlKey;

@@ -256,6 +256,13 @@ export function useKeyboardShortcuts() {
   }, [playheadPosition, project.timeline.markers.length, addMarker]);
 
   useEffect(() => {
+    keyboardShortcuts.startListening();
+    return () => {
+      keyboardShortcuts.stopListening();
+    };
+  }, []);
+
+  useEffect(() => {
     const handlers: Array<[string, ShortcutHandler]> = [
       ["playback.playPause", handlePlayPause],
       ["playback.frameBack", handleFrameBack],
@@ -296,11 +303,8 @@ export function useKeyboardShortcuts() {
       keyboardShortcuts.registerHandler(action, handler),
     );
 
-    keyboardShortcuts.startListening();
-
     return () => {
       unsubscribes.forEach((unsub) => unsub());
-      keyboardShortcuts.stopListening();
     };
   }, [
     handlePlayPause,

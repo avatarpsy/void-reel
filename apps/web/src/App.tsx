@@ -113,6 +113,41 @@ function App() {
           console.log(`[Voidspace] Found local copy for ${sceneListId}, recovering...`);
           const recovered = await useProjectStore.getState().recoverFromAutoSave(localSave.id);
           if (recovered) {
+            const recoveredProject = useProjectStore.getState().project;
+            const recoveredMusicTrack = recoveredProject.timeline.tracks.find(
+              (track) => track.id === "track-music",
+            );
+            const recoveredLooksStale =
+              Boolean(recoveredMusicTrack) &&
+              recoveredMusicTrack!.clips.length > 0 &&
+              recoveredMusicTrack!.clips.every(
+                (clip) => Math.abs(clip.inPoint ?? 0) < 0.0001,
+              );
+
+            if (recoveredLooksStale) {
+              try {
+                const refreshedProject = await loadSceneListAsProject(userId, sceneListId);
+                const refreshedMusicTrack = refreshedProject.timeline.tracks.find(
+                  (track) => track.id === "track-music",
+                );
+                const refreshedHasOffsets =
+                  Boolean(refreshedMusicTrack) &&
+                  refreshedMusicTrack!.clips.some(
+                    (clip) => (clip.inPoint ?? 0) > 0.0001,
+                  );
+
+                if (refreshedHasOffsets) {
+                  loadProject(refreshedProject);
+                  await forceSave();
+                  console.log(
+                    "[Voidspace] Replaced stale local cache with refreshed scene timing.",
+                  );
+                }
+              } catch (refreshErr) {
+                console.warn("[Voidspace] Failed to refresh stale local cache:", refreshErr);
+              }
+            }
+
             if (
               localSave.projectId === legacyLocalProjectId ||
               localSave.projectId === userScopedLegacyProjectId

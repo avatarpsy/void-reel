@@ -65,8 +65,10 @@ interface SceneData {
   image_url?: string;
   first_frame_url?: string;
   preview_image_url?: string;
-  music_start_ms?: number;
-  music_end_ms?: number;
+  music_start_ms?: number | string;
+  music_end_ms?: number | string;
+  audio_start_ms?: number | string;
+  audio_end_ms?: number | string;
   music_url?: string;
   music_file_name?: string;
   music_title?: string;
@@ -79,6 +81,12 @@ interface SceneData {
   lyrics_json?: string;
   is_branding?: boolean;
   status?: string;
+  edit_state?: {
+    music_start_ms?: number | string;
+    music_end_ms?: number | string;
+    audio_start_ms?: number | string;
+    audio_end_ms?: number | string;
+  };
 }
 
 interface SceneVideoData {
@@ -484,6 +492,50 @@ function parseNumericTime(value: unknown, assumeMs = false): number | null {
   return null;
 }
 
+function parseNumericMs(value: unknown): number | null {
+  if (value == null) return null;
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const parsed = Number(value.trim());
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
+function resolveSceneMusicTimingMs(scene: SceneData): {
+  startMs: number | null;
+  endMs: number | null;
+} {
+  const row = scene as unknown as Record<string, unknown>;
+  const editState =
+    (row.edit_state as Record<string, unknown> | undefined) ??
+    undefined;
+
+  const startMs =
+    parseNumericMs(row.music_start_ms) ??
+    parseNumericMs(row.audio_start_ms) ??
+    parseNumericMs(editState?.music_start_ms) ??
+    parseNumericMs(editState?.audio_start_ms);
+
+  const endMs =
+    parseNumericMs(row.music_end_ms) ??
+    parseNumericMs(row.audio_end_ms) ??
+    parseNumericMs(editState?.music_end_ms) ??
+    parseNumericMs(editState?.audio_end_ms);
+
+  return {
+    startMs,
+    endMs,
+  };
+}
+
 function parseLyricsJsonSegments(raw: string): Array<{ text: string; start: number; end?: number }> {
   try {
     const parsed = JSON.parse(raw);
@@ -667,33 +719,59 @@ export async function loadSceneListAsProject(
   const videoTrackClips: Clip[] = [];
   const narrationTrackClips: Clip[] = [];
   const musicTrackClips: Clip[] = [];
+  const musicTrackSpecs: Array<{
+    mediaId: string;
+    startTime: number;
+    duration: number;
+    inPoint: number;
+    outPoint: number;
+  }> = [];
   const subtitles: Subtitle[] = [];
   const textClips: TextClip[] = [];
 
   let currentTime = 0; // running timeline position in seconds
-  let musicMediaId: string | null = null;
+  let fallbackMusicMediaId: string | null = null;
   let totalMusicDuration = 0;
+  const musicMediaIdsByUrl = new Map<string, string>();
+  let lastMusicMediaId: string | null = null;
+  let lastMusicOutPointSec: number | null = null;
 
-  // Track the global music URL so we create one media item for it
-  const globalMusicUrl =
-    (await resolveMediaUrl(
-      slData.music_url ?? scenes.find((s) => s.music_url)?.music_url ?? null,
-    )) ?? null;
+  const ensureMusicMediaItem = async (
+    rawUrl: string | null | undefined,
+    preferredTitle?: string,
+  ): Promise<string | null> => {
+    const resolvedUrl = await resolveMediaUrl(rawUrl ?? null);
+    if (!resolvedUrl) return null;
 
-  if (globalMusicUrl) {
-    musicMediaId = uuidv4();
+    const existingMediaId = musicMediaIdsByUrl.get(resolvedUrl);
+    if (existingMediaId) return existingMediaId;
+
+    const mediaId = uuidv4();
+    musicMediaIdsByUrl.set(resolvedUrl, mediaId);
     mediaItems.push({
-      id: musicMediaId,
-      name: slData.music_title || "Background Music",
+      id: mediaId,
+      name: preferredTitle || "Background Music",
       type: "audio",
       fileHandle: null,
       blob: null,
-      metadata: makeMediaMeta({ duration: 300 }), // placeholder, will span timeline
+      metadata: makeMediaMeta({ duration: 300 }), // placeholder, updated from clips below
       thumbnailUrl: null,
       waveformData: null,
-      originalUrl: globalMusicUrl,
+      originalUrl: resolvedUrl,
     });
-  }
+
+    if (!fallbackMusicMediaId) {
+      fallbackMusicMediaId = mediaId;
+    }
+
+    return mediaId;
+  };
+
+  // Track the global music URL so we create one media item for it
+  await ensureMusicMediaItem(
+    slData.music_url ?? scenes.find((s) => s.music_url)?.music_url ?? null,
+    slData.music_title || "Background Music",
+  );
 
   for (const { scene, videos, images, narrations } of sceneMedia) {
     const sceneFallbackVideoUrl = await resolveMediaUrl(
@@ -731,12 +809,25 @@ export async function loadSceneListAsProject(
           null,
       )) ?? null;
 
+    const sceneMusicMediaId =
+      (await ensureMusicMediaItem(
+        scene.music_url ?? slData.music_url ?? null,
+        scene.music_title || slData.music_title || "Background Music",
+      )) ?? fallbackMusicMediaId;
+
+    const { startMs: musicStartMs, endMs: musicEndMs } =
+      resolveSceneMusicTimingMs(scene);
+    const musicStartSec =
+      musicStartMs != null ? Math.max(0, musicStartMs / 1000) : null;
+    const musicEndSec =
+      musicEndMs != null ? Math.max(0, musicEndMs / 1000) : null;
+
     // Compute scene duration from available timing data
     let sceneDuration = DEFAULT_SCENE_DURATION;
     if (primaryVideo?.duration_ms) {
       sceneDuration = primaryVideo.duration_ms / 1000;
-    } else if (scene.music_start_ms != null && scene.music_end_ms != null) {
-      sceneDuration = (scene.music_end_ms - scene.music_start_ms) / 1000;
+    } else if (musicStartSec != null && musicEndSec != null) {
+      sceneDuration = musicEndSec - musicStartSec;
     } else if (
       scene.narration_start_ms != null &&
       scene.narration_end_ms != null
@@ -746,6 +837,51 @@ export async function loadSceneListAsProject(
       sceneDuration = narration.duration_ms / 1000;
     }
     if (sceneDuration <= 0) sceneDuration = DEFAULT_SCENE_DURATION;
+
+    // Build music track segments from scene trim timing (Flutter parity).
+    // When music_start_ms/music_end_ms are present, use them as source in/out points.
+    if (sceneMusicMediaId) {
+      let inPoint: number | null = null;
+      let outPoint: number | null = null;
+
+      if (musicStartSec != null || musicEndSec != null) {
+        inPoint =
+          musicStartSec ??
+          (musicEndSec != null ? Math.max(0, musicEndSec - sceneDuration) : 0);
+        outPoint =
+          musicEndSec ??
+          (inPoint + sceneDuration);
+      } else if (
+        lastMusicOutPointSec != null &&
+        lastMusicMediaId === sceneMusicMediaId
+      ) {
+        // Continue seamlessly if a previous scene established the source cursor.
+        inPoint = lastMusicOutPointSec;
+        outPoint = inPoint + sceneDuration;
+      } else {
+        // Backward compatibility for scenes without explicit trim timing.
+        inPoint = 0;
+        outPoint = sceneDuration;
+      }
+
+      if (inPoint != null && outPoint != null) {
+        if (outPoint <= inPoint) {
+          outPoint = inPoint + sceneDuration;
+        }
+        const duration = Math.max(0.001, Math.min(sceneDuration, outPoint - inPoint));
+        const clippedOutPoint: number = inPoint + duration;
+
+        musicTrackSpecs.push({
+          mediaId: sceneMusicMediaId,
+          startTime: currentTime,
+          duration,
+          inPoint,
+          outPoint: clippedOutPoint,
+        });
+        lastMusicMediaId = sceneMusicMediaId;
+        lastMusicOutPointSec = clippedOutPoint;
+      }
+    }
 
     // ── Video clip ──
     if (videoUrl) {
@@ -905,18 +1041,41 @@ export async function loadSceneListAsProject(
     }
 
     // ── Subtitles from word timestamps ──
-    const wordTs =
+    const rawWordTs =
       narration?.word_timestamps ??
       primaryVideo?.word_timestamps ??
       null;
 
-    if (wordTs && wordTs.length > 0) {
+    if (rawWordTs && rawWordTs.length > 0) {
+      // Filter and rebase word timestamps to match trim handles (Flutter parity).
+      // narration.start_ms / end_ms define which portion of the audio file is used;
+      // only words within that range should appear, rebased to scene-relative time.
+      const trimStartSec =
+        narration?.start_ms != null ? narration.start_ms / 1000 : 0;
+      const trimEndSec =
+        narration?.end_ms != null
+          ? narration.end_ms / 1000
+          : trimStartSec + sceneDuration;
+
+      const wordTs = rawWordTs
+        .filter(
+          (w) =>
+            typeof w.word === "string" &&
+            w.word.trim().length > 0 &&
+            w.start >= trimStartSec &&
+            w.start < trimEndSec,
+        )
+        .map((w) => ({
+          word: w.word,
+          start: w.start - trimStartSec,
+          end: Math.min(w.end - trimStartSec, sceneDuration),
+        }));
+
       // Group words into subtitle segments to match Remotion-style phrase pacing.
       const WORDS_PER_CHUNK = 4;
       for (let i = 0; i < wordTs.length; i += WORDS_PER_CHUNK) {
         const chunk = wordTs
           .slice(i, i + WORDS_PER_CHUNK)
-          .filter((w) => typeof w.word === "string" && w.word.trim().length > 0)
           .map((w) => ({
             text: w.word.trim().toUpperCase(),
             startTime: w.start + currentTime,
@@ -938,51 +1097,80 @@ export async function loadSceneListAsProject(
         });
       }
     } else {
+      // Lyrics segments need rebasing relative to music_start_ms (Flutter parity).
+      // lyrics_json / lyrics_lrc timestamps are absolute within the full song;
+      // subtract the scene's music_start_ms to get scene-relative offsets.
+      const lyricsBaseSec = musicStartSec;
+
       const jsonSegments = scene.lyrics_json
         ? parseLyricsJsonSegments(scene.lyrics_json)
         : [];
 
       if (jsonSegments.length > 0) {
+        // Determine offset: prefer music_start_ms, fallback to first segment start
+        const offsetSec = lyricsBaseSec ?? jsonSegments[0].start;
+
         for (let i = 0; i < jsonSegments.length; i += 1) {
           const segment = jsonSegments[i];
+          const rebasedStart = segment.start - offsetSec;
           const next = jsonSegments[i + 1];
-          const fallbackEnd = next?.start ?? Math.min(sceneDuration, segment.start + 2.5);
-          const end = segment.end ?? fallbackEnd;
-          if (end <= segment.start) continue;
+          const rebasedNextStart = next != null ? next.start - offsetSec : null;
+          const fallbackEnd =
+            rebasedNextStart ?? Math.min(sceneDuration, rebasedStart + 2.5);
+          const rebasedEnd = segment.end != null
+            ? segment.end - offsetSec
+            : fallbackEnd;
+
+          // Skip segments outside scene bounds
+          if (rebasedStart < 0 || rebasedStart >= sceneDuration) continue;
+          if (rebasedEnd <= rebasedStart) continue;
+          const clampedEnd = Math.min(rebasedEnd, sceneDuration);
 
           subtitles.push({
             id: uuidv4(),
             text: segment.text.toUpperCase(),
-            startTime: currentTime + segment.start,
-            endTime: currentTime + end,
+            startTime: currentTime + rebasedStart,
+            endTime: currentTime + clampedEnd,
             style: REMOTION_LYRICS_SUBTITLE_STYLE,
             animationStyle: "word-highlight",
             words: buildEvenWordTimings(
               segment.text,
-              currentTime + segment.start,
-              currentTime + end,
+              currentTime + rebasedStart,
+              currentTime + clampedEnd,
             ),
           });
         }
       } else if (scene.lyrics_lrc) {
         const lrcSegments = parseLrcSegments(scene.lyrics_lrc);
+        // Determine offset: prefer music_start_ms, fallback to first segment start
+        const offsetSec =
+          lyricsBaseSec ??
+          (lrcSegments.length > 0 ? lrcSegments[0].start : 0);
+
         for (let i = 0; i < lrcSegments.length; i += 1) {
           const segment = lrcSegments[i];
+          const rebasedStart = segment.start - offsetSec;
           const next = lrcSegments[i + 1];
-          const fallbackEnd = next?.start ?? Math.min(sceneDuration, segment.start + 2.5);
-          if (fallbackEnd <= segment.start) continue;
+          const rebasedNextStart = next != null ? next.start - offsetSec : null;
+          const fallbackEnd =
+            rebasedNextStart ?? Math.min(sceneDuration, rebasedStart + 2.5);
+
+          // Skip segments outside scene bounds
+          if (rebasedStart < 0 || rebasedStart >= sceneDuration) continue;
+          if (fallbackEnd <= rebasedStart) continue;
+          const clampedEnd = Math.min(fallbackEnd, sceneDuration);
 
           subtitles.push({
             id: uuidv4(),
             text: segment.text.toUpperCase(),
-            startTime: currentTime + segment.start,
-            endTime: currentTime + fallbackEnd,
+            startTime: currentTime + rebasedStart,
+            endTime: currentTime + clampedEnd,
             style: REMOTION_LYRICS_SUBTITLE_STYLE,
             animationStyle: "word-highlight",
             words: buildEvenWordTimings(
               segment.text,
-              currentTime + segment.start,
-              currentTime + fallbackEnd,
+              currentTime + rebasedStart,
+              currentTime + clampedEnd,
             ),
           });
         }
@@ -993,19 +1181,29 @@ export async function loadSceneListAsProject(
     totalMusicDuration = currentTime;
   }
 
-  // ── Global music clip spanning entire timeline ──
-  if (musicMediaId && totalMusicDuration > 0) {
-    // Update music media duration
-    const musicItem = mediaItems.find((m) => m.id === musicMediaId);
-    if (musicItem) {
-      (musicItem as { metadata: MediaMetadata }).metadata = makeMediaMeta({
-        duration: totalMusicDuration,
+  // ── Build music track clips ──
+  if (musicTrackSpecs.length > 0 && totalMusicDuration > 0) {
+    for (const spec of musicTrackSpecs) {
+      musicTrackClips.push({
+        id: uuidv4(),
+        mediaId: spec.mediaId,
+        trackId: "track-music",
+        startTime: spec.startTime,
+        duration: spec.duration,
+        inPoint: spec.inPoint,
+        outPoint: spec.outPoint,
+        effects: [],
+        audioEffects: [],
+        transform: makeDefaultTransform(),
+        volume: 0.3,
+        keyframes: [],
       });
     }
-
+  } else if (fallbackMusicMediaId && totalMusicDuration > 0) {
+    // Fallback for older scene lists that don't have per-scene music timing.
     musicTrackClips.push({
       id: uuidv4(),
-      mediaId: musicMediaId,
+      mediaId: fallbackMusicMediaId,
       trackId: "track-music",
       startTime: 0,
       duration: totalMusicDuration,
@@ -1014,9 +1212,27 @@ export async function loadSceneListAsProject(
       effects: [],
       audioEffects: [],
       transform: makeDefaultTransform(),
-      volume: 0.3, // Background music at 30%
+      volume: 0.3,
       keyframes: [],
     });
+  }
+
+  // Ensure each music media metadata duration covers the furthest out-point used by its clips.
+  if (musicTrackClips.length > 0) {
+    const maxMusicOutPointByMedia = new Map<string, number>();
+    for (const clip of musicTrackClips) {
+      const currentMax = maxMusicOutPointByMedia.get(clip.mediaId) ?? 0;
+      maxMusicOutPointByMedia.set(clip.mediaId, Math.max(currentMax, clip.outPoint));
+    }
+
+    for (const [mediaId, maxOutPoint] of maxMusicOutPointByMedia.entries()) {
+      const musicItem = mediaItems.find((m) => m.id === mediaId);
+      if (musicItem) {
+        (musicItem as { metadata: MediaMetadata }).metadata = makeMediaMeta({
+          duration: Math.max(maxOutPoint, musicItem.metadata.duration || 0),
+        });
+      }
+    }
   }
 
   // Build text clips from subtitle segments so captions are visible on the timeline.
@@ -1049,7 +1265,11 @@ export async function loadSceneListAsProject(
       muted: false,
       solo: false,
     },
-    {
+  ];
+
+  // Only add narration track if it has clips (matches Flutter — no empty tracks)
+  if (narrationTrackClips.length > 0) {
+    tracks.push({
       id: "track-narration",
       type: "audio",
       name: "Narration",
@@ -1059,8 +1279,8 @@ export async function loadSceneListAsProject(
       hidden: false,
       muted: false,
       solo: false,
-    },
-  ];
+    });
+  }
 
   if (textClips.length > 0) {
     tracks.push({

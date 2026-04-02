@@ -377,6 +377,22 @@ export const Preview: React.FC = () => {
     timelineTracksRef.current = timelineTracks;
   }, [timelineTracks]);
 
+  useEffect(() => {
+    const audioGraph = audioGraphRef.current;
+    if (!audioGraph) return;
+
+    const tracksWithAudio = timelineTracks.filter(
+      (t) => t.type === "audio" || t.type === "video",
+    );
+
+    for (const track of tracksWithAudio) {
+      const shouldMute = Boolean(track.muted || track.hidden);
+      const shouldSolo = Boolean(track.solo && !track.hidden);
+      audioGraph.setTrackMuted(track.id, shouldMute);
+      audioGraph.setTrackSolo(track.id, shouldSolo);
+    }
+  }, [timelineTracks]);
+
   // Keep a ref to allTextClips for use in playback effect
   const allTextClipsRef = useRef(allTextClips);
   useEffect(() => {
@@ -1792,7 +1808,7 @@ export const Preview: React.FC = () => {
         trackIndex: number;
       }>;
     } => {
-      const tracks = timelineTracks;
+      const tracks = timelineTracksRef.current;
       const videoTracks = tracks.filter((t) => t.type === "video" && !t.hidden);
 
       const allVideoClips: Array<{
@@ -1854,7 +1870,7 @@ export const Preview: React.FC = () => {
 
       return { canUse: true, clips: allVideoClips, imageClips };
     },
-    [timelineTracks, getMediaItem, allTextClips, allShapeClips],
+    [getMediaItem],
   );
 
   // Start native video playback using hardware-accelerated video elements (handles multiple clips)
@@ -1947,7 +1963,7 @@ export const Preview: React.FC = () => {
       const audioGraph = audioGraphRef.current;
       audioGraph.setPreviewMuted(isMuted);
 
-      const tracksWithAudio = timelineTracks.filter(
+      const tracksWithAudio = timelineTracksRef.current.filter(
         (t) => (t.type === "audio" || t.type === "video") && !t.hidden,
       );
       for (const audioTrack of tracksWithAudio) {
@@ -1965,7 +1981,7 @@ export const Preview: React.FC = () => {
       audioGraph.seekTo(startPosition);
       await masterClock.play();
       audioGraph.startScheduler(() => {
-        const tracksWithAudio = timelineTracks.filter(
+        const tracksWithAudio = timelineTracksRef.current.filter(
           (t) => (t.type === "audio" || t.type === "video") && !t.hidden,
         );
         const schedules: AudioClipSchedule[] = [];
@@ -2096,7 +2112,7 @@ export const Preview: React.FC = () => {
           }
 
           const activeSubtitlesNoVideo = getActiveSubtitles(
-            allSubtitles,
+            allSubtitlesRef.current,
             currentPlayhead,
           );
           for (const subtitle of activeSubtitlesNoVideo) {
@@ -2247,7 +2263,7 @@ export const Preview: React.FC = () => {
         }
 
         const activeSubtitles = getActiveSubtitles(
-          allSubtitles,
+          allSubtitlesRef.current,
           currentPlayhead,
         );
         for (const subtitle of activeSubtitles) {
@@ -2302,12 +2318,10 @@ export const Preview: React.FC = () => {
     },
     [
       actualEndTime,
-      allSubtitles,
       getMediaItem,
       isMuted,
       preDecodeAllAudioBuffers,
       setPlayheadPosition,
-      timelineTracks,
     ],
   );
 
