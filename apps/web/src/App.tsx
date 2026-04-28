@@ -9,6 +9,8 @@ import { useUIStore } from "./stores/ui-store";
 import { useProjectStore } from "./stores/project-store";
 import { useVoidspaceStore } from "./stores/voidspace-store";
 import { useRouter } from "./hooks/use-router";
+import { useProjectRecovery } from "./hooks/useProjectRecovery";
+import { useKieAIPoller } from "./hooks/useKieAIPoller";
 import { SOCIAL_MEDIA_PRESETS, type SocialMediaCategory } from "@openreel/core";
 import { TooltipProvider } from "@openreel/ui";
 import {
@@ -199,6 +201,8 @@ function App() {
       }
     })();
   }, [forceSave, loadProject, navigate]);
+
+  useKieAIPoller();
 
   useEffect(() => {
     if (hasHandledInitialRoute.current) return;
