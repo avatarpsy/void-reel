@@ -138,6 +138,15 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ initialTab }) => {
       <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,rgba(99,102,241,0.08),transparent_60%)]" />
       <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_bottom_right,rgba(139,92,246,0.05),transparent_50%)]" />
 
+      {/* Back to Voidspace projects (sticky in top-left of editor shell) */}
+      <a
+        href="/studio/projects"
+        className="absolute top-5 left-6 z-20 inline-flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary transition-colors"
+      >
+        <ArrowRight className="rotate-180" size={14} />
+        My Projects
+      </a>
+
       <div className="relative h-full flex flex-col items-center justify-center px-6">
         <div className="w-full max-w-3xl">
           <div className="flex flex-col items-center text-center mb-12">

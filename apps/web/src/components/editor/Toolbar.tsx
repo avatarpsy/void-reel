@@ -1,14 +1,10 @@
 import React, { useCallback, useState, useEffect, useRef } from "react";
 import {
-  Search,
   Command,
   ChevronDown,
   FileVideo,
   Film,
   Music,
-  Sun,
-  Moon,
-  SunMoon,
   Loader2,
   X,
   Check,
@@ -26,7 +22,6 @@ import {
 } from "lucide-react";
 import { useProjectStore } from "../../stores/project-store";
 import { useUIStore } from "../../stores/ui-store";
-import { useThemeStore } from "../../stores/theme-store";
 import {
   getExportEngine,
   getDeviceProfile,
@@ -81,15 +76,16 @@ interface ExportState {
 export const Toolbar: React.FC = () => {
   const { project } = useProjectStore();
   const {
-    openModal,
-    selectedItems,
     setExportState: setGlobalExportState,
     keyframeEditorOpen,
     toggleKeyframeEditor,
     panels,
     togglePanel,
   } = useUIStore();
-  const { mode: themeMode, toggleTheme } = useThemeStore();
+  // Theme is driven by the parent website (studio-ai page sets
+  // ?theme= and posts voidspace:theme messages). Keeping
+  // useThemeStore unused here so the toolbar doesn't fight the
+  // parent's choice.
   const { openSettings } = useSettingsStore();
   const [isExportOpen, setIsExportOpen] = useState(false);
   const [isExportDialogOpen, setIsExportDialogOpen] = useState(false);
@@ -111,12 +107,9 @@ export const Toolbar: React.FC = () => {
     startMoGraphTour();
   }, []);
 
-  const hasSelectedClip = selectedItems.some(
-    (item) =>
-      item.type === "clip" ||
-      item.type === "text-clip" ||
-      item.type === "shape-clip",
-  );
+  // hasSelectedClip used to drive the search palette's "Search effects
+  // for selected clip…" hint state. The palette is hidden in the
+  // studio shell, so the flag is no longer read.
   const [exportState, setExportState] = useState<ExportState>({
     isExporting: false,
     progress: 0,
@@ -173,9 +166,9 @@ export const Toolbar: React.FC = () => {
     setExportEstimates(estimates);
   }, [deviceProfile, project.timeline?.duration, project.settings.width, project.settings.height]);
 
-  const handleSearch = useCallback(() => {
-    openModal("search");
-  }, [openModal]);
+  // Search palette removed from the toolbar; the chat sidebar is the
+  // canonical search/ask surface in the studio shell. Keeping the
+  // unused handler would trip TS6133 in strict noUnused checks.
 
   const runExport = useCallback(
     async (videoSettings: Partial<VideoExportSettings>, _ext: string, writableStream: FileSystemWritableFileStream) => {
@@ -843,10 +836,10 @@ export const Toolbar: React.FC = () => {
             <button
               onClick={() => {
                 if (window.top && window.top !== window) {
-                  window.top.location.href = "/video-editor";
+                  window.top.location.href = "/studio/projects";
                   return;
                 }
-                window.location.href = "/video-editor";
+                window.location.href = "/studio/projects";
               }}
               className="flex items-center gap-3 hover:opacity-80 transition-opacity"
               title="Back to Studio Projects"
@@ -856,9 +849,9 @@ export const Toolbar: React.FC = () => {
                 alt="Voidspace"
                 className="w-8 h-8 group-hover:scale-110 transition-transform duration-300"
               />
-              <span className="text-lg font-bold text-text-primary tracking-widest hidden lg:block" style={{ fontFamily: "'DM Sans', 'Inter', sans-serif" }}>
-                VOIDSPACE
-              </span>
+              {/* VOIDSPACE wordmark removed — the chat sidebar already
+                  shows the brand; doubling it on the editor toolbar
+                  ate horizontal space and made the row feel cluttered. */}
             </button>
           </TooltipTrigger>
           <TooltipContent>Back to Studio Projects</TooltipContent>
@@ -867,59 +860,28 @@ export const Toolbar: React.FC = () => {
         <button
           onClick={() => {
             if (window.top && window.top !== window) {
-              window.top.location.href = "/video-editor";
+              window.top.location.href = "/studio/projects";
               return;
             }
-            window.location.href = "/video-editor";
+            window.location.href = "/studio/projects";
           }}
-          className="h-9 px-3 rounded-lg border border-border bg-background-secondary text-sm text-text-secondary hover:text-text-primary hover:bg-background-elevated transition-colors"
+          /* Allow the button to size to its label and never overflow the
+             toolbar gutter. The previous fixed height + no min-width let
+             the text clip on narrower split-mode panes. */
+          className="h-9 px-3 rounded-lg border border-border bg-background-secondary text-sm text-text-secondary hover:text-text-primary hover:bg-background-elevated transition-colors whitespace-nowrap shrink-0 inline-flex items-center"
           title="Back to Studio Projects"
         >
           Back to Projects
         </button>
       </div>
 
-      <div className="flex-1 max-w-2xl mx-12 relative group">
-        <div
-          className={`absolute inset-0 bg-primary/20 rounded-xl blur-md transition-opacity duration-300 ${
-            hasSelectedClip
-              ? "opacity-100 animate-pulse"
-              : "opacity-0 group-hover:opacity-100"
-          }`}
-        />
-        <button
-          onClick={handleSearch}
-          className={`relative w-full bg-background-secondary border rounded-xl h-10 flex items-center px-4 gap-3 transition-all text-left shadow-inner ${
-            hasSelectedClip
-              ? "border-primary/50 ring-1 ring-primary/30"
-              : "border-border group-hover:border-primary/50"
-          }`}
-        >
-          <Search
-            size={16}
-            className={`transition-colors ${
-              hasSelectedClip
-                ? "text-primary"
-                : "text-text-muted group-hover:text-primary"
-            }`}
-          />
-          <span
-            className={`flex-1 text-sm transition-colors ${
-              hasSelectedClip
-                ? "text-text-secondary"
-                : "text-text-muted group-hover:text-text-secondary"
-            }`}
-          >
-            {hasSelectedClip
-              ? "Search effects for selected clip..."
-              : "Search tools, effects, or ask AI..."}
-          </span>
-          <div className="flex items-center gap-1.5 px-2 py-0.5 rounded border border-border bg-background-tertiary">
-            <Command size={10} className="text-text-muted" />
-            <span className="text-[10px] text-text-muted font-mono">K</span>
-          </div>
-        </button>
-      </div>
+      {/* The "Search tools, effects, or ask AI…" command palette
+          launcher used to live here. Hidden by request — the chat
+          sidebar is the canonical search/ask surface in the studio
+          shell, so duplicating it in the editor toolbar was both
+          visually noisy and confusing for users who couldn't tell
+          which AI surface they were talking to. */}
+      <div className="flex-1" />
 
       <div className="flex items-center gap-4">
         <DropdownMenu>
@@ -947,25 +909,12 @@ export const Toolbar: React.FC = () => {
           </DropdownMenuContent>
         </DropdownMenu>
 
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              onClick={toggleTheme}
-              className="p-2 rounded-lg hover:bg-background-elevated text-text-secondary hover:text-text-primary transition-colors"
-            >
-              {themeMode === "light" ? (
-                <Sun size={16} />
-              ) : themeMode === "dark" ? (
-                <Moon size={16} />
-              ) : (
-                <SunMoon size={16} />
-              )}
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>
-            <p>Theme: {themeMode}</p>
-          </TooltipContent>
-        </Tooltip>
+        {/* Theme toggle removed in the studio shell — the website's
+            top-bar theme button is the single source of truth.
+            Studio-AI relays the website's theme into this iframe via
+            ?theme= URL param + a `voidspace:theme` postMessage; the
+            App.tsx listener applies it to the openreel theme store
+            so light/dark stays in lockstep with the parent. */}
 
         <Tooltip>
           <TooltipTrigger asChild>

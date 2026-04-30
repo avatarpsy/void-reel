@@ -22,7 +22,6 @@ import {
   LayoutGrid,
   Grid2x2,
   List,
-  Cloud,
   Sparkles,
 } from "lucide-react";
 import {
@@ -38,7 +37,6 @@ import { AspectRatioMatchDialog } from "./dialogs/AspectRatioMatchDialog";
 // Voidspace fork: keep Voidspace media panel + add upstream's AI generation tab + Kie.ai dialog.
 import { VoidspaceMediaPanel } from "./VoidspaceMediaPanel";
 import { AIGenTab } from "./AIGenTab";
-import { useTtsAudioStore } from "../../stores/tts-store";
 import { toast } from "../../stores/notification-store";
 import { saveFileHandle, saveDirectoryHandle } from "../../services/media-storage";
 import {
@@ -952,34 +950,10 @@ export const AssetsPanel: React.FC = () => {
             <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-t-full shadow-[0_-2px_8px_rgba(99,102,241,0.5)]" />
           )}
         </button>
-        <button
-          onClick={() => setActiveTab("voidspace")}
-          className={`pb-3 transition-all relative flex items-center gap-1.5 ${
-            activeTab === "voidspace"
-              ? "text-text-primary"
-              : "hover:text-text-secondary"
-          }`}
-        >
-          <Cloud size={12} />
-          Cloud
-          {activeTab === "voidspace" && (
-            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-t-full shadow-[0_-2px_8px_rgba(99,102,241,0.5)]" />
-          )}
-        </button>
-        <button
-          onClick={() => setActiveTab("ai-gen")}
-          className={`pb-3 transition-all relative flex items-center gap-1.5 ${
-            activeTab === "ai-gen"
-              ? "text-text-primary"
-              : "hover:text-text-secondary"
-          }`}
-        >
-          <Sparkles size={12} />
-          AI
-          {activeTab === "ai-gen" && (
-            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-t-full shadow-[0_-2px_8px_rgba(99,102,241,0.5)]" />
-          )}
-        </button>
+        {/* Cloud + AI tabs hidden in the studio shell — the chat
+            sidebar is the authoritative AI surface, and Voidspace
+            cloud media flows in automatically via the scene_list
+            subscription, so a separate "Cloud" tab was redundant. */}
       </div>
 
       {/* Search & view toggle - only show for media tab */}

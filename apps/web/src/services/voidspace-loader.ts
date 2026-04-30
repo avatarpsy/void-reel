@@ -15,6 +15,8 @@ import {
   getDoc,
   query,
   orderBy,
+  onSnapshot,
+  type Unsubscribe,
 } from "firebase/firestore";
 import { v4 as uuidv4 } from "uuid";
 import type {
@@ -26,7 +28,6 @@ import type {
   Track,
   Clip,
   Subtitle,
-  TextClip,
 } from "@openreel/core";
 
 // ────────────────────────────────────────────
@@ -409,21 +410,6 @@ const REMOTION_LYRICS_SUBTITLE_STYLE = {
   highlightColor: "#FF0000",
 };
 
-function subtitleStyleToTextStyle(style?: Subtitle["style"]) {
-  return {
-    fontFamily: style?.fontFamily ?? "Anton",
-    fontSize: style?.fontSize ?? 72,
-    fontWeight: "bold" as const,
-    fontStyle: "normal" as const,
-    color: style?.color ?? "#FFFFFF",
-    backgroundColor: style?.backgroundColor ?? undefined,
-    textAlign: "center" as const,
-    verticalAlign: "middle" as const,
-    lineHeight: 1.2,
-    letterSpacing: 0,
-  };
-}
-
 function buildEvenWordTimings(
   text: string,
   startTime: number,
@@ -783,7 +769,6 @@ export async function loadSceneListAsProject(
     outPoint: number;
   }> = [];
   const subtitles: Subtitle[] = [];
-  const textClips: TextClip[] = [];
 
   let currentTime = 0; // running timeline position in seconds
   let fallbackMusicMediaId: string | null = null;
@@ -804,13 +789,17 @@ export async function loadSceneListAsProject(
 
     const mediaId = uuidv4();
     musicMediaIdsByUrl.set(resolvedUrl, mediaId);
+    // Fetch the music blob so the export-time audio engine can decode it.
+    // Without a blob, getAudioBuffer() in audio-engine.ts returns null and
+    // the track is silently dropped from the rendered MP4.
+    const musicBlob = await fetchMediaBlob(resolvedUrl);
     mediaItems.push({
       id: mediaId,
       name: preferredTitle || "Background Music",
       type: "audio",
       fileHandle: null,
-      blob: null,
-      metadata: mediaMeta({ duration: 300 }), // placeholder, updated from clips below
+      blob: musicBlob,
+      metadata: mediaMeta({ duration: 300, fileSize: musicBlob?.size || 0 }), // placeholder duration, updated from clips below
       thumbnailUrl: null,
       waveformData: null,
       originalUrl: resolvedUrl,
@@ -982,36 +971,57 @@ export async function loadSceneListAsProject(
     // ── Narration clip ──
     if (narrationUrl) {
       const narMediaId = uuidv4();
-      const narDuration =
-        narration?.duration_ms != null
-          ? narration.duration_ms / 1000
-          : sceneDuration;
+      const narDurMs = typeof narration?.duration_ms === "number" ? narration.duration_ms : null;
+      const narDuration = narDurMs != null ? narDurMs / 1000 : sceneDuration;
+
+      // Fetch the narration blob so the export-time audio engine can decode
+      // it. The audio engine's getAudioBuffer() returns null when blob is
+      // missing, which silently drops the narration from the rendered MP4
+      // (caused the "missing narration" bug at export time).
+      const narrationBlob = await fetchMediaBlob(narrationUrl);
 
       mediaItems.push({
         id: narMediaId,
         name: `Scene ${scene.scene_number} Narration`,
         type: "audio",
         fileHandle: null,
-        blob: null,
-        metadata: mediaMeta({ duration: narDuration }),
+        blob: narrationBlob,
+        metadata: mediaMeta({ duration: narDuration, fileSize: narrationBlob?.size || 0 }),
         thumbnailUrl: null,
         waveformData: null,
         originalUrl: narrationUrl,
       });
 
-      const inPoint =
-        narration?.start_ms != null ? narration.start_ms / 1000 : 0;
-      const outPoint =
-        narration?.end_ms != null
-          ? narration.end_ms / 1000
-          : inPoint + sceneDuration;
+      // Bullet-proof source-clip in/out resolution.
+      //
+      // Older studio chats wrote `start_ms`/`end_ms` as GLOBAL timeline
+      // offsets (e.g. scene 2 narration had start_ms: 6000 even though
+      // its audio file is only 6s long). The loader used to feed those
+      // straight in as inPoint/outPoint, which made the audio element
+      // play frames 6–12 of a 6s file — silence — and filtered every
+      // word out of the captions because their timestamps fell below
+      // trimStartSec.
+      //
+      // Heuristic: treat start_ms as the source-clip in-point ONLY if
+      // it falls inside the audio file (i.e. < duration_ms). Anything
+      // at or beyond duration_ms is a stale global offset; collapse to
+      // 0..duration. This keeps both old and new docs working without
+      // a Firestore migration.
+      const rawStartMs = typeof narration?.start_ms === "number" ? narration.start_ms : 0;
+      const rawEndMs = typeof narration?.end_ms === "number" ? narration.end_ms : null;
+      const looksLikeGlobalOffset =
+        narDurMs != null && rawStartMs > 0 && rawStartMs >= narDurMs;
+      const inPoint = looksLikeGlobalOffset ? 0 : Math.max(0, rawStartMs / 1000);
+      const outPoint = looksLikeGlobalOffset
+        ? narDuration
+        : (rawEndMs != null ? Math.max(inPoint, rawEndMs / 1000) : inPoint + narDuration);
 
       narrationTrackClips.push({
         id: uuidv4(),
         mediaId: narMediaId,
         trackId: "track-narration",
         startTime: currentTime,
-        duration: outPoint - inPoint,
+        duration: Math.max(0.1, outPoint - inPoint),
         inPoint,
         outPoint,
         effects: [],
@@ -1042,14 +1052,18 @@ export async function loadSceneListAsProject(
 
     if (rawWordTs && rawWordTs.length > 0) {
       // Filter and rebase word timestamps to match trim handles (Flutter parity).
-      // narration.start_ms / end_ms define which portion of the audio file is used;
-      // only words within that range should appear, rebased to scene-relative time.
-      const trimStartSec =
-        narration?.start_ms != null ? narration.start_ms / 1000 : 0;
-      const trimEndSec =
-        narration?.end_ms != null
-          ? narration.end_ms / 1000
-          : trimStartSec + sceneDuration;
+      // Same global-offset guard as the narration clip above: when
+      // start_ms looks like a stale global offset (>= file duration),
+      // collapse to 0..duration so all words pass through unfiltered.
+      const narDurMsForWords = typeof narration?.duration_ms === "number" ? narration.duration_ms : null;
+      const rawStartMsForWords = typeof narration?.start_ms === "number" ? narration.start_ms : 0;
+      const rawEndMsForWords = typeof narration?.end_ms === "number" ? narration.end_ms : null;
+      const wordsLookLikeGlobalOffset =
+        narDurMsForWords != null && rawStartMsForWords > 0 && rawStartMsForWords >= narDurMsForWords;
+      const trimStartSec = wordsLookLikeGlobalOffset ? 0 : rawStartMsForWords / 1000;
+      const trimEndSec = wordsLookLikeGlobalOffset
+        ? (narDurMsForWords != null ? narDurMsForWords / 1000 : sceneDuration)
+        : (rawEndMsForWords != null ? rawEndMsForWords / 1000 : trimStartSec + sceneDuration);
 
       const wordTs = rawWordTs
         .filter(
@@ -1229,22 +1243,15 @@ export async function loadSceneListAsProject(
     }
   }
 
-  // Build text clips from subtitle segments so captions are visible on the timeline.
-  if (subtitles.length > 0) {
-    for (const subtitle of subtitles) {
-      const duration = Math.max(0.1, subtitle.endTime - subtitle.startTime);
-      textClips.push({
-        id: subtitle.id,
-        trackId: "track-captions",
-        startTime: subtitle.startTime,
-        duration,
-        text: subtitle.text,
-        style: subtitleStyleToTextStyle(subtitle.style),
-        transform: makeDefaultTransform(),
-        keyframes: [],
-      });
-    }
-  }
+  // Subtitle rendering is driven entirely by `timeline.subtitles` via the
+  // shared subtitle-canvas-renderer (it reads style.position and draws at
+  // bottom-center / center / top-center as configured). We deliberately do
+  // NOT mirror those subtitles into TextClips on a `track-captions` text
+  // track: the title-engine renders TextClips at `transform.position * canvas`
+  // which, with our default 0,0 position, produces a ghost caption clipped
+  // into the top-left corner on top of the proper bottom-center subtitle.
+  // The timeline panel can still show the captions via the subtitle store —
+  // no editor-visible track is needed here.
 
   // 5) Assemble tracks
   const tracks: Track[] = [
@@ -1268,20 +1275,6 @@ export async function loadSceneListAsProject(
       type: "audio",
       name: "Narration",
       clips: narrationTrackClips,
-      transitions: [],
-      locked: false,
-      hidden: false,
-      muted: false,
-      solo: false,
-    });
-  }
-
-  if (textClips.length > 0) {
-    tracks.push({
-      id: "track-captions",
-      type: "text",
-      name: "Captions",
-      clips: [],
       transitions: [],
       locked: false,
       hidden: false,
@@ -1333,8 +1326,112 @@ export async function loadSceneListAsProject(
     settings,
     mediaLibrary: { items: mediaItems },
     timeline,
-    textClips,
+    textClips: [],
   };
 
   return project;
+}
+
+/**
+ * Live subscription wrapper — registers Firestore onSnapshot() listeners on
+ * the scene_list doc and the scenes / images / videos / narrations
+ * subcollections, debounces them, and re-runs `loadSceneListAsProject` on
+ * every change.
+ *
+ * The studio chat upserts assets (frame, voiceover, clip) one by one as the
+ * user approves each step. Without live subscription the editor sees only
+ * the snapshot at iframe-mount time and the timeline never refreshes —
+ * users had to reload the page to see the next clip land. This wires the
+ * editor to receive a fresh `Project` on every Firestore write so the
+ * timeline tracks fill in real time.
+ *
+ * Returns an unsubscribe function that tears down all listeners.
+ */
+export function subscribeSceneListAsProject(
+  userId: string,
+  sceneListId: string,
+  onProject: (project: Project) => void,
+  onError?: (err: Error) => void,
+): Unsubscribe {
+  const slRef = doc(db, "users", userId, "scene_lists", sceneListId);
+  const scenesCol = collection(db, "users", userId, "scene_lists", sceneListId, "scenes");
+
+  // Coalesce bursts of writes into a single rebuild so we don't reload
+  // the whole project on each per-asset upsert (which itself fires 4–6
+  // writes back-to-back: scene_text, narration_url, narration_*_ms, etc.).
+  let pending: any = null;
+  let inFlight = false;
+  let needsRerun = false;
+  const rebuild = async () => {
+    if (inFlight) { needsRerun = true; return; }
+    inFlight = true;
+    try {
+      const project = await loadSceneListAsProject(userId, sceneListId);
+      onProject(project);
+    } catch (err) {
+      console.warn("[voidspace-loader] live rebuild failed:", err);
+      onError?.(err instanceof Error ? err : new Error(String(err)));
+    } finally {
+      inFlight = false;
+      if (needsRerun) {
+        needsRerun = false;
+        schedule();
+      }
+    }
+  };
+  const schedule = () => {
+    if (pending) clearTimeout(pending);
+    pending = setTimeout(rebuild, 250);
+  };
+
+  const unsubscribers: Unsubscribe[] = [];
+
+  // 1. Top-level scene_list doc — captures aspect_ratio / music_url /
+  //    title / video_url / status changes.
+  unsubscribers.push(
+    onSnapshot(slRef, () => schedule(), (err) => onError?.(err))
+  );
+
+  // 2. Scenes collection — every per-scene field write (first_frame_url,
+  //    narration_url, video_url, status, duration_ms…). Subcollection
+  //    snapshots fire when an `addAsset` call lands the new image / video
+  //    / narration doc; the per-scene listener registered below on
+  //    demand catches those.
+  let sceneAssetUnsubs: Unsubscribe[] = [];
+  unsubscribers.push(
+    onSnapshot(
+      query(scenesCol, orderBy("scene_number")),
+      (snap) => {
+        // Tear down existing per-scene asset listeners.
+        for (const u of sceneAssetUnsubs) try { u(); } catch { /* ignore */ }
+        sceneAssetUnsubs = [];
+        // Register fresh listeners on each scene's images/videos/
+        // narrations subcollections so live asset upserts trigger a
+        // rebuild without polling.
+        for (const sceneDoc of snap.docs) {
+          const sceneId = sceneDoc.id;
+          for (const kind of ["images", "videos", "narrations"] as const) {
+            const sub = collection(
+              db, "users", userId, "scene_lists", sceneListId,
+              "scenes", sceneId, kind,
+            );
+            sceneAssetUnsubs.push(
+              onSnapshot(sub, () => schedule(), (err) => onError?.(err))
+            );
+          }
+        }
+        schedule();
+      },
+      (err) => onError?.(err),
+    )
+  );
+
+  // Immediate first load — don't wait for the first snapshot tick.
+  schedule();
+
+  return () => {
+    if (pending) clearTimeout(pending);
+    for (const u of unsubscribers) try { u(); } catch { /* ignore */ }
+    for (const u of sceneAssetUnsubs) try { u(); } catch { /* ignore */ }
+  };
 }
