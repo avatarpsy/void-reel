@@ -45,6 +45,7 @@ export interface VoidspaceSceneList {
   music_url?: string;
   music_title?: string;
   content_type?: string;
+  aspect_ratio?: string;
   video_url?: string;
   loop_description?: string;
   description?: string;
@@ -364,8 +365,31 @@ export async function fetchUserMusic(userId: string): Promise<
 
 const DEFAULT_SCENE_DURATION = 6; // seconds
 const DEFAULT_FPS = 30;
-const DEFAULT_WIDTH = 1080;
-const DEFAULT_HEIGHT = 1920;
+
+// Aspect-ratio → canvas dimensions, kept in lockstep with the studio's
+// Remotion render (`studio/src/render.ts` → ASPECT_DIMENSIONS). The chat
+// writes `aspect_ratio` onto the scene_list doc; we resolve it here so
+// the editor canvas, timeline thumbnails, and final encode all agree.
+const ASPECT_DIMENSIONS: Record<string, { width: number; height: number }> = {
+  '16:9': { width: 1920, height: 1080 },
+  '9:16': { width: 1080, height: 1920 },
+  '1:1':  { width: 1080, height: 1080 },
+  '4:3':  { width: 1440, height: 1080 },
+  '3:4':  { width: 1080, height: 1440 },
+  '21:9': { width: 2560, height: 1080 },
+};
+const FALLBACK_DIM = ASPECT_DIMENSIONS['16:9'];
+
+function resolveAspectDimensions(aspect: unknown): { width: number; height: number } {
+  if (typeof aspect === 'string') {
+    const key = aspect.trim();
+    if (ASPECT_DIMENSIONS[key]) return ASPECT_DIMENSIONS[key];
+    // Tolerate "16x9" / "16/9" variants.
+    const norm = key.replace(/[x/]/g, ':');
+    if (ASPECT_DIMENSIONS[norm]) return ASPECT_DIMENSIONS[norm];
+  }
+  return FALLBACK_DIM;
+}
 
 const REMOTION_NARRATION_SUBTITLE_STYLE = {
   fontFamily: "Anton",
@@ -429,11 +453,14 @@ function buildEvenWordTimings(
   });
 }
 
-function makeMediaMeta(overrides: Partial<MediaMetadata> = {}): MediaMetadata {
+function makeMediaMeta(
+  overrides: Partial<MediaMetadata> = {},
+  dim: { width: number; height: number } = FALLBACK_DIM,
+): MediaMetadata {
   return {
     duration: 0,
-    width: DEFAULT_WIDTH,
-    height: DEFAULT_HEIGHT,
+    width: dim.width,
+    height: dim.height,
     frameRate: DEFAULT_FPS,
     codec: "",
     sampleRate: 44100,
@@ -694,6 +721,35 @@ export async function loadSceneListAsProject(
   const slData = slDoc.data();
   console.log(`[voidspace-loader] Scene list found: ${slData.name || sceneListId}`);
 
+  // Resolve canvas dimensions. Priority order:
+  //   1. `?aspect=…` query param on the iframe URL — wins over Firestore
+  //      because the studio chat sets it from the welcome picker LIVE,
+  //      so even if the doc was minted with a stale value (rehydrated
+  //      session, race), the canvas matches what the user chose.
+  //   2. `aspect_ratio` on the scene_list doc (canonical).
+  //   3. `aspect` (legacy alias) on the scene_list doc.
+  //   4. Default 16:9.
+  // Every media item built below carries matching width/height — keeping
+  // the openreel canvas, timeline thumbnails, and the final Remotion
+  // encode all in lockstep.
+  let urlAspect: string | undefined;
+  if (typeof window !== 'undefined') {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const v = params.get('aspect');
+      if (v) urlAspect = v;
+    } catch {
+      // ignore — fall through to Firestore.
+    }
+  }
+  const dim = resolveAspectDimensions(
+    urlAspect
+      ?? (slData as Record<string, unknown>).aspect_ratio
+      ?? (slData as Record<string, unknown>).aspect,
+  );
+  const mediaMeta = (overrides: Partial<MediaMetadata> = {}) =>
+    makeMediaMeta(overrides, dim);
+
   // Populate scene list context in Voidspace store
   setSceneListContext(sceneListId, slData as Record<string, unknown>);
 
@@ -754,7 +810,7 @@ export async function loadSceneListAsProject(
       type: "audio",
       fileHandle: null,
       blob: null,
-      metadata: makeMediaMeta({ duration: 300 }), // placeholder, updated from clips below
+      metadata: mediaMeta({ duration: 300 }), // placeholder, updated from clips below
       thumbnailUrl: null,
       waveformData: null,
       originalUrl: resolvedUrl,
@@ -884,6 +940,11 @@ export async function loadSceneListAsProject(
     }
 
     // ── Video clip ──
+    // Only place the actual rendered video on the timeline. Scenes
+    // without a generated video URL are skipped entirely — no image
+    // fallback, no orphan image tracks. The user's chat flow guarantees
+    // a video per scene before render is offered, so a missing video
+    // means generation failed and we'd rather see a gap than a still.
     if (videoUrl) {
       const videoBlob = await fetchMediaBlob(videoUrl);
       const mediaId = uuidv4();
@@ -893,7 +954,7 @@ export async function loadSceneListAsProject(
         type: "video",
         fileHandle: null,
         blob: videoBlob,
-        metadata: makeMediaMeta({
+        metadata: mediaMeta({
           duration: sceneDuration,
           fileSize: videoBlob?.size || 0,
         }),
@@ -916,85 +977,6 @@ export async function loadSceneListAsProject(
         volume: primaryVideo?.has_embedded_audio ? 1 : 0,
         keyframes: [],
       });
-    } else if (imageUrl) {
-      // Fall back to image if no video
-      const mediaId = uuidv4();
-      mediaItems.push({
-        id: mediaId,
-        name: `Scene ${scene.scene_number} Image`,
-        type: "image",
-        fileHandle: null,
-        blob: null,
-        metadata: makeMediaMeta({ duration: sceneDuration }),
-        thumbnailUrl: imageUrl,
-        waveformData: null,
-        originalUrl: imageUrl,
-      });
-
-      videoTrackClips.push({
-        id: uuidv4(),
-        mediaId,
-        trackId: "track-video",
-        startTime: currentTime,
-        duration: sceneDuration,
-        inPoint: 0,
-        outPoint: sceneDuration,
-        effects: [],
-        audioEffects: [],
-        transform: makeDefaultTransform(),
-        volume: 0,
-        keyframes: [],
-      });
-    }
-
-    // Always add the primary scene image to media library for editing use.
-    if (imageUrl) {
-      mediaItems.push({
-        id: uuidv4(),
-        name: `Scene ${scene.scene_number} Image`,
-        type: "image",
-        fileHandle: null,
-        blob: null,
-        metadata: makeMediaMeta({ duration: sceneDuration }),
-        thumbnailUrl: imageUrl,
-        waveformData: null,
-        originalUrl: imageUrl,
-      });
-    }
-
-    // ── Additional images as media library items ──
-    for (const img of images) {
-      const imgUrl = await resolveMediaUrl(img.url ?? img.image_url ?? null);
-      if (!imgUrl || imgUrl === imageUrl) continue; // skip primary, already added
-      mediaItems.push({
-        id: uuidv4(),
-        name: `Scene ${scene.scene_number} – ${img.tag || "image"}`,
-        type: "image",
-        fileHandle: null,
-        blob: null,
-        metadata: makeMediaMeta(),
-        thumbnailUrl: imgUrl,
-        waveformData: null,
-        originalUrl: imgUrl,
-      });
-    }
-
-    // ── Additional videos as media library items ──
-    for (const vid of videos) {
-      if (vid === primaryVideo) continue;
-      const vUrl = await resolveMediaUrl(vid.url ?? vid.video_url ?? null);
-      if (!vUrl) continue;
-      mediaItems.push({
-        id: uuidv4(),
-        name: `Scene ${scene.scene_number} – ${vid.tag || "alt"} video`,
-        type: "video",
-        fileHandle: null,
-        blob: null,
-        metadata: makeMediaMeta({ duration: (vid.duration_ms ?? 0) / 1000 }),
-        thumbnailUrl: imageUrl,
-        waveformData: null,
-        originalUrl: vUrl,
-      });
     }
 
     // ── Narration clip ──
@@ -1011,7 +993,7 @@ export async function loadSceneListAsProject(
         type: "audio",
         fileHandle: null,
         blob: null,
-        metadata: makeMediaMeta({ duration: narDuration }),
+        metadata: mediaMeta({ duration: narDuration }),
         thumbnailUrl: null,
         waveformData: null,
         originalUrl: narrationUrl,
@@ -1041,9 +1023,21 @@ export async function loadSceneListAsProject(
     }
 
     // ── Subtitles from word timestamps ──
+    // Studio writes word_timestamps onto the narration doc post-TTS AND
+    // onto the chosen video doc post-clip-STT. Earlier versions stamped
+    // them only on the first scene's narration; check every available
+    // source before giving up so every scene shows captions.
+    const videoWithWords = videos.find(
+      (v) => Array.isArray(v.word_timestamps) && v.word_timestamps.length > 0,
+    );
+    const narrationWithWords = narrations.find(
+      (n) => Array.isArray(n.word_timestamps) && n.word_timestamps!.length > 0,
+    );
     const rawWordTs =
       narration?.word_timestamps ??
+      narrationWithWords?.word_timestamps ??
       primaryVideo?.word_timestamps ??
+      videoWithWords?.word_timestamps ??
       null;
 
     if (rawWordTs && rawWordTs.length > 0) {
@@ -1228,7 +1222,7 @@ export async function loadSceneListAsProject(
     for (const [mediaId, maxOutPoint] of maxMusicOutPointByMedia.entries()) {
       const musicItem = mediaItems.find((m) => m.id === mediaId);
       if (musicItem) {
-        (musicItem as { metadata: MediaMetadata }).metadata = makeMediaMeta({
+        (musicItem as { metadata: MediaMetadata }).metadata = mediaMeta({
           duration: Math.max(maxOutPoint, musicItem.metadata.duration || 0),
         });
       }
@@ -1318,8 +1312,8 @@ export async function loadSceneListAsProject(
   };
 
   const settings: ProjectSettings = {
-    width: DEFAULT_WIDTH,
-    height: DEFAULT_HEIGHT,
+    width: dim.width,
+    height: dim.height,
     frameRate: DEFAULT_FPS,
     sampleRate: 44100,
     channels: 2,
