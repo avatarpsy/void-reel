@@ -1054,18 +1054,38 @@ export const Toolbar: React.FC = () => {
             </div>
           ) : (
             <div className="flex items-center gap-2">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    onClick={handlePublish}
-                    className="h-10 px-4 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-bold rounded-lg flex items-center gap-2 transition-all shadow-[0_0_20px_rgba(59,130,246,0.3)] hover:shadow-[0_0_30px_rgba(59,130,246,0.5)] transform hover:-translate-y-0.5"
-                  >
-                    <Send size={14} />
-                    <span className="text-sm tracking-wider">PUBLISH</span>
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent>Publish to your social platforms</TooltipContent>
-              </Tooltip>
+              {/*
+                Publish button is hidden when the editor runs inside the
+                Voidspace chat iframe. The chat owns the publish flow
+                end-to-end (its result card has the Publish button +
+                platform-select modal that pulls connected accounts from
+                the user's avatar settings). Surfacing a SECOND publish
+                button here would create two divergent code paths into
+                the social-post tool — keeping a single source of truth
+                in the chat is what the user explicitly asked for.
+                Detection: standalone openreel renders in a top-level
+                window; the chat-embedded iframe carries `?embed=1`
+                (set by studio-ai/index.vue's iframe `:src` builder)
+                AND has window.self !== window.top.
+              */}
+              {!(
+                typeof window !== "undefined" &&
+                (window.self !== window.top ||
+                  new URLSearchParams(window.location.search).get("embed") === "1")
+              ) && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      onClick={handlePublish}
+                      className="h-10 px-4 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-bold rounded-lg flex items-center gap-2 transition-all shadow-[0_0_20px_rgba(59,130,246,0.3)] hover:shadow-[0_0_30px_rgba(59,130,246,0.5)] transform hover:-translate-y-0.5"
+                    >
+                      <Send size={14} />
+                      <span className="text-sm tracking-wider">PUBLISH</span>
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent>Publish to your social platforms</TooltipContent>
+                </Tooltip>
+              )}
               <DropdownMenu open={isExportOpen} onOpenChange={setIsExportOpen}>
                 <DropdownMenuTrigger asChild>
                   <button
