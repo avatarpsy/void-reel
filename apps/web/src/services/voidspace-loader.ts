@@ -18,7 +18,6 @@ import {
   onSnapshot,
   type Unsubscribe,
 } from "firebase/firestore";
-import { v4 as uuidv4 } from "uuid";
 import type {
   Project,
   ProjectSettings,
@@ -28,6 +27,7 @@ import type {
   Track,
   Clip,
   Subtitle,
+  TextClip,
 } from "@openreel/core";
 
 // ────────────────────────────────────────────
@@ -108,6 +108,18 @@ interface SceneVideoData {
 const resolvedUrlCache = new Map<string, string>();
 const mediaBlobCache = new Map<string, Blob>();
 
+// Tiny deterministic hash for building stable media IDs from URLs.
+// FNV-1a 32-bit, base36-encoded — short, dependency-free, and stable
+// across reloads (which is what we want for the live-rebuild path).
+function stableHash(input: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
+}
+
 async function resolveMediaUrl(rawUrl?: string | null): Promise<string | null> {
   if (!rawUrl) return null;
   const url = String(rawUrl).trim();
@@ -133,6 +145,11 @@ async function resolveMediaUrl(rawUrl?: string | null): Promise<string | null> {
     return url;
   }
 }
+
+// CORS-bypass proxy helper lives in @openreel/core/utils so every
+// renderer surface (preview, export, video-engine, playback) routes
+// through the same same-origin endpoint. See utils/cors-proxy.ts.
+import { rewriteToProxy } from "@openreel/core";
 
 async function fetchMediaBlob(
   url: string | null,
@@ -171,14 +188,39 @@ async function fetchMediaBlob(
     }
   };
 
-  // First attempt with raw URL
-  let blob = await tryFetch(url);
-  if (blob) return blob;
+  // For cross-origin URLs, route through the same-origin proxy from
+  // the FIRST attempt. Hosts like tempfile.redpandaai.co serve no
+  // `Access-Control-Allow-Origin` header so a direct fetch always
+  // fails CORS — and even though we used to recover via the proxy on
+  // the second attempt, the failed first attempt floods the console
+  // with red `net::ERR_FAILED` lines on every project load. Cleaner
+  // and faster to skip the wasted round-trip entirely.
+  const proxied = rewriteToProxy(url);
+  const isCrossOrigin = proxied !== url;
 
-  // Retry with encoded URL for paths containing spaces/special chars
-  if (url.includes(" ")) {
-    blob = await tryFetch(encodeURI(url));
+  let blob: Blob | null;
+  if (isCrossOrigin) {
+    blob = await tryFetch(proxied);
+    if (blob) {
+      // Cache against the ORIGINAL URL so future lookups keyed on
+      // `originalUrl` hit immediately without re-routing.
+      mediaBlobCache.set(url, blob);
+      return blob;
+    }
+    // Proxy didn't have it — try the raw URL as a last resort. This
+    // covers the rare case where the host actually does serve CORS
+    // (some R2 buckets) but the proxy is misconfigured / down.
+    blob = await tryFetch(url);
     if (blob) return blob;
+  } else {
+    // Same-origin URL — fetch direct.
+    blob = await tryFetch(url);
+    if (blob) return blob;
+    // Retry with encoded URL for paths containing spaces/special chars
+    if (url.includes(" ")) {
+      blob = await tryFetch(encodeURI(url));
+      if (blob) return blob;
+    }
   }
 
   return null;
@@ -392,52 +434,39 @@ function resolveAspectDimensions(aspect: unknown): { width: number; height: numb
   return FALLBACK_DIM;
 }
 
-const REMOTION_NARRATION_SUBTITLE_STYLE = {
-  fontFamily: "Anton",
-  fontSize: 80,
-  color: "#FFFFFF",
-  backgroundColor: "transparent",
-  position: "center" as const,
-  highlightColor: "#FF0000",
-};
-
-const REMOTION_LYRICS_SUBTITLE_STYLE = {
+// TextClip style for caption phrases. The title-engine uses these
+// fields for rendering; standard openreel Inspector edits (font size,
+// color, alignment, transform) bind directly into this style and the
+// clip's transform.
+const CAPTION_TEXT_STYLE = {
   fontFamily: "Anton",
   fontSize: 72,
+  fontWeight: "bold" as const,
+  fontStyle: "normal" as const,
   color: "#FFFFFF",
   backgroundColor: "transparent",
-  position: "center" as const,
-  highlightColor: "#FF0000",
+  textAlign: "center" as const,
+  verticalAlign: "middle" as const,
+  lineHeight: 1.2,
+  letterSpacing: 0,
+  // Drop shadow + outline for legibility over busy backgrounds —
+  // mirrors the look the subtitle-canvas-renderer produced for
+  // Anton-family captions.
+  strokeColor: "#000000",
+  strokeWidth: 5,
 };
 
-function buildEvenWordTimings(
-  text: string,
-  startTime: number,
-  endTime: number,
-): Array<{ text: string; startTime: number; endTime: number }> {
-  const words = text
-    .split(/\s+/)
-    .map((w) => w.trim())
-    .filter((w) => w.length > 0)
-    .map((w) => w.toUpperCase());
-
-  if (words.length === 0 || endTime <= startTime) {
-    return [];
-  }
-
-  const totalDuration = endTime - startTime;
-  const step = totalDuration / words.length;
-
-  return words.map((word, index) => {
-    const wordStart = startTime + step * index;
-    const wordEnd = index === words.length - 1 ? endTime : startTime + step * (index + 1);
-    return {
-      text: word,
-      startTime: wordStart,
-      endTime: wordEnd,
-    };
-  });
-}
+// Bottom-center transform expressed in NORMALIZED canvas coords (0..1)
+// so it scales correctly across 16:9 / 9:16 / 1:1 / etc. The Inspector
+// Transform section edits these directly, so users can drag captions
+// anywhere on the canvas after the initial placement.
+const CAPTION_DEFAULT_TRANSFORM = {
+  position: { x: 0.5, y: 0.85 },
+  scale: { x: 1, y: 1 },
+  rotation: 0,
+  anchor: { x: 0.5, y: 0.5 },
+  opacity: 1,
+};
 
 function makeMediaMeta(
   overrides: Partial<MediaMetadata> = {},
@@ -763,12 +792,38 @@ export async function loadSceneListAsProject(
   const musicTrackClips: Clip[] = [];
   const musicTrackSpecs: Array<{
     mediaId: string;
+    sceneDocId: string;
     startTime: number;
     duration: number;
     inPoint: number;
     outPoint: number;
   }> = [];
+  // Captions are emitted as TextClips on `track-captions` so the
+  // standard openreel Inspector (Transform, Alignment, Effects, Text
+  // Properties, Animation) operates on them like any other text. The
+  // legacy `timeline.subtitles` array is kept empty to avoid double-
+  // rendering on top of the TextClips.
   const subtitles: Subtitle[] = [];
+  const captionTextClips: TextClip[] = [];
+  const pushCaption = (
+    text: string,
+    startTime: number,
+    endTime: number,
+    sceneDocId: string,
+    chunkIdx: number,
+  ) => {
+    const duration = Math.max(0.1, endTime - startTime);
+    captionTextClips.push({
+      id: `caption-${sceneDocId}-${chunkIdx}`,
+      trackId: "track-captions",
+      startTime,
+      duration,
+      text,
+      style: { ...CAPTION_TEXT_STYLE },
+      transform: { ...CAPTION_DEFAULT_TRANSFORM },
+      keyframes: [],
+    });
+  };
 
   let currentTime = 0; // running timeline position in seconds
   let fallbackMusicMediaId: string | null = null;
@@ -787,7 +842,10 @@ export async function loadSceneListAsProject(
     const existingMediaId = musicMediaIdsByUrl.get(resolvedUrl);
     if (existingMediaId) return existingMediaId;
 
-    const mediaId = uuidv4();
+    // Stable mediaId derived from the resolved URL — same hashing
+    // rationale as scene video / narration above (id stability across
+    // live-rebuilds → preserves selection + dedupes additive merges).
+    const mediaId = `media-music-${stableHash(resolvedUrl)}`;
     musicMediaIdsByUrl.set(resolvedUrl, mediaId);
     // Fetch the music blob so the export-time audio engine can decode it.
     // Without a blob, getAudioBuffer() in audio-engine.ts returns null and
@@ -803,6 +861,8 @@ export async function loadSceneListAsProject(
       thumbnailUrl: null,
       waveformData: null,
       originalUrl: resolvedUrl,
+      category: "Music",
+      role: "music",
     });
 
     if (!fallbackMusicMediaId) {
@@ -918,6 +978,7 @@ export async function loadSceneListAsProject(
 
         musicTrackSpecs.push({
           mediaId: sceneMusicMediaId,
+          sceneDocId: scene._docId,
           startTime: currentTime,
           duration,
           inPoint,
@@ -936,10 +997,16 @@ export async function loadSceneListAsProject(
     // means generation failed and we'd rather see a gap than a still.
     if (videoUrl) {
       const videoBlob = await fetchMediaBlob(videoUrl);
-      const mediaId = uuidv4();
+      // Stable IDs derived from Firestore doc keys so the editor's
+      // selection / Inspector edits / undo history survive across the
+      // periodic rebuilds the live subscription performs. Random
+      // uuidv4()s would mint a fresh id on every Firestore tick which
+      // (a) breaks selection mid-edit and (b) makes additive media-
+      // library merges duplicate the same scene's video / narration.
+      const mediaId = `media-video-${scene._docId}-${primaryVideo?.id ?? "fallback"}`;
       mediaItems.push({
         id: mediaId,
-        name: `Scene ${scene.scene_number} Video`,
+        name: `Scene ${scene.scene_number} · Video`,
         type: "video",
         fileHandle: null,
         blob: videoBlob,
@@ -950,10 +1017,13 @@ export async function loadSceneListAsProject(
         thumbnailUrl: imageUrl,
         waveformData: null,
         originalUrl: videoUrl,
+        category: "Scene Videos",
+        sceneNumber: scene.scene_number,
+        role: "primary",
       });
 
       videoTrackClips.push({
-        id: uuidv4(),
+        id: `clip-video-${scene._docId}`,
         mediaId,
         trackId: "track-video",
         startTime: currentTime,
@@ -970,7 +1040,7 @@ export async function loadSceneListAsProject(
 
     // ── Narration clip ──
     if (narrationUrl) {
-      const narMediaId = uuidv4();
+      const narMediaId = `media-narration-${scene._docId}-${narration?.id ?? "fallback"}`;
       const narDurMs = typeof narration?.duration_ms === "number" ? narration.duration_ms : null;
       const narDuration = narDurMs != null ? narDurMs / 1000 : sceneDuration;
 
@@ -982,7 +1052,7 @@ export async function loadSceneListAsProject(
 
       mediaItems.push({
         id: narMediaId,
-        name: `Scene ${scene.scene_number} Narration`,
+        name: `Scene ${scene.scene_number} · Narration`,
         type: "audio",
         fileHandle: null,
         blob: narrationBlob,
@@ -990,6 +1060,9 @@ export async function loadSceneListAsProject(
         thumbnailUrl: null,
         waveformData: null,
         originalUrl: narrationUrl,
+        category: "Narrations",
+        sceneNumber: scene.scene_number,
+        role: "narration",
       });
 
       // Bullet-proof source-clip in/out resolution.
@@ -1017,7 +1090,7 @@ export async function loadSceneListAsProject(
         : (rawEndMs != null ? Math.max(inPoint, rawEndMs / 1000) : inPoint + narDuration);
 
       narrationTrackClips.push({
-        id: uuidv4(),
+        id: `clip-narration-${scene._docId}`,
         mediaId: narMediaId,
         trackId: "track-narration",
         startTime: currentTime,
@@ -1079,8 +1152,9 @@ export async function loadSceneListAsProject(
           end: Math.min(w.end - trimStartSec, sceneDuration),
         }));
 
-      // Group words into subtitle segments to match Remotion-style phrase pacing.
+      // Group words into phrase segments synced to narration timing.
       const WORDS_PER_CHUNK = 4;
+      let chunkIdx = 0;
       for (let i = 0; i < wordTs.length; i += WORDS_PER_CHUNK) {
         const chunk = wordTs
           .slice(i, i + WORDS_PER_CHUNK)
@@ -1094,15 +1168,7 @@ export async function loadSceneListAsProject(
         const text = chunk.map((w) => w.text).join(" ");
         const startSec = chunk[0].startTime;
         const endSec = chunk[chunk.length - 1].endTime;
-        subtitles.push({
-          id: uuidv4(),
-          text,
-          startTime: startSec,
-          endTime: endSec,
-          style: REMOTION_NARRATION_SUBTITLE_STYLE,
-          animationStyle: "word-highlight",
-          words: chunk,
-        });
+        pushCaption(text, startSec, endSec, scene._docId, chunkIdx++);
       }
     } else {
       // Lyrics segments need rebasing relative to music_start_ms (Flutter parity).
@@ -1118,6 +1184,7 @@ export async function loadSceneListAsProject(
         // Determine offset: prefer music_start_ms, fallback to first segment start
         const offsetSec = lyricsBaseSec ?? jsonSegments[0].start;
 
+        let chunkIdx = 0;
         for (let i = 0; i < jsonSegments.length; i += 1) {
           const segment = jsonSegments[i];
           const rebasedStart = segment.start - offsetSec;
@@ -1134,19 +1201,13 @@ export async function loadSceneListAsProject(
           if (rebasedEnd <= rebasedStart) continue;
           const clampedEnd = Math.min(rebasedEnd, sceneDuration);
 
-          subtitles.push({
-            id: uuidv4(),
-            text: segment.text.toUpperCase(),
-            startTime: currentTime + rebasedStart,
-            endTime: currentTime + clampedEnd,
-            style: REMOTION_LYRICS_SUBTITLE_STYLE,
-            animationStyle: "word-highlight",
-            words: buildEvenWordTimings(
-              segment.text,
-              currentTime + rebasedStart,
-              currentTime + clampedEnd,
-            ),
-          });
+          pushCaption(
+            segment.text.toUpperCase(),
+            currentTime + rebasedStart,
+            currentTime + clampedEnd,
+            scene._docId,
+            chunkIdx++,
+          );
         }
       } else if (scene.lyrics_lrc) {
         const lrcSegments = parseLrcSegments(scene.lyrics_lrc);
@@ -1155,6 +1216,7 @@ export async function loadSceneListAsProject(
           lyricsBaseSec ??
           (lrcSegments.length > 0 ? lrcSegments[0].start : 0);
 
+        let chunkIdx = 0;
         for (let i = 0; i < lrcSegments.length; i += 1) {
           const segment = lrcSegments[i];
           const rebasedStart = segment.start - offsetSec;
@@ -1168,19 +1230,13 @@ export async function loadSceneListAsProject(
           if (fallbackEnd <= rebasedStart) continue;
           const clampedEnd = Math.min(fallbackEnd, sceneDuration);
 
-          subtitles.push({
-            id: uuidv4(),
-            text: segment.text.toUpperCase(),
-            startTime: currentTime + rebasedStart,
-            endTime: currentTime + clampedEnd,
-            style: REMOTION_LYRICS_SUBTITLE_STYLE,
-            animationStyle: "word-highlight",
-            words: buildEvenWordTimings(
-              segment.text,
-              currentTime + rebasedStart,
-              currentTime + clampedEnd,
-            ),
-          });
+          pushCaption(
+            segment.text.toUpperCase(),
+            currentTime + rebasedStart,
+            currentTime + clampedEnd,
+            scene._docId,
+            chunkIdx++,
+          );
         }
       }
     }
@@ -1193,7 +1249,7 @@ export async function loadSceneListAsProject(
   if (musicTrackSpecs.length > 0 && totalMusicDuration > 0) {
     for (const spec of musicTrackSpecs) {
       musicTrackClips.push({
-        id: uuidv4(),
+        id: `clip-music-${spec.sceneDocId}`,
         mediaId: spec.mediaId,
         trackId: "track-music",
         startTime: spec.startTime,
@@ -1210,7 +1266,7 @@ export async function loadSceneListAsProject(
   } else if (fallbackMusicMediaId && totalMusicDuration > 0) {
     // Fallback for older scene lists that don't have per-scene music timing.
     musicTrackClips.push({
-      id: uuidv4(),
+      id: `clip-music-fallback-${fallbackMusicMediaId}`,
       mediaId: fallbackMusicMediaId,
       trackId: "track-music",
       startTime: 0,
@@ -1243,30 +1299,58 @@ export async function loadSceneListAsProject(
     }
   }
 
-  // Subtitle rendering is driven entirely by `timeline.subtitles` via the
-  // shared subtitle-canvas-renderer (it reads style.position and draws at
-  // bottom-center / center / top-center as configured). We deliberately do
-  // NOT mirror those subtitles into TextClips on a `track-captions` text
-  // track: the title-engine renders TextClips at `transform.position * canvas`
-  // which, with our default 0,0 position, produces a ghost caption clipped
-  // into the top-left corner on top of the proper bottom-center subtitle.
-  // The timeline panel can still show the captions via the subtitle store —
-  // no editor-visible track is needed here.
+  // Captions are emitted as TextClips on `track-captions` (built via
+  // `pushCaption` above). They render through the title-engine, so the
+  // standard openreel Inspector — Transform, Alignment, Effects, Text
+  // Properties, Animations, Keyframes — operates on them like any other
+  // text clip. `timeline.subtitles` is intentionally left empty so the
+  // subtitle-canvas-renderer doesn't draw a second copy on top.
 
   // 5) Assemble tracks
-  const tracks: Track[] = [
-    {
-      id: "track-video",
-      type: "video",
-      name: "Video",
-      clips: videoTrackClips,
+  //
+  // ⚠ Track ORDER matters for both the editor preview AND the export
+  // renderer. Both sort tracks by descending `originalIndex` (last
+  // track first → drawn FIRST → bottom of the stack), so a track at
+  // index 0 ends up on TOP of the visual stack. We deliberately put
+  // the captions track at index 0 (top) so subtitles render OVER the
+  // video, not underneath it. The previous order had captions at the
+  // tail of the array which made the video clip cover them in the
+  // export — captions appeared in the preview only because the
+  // preview-side renderer's "above-video" pass was structured around
+  // the originalIndex < lowestVideoIndex predicate; the export
+  // renderer has no such split, so the descending-sort z-order
+  // dropped them straight into the bottom layer.
+  const tracks: Track[] = [];
+
+  if (captionTextClips.length > 0) {
+    // Type "text" — see video-engine `getActiveTextClips` which filters
+    // textClips by their track type. We register an empty `clips` array
+    // here because TextClips live in `project.textClips` (managed by the
+    // title-engine), not on the track itself.
+    tracks.push({
+      id: "track-captions",
+      type: "text",
+      name: "Captions",
+      clips: [],
       transitions: [],
       locked: false,
       hidden: false,
       muted: false,
       solo: false,
-    },
-  ];
+    });
+  }
+
+  tracks.push({
+    id: "track-video",
+    type: "video",
+    name: "Video",
+    clips: videoTrackClips,
+    transitions: [],
+    locked: false,
+    hidden: false,
+    muted: false,
+    solo: false,
+  });
 
   // Only add narration track if it has clips (matches Flutter — no empty tracks)
   if (narrationTrackClips.length > 0) {
@@ -1326,7 +1410,7 @@ export async function loadSceneListAsProject(
     settings,
     mediaLibrary: { items: mediaItems },
     timeline,
-    textClips: [],
+    textClips: captionTextClips,
   };
 
   return project;

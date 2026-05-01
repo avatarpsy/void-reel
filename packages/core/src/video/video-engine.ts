@@ -13,6 +13,7 @@ import { titleEngine } from "../text/title-engine";
 import { graphicsEngine } from "../graphics/graphics-engine";
 import { VideoEffectsEngine } from "./video-effects-engine";
 import { getMediaEngine } from "../media/mediabunny-engine";
+import { rewriteToProxy } from "../utils/cors-proxy";
 import type {
   RenderedFrame,
   CompositeLayer,
@@ -421,6 +422,19 @@ export class VideoEngine {
     const activeSubtitles = this.getActiveSubtitles(timeline, time);
 
 
+    // Render order is determined by descending originalIndex (so a
+    // track at array position 0 paints LAST = on top). On top of that
+    // we ALWAYS render `text` and `graphics` tracks AFTER `video` /
+    // `image` tracks regardless of their array position — text
+    // overlays (captions, titles, lower-thirds) and shape overlays
+    // belong above the video by definition. Without this rule, a
+    // captions track that landed at the tail of the array (e.g.
+    // because the chat's additive Firestore merge appended it after
+    // the existing video/audio tracks) would be drawn FIRST, putting
+    // subtitles BENEATH the video frame — which is exactly the
+    // "captions visible in preview but not in export" symptom we hit.
+    const trackTypeRank = (t: string) =>
+      t === "text" || t === "graphics" ? 1 : 0; // overlay layers sort AFTER pixel layers
     const allRenderableTracks = timeline.tracks
       .map((track, idx) => ({ track, originalIndex: idx }))
       .filter(
@@ -431,7 +445,16 @@ export class VideoEngine {
             track.type === "graphics") &&
           !track.hidden,
       )
-      .sort((a, b) => b.originalIndex - a.originalIndex);
+      .sort((a, b) => {
+        // Primary key: pixel tracks before overlay tracks.
+        const layerDelta = trackTypeRank(a.track.type) - trackTypeRank(b.track.type);
+        if (layerDelta !== 0) return layerDelta;
+        // Secondary key: descending originalIndex within the same
+        // layer so the existing in-layer z-order semantics are
+        // preserved (track at array position 0 still paints LAST
+        // within its layer).
+        return b.originalIndex - a.originalIndex;
+      });
 
     if (
       !this.compositeCanvas ||
@@ -1665,7 +1688,11 @@ export class VideoEngine {
 
     const fetchPromise = (async (): Promise<Blob | null> => {
       try {
-        const response = await fetch(sourceUrl, { mode: "cors" });
+        // Cross-origin assets without CORS headers (Kie tempfile, R2)
+        // need to go through the same-origin /api/studio/media-proxy
+        // — direct fetch trips the browser's CORS wall and returns
+        // null, leaving the renderer with no decoded frame.
+        const response = await fetch(rewriteToProxy(sourceUrl), { mode: "cors" });
         if (!response.ok) {
           return null;
         }

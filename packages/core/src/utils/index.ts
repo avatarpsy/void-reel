@@ -31,3 +31,4 @@ export function deepClone<T>(obj: T): T {
 }
 export * from "./serialization";
 export * from "./immutable-updates";
+export * from "./cors-proxy";

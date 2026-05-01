@@ -314,14 +314,27 @@ class AutoSaveManager {
       // Anything that isn't a real Blob must be nulled so the editor
       // falls back to re-fetching from originalUrl instead of crashing
       // in URL.createObjectURL.
+      //
+      // Also: any field that holds a `blob:http://localhost:.../<uuid>`
+      // reference is dead the moment the previous Document tears down.
+      // Loading those into a <video> / <img> produces
+      // `net::ERR_FILE_NOT_FOUND` and the user sees a black canvas
+      // until they hard-refresh. Strip ALL blob: URLs at recovery time
+      // and let the renderer hydrate from `originalUrl` instead.
+      const isDeadBlobUrl = (v: unknown): v is string =>
+        typeof v === "string" && v.startsWith("blob:");
       if (project.mediaLibrary?.items) {
         const sanitizedItems = project.mediaLibrary.items.map((item) => {
           const needsBlobFix = item.blob && !(item.blob instanceof Blob);
-          const needsThumbFix =
-            typeof item.thumbnailUrl === "string" &&
-            item.thumbnailUrl.startsWith("blob:");
+          const needsThumbFix = isDeadBlobUrl(item.thumbnailUrl);
+          // filmstripThumbnails is an array of { timestamp, url }; any
+          // url that's a blob: from a prior session also needs to die.
+          const filmstrip = item.filmstripThumbnails;
+          const needsFilmFix =
+            Array.isArray(filmstrip) &&
+            filmstrip.some((f: any) => isDeadBlobUrl(f?.url));
 
-          if (!needsBlobFix && !needsThumbFix) return item;
+          if (!needsBlobFix && !needsThumbFix && !needsFilmFix) return item;
 
           return {
             ...item,
@@ -329,6 +342,9 @@ class AutoSaveManager {
             thumbnailUrl: needsThumbFix
               ? item.originalUrl ?? null
               : item.thumbnailUrl,
+            // Drop the entire filmstrip rather than partial-strip — the
+            // editor regenerates it lazily from the source asset.
+            filmstripThumbnails: needsFilmFix ? undefined : filmstrip,
           };
         });
 

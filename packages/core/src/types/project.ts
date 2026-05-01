@@ -48,6 +48,18 @@ export interface MediaItem {
   readonly kieaiError?: boolean;
   /** KieAI task ID used to poll for completion */
   readonly kieaiTaskId?: string;
+  /**
+   * Category tag used by the AssetsPanel to group items into named
+   * sections — e.g. "Scene Videos", "Narrations", "Frames", "Music".
+   * When unset, the panel falls back to the flat list keyed off
+   * `type`. Voidspace-loader stamps this so chat-generated assets
+   * land in tidy buckets the moment they appear.
+   */
+  readonly category?: string;
+  /** Scene number this asset belongs to (1-indexed). Voidspace only. */
+  readonly sceneNumber?: number;
+  /** Sub-role within the scene: 'primary'|'first_frame'|'narration'|'music'|… */
+  readonly role?: string;
 }
 
 /** Thumbnail for filmstrip display in timeline */

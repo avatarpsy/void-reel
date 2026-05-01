@@ -41,6 +41,7 @@ import {
   type StickerClip,
   type Subtitle,
   type Track,
+  rewriteToProxy,
 } from "@openreel/core";
 import { useEngineStore } from "../../stores/engine-store";
 import {
@@ -325,7 +326,12 @@ export const Preview: React.FC = () => {
       if (cached) return cached;
 
       try {
-        const response = await fetch(mediaItem.originalUrl, { mode: "cors" });
+        // Cross-origin hosts that lack CORS (Kie tempfile, R2 buckets,
+        // Grok aiquickdraw) get rewritten to /api/studio/media-proxy
+        // so the fetch doesn't trip the browser's CORS wall.
+        const response = await fetch(rewriteToProxy(mediaItem.originalUrl), {
+          mode: "cors",
+        });
         if (!response.ok) return null;
         const blob = await response.blob();
         remoteBlobCacheRef.current.set(mediaItem.id, blob);
@@ -338,12 +344,18 @@ export const Preview: React.FC = () => {
   );
 
   // Get text clips from TitleEngine
+  //
+  // Voidspace captions live on `track-captions` but render through
+  // the SAME title-engine path as user-created text clips — they
+  // were previously filtered out here as a leftover from the old
+  // subtitle-canvas-renderer days. The filter caused captions to
+  // appear on the timeline (so the user thinks they exist) but never
+  // be drawn on the preview / export canvas. Drop the filter so
+  // captions flow through the standard render pipeline.
   const getTitleEngine = useEngineStore((state) => state.getTitleEngine);
   const allTextClips = useMemo(() => {
     const titleEngine = getTitleEngine();
-    return (titleEngine?.getAllTextClips() || []).filter(
-      (clip) => clip.trackId !== "track-captions",
-    );
+    return titleEngine?.getAllTextClips() || [];
   }, [getTitleEngine, project.modifiedAt]);
 
   const getGraphicsEngine = useEngineStore((state) => state.getGraphicsEngine);
@@ -794,11 +806,26 @@ export const Preview: React.FC = () => {
             !track.hidden,
         );
 
+      // CAPTIONS RULE: any track of type "text" is always treated as
+      // an above-video overlay regardless of its array position. The
+      // chat's additive Firestore merge can append the captions track
+      // at the END of the tracks array (highest originalIndex), which
+      // would otherwise route it through the below-video pass and
+      // hide subtitles beneath the video frame. Forcing text tracks
+      // into the above-video pass keeps preview behaviour aligned
+      // with the export pipeline (see video-engine.renderFrame's
+      // trackTypeRank fix). Graphics tracks keep the existing
+      // index-relative semantics because shapes / SVGs / stickers
+      // are sometimes intentionally placed UNDER footage as a
+      // background layer.
       const tracksToRender = overlayTracksWithIndex.filter(
-        ({ originalIndex }) => {
+        ({ track, originalIndex }) => {
+          const isTextOverlay = track.type === "text";
           if (mode === "below-video") {
+            if (isTextOverlay) return false;
             return originalIndex > highestVideoIndex;
           } else if (mode === "above-video") {
+            if (isTextOverlay) return true;
             return originalIndex < lowestVideoIndex;
           }
           return true;
@@ -1951,9 +1978,13 @@ export const Preview: React.FC = () => {
       for (const { clip, mediaItem } of clips) {
         if (!videoCache.has(clip.mediaId)) {
           const mediaBlob = await resolveMediaBlob(mediaItem);
+          // Fallback to a proxy-routed remote URL when the blob fetch
+          // returned null (CORS / 404 / 0 bytes). The element decoder
+          // will at least play the audio; without the rewrite the
+          // direct cross-origin URL hits the same CORS wall.
           const url = mediaBlob
             ? URL.createObjectURL(mediaBlob)
-            : mediaItem.originalUrl || "";
+            : rewriteToProxy(mediaItem.originalUrl || "") || "";
           if (!url) continue;
 
           const video = document.createElement("video");
@@ -4724,7 +4755,9 @@ export const Preview: React.FC = () => {
     if (mediaItem.blob instanceof Blob) {
       src = URL.createObjectURL(mediaItem.blob);
     } else if (mediaItem.originalUrl) {
-      src = mediaItem.originalUrl;
+      // Route through the proxy so cross-origin assets (Kie tempfile,
+      // R2 buckets) load without CORS errors.
+      src = rewriteToProxy(mediaItem.originalUrl);
     }
 
     if (!src) return null;

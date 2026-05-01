@@ -303,6 +303,60 @@ export async function registerServiceWorker(): Promise<ServiceWorkerRegistration
     return null;
   }
 
+  // Skip SW registration when running embedded in another page (Voidspace
+  // chat iframe). Two reasons:
+  //   1. The SW caches with scope `/` and was historically registered at
+  //      the openreel STANDALONE origin (e.g. localhost:5173). When the
+  //      same browser later loads the embedded build under a different
+  //      origin, the stale cached SW can intercept network requests and
+  //      hand back responses that 404 or point at the dead localhost
+  //      origin — manifesting as "localhost refused to connect" inside
+  //      the iframe on the FIRST load of a project (a hard refresh
+  //      reissues network requests and bypasses the stale SW, which is
+  //      why the same project loads cleanly on refresh).
+  //   2. Offline support inside an iframe is meaningless — the parent
+  //      chat already needs network for Firestore writes, so caching
+  //      the iframe's static assets adds no value here.
+  // Active de-registration of any pre-existing SW also runs so the
+  // stale install gets cleaned up the moment a user loads the embedded
+  // bundle, without waiting for a scheduled hard refresh.
+  if (typeof window !== "undefined") {
+    const isEmbedded =
+      window.self !== window.top ||
+      new URLSearchParams(window.location.search).get("embed") === "1";
+    if (isEmbedded) {
+      // Aggressive cleanup: unregister AND nuke all CacheStorage
+      // entries the stale SW populated. Without the cache wipe,
+      // subsequent loads can still get tainted responses (the cache
+      // outlives the SW). Two failure modes were observed:
+      //   - First-load "localhost refused" inside the iframe (stale
+      //     SW intercepted asset requests pointing at :5173).
+      //   - Second-load 404s on hashed bundles (cache held an HTML
+      //     fallback for what should have been a JS chunk).
+      try {
+        const regs = await navigator.serviceWorker?.getRegistrations?.();
+        if (regs && regs.length > 0) {
+          await Promise.all(regs.map((r) => r.unregister().catch(() => false)));
+          console.info(
+            `[SW] Unregistered ${regs.length} stale service worker(s) for embedded run`,
+          );
+        }
+        if (typeof caches !== "undefined" && caches.keys) {
+          const keys = await caches.keys();
+          if (keys.length > 0) {
+            await Promise.all(keys.map((k) => caches.delete(k).catch(() => false)));
+            console.info(
+              `[SW] Cleared ${keys.length} stale CacheStorage bucket(s) for embedded run`,
+            );
+          }
+        }
+      } catch {
+        /* best-effort cleanup */
+      }
+      return null;
+    }
+  }
+
   return serviceWorkerManager.register();
 }
 

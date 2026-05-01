@@ -7,6 +7,7 @@ import { WelcomeScreen } from "./components/welcome";
 import { SharePage } from "./pages/SharePage";
 import { useUIStore } from "./stores/ui-store";
 import { useProjectStore } from "./stores/project-store";
+import { useEngineStore } from "./stores/engine-store";
 import { useVoidspaceStore } from "./stores/voidspace-store";
 import { useRouter } from "./hooks/use-router";
 import { useKieAIPoller } from "./hooks/useKieAIPoller";
@@ -23,6 +24,7 @@ import {
   buildLegacyVoidspaceProjectId,
   buildUserScopedVoidspaceProjectId,
   buildVoidspaceProjectId,
+  parseVoidspaceProjectId,
 } from "./services/voidspace-project-id";
 
 const EditorInterface = lazy(() =>
@@ -45,6 +47,193 @@ const PRESET_DIMENSIONS: Record<string, SocialMediaCategory> = {
   "720x1280": "instagram-stories",
   "1280x720": "youtube-video",
 };
+
+/**
+ * Single-flight wrapper around `loadSceneListAsProject`. The chat
+ * fires `voidspace:reload` once per generated asset (coalesced behind
+ * a 120 ms debounce on the chat side, but bursts can still arrive
+ * here) AND the live Firestore subscription's debounced rebuild may
+ * fire concurrently. Without single-flight, the editor would issue
+ * 4-8 parallel `loadSceneListAsProject` calls per generated scene,
+ * each fetching every blob over the network — wasteful and a source
+ * of "everything works after a delay" stutters. We dedupe to the
+ * latest in-flight promise so concurrent callers share the result.
+ */
+let _reloadInFlight: Promise<import("@openreel/core").Project> | null = null;
+function reloadSingleFlight(
+  userId: string,
+  sceneListId: string,
+): Promise<import("@openreel/core").Project> {
+  if (_reloadInFlight) return _reloadInFlight;
+  _reloadInFlight = loadSceneListAsProject(userId, sceneListId).finally(() => {
+    _reloadInFlight = null;
+  });
+  return _reloadInFlight;
+}
+
+/**
+ * Additive merge of a Firestore-derived `fresh` Project into the
+ * editor's current store state. Single source of truth for every
+ * chat → editor sync: the live subscription's tick callback AND the
+ * `voidspace:reload` postMessage handler both go through this so the
+ * two paths can never diverge.
+ *
+ * Semantics:
+ *   - Append media items / track clips / text clips that the editor
+ *     doesn't have yet (deduped by stable id from voidspace-loader).
+ *   - Upgrade existing media items whose blob/originalUrl is missing
+ *     by overlaying the fresh fields — this hydrates blob-less items
+ *     surviving from autosave recovery without losing user edits.
+ *   - Append entirely new tracks (e.g. captions track on first use).
+ *   - Adopt fresh canvas settings only when the recovered/current
+ *     dims drift from the chat's authoritative dims (the URL aspect
+ *     param is the chat's contract).
+ *   - Re-sync the title-engine on every dirty merge so caption
+ *     repaints are guaranteed.
+ *   - Invalidate cached audio buffers for upgraded media so the
+ *     playback path re-decodes with the freshly-hydrated blob.
+ *
+ * Returns `{ dirty, newMedia, upgraded, newClips, newCaptions }` for
+ * logging — every tick prints exactly what changed.
+ */
+function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
+  dirty: boolean;
+  newMedia: number;
+  upgraded: number;
+  newClips: number;
+  newCaptions: number;
+} {
+  const store = useProjectStore.getState();
+  const current = store.project;
+
+  const currentMediaById = new Map(
+    current.mediaLibrary.items.map((m) => [m.id, m] as const),
+  );
+  const newMedia: import("@openreel/core").MediaItem[] = [];
+  const upgradedMediaById = new Map<
+    string,
+    import("@openreel/core").MediaItem
+  >();
+  for (const fr of fresh.mediaLibrary.items) {
+    const existing = currentMediaById.get(fr.id);
+    if (!existing) {
+      newMedia.push(fr);
+      continue;
+    }
+    const existingHasBlob = existing.blob instanceof Blob;
+    const freshHasBlob = fr.blob instanceof Blob;
+    const existingHasUrl = Boolean(existing.originalUrl);
+    const freshHasUrl = Boolean(fr.originalUrl);
+    if (
+      (!existingHasBlob && freshHasBlob) ||
+      (!existingHasUrl && freshHasUrl)
+    ) {
+      upgradedMediaById.set(fr.id, {
+        ...existing,
+        blob: freshHasBlob ? fr.blob : existing.blob,
+        originalUrl: freshHasUrl ? fr.originalUrl : existing.originalUrl,
+        thumbnailUrl: existing.thumbnailUrl ?? fr.thumbnailUrl,
+        metadata: existing.metadata ?? fr.metadata,
+      });
+    }
+  }
+
+  const knownTextClipIds = new Set(
+    (current.textClips ?? []).map((t) => t.id),
+  );
+  const newTextClips = (fresh.textClips ?? []).filter(
+    (t) => !knownTextClipIds.has(t.id),
+  );
+
+  const knownClipIds = new Set<string>();
+  for (const tr of current.timeline.tracks) {
+    for (const c of tr.clips) knownClipIds.add(c.id);
+  }
+  const trackPatches = new Map<
+    string,
+    import("@openreel/core").Clip[]
+  >();
+  for (const tr of fresh.timeline.tracks) {
+    const adds = tr.clips.filter((c) => !knownClipIds.has(c.id));
+    if (adds.length > 0) trackPatches.set(tr.id, adds);
+  }
+
+  const newClipsCount = [...trackPatches.values()].reduce(
+    (n, a) => n + a.length,
+    0,
+  );
+  const dirty =
+    newMedia.length > 0 ||
+    upgradedMediaById.size > 0 ||
+    newTextClips.length > 0 ||
+    trackPatches.size > 0;
+
+  if (!dirty) {
+    return {
+      dirty: false,
+      newMedia: 0,
+      upgraded: 0,
+      newClips: 0,
+      newCaptions: 0,
+    };
+  }
+
+  const mergedTracks = current.timeline.tracks.map((tr) => {
+    const adds = trackPatches.get(tr.id);
+    return adds ? { ...tr, clips: [...tr.clips, ...adds] } : tr;
+  });
+  const knownTrackIds = new Set(mergedTracks.map((t) => t.id));
+  for (const tr of fresh.timeline.tracks) {
+    if (!knownTrackIds.has(tr.id)) mergedTracks.push(tr);
+  }
+
+  const mergedMediaItems = current.mediaLibrary.items.map(
+    (m) => upgradedMediaById.get(m.id) ?? m,
+  );
+
+  // Adopt fresh settings if dims drift. Voidspace-loader honors the
+  // URL `aspect` param which is the chat's authoritative contract.
+  const adoptFreshSettings =
+    fresh.settings &&
+    ((current.settings?.width ?? 0) !== fresh.settings.width ||
+      (current.settings?.height ?? 0) !== fresh.settings.height);
+
+  useProjectStore.setState({
+    project: {
+      ...current,
+      settings: adoptFreshSettings
+        ? { ...current.settings, ...fresh.settings }
+        : current.settings,
+      mediaLibrary: { items: [...mergedMediaItems, ...newMedia] },
+      timeline: { ...current.timeline, tracks: mergedTracks },
+      textClips: [...(current.textClips ?? []), ...newTextClips],
+      modifiedAt: fresh.modifiedAt,
+    },
+  });
+
+  if (upgradedMediaById.size > 0) {
+    const playbackController = useEngineStore
+      .getState()
+      .getPlaybackController();
+    playbackController?.invalidateAudioForMedia(upgradedMediaById.keys());
+  }
+
+  const liveTitleEngine = useEngineStore.getState().getTitleEngine();
+  if (liveTitleEngine) {
+    liveTitleEngine.loadTextClips([
+      ...(current.textClips ?? []),
+      ...newTextClips,
+    ]);
+  }
+
+  return {
+    dirty: true,
+    newMedia: newMedia.length,
+    upgraded: upgradedMediaById.size,
+    newClips: newClipsCount,
+    newCaptions: newTextClips.length,
+  };
+}
 
 function App() {
   const { activeModal, closeModal } = useUIStore();
@@ -78,6 +267,10 @@ function App() {
     setVoidspaceLoading(true);
 
     (async () => {
+      // Marker flipped on once we've successfully restored a project
+      // from IndexedDB. The Firestore subscription below uses it to
+      // pick its merge strategy (additive vs wholesale-replace).
+      let recoveredFromLocal = false;
       try {
         const userId = await waitForAuth(10000);
         if (!userId) {
@@ -118,6 +311,89 @@ function App() {
           console.log(`[Voidspace] Found local copy for ${sceneListId}, recovering...`);
           const recovered = await useProjectStore.getState().recoverFromAutoSave(localSave.id);
           if (recovered) {
+            // Strip *broken* legacy caption TextClips from older saves
+            // (transform.position {x:0,y:0} → ghost-rendered at the
+            // canvas top-left corner). Voidspace now emits caption
+            // TextClips with a proper bottom-center transform, so we
+            // keep those and only filter out the stale corner ones.
+            // Also drop `timeline.subtitles` left over from when
+            // captions were drawn via the subtitle-canvas-renderer —
+            // those are no longer used and would double-render on top
+            // of the new TextClips if anything started honoring them.
+            const titleEngine = useEngineStore.getState().getTitleEngine();
+            try {
+              const cur = useProjectStore.getState().project;
+              const isBrokenCaption = (tc: import("@openreel/core").TextClip) =>
+                tc.trackId === "track-captions" &&
+                (tc.transform?.position?.y ?? 0) < 0.1;
+              const cleanTextClips = (cur.textClips ?? []).filter(
+                (tc) => !isBrokenCaption(tc),
+              );
+              const hadStaleSubtitles = (cur.timeline.subtitles ?? []).length > 0;
+              if (
+                cleanTextClips.length !== (cur.textClips?.length ?? 0) ||
+                hadStaleSubtitles
+              ) {
+                useProjectStore.setState({
+                  project: {
+                    ...cur,
+                    timeline: { ...cur.timeline, subtitles: [] },
+                    textClips: cleanTextClips,
+                  },
+                });
+              }
+              if (titleEngine) {
+                titleEngine.loadTextClips(cleanTextClips);
+              }
+            } catch {
+              /* best-effort scrub */
+            }
+
+            // Belt-and-suspenders blob: scrub. Old autosaves written
+            // before the dedicated sanitizer in auto-save.ts was added
+            // can still carry stale `blob:http://localhost:.../<uuid>`
+            // references that produce `net::ERR_FILE_NOT_FOUND` at
+            // render time. Strip them here so the renderer's hydration
+            // path picks up `originalUrl` instead, which is what the
+            // user observes as "works after refresh."
+            try {
+              const cur = useProjectStore.getState().project;
+              const isDeadBlob = (v: unknown): v is string =>
+                typeof v === "string" && v.startsWith("blob:");
+              let mutated = false;
+              const cleanedItems = cur.mediaLibrary.items.map((item) => {
+                const dirtyThumb = isDeadBlob(item.thumbnailUrl);
+                const dirtyFilmstrip = Array.isArray(item.filmstripThumbnails)
+                  && item.filmstripThumbnails.some(
+                    (f: any) => isDeadBlob(f?.url),
+                  );
+                if (!dirtyThumb && !dirtyFilmstrip) return item;
+                mutated = true;
+                return {
+                  ...item,
+                  thumbnailUrl: dirtyThumb
+                    ? item.originalUrl ?? null
+                    : item.thumbnailUrl,
+                  filmstripThumbnails: dirtyFilmstrip
+                    ? undefined
+                    : item.filmstripThumbnails,
+                };
+              });
+              if (mutated) {
+                useProjectStore.setState({
+                  project: {
+                    ...cur,
+                    mediaLibrary: { ...cur.mediaLibrary, items: cleanedItems },
+                  },
+                });
+                console.log(
+                  "[Voidspace] Stripped stale blob: URLs from recovered project; renderer will hydrate from originalUrl.",
+                );
+              }
+            } catch {
+              /* best-effort scrub */
+            }
+
             const recoveredProject = useProjectStore.getState().project;
             const recoveredMusicTrack = recoveredProject.timeline.tracks.find(
               (track) => track.id === "track-music",
@@ -129,7 +405,22 @@ function App() {
                 (clip) => Math.abs(clip.inPoint ?? 0) < 0.0001,
               );
 
-            if (recoveredLooksStale) {
+            // Two reasons to immediately re-fetch from Firestore here:
+            //   1. The recovered music track has no per-scene offsets
+            //      (legacy save predates the timing rewrite).
+            //   2. ANY recovered media item is missing a blob — which
+            //      is the common case after JSON-roundtrip recovery and
+            //      causes the renderer to spend its first ~250ms (until
+            //      the live-subscription tick) trying to play
+            //      blob:/originalUrl pointers that may be dead. The
+            //      live subscription will catch this eventually but
+            //      "wait until then" is what the user observes as
+            //      "doesn't work until I refresh."
+            const recoveredHasMissingBlobs =
+              recoveredProject.mediaLibrary.items.some(
+                (m) => !(m.blob instanceof Blob) && Boolean(m.originalUrl),
+              );
+            if (recoveredLooksStale || recoveredHasMissingBlobs) {
               try {
                 const refreshedProject = await loadSceneListAsProject(userId, sceneListId);
                 const refreshedMusicTrack = refreshedProject.timeline.tracks.find(
@@ -141,11 +432,53 @@ function App() {
                     (clip) => (clip.inPoint ?? 0) > 0.0001,
                   );
 
-                if (refreshedHasOffsets) {
+                if (recoveredLooksStale && refreshedHasOffsets) {
+                  // Full replace — music timing was the issue, take
+                  // the freshly-built project as the new baseline.
                   loadProject(refreshedProject);
                   await forceSave();
                   console.log(
                     "[Voidspace] Replaced stale local cache with refreshed scene timing.",
+                  );
+                } else if (recoveredHasMissingBlobs) {
+                  // Surgical upgrade — preserve the user's recovered
+                  // edits (selection, transforms, etc.) but overlay
+                  // each item's freshly-fetched blob/originalUrl so
+                  // the renderer can paint immediately. Mirrors the
+                  // additive-merge upgrade path the live subscription
+                  // runs, just executed eagerly here.
+                  const cur = useProjectStore.getState().project;
+                  const freshById = new Map(
+                    refreshedProject.mediaLibrary.items.map((m) => [m.id, m]),
+                  );
+                  const upgraded = cur.mediaLibrary.items.map((existing) => {
+                    const fresh = freshById.get(existing.id);
+                    if (!fresh) return existing;
+                    const existingHasBlob = existing.blob instanceof Blob;
+                    const freshHasBlob = fresh.blob instanceof Blob;
+                    if (existingHasBlob || !freshHasBlob) {
+                      // Fresh-only fields that don't depend on blob.
+                      return {
+                        ...existing,
+                        originalUrl: fresh.originalUrl ?? existing.originalUrl,
+                      };
+                    }
+                    return {
+                      ...existing,
+                      blob: fresh.blob,
+                      originalUrl: fresh.originalUrl ?? existing.originalUrl,
+                      thumbnailUrl: existing.thumbnailUrl ?? fresh.thumbnailUrl,
+                      metadata: existing.metadata ?? fresh.metadata,
+                    };
+                  });
+                  useProjectStore.setState({
+                    project: {
+                      ...cur,
+                      mediaLibrary: { ...cur.mediaLibrary, items: upgraded },
+                    },
+                  });
+                  console.log(
+                    `[Voidspace] Eager-hydrated ${upgraded.filter((m) => m.blob instanceof Blob).length}/${upgraded.length} media blobs after recovery.`,
                   );
                 }
               } catch (refreshErr) {
@@ -178,28 +511,104 @@ function App() {
             } catch (contextErr) {
               console.warn("[Voidspace] Failed to refresh scene list context:", contextErr);
             }
+
+            // Force the canvas dimensions to honor the iframe URL's
+            // `aspect=` param even when recovery loaded settings from
+            // a stale local save. The studio-ai page mints the iframe
+            // with the user's CURRENT aspect choice; recovered settings
+            // come from whatever the project was when autosave last
+            // fired. Without this override, the editor reverts to its
+            // own default (1920x1080) on every reopen of a 9:16 / 1:1
+            // project. The additive-merge path below preserves user
+            // edits but doesn't touch `settings`, so we patch it here
+            // once at recovery time.
+            try {
+              const sp = new URLSearchParams(window.location.search);
+              const urlAspect = sp.get("aspect");
+              const ASPECT_DIMS: Record<string, { width: number; height: number }> = {
+                "16:9": { width: 1920, height: 1080 },
+                "9:16": { width: 1080, height: 1920 },
+                "1:1":  { width: 1080, height: 1080 },
+                "4:3":  { width: 1440, height: 1080 },
+                "3:4":  { width: 1080, height: 1440 },
+                "21:9": { width: 2560, height: 1080 },
+              };
+              const dim = urlAspect ? ASPECT_DIMS[urlAspect] : null;
+              if (dim) {
+                const cur = useProjectStore.getState().project;
+                const drift =
+                  (cur.settings?.width ?? 0) !== dim.width ||
+                  (cur.settings?.height ?? 0) !== dim.height;
+                if (drift) {
+                  useProjectStore.setState({
+                    project: {
+                      ...cur,
+                      settings: {
+                        ...cur.settings,
+                        width: dim.width,
+                        height: dim.height,
+                      },
+                    },
+                  });
+                  console.log(
+                    `[Voidspace] Aspect override from URL: ${urlAspect} → ${dim.width}x${dim.height} (was ${cur.settings?.width}x${cur.settings?.height})`,
+                  );
+                }
+              }
+            } catch (aspectErr) {
+              console.warn("[Voidspace] Aspect override failed:", aspectErr);
+            }
+
             navigate("editor");
             console.log(`[Voidspace] Restored local project: ${localSave.projectName}`);
             setVoidspaceLoading(false);
-            return;
+            // ⚠️  DO NOT return — fall through and install the live
+            // Firestore subscription below in additive-only mode. The
+            // chat keeps writing assets to Firestore after this iframe
+            // mounts; without a subscription the editor would freeze on
+            // the IndexedDB snapshot and new clips would never land,
+            // which is exactly what produced the "Timeline is empty"
+            // export error. `recoveredFromLocal` flips the snapshot
+            // callback into additive-merge mode so the recovered project
+            // (and any user edits already in flight) survive the merge.
+            recoveredFromLocal = true;
+          } else {
+            console.warn("[Voidspace] Local recovery failed, falling back to Firestore import");
           }
-          console.warn("[Voidspace] Local recovery failed, falling back to Firestore import");
         }
 
-        // No local copy — import fresh from Firestore AND subscribe to
-        // live updates. Studio chat upserts assets one-by-one as the
-        // user approves each step (frame → voiceover → clip → render);
-        // without the subscription the editor only saw the snapshot at
-        // mount time, so the timeline never refreshed and users had to
-        // reload to see the next clip land. The subscription
-        // coalesces bursts and re-runs `loadSceneListAsProject` on
-        // every Firestore write so tracks fill in real time.
-        console.log(`[Voidspace] Loading scene list: ${sceneListId} (live)`);
-        let firstLoad = true;
+        // Always install the Firestore live subscription. Studio chat
+        // upserts assets one-by-one as the user approves each step
+        // (frame → voiceover → clip → render); without the subscription
+        // the editor would only see the snapshot at mount time, so the
+        // timeline would never refresh and users would have to reload
+        // to see the next clip land. The subscription coalesces bursts
+        // and re-runs `loadSceneListAsProject` on every Firestore write
+        // so tracks fill in real time.
+        //
+        //   - On a clean mount: `firstLoad=true` → first snapshot wins,
+        //     subsequent ticks merge or replace based on user edits.
+        //   - After a local-save recovery: `firstLoad=false` from the
+        //     start so the recovered project is the baseline; every
+        //     snapshot tick goes through the additive merge path below.
+        console.log(
+          `[Voidspace] Loading scene list: ${sceneListId} (live${recoveredFromLocal ? ", post-recovery additive" : ""})`,
+        );
+        let firstLoad = !recoveredFromLocal;
+        let tickCount = 0;
         const unsubscribe = subscribeSceneListAsProject(
           userId,
           sceneListId,
           (project) => {
+            tickCount++;
+            // Always-on summary so chat → editor coupling is observable
+            // from the DevTools console without needing to attach to
+            // each Firestore listener manually. Format mirrors the
+            // merge-result line below so a "tick fired but no merge"
+            // case is visually distinct.
+            console.log(
+              `[Voidspace tick #${tickCount}] fresh: ${project.mediaLibrary.items.length} media, ${(project.textClips ?? []).length} captions, ${project.timeline.tracks.reduce((n, t) => n + t.clips.length, 0)} clips`,
+            );
             if (firstLoad) {
               firstLoad = false;
               loadProject(project);
@@ -209,24 +618,25 @@ function App() {
               );
               return;
             }
-            // Subsequent live update — merge fresh media + timeline
-            // into the running project so the editor canvas / tracks
-            // update without losing the user's in-progress edits
-            // (selection, playhead, etc.).
-            const current = useProjectStore.getState().project;
-            useProjectStore.setState({
-              project: {
-                ...current,
-                name: project.name,
-                settings: project.settings,
-                mediaLibrary: project.mediaLibrary,
-                timeline: project.timeline,
-                modifiedAt: project.modifiedAt,
-              },
-            });
-            console.log(
-              `[Voidspace] Live update: ${project.mediaLibrary.items.length} media items`,
-            );
+            // Subsequent live update — single path: additive merge.
+            // The previous wholesale-replace branch (when canUndo()
+            // was false AND no recovery) raced against any user
+            // mid-edit and against the chat's `pingEditor` which also
+            // reloaded. One code path here means the editor's
+            // behaviour for chat-driven assets is deterministic:
+            // append what's new, upgrade what's blob-less, never
+            // wipe what already exists. User-edit preservation comes
+            // for free because we never overwrite existing items.
+            const result = applyAdditiveMerge(project);
+            if (result.dirty) {
+              console.log(
+                `[Voidspace tick #${tickCount}] merged: +${result.newMedia} media, ↑${result.upgraded} hydrated, +${result.newCaptions} captions, +${result.newClips} clips`,
+              );
+            } else {
+              // Quiet no-op — useful to confirm the subscription is
+              // actually firing even when nothing changed.
+              console.log(`[Voidspace tick #${tickCount}] merged: no-op (already up-to-date)`);
+            }
           },
           (err) => {
             console.warn("[Voidspace] Live subscription error:", err);
@@ -338,20 +748,79 @@ function App() {
             });
             break;
           }
+          case "voidspace:set-aspect": {
+            // Live aspect change from the chat — resize the canvas
+            // in-place without an iframe navigation. The chat's
+            // settings popup updates `currentAspect` and pushes the
+            // new value here; we patch `project.settings.{width,height}`
+            // and let the renderer pick up the new dims on the next
+            // frame. Avoids the recovery-branch round-trip that would
+            // otherwise lose in-flight chat-generated assets.
+            const aspect = String(msg.aspect || "").trim();
+            const ASPECT_DIMS: Record<string, { width: number; height: number }> = {
+              "16:9": { width: 1920, height: 1080 },
+              "9:16": { width: 1080, height: 1920 },
+              "1:1":  { width: 1080, height: 1080 },
+              "4:3":  { width: 1440, height: 1080 },
+              "3:4":  { width: 1080, height: 1440 },
+              "21:9": { width: 2560, height: 1080 },
+            };
+            const dim = ASPECT_DIMS[aspect];
+            if (!dim) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: `unknown aspect: ${aspect}` });
+              break;
+            }
+            const cur = useProjectStore.getState().project;
+            if (
+              (cur.settings?.width ?? 0) !== dim.width ||
+              (cur.settings?.height ?? 0) !== dim.height
+            ) {
+              useProjectStore.setState({
+                project: {
+                  ...cur,
+                  settings: { ...cur.settings, width: dim.width, height: dim.height },
+                },
+              });
+              console.log(
+                `[Voidspace set-aspect] ${aspect} → ${dim.width}x${dim.height} (was ${cur.settings?.width}x${cur.settings?.height})`,
+              );
+            }
+            reply({ type: "voidspace:ack", requestId: msg.requestId, op: "set-aspect" });
+            break;
+          }
           case "voidspace:reload": {
+            // Chat's "I just wrote a new asset, please refresh" nudge.
+            // Coalesced + single-flight — concurrent reload requests
+            // (chat may burst-fire one per write) reuse the in-flight
+            // loadSceneListAsProject promise and re-merge against the
+            // same fresh data, eliminating duplicate network traffic.
+            //
+            // CRITICAL: this used to call `loadProject(fresh)` which
+            // wholesale-replaced `mediaLibrary` / `timeline` /
+            // `textClips`. That raced against any user mid-edit AND
+            // against the live subscription which was also firing
+            // for the same write — sometimes wiping fresh content
+            // the subscription had just merged in. Now both paths
+            // funnel through `applyAdditiveMerge` so the chat nudge
+            // can never destroy editor state, only add to it.
             const sp = new URLSearchParams(window.location.search);
             const sceneListId = sp.get("sceneListId");
-            const userId = useProjectStore.getState().project?.id?.match(/users?_(.*?)_/)?.[1] || null;
-            if (sceneListId && userId) {
-              try {
-                const fresh = await loadSceneListAsProject(userId, sceneListId);
-                loadProject(fresh);
-                reply({ type: "voidspace:ack", requestId: msg.requestId, op: "reload" });
-              } catch (err) {
-                reply({ type: "voidspace:error", requestId: msg.requestId, error: String((err as any)?.message ?? err) });
-              }
-            } else {
+            const projectId = useProjectStore.getState().project?.id;
+            const parsed = projectId ? parseVoidspaceProjectId(projectId) : null;
+            const userId = parsed?.userId ?? null;
+            if (!sceneListId || !userId) {
               reply({ type: "voidspace:error", requestId: msg.requestId, error: "no sceneListId in URL" });
+              break;
+            }
+            try {
+              const fresh = await reloadSingleFlight(userId, sceneListId);
+              const result = applyAdditiveMerge(fresh);
+              console.log(
+                `[Voidspace reload-ping] merged: +${result.newMedia} media, ↑${result.upgraded} hydrated, +${result.newCaptions} captions, +${result.newClips} clips`,
+              );
+              reply({ type: "voidspace:ack", requestId: msg.requestId, op: "reload" });
+            } catch (err) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: String((err as any)?.message ?? err) });
             }
             break;
           }

@@ -12,8 +12,131 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Abril+Fatface&family=Alfa+Slab+One&family=Anton&family=Archivo+Black&family=Bangers&family=Bebas+Neue&family=Black+Ops+One&family=Bungee&family=Caveat:wght@400;700&family=Cinzel:wght@400;700;900&family=Comfortaa:wght@300;400;700&family=Concert+One&family=Creepster&family=Dancing+Script:wght@400;700&family=DM+Sans:wght@400;500;700&family=DM+Serif+Display&family=Fredoka+One&family=Great+Vibes&family=Inter:wght@300;400;500;600;700;800;900&family=Lato:wght@300;400;700;900&family=Lexend:wght@300;400;500;600;700&family=Lobster&family=Lora:wght@400;500;600;700&family=Merriweather:wght@300;400;700;900&family=Montserrat:wght@300;400;500;600;700;800;900&family=Nunito:wght@300;400;600;700;800&family=Open+Sans:wght@300;400;600;700;800&family=Oswald:wght@300;400;500;600;700&family=Outfit:wght@300;400;500;600;700;800&family=Pacifico&family=Permanent+Marker&family=Playfair+Display:wght@400;500;600;700;800;900&family=Poppins:wght@300;400;500;600;700;800;900&family=Press+Start+2P&family=Quicksand:wght@300;400;500;600;700&family=Raleway:wght@300;400;500;600;700;800&family=Righteous&family=Roboto:wght@300;400;500;700;900&family=Roboto+Condensed:wght@300;400;700&family=Roboto+Mono:wght@300;400;500;700&family=Roboto+Slab:wght@300;400;500;700&family=Rock+Salt&family=Rubik:wght@300;400;500;600;700;800&family=Sacramento&family=Satisfy&family=Space+Grotesk:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&family=Staatliches&family=Teko:wght@300;400;500;600;700&family=Titan+One&family=Ubuntu:wght@300;400;500;700&family=Work+Sans:wght@300;400;500;600;700;800&family=Yellowtail&family=Zilla+Slab:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
     <title>Voidspace Studio - AI Video Editor</title>
+    <!--
+      KILL-SWITCH for stale Service Workers from a previous standalone
+      openreel install. When the editor is loaded inside the Voidspace
+      chat iframe (?embed=1 or window.self !== window.top), an SW
+      registered earlier under the same origin can intercept these
+      bootstrap requests and serve cached responses that point at a
+      port that's no longer running — manifesting as "localhost
+      refused to connect" inside the iframe on first load. This
+      script runs BEFORE any module imports and does three things:
+        1. Unregister every Service Worker on this origin.
+        2. Wipe every CacheStorage bucket.
+        3. If we actually unregistered an active controller, reload
+           the page once so the next request batch goes to the
+           network instead of through the dying SW.
+      The whole block is a no-op when the editor runs standalone
+      (window.self === window.top and no ?embed=1).
+    -->
+    <script>
+      (function () {
+        try {
+          var isEmbedded =
+            window.self !== window.top ||
+            new URLSearchParams(location.search).get("embed") === "1";
+          if (!isEmbedded) return;
+          // Sentinel so the post-unregister reload only fires once
+          // per page-load attempt — avoids reload loops if the
+          // browser keeps re-attaching a controller for some reason.
+          var didReload = sessionStorage.getItem("voidspace_sw_kill_did_reload") === "1";
+          var hadController = !!(navigator.serviceWorker && navigator.serviceWorker.controller);
+          var work = [];
+          if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+            work.push(
+              navigator.serviceWorker.getRegistrations().then(function (regs) {
+                return Promise.all((regs || []).map(function (r) {
+                  return r.unregister().catch(function () { return false; });
+                }));
+              }).catch(function () { /* ignore */ })
+            );
+          }
+          if (window.caches && caches.keys) {
+            work.push(
+              caches.keys().then(function (keys) {
+                return Promise.all((keys || []).map(function (k) {
+                  return caches.delete(k).catch(function () { return false; });
+                }));
+              }).catch(function () { /* ignore */ })
+            );
+          }
+          if (hadController && !didReload) {
+            // Block module loading until the SW is gone, then reload
+            // ONCE so the next fetch sequence bypasses the dead SW.
+            sessionStorage.setItem("voidspace_sw_kill_did_reload", "1");
+            Promise.all(work).then(function () {
+              location.reload();
+            });
+          } else {
+            // No active controller — let the page boot normally.
+            // Fire-and-forget the cleanup so future loads are clean.
+            Promise.all(work).catch(function () { /* ignore */ });
+            // Clear the sentinel so a future stale install can still
+            // trigger the reload path on a later session.
+            try { sessionStorage.removeItem("voidspace_sw_kill_did_reload"); } catch (_) {}
+          }
+        } catch (_) {
+          /* best-effort */
+        }
+      })();
+    </script>
+    <!--
+      Inline pre-paint theme applier. Reads ?theme=light|dark|system from
+      the URL (the chat embed sets this), falls back to the persisted
+      theme-store value (`voidspace_theme_mode` in localStorage), then to
+      `system` via prefers-color-scheme. We set `data-theme` on <html>
+      AND paint the body background here so React's slower mount path
+      doesn't flash white before the theme provider boots. Without this,
+      the iframe shows a 200–400 ms white frame on every cold load.
+    -->
+    <script>
+      (function () {
+        try {
+          // The chat embed forwards its own theme via `?theme=light|dark`
+          // (also accepts `system` as an alias for the persisted store
+          // value `auto`). When absent, fall back to the persisted
+          // theme-store value, then to the OS preference.
+          var modeParam = new URLSearchParams(location.search).get("theme");
+          if (modeParam === "system") modeParam = "auto";
+          var stored = null;
+          try {
+            var raw = localStorage.getItem("voidspace-studio-theme");
+            if (raw) {
+              var parsed = JSON.parse(raw);
+              stored = (parsed && parsed.state && parsed.state.mode) || null;
+            }
+          } catch (_) {}
+          var mode =
+            modeParam === "light" || modeParam === "dark" || modeParam === "auto"
+              ? modeParam
+              : stored === "light" || stored === "dark" || stored === "auto"
+                ? stored
+                : "dark";
+          var resolved = mode;
+          if (resolved === "auto") {
+            resolved = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark"
+              : "light";
+          }
+          // Theme-store applies dark via the `dark` class on <html>; we
+          // mirror that here so Tailwind dark: variants and the studio's
+          // CSS-var theme are correct from the very first paint.
+          if (resolved === "dark") {
+            document.documentElement.classList.add("dark");
+          } else {
+            document.documentElement.classList.remove("dark");
+          }
+          document.documentElement.style.backgroundColor =
+            resolved === "dark" ? "#09090b" : "#ffffff";
+          document.documentElement.style.colorScheme = resolved;
+        } catch (_) {
+          document.documentElement.classList.add("dark");
+          document.documentElement.style.backgroundColor = "#09090b";
+        }
+      })();
+    </script>
   </head>
-  <body style="background:#09090b;margin:0">
+  <body style="margin:0">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

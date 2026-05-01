@@ -22,6 +22,7 @@ import { titleEngine } from "../text/title-engine";
 import { graphicsEngine } from "../graphics/graphics-engine";
 import { UpscalingEngine, getUpscalingEngine } from "../video/upscaling";
 import { getMediaEngine } from "../media/mediabunny-engine";
+import { rewriteToProxy } from "../utils/cors-proxy";
 import { getWavEncoder } from "../wasm/wav";
 
 export class ExportEngine {
@@ -391,6 +392,43 @@ export class ExportEngine {
 
       await output.start();
 
+      // Pre-fetch blobs for any audio-bearing media items that arrived
+      // without one — Voidspace remote media (narration, music) is
+      // declared with `originalUrl` only and the audio engine bails
+      // silently when `mediaItem.blob` is null. Mirrors the video
+      // pre-load below; without this the exported MP4 has video but
+      // no narration/music, even though the preview plays them via
+      // HTMLAudioElement (which doesn't go through the audio engine).
+      const audioPrefetchIds = new Set<string>();
+      for (const track of project.timeline.tracks) {
+        if (track.type !== "audio" && track.type !== "video") continue;
+        for (const clip of track.clips) {
+          const mediaItem = project.mediaLibrary.items.find(
+            (m) => m.id === clip.mediaId,
+          );
+          if (!mediaItem || mediaItem.type !== "audio") continue;
+          if (mediaItem.blob instanceof Blob) continue;
+          if (audioPrefetchIds.has(mediaItem.id)) continue;
+          audioPrefetchIds.add(mediaItem.id);
+          if (!mediaItem.originalUrl) continue;
+          try {
+            const resp = await fetch(rewriteToProxy(mediaItem.originalUrl), { mode: "cors" });
+            if (resp.ok) {
+              (mediaItem as { blob: Blob | null }).blob = await resp.blob();
+            } else {
+              console.warn(
+                `[export-engine] Audio prefetch ${resp.status} for ${mediaItem.id} (${mediaItem.originalUrl})`,
+              );
+            }
+          } catch (err) {
+            console.warn(
+              `[export-engine] Audio prefetch failed for ${mediaItem.id}:`,
+              err,
+            );
+          }
+        }
+      }
+
       try {
         await this.encodeTimelineAudioToSource(project, audioSource);
       } finally {
@@ -413,7 +451,7 @@ export class ExportEngine {
           // Fetch from originalUrl when blob is missing (e.g. Voidspace remote media)
           if (!blob && mediaItem.originalUrl) {
             try {
-              const resp = await fetch(mediaItem.originalUrl, { mode: "cors" });
+              const resp = await fetch(rewriteToProxy(mediaItem.originalUrl), { mode: "cors" });
               if (resp.ok) blob = await resp.blob();
             } catch {
               console.warn(`[export-engine] Failed to fetch media blob for ${mediaItem.id}`);

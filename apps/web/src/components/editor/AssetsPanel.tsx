@@ -1042,34 +1042,93 @@ export const AssetsPanel: React.FC = () => {
           <div className="px-5 pb-5">
             {filteredItems.length === 0 ? (
               <EmptyState onImport={triggerFileInput} />
-            ) : (
-              <div className={
-                mediaViewMode === "list"
-                  ? "flex flex-col gap-1.5"
-                  : mediaViewMode === "small"
-                    ? "grid grid-cols-3 gap-2"
-                    : "grid grid-cols-2 gap-3"
-              }>
-                {filteredItems.map((item) => (
-                  <MediaThumbnail
-                    key={item.id}
-                    item={item}
-                    isSelected={isSelected(item.id)}
-                    viewMode={mediaViewMode}
-                    onSelect={() => handleSelectItem(item.id)}
-                    onDelete={() => handleDeleteItem(item.id)}
-                    onReplace={() => handleReplaceAsset(item.id)}
-                    onDragStart={(e) => handleItemDragStart(e, item)}
-                    onAddToTimeline={() => handleAddToTimeline(item)}
-                    onKieAI={item.type === "image" && !item.isPending && !item.kieaiError ? () => handleOpenKieAI(item) : undefined}
-                    onRetryKieAI={item.kieaiError && item.kieaiTaskId ? () => handleRetryKieAI(item) : undefined}
-                  />
-                ))}
-                {/* Add more media tile */}
+            ) : (() => {
+              // Bucket items by `category` (Voidspace stamps these:
+              // "Scene Videos", "Narrations", "Music"). Items without a
+              // category fall into "Imported" so user-uploaded files
+              // stay visually distinct from generated content. Within
+              // a bucket, sort by sceneNumber when present so the
+              // panel matches the timeline left-to-right.
+              const buckets = new Map<string, typeof filteredItems>();
+              for (const item of filteredItems) {
+                const key = item.category || "Imported";
+                if (!buckets.has(key)) buckets.set(key, []);
+                buckets.get(key)!.push(item);
+              }
+              for (const [, arr] of buckets) {
+                arr.sort((a, b) => {
+                  const an = a.sceneNumber ?? Number.POSITIVE_INFINITY;
+                  const bn = b.sceneNumber ?? Number.POSITIVE_INFINITY;
+                  if (an !== bn) return an - bn;
+                  return a.name.localeCompare(b.name);
+                });
+              }
+              // Stable section order: Voidspace categories first, then
+              // any other category alphabetically, then user imports.
+              const ORDER = ["Scene Videos", "Narrations", "Music", "Frames"];
+              const sectionKeys = Array.from(buckets.keys()).sort((a, b) => {
+                const ai = ORDER.indexOf(a);
+                const bi = ORDER.indexOf(b);
+                if (ai !== -1 && bi !== -1) return ai - bi;
+                if (ai !== -1) return -1;
+                if (bi !== -1) return 1;
+                if (a === "Imported") return 1;
+                if (b === "Imported") return -1;
+                return a.localeCompare(b);
+              });
+              return (
+                <div className="flex flex-col gap-4">
+                  {sectionKeys.map((section) => {
+                    const items = buckets.get(section)!;
+                    return (
+                      <div key={section} className="flex flex-col gap-2">
+                        <div className="flex items-center justify-between sticky top-0 z-10 bg-background-secondary/95 backdrop-blur py-1">
+                          <span className="text-[11px] font-semibold uppercase tracking-wide text-text-secondary">
+                            {section}
+                          </span>
+                          <span className="text-[10px] text-text-muted tabular-nums">
+                            {items.length}
+                          </span>
+                        </div>
+                        <div className={
+                          mediaViewMode === "list"
+                            ? "flex flex-col gap-1.5"
+                            : mediaViewMode === "small"
+                              ? "grid grid-cols-3 gap-2"
+                              : "grid grid-cols-2 gap-3"
+                        }>
+                          {items.map((item) => (
+                            <MediaThumbnail
+                              key={item.id}
+                              item={item}
+                              isSelected={isSelected(item.id)}
+                              viewMode={mediaViewMode}
+                              onSelect={() => handleSelectItem(item.id)}
+                              onDelete={() => handleDeleteItem(item.id)}
+                              onReplace={() => handleReplaceAsset(item.id)}
+                              onDragStart={(e) => handleItemDragStart(e, item)}
+                              onAddToTimeline={() => handleAddToTimeline(item)}
+                              onKieAI={item.type === "image" && !item.isPending && !item.kieaiError ? () => handleOpenKieAI(item) : undefined}
+                              onRetryKieAI={item.kieaiError && item.kieaiTaskId ? () => handleRetryKieAI(item) : undefined}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+            {filteredItems.length > 0 && (
+              <div className="mt-3">
+                {/* Add more media tile — pinned at the bottom of the
+                    grouped list so user-imported additions sit alongside
+                    the always-on import affordance instead of being
+                    swallowed by the section sort. */}
                 {mediaViewMode === "list" ? (
                   <button
                     onClick={triggerFileInput}
-                    className="flex items-center gap-3 px-2 py-1.5 rounded-lg border-2 border-dashed border-border hover:border-text-secondary cursor-pointer transition-all group"
+                    className="w-full flex items-center gap-3 px-2 py-1.5 rounded-lg border-2 border-dashed border-border hover:border-text-secondary cursor-pointer transition-all group"
                   >
                     <div className="w-12 h-8 rounded bg-background-tertiary flex items-center justify-center flex-shrink-0">
                       <Upload size={14} className="text-text-muted group-hover:text-text-secondary transition-colors" />
@@ -1077,17 +1136,15 @@ export const AssetsPanel: React.FC = () => {
                     <span className="text-[11px] text-text-muted group-hover:text-text-secondary transition-colors font-medium">Add media</span>
                   </button>
                 ) : (
-                  <div className="flex flex-col">
-                    <button
-                      onClick={triggerFileInput}
-                      className="aspect-video bg-background-tertiary rounded-lg border-2 border-dashed border-border hover:border-text-secondary relative flex items-center justify-center cursor-pointer transition-all overflow-hidden shadow-sm group"
-                    >
-                      <div className="flex flex-col items-center gap-1.5">
-                        <Upload size={mediaViewMode === "small" ? 16 : 20} className="text-text-muted group-hover:text-text-secondary transition-colors" />
-                        <span className="text-[10px] text-text-muted group-hover:text-text-secondary transition-colors">Add media</span>
-                      </div>
-                    </button>
-                  </div>
+                  <button
+                    onClick={triggerFileInput}
+                    className="w-full aspect-video bg-background-tertiary rounded-lg border-2 border-dashed border-border hover:border-text-secondary relative flex items-center justify-center cursor-pointer transition-all overflow-hidden shadow-sm group"
+                  >
+                    <div className="flex flex-col items-center gap-1.5">
+                      <Upload size={mediaViewMode === "small" ? 16 : 20} className="text-text-muted group-hover:text-text-secondary transition-colors" />
+                      <span className="text-[10px] text-text-muted group-hover:text-text-secondary transition-colors">Add media</span>
+                    </div>
+                  </button>
                 )}
               </div>
             )}

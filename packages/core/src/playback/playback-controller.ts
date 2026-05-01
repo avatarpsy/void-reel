@@ -22,6 +22,7 @@ import {
   initializeRealtimeAudioGraph,
   type AudioClipSchedule,
 } from "../audio/realtime-audio-graph";
+import { rewriteToProxy } from "../utils/cors-proxy";
 
 export class PlaybackController {
   private videoEngine: VideoEngine | null = null;
@@ -194,7 +195,27 @@ export class PlaybackController {
 
     this.state = "playing";
 
+    // Hydrate every buffer we'll need before starting the clock. If we
+    // start the clock first and the scheduler runs while a fetch is in
+    // flight, the clip's startTime slides into the past unscheduled and
+    // the user gets partial / silent audio for the first scene — which
+    // is the symptom the chat-driven flow has been hitting because
+    // every Voidspace narration starts life as a remote URL with no
+    // local blob. preloadAudioBuffers awaits all decodes (incl. the
+    // network fetch we now do for blob-less items).
     await this.preloadAudioBuffers();
+
+    // After preload, audit the timeline's audio surface. Any clip that
+    // failed to decode after the retries has fallen back to an
+    // <audio> element under `htmlAudioFallback` — start those before
+    // the clock so they're aligned with masterClock from frame 0.
+    this.startHtmlAudioFallbacks();
+
+    const audioCtx = this.realtimeAudioGraph.getAudioContext();
+    console.log(
+      `[playback] play(): audioContext.state=${audioCtx.state}, buffered=${this.audioBufferCache.size}, fallbacks=${this.htmlAudioFallback.size}, failures=${this.audioDecodeFailures.size}`,
+    );
+
     await this.masterClock.play();
     await this.startAudioPlayback();
 
@@ -220,6 +241,7 @@ export class PlaybackController {
 
     this.masterClock.pause();
     this.stopAudioPlayback();
+    this.stopHtmlAudioFallbacks();
 
     const currentTime = this.masterClock.currentTime;
 
@@ -242,6 +264,7 @@ export class PlaybackController {
 
     this.masterClock.stop();
     this.stopAudioPlayback();
+    this.stopHtmlAudioFallbacks();
 
     this.emitEvent({
       type: "stop",
@@ -279,7 +302,19 @@ export class PlaybackController {
 
     if (wasPlaying) {
       this.stopAudioPlayback();
+      this.stopHtmlAudioFallbacks();
       await this.startAudioPlayback();
+      this.startHtmlAudioFallbacks();
+    } else {
+      // Even when paused, snap fallback elements to the new offset so
+      // a subsequent play() picks up from the right spot.
+      for (const [, entry] of this.htmlAudioFallback) {
+        const offset =
+          entry.mediaOffset + Math.max(0, clampedTime - entry.clipStart);
+        try {
+          entry.el.currentTime = offset;
+        } catch { /* ignore */ }
+      }
     }
 
     await this.renderFrameAtTime(clampedTime);
@@ -561,7 +596,16 @@ export class PlaybackController {
         if (clipEnd <= time || clip.startTime > time + 1) continue;
 
         const mediaItem = mediaLibrary.items.find((m) => m.id === clip.mediaId);
-        if (!mediaItem?.blob) continue;
+        // Skip only when there's neither a blob nor an originalUrl to
+        // hydrate from. Voidspace remote media (narration, music,
+        // Remotion clips) lands here with `blob: null` because the
+        // loader either failed CORS, the blob never made it into
+        // IndexedDB, or the project was just recovered from autosave
+        // (autosave JSON-strips blobs). `getOrDecodeAudioBuffer` will
+        // lazily fetch and decode using `originalUrl` so the very next
+        // scheduler tick has audio for this clip.
+        if (!mediaItem) continue;
+        if (!mediaItem.blob && !mediaItem.originalUrl) continue;
 
         const cachedBuffer = this.getOrDecodeAudioBuffer(mediaItem);
         if (!cachedBuffer) continue;
@@ -599,7 +643,16 @@ export class PlaybackController {
 
       for (const clip of track.clips) {
         const mediaItem = mediaLibrary.items.find((m) => m.id === clip.mediaId);
-        if (mediaItem?.blob && !this.audioBufferCache.has(mediaItem.id)) {
+        if (!mediaItem) continue;
+        // Preload anything we can hydrate — either an in-memory blob
+        // OR a remote `originalUrl` (Voidspace narration / music /
+        // Remotion-rendered clips, which arrive blob-less after
+        // autosave recovery or when the loader couldn't fetch the
+        // bytes inline).
+        if (
+          !this.audioBufferCache.has(mediaItem.id) &&
+          (mediaItem.blob || mediaItem.originalUrl)
+        ) {
           mediaIdsToPreload.add(mediaItem.id);
         }
       }
@@ -609,17 +662,64 @@ export class PlaybackController {
 
     for (const mediaId of mediaIdsToPreload) {
       const mediaItem = mediaLibrary.items.find((m) => m.id === mediaId);
-      if (mediaItem?.blob) {
+      if (mediaItem) {
         decodePromises.push(this.decodeAudioBuffer(mediaItem));
       }
     }
 
     await Promise.all(decodePromises);
+
+    // After the AudioContext decode round, install HTML <audio>
+    // fallbacks for anything that ended up in the failure map. This is
+    // the safety net for codecs WebAudio's `decodeAudioData` rejects
+    // (some CDN-served MP3s, Opus-in-WebM mismatches, mid-renamed
+    // .mp3-with-mp4-bytes outputs from the TTS provider, etc.). The
+    // <audio> element decoder is independent and survives most of those.
+    for (const track of timeline.tracks) {
+      if (track.type !== "audio" && track.type !== "video") continue;
+      for (const clip of track.clips) {
+        const mediaItem = mediaLibrary.items.find((m) => m.id === clip.mediaId);
+        if (!mediaItem) continue;
+        const failed = (this.audioDecodeFailures.get(mediaItem.id) ?? 0) >= 2;
+        const decoded = this.audioBufferCache.has(mediaItem.id);
+        if (!decoded && failed) {
+          this.installHtmlAudioFallback(mediaItem, clip);
+        }
+      }
+    }
   }
+
+  /**
+   * Tracks media ids whose blob was fetched from `originalUrl` but
+   * decoded to nothing — almost always because the bytes were a 0-byte
+   * Firebase Storage 200, an HTML error page, or an unsupported codec.
+   * On the next decode call we discard the cached blob and re-fetch
+   * once. After two consecutive failures we mark the id as permanently
+   * undecodable so we stop hammering the network.
+   */
+  private audioDecodeFailures: Map<string, number> = new Map();
+
+  /**
+   * Last-resort playback: an HTMLAudioElement keyed by media id. When
+   * `decodeAudioData` rejects (CORS-tainted body, codec unsupported by
+   * the WebAudio path, etc.), `<audio>` will still play the URL
+   * because the media element decoder is a separate path that doesn't
+   * require CORS for playback. We drive it directly off `masterClock`
+   * with `currentTime` adjustments so it stays in sync with the
+   * timeline. Audio quality is identical; we just lose effects /
+   * mixing routing for these clips.
+   */
+  private htmlAudioFallback: Map<
+    string,
+    { el: HTMLAudioElement; clipStart: number; clipDuration: number; mediaOffset: number }
+  > = new Map();
 
   private async decodeAudioBuffer(mediaItem: {
     id: string;
     blob?: Blob | null;
+    originalUrl?: string;
+    name?: string;
+    type?: string;
   }): Promise<AudioBuffer | null> {
     if (this.audioBufferCache.has(mediaItem.id)) {
       return this.audioBufferCache.get(mediaItem.id) || null;
@@ -629,20 +729,119 @@ export class PlaybackController {
       return this.audioDecodePromises.get(mediaItem.id) || null;
     }
 
-    if (!mediaItem.blob) return null;
+    const failures = this.audioDecodeFailures.get(mediaItem.id) ?? 0;
+    if (failures >= 2) {
+      // Stopped trying — see audioDecodeFailures comment above.
+      return null;
+    }
+
+    if (!mediaItem.blob && !mediaItem.originalUrl) return null;
 
     const audioContext = this.masterClock.getAudioContext();
+    const url = mediaItem.originalUrl;
+    const label = `${mediaItem.name || mediaItem.id}${url ? ` (${url})` : ""}`;
 
-    const decodePromise = mediaItem.blob
-      .arrayBuffer()
-      .then((arrayBuffer) => audioContext.decodeAudioData(arrayBuffer))
-      .then((buffer) => {
-        this.audioBufferCache.set(mediaItem.id, buffer);
-        this.audioDecodePromises.delete(mediaItem.id);
-        return buffer;
+    // Many studio assets sit on hosts that don't return CORS headers
+    // (Kie's tempfile.redpandaai.co is the prime offender — every
+    // narration MP3 lands there). A direct cross-origin fetch is hard-
+    // blocked. Route through our same-origin proxy which adds an
+    // `Access-Control-Allow-Origin: *` header so both `decodeAudioData`
+    // here and the export engine succeed. Same-origin URLs (already
+    // local public/, our own /api routes) and blob:/data: URLs go
+    // direct.
+    const fetchUrl = url ? rewriteToProxy(url) : undefined;
+
+    // The cached blob can be tainted: an earlier fetch may have
+    // returned 0 bytes, a redirected HTML page, or an opaque response.
+    // Any of those decode to nothing and the user gets silence with no
+    // log line to point at. Treat a failed prior decode as a signal to
+    // discard the cached blob and try the network again.
+    const previousDecodeFailed = failures > 0;
+    const useCachedBlob =
+      mediaItem.blob instanceof Blob &&
+      mediaItem.blob.size > 0 &&
+      !previousDecodeFailed;
+
+    const blobPromise: Promise<Blob | null> = useCachedBlob
+      ? Promise.resolve(mediaItem.blob as Blob)
+      : (async () => {
+          if (!fetchUrl) {
+            console.warn(
+              `[playback] No originalUrl to hydrate ${label}; cannot play.`,
+            );
+            return null;
+          }
+          try {
+            // `cache: "no-store"` sidesteps stale 0-byte responses that
+            // some CDNs occasionally serve when the asset was uploaded
+            // moments ago. The trade-off is one extra round trip the
+            // first time; it's cached on the MediaItem after that.
+            const resp = await fetch(fetchUrl, {
+              mode: "cors",
+              cache: "no-store",
+              credentials: "omit",
+            });
+            if (!resp.ok) {
+              console.warn(
+                `[playback] Audio fetch ${resp.status} for ${label}`,
+              );
+              return null;
+            }
+            const fetched = await resp.blob();
+            if (!fetched || fetched.size === 0) {
+              console.warn(
+                `[playback] Audio fetch returned 0 bytes for ${label}`,
+              );
+              return null;
+            }
+            (mediaItem as { blob: Blob | null }).blob = fetched;
+            return fetched;
+          } catch (err) {
+            console.warn(
+              `[playback] Audio fetch threw for ${label}:`,
+              err,
+            );
+            return null;
+          }
+        })();
+
+    const decodePromise = blobPromise
+      .then(async (blob) => {
+        if (!blob) return null;
+        try {
+          const arrayBuffer = await blob.arrayBuffer();
+          // `decodeAudioData` mutates the ArrayBuffer (transfers it),
+          // so always pass a fresh copy if you ever want to retry. We
+          // don't retry here, but the next call (after a failure
+          // counter bump) re-fetches and gets a fresh buffer.
+          return await audioContext.decodeAudioData(arrayBuffer);
+        } catch (err) {
+          console.warn(
+            `[playback] decodeAudioData failed for ${label} (size=${blob.size}, type=${blob.type}):`,
+            err,
+          );
+          return null;
+        }
       })
-      .catch(() => {
+      .then((buffer) => {
         this.audioDecodePromises.delete(mediaItem.id);
+        if (buffer) {
+          this.audioBufferCache.set(mediaItem.id, buffer);
+          this.audioDecodeFailures.delete(mediaItem.id);
+          return buffer;
+        }
+        // Bump the failure counter and discard the cached blob so a
+        // follow-up call fetches fresh bytes from `originalUrl`.
+        this.audioDecodeFailures.set(mediaItem.id, failures + 1);
+        if (mediaItem.blob && url) {
+          (mediaItem as { blob: Blob | null }).blob = null;
+        }
+        return null;
+      })
+      .catch((err) => {
+        this.audioDecodePromises.delete(mediaItem.id);
+        this.audioDecodeFailures.set(mediaItem.id, failures + 1);
+        console.warn(`[playback] Audio decode chain rejected for ${label}:`, err);
         return null;
       });
 
@@ -653,12 +852,19 @@ export class PlaybackController {
   private getOrDecodeAudioBuffer(mediaItem: {
     id: string;
     blob?: Blob | null;
+    originalUrl?: string;
   }): AudioBuffer | null {
     const cached = this.audioBufferCache.get(mediaItem.id);
     if (cached) return cached;
 
-    if (!mediaItem.blob) return null;
+    if (!mediaItem.blob && !mediaItem.originalUrl) return null;
 
+    // Fire-and-forget: kicks off the decode (and a fetch when the
+    // blob is missing). The next scheduler tick after the buffer
+    // lands in the cache will pick it up and start playback. This is
+    // why narration / music start ~1 tick late on the very first
+    // play after a Voidspace load — but it DOES start, where the
+    // previous code silently dropped the clip forever.
     this.decodeAudioBuffer(mediaItem);
 
     return null;
@@ -673,6 +879,124 @@ export class PlaybackController {
   private clearAudioBuffer(): void {
     this.stopAudioPlayback();
     this.audioBufferCache.clear();
+    this.audioDecodePromises.clear();
+    this.audioDecodeFailures.clear();
+    this.disposeHtmlAudioFallbacks();
+  }
+
+  /**
+   * Install or refresh an HTMLAudioElement-backed fallback for a clip
+   * whose AudioContext decode path failed. Called from
+   * `getOrDecodeAudioBuffer` once `audioDecodeFailures` reaches the
+   * cap, and from `preloadAudioBuffers` after the await for any media
+   * that ended up in the failure map. Idempotent on (mediaId).
+   */
+  private installHtmlAudioFallback(
+    mediaItem: { id: string; originalUrl?: string; name?: string },
+    clip: { startTime: number; duration: number; inPoint?: number },
+  ): void {
+    if (typeof document === "undefined") return;
+    if (this.htmlAudioFallback.has(mediaItem.id)) return;
+    if (!mediaItem.originalUrl) return;
+
+    const el = new Audio();
+    // NB: deliberately NOT setting `crossOrigin` here. Setting it
+    // forces the browser to require CORS on the response — which the
+    // Kie temp host refuses, so the element fails to play at all.
+    // Without `crossOrigin` the browser treats the audio as opaque:
+    // playback works, but it can't be routed through Web Audio nor
+    // captured to canvas. For preview-only narration that's an
+    // acceptable trade — the user hears the audio. For the export
+    // path we go through the same-origin /media-proxy which lets the
+    // export-engine's WebAudio fetch succeed.
+    el.preload = "auto";
+    // Route through the proxy when cross-origin so retries / range
+    // requests benefit from edge caching and uniform error semantics.
+    el.src = rewriteToProxy(mediaItem.originalUrl);
+    el.addEventListener("error", () => {
+      console.warn(
+        `[playback] HTML <audio> fallback errored for ${mediaItem.name || mediaItem.id}: code=${el.error?.code}`,
+      );
+    });
+    this.htmlAudioFallback.set(mediaItem.id, {
+      el,
+      clipStart: clip.startTime,
+      clipDuration: clip.duration,
+      mediaOffset: clip.inPoint ?? 0,
+    });
+    console.log(
+      `[playback] Installed HTML <audio> fallback for ${mediaItem.name || mediaItem.id}`,
+    );
+  }
+
+  /**
+   * Start every HTML audio fallback in sync with masterClock. Called
+   * from play() after preloadAudioBuffers awaits. Each element seeks
+   * to its scene-relative offset and plays only while the clip is
+   * active; outside that window it pauses but stays attached so the
+   * next play()/seek doesn't have to reload the source.
+   */
+  private startHtmlAudioFallbacks(): void {
+    const t = this.masterClock.currentTime;
+    for (const [, entry] of this.htmlAudioFallback) {
+      const { el, clipStart, clipDuration, mediaOffset } = entry;
+      const clipEnd = clipStart + clipDuration;
+      if (t < clipStart || t >= clipEnd) {
+        el.pause();
+        try {
+          el.currentTime = mediaOffset;
+        } catch { /* readyState too low; ignore */ }
+        continue;
+      }
+      try {
+        el.currentTime = mediaOffset + (t - clipStart);
+      } catch { /* ignore */ }
+      el.play().catch((err) => {
+        console.warn(
+          `[playback] HTML <audio> fallback play() rejected:`,
+          err,
+        );
+      });
+    }
+  }
+
+  private stopHtmlAudioFallbacks(): void {
+    for (const [, entry] of this.htmlAudioFallback) {
+      entry.el.pause();
+    }
+  }
+
+  private disposeHtmlAudioFallbacks(): void {
+    for (const [, entry] of this.htmlAudioFallback) {
+      entry.el.pause();
+      entry.el.src = "";
+      entry.el.load();
+    }
+    this.htmlAudioFallback.clear();
+  }
+
+  /**
+   * Drop cached buffers / decode state for the given media ids so the
+   * next play() refetches and re-decodes them. Called from the project
+   * store when Voidspace's live subscription replaces a blob-less media
+   * item with the freshly hydrated one — the cached null buffer from
+   * the previous attempt would otherwise stick around and the user
+   * would still hear silence even after the upgrade.
+   */
+  public invalidateAudioForMedia(mediaIds: Iterable<string>): void {
+    let any = false;
+    for (const id of mediaIds) {
+      this.audioBufferCache.delete(id);
+      this.audioDecodePromises.delete(id);
+      this.audioDecodeFailures.delete(id);
+      any = true;
+    }
+    if (any && this.state === "playing") {
+      // Force a reschedule on the next tick so the freshly decoded
+      // buffer gets picked up for the *current* clip rather than
+      // sitting idle until the user pauses and plays again.
+      this.realtimeAudioGraph.seekTo(this.masterClock.currentTime);
+    }
   }
 
   private trackFrameRenderTime(time: number): void {
