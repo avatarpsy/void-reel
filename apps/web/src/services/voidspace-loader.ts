@@ -886,26 +886,52 @@ export async function loadSceneListAsProject(
       scene.image_url ?? scene.first_frame_url ?? scene.preview_image_url ?? null,
     );
 
-    // Pick the primary video (or first available)
+    // Pick the primary video. Prefer the asset whose URL matches the
+    // scene-level `video_url` — that field is the chat side's
+    // authoritative pointer to the latest approved clip, so honoring
+    // it makes regen-approve actually swap the clip on the timeline
+    // instead of replaying the oldest doc that happens to be tagged
+    // `primary` from a prior generation.
     const videosWithUrls = videos.filter((v) => v.url || v.video_url);
     const primaryVideo =
-      videosWithUrls.find((v) => v.tag === "primary") ?? videosWithUrls[0] ?? null;
+      (scene.video_url
+        ? videosWithUrls.find((v) => (v.url ?? v.video_url) === scene.video_url)
+        : null) ??
+      videosWithUrls.find((v) => v.tag === "primary") ??
+      videosWithUrls[videosWithUrls.length - 1] ??
+      null;
     const videoUrl = await resolveMediaUrl(
       primaryVideo?.url ?? primaryVideo?.video_url ?? sceneFallbackVideoUrl ?? null,
     );
 
-    // Pick the primary image (first_frame or first available)
+    // Pick the primary image. Same idea as video — prefer whichever
+    // asset matches the scene-level pointer so a regen-approved frame
+    // wins over the first-tagged doc.
+    const sceneImagePointer =
+      scene.image_url ?? scene.first_frame_url ?? scene.preview_image_url ?? null;
     const primaryImage =
+      (sceneImagePointer
+        ? images.find((i) => (i.url ?? i.image_url) === sceneImagePointer)
+        : null) ??
       images.find((i) => i.tag === "first_frame") ??
       images.find((i) => i.tag === "generated_first_frame") ??
-      images[0] ??
+      images[images.length - 1] ??
       null;
     const imageUrl = await resolveMediaUrl(
       primaryImage?.url ?? primaryImage?.image_url ?? sceneFallbackImageUrl ?? null,
     );
 
-    // Pick narration
-    const narration = narrations[0] ?? null;
+    // Pick narration. Same pointer-first rule so the editor swaps to
+    // the regenerated TTS instead of the first-inserted doc — which
+    // never matched the chat side's slider selection after regen.
+    const narration =
+      (scene.narration_url
+        ? narrations.find(
+            (n) => (n.narration_url ?? n.url) === scene.narration_url,
+          )
+        : null) ??
+      narrations[narrations.length - 1] ??
+      null;
     const narrationUrl =
       (await resolveMediaUrl(
         narration?.narration_url ??

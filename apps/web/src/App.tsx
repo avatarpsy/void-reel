@@ -146,16 +146,31 @@ function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
   );
 
   const knownClipIds = new Set<string>();
+  const currentClipById = new Map<string, import("@openreel/core").Clip>();
   for (const tr of current.timeline.tracks) {
-    for (const c of tr.clips) knownClipIds.add(c.id);
+    for (const c of tr.clips) {
+      knownClipIds.add(c.id);
+      currentClipById.set(c.id, c);
+    }
   }
   const trackPatches = new Map<
     string,
     import("@openreel/core").Clip[]
   >();
+  // Detect clips that already exist but now reference a different media item
+  // (e.g. narration/video replaced on timeline after regen-approve). The
+  // additive path only adds new clips — without this, the clip keeps pointing
+  // at the old mediaId even though Firestore has a newer narration_url.
+  const updatedClips = new Map<string, import("@openreel/core").Clip>();
   for (const tr of fresh.timeline.tracks) {
     const adds = tr.clips.filter((c) => !knownClipIds.has(c.id));
     if (adds.length > 0) trackPatches.set(tr.id, adds);
+    for (const freshClip of tr.clips) {
+      const existing = currentClipById.get(freshClip.id);
+      if (existing && existing.mediaId !== freshClip.mediaId) {
+        updatedClips.set(freshClip.id, freshClip);
+      }
+    }
   }
 
   const newClipsCount = [...trackPatches.values()].reduce(
@@ -166,7 +181,8 @@ function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
     newMedia.length > 0 ||
     upgradedMediaById.size > 0 ||
     newTextClips.length > 0 ||
-    trackPatches.size > 0;
+    trackPatches.size > 0 ||
+    updatedClips.size > 0;
 
   if (!dirty) {
     return {
@@ -180,7 +196,8 @@ function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
 
   const mergedTracks = current.timeline.tracks.map((tr) => {
     const adds = trackPatches.get(tr.id);
-    return adds ? { ...tr, clips: [...tr.clips, ...adds] } : tr;
+    const replaced = tr.clips.map((c) => updatedClips.get(c.id) ?? c);
+    return adds ? { ...tr, clips: [...replaced, ...adds] } : { ...tr, clips: replaced };
   });
   const knownTrackIds = new Set(mergedTracks.map((t) => t.id));
   for (const tr of fresh.timeline.tracks) {
@@ -211,11 +228,18 @@ function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
     },
   });
 
-  if (upgradedMediaById.size > 0) {
+  if (upgradedMediaById.size > 0 || updatedClips.size > 0) {
     const playbackController = useEngineStore
       .getState()
       .getPlaybackController();
-    playbackController?.invalidateAudioForMedia(upgradedMediaById.keys());
+    // Invalidate upgraded media AND the OLD media IDs whose clips were
+    // replaced — clearing the stale audio buffer forces the engine to
+    // decode the new narration blob on next playback.
+    const toInvalidate = [
+      ...upgradedMediaById.keys(),
+      ...[...updatedClips.keys()].map((clipId) => currentClipById.get(clipId)!.mediaId),
+    ];
+    playbackController?.invalidateAudioForMedia(toInvalidate[Symbol.iterator]());
   }
 
   const liveTitleEngine = useEngineStore.getState().getTitleEngine();
