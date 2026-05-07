@@ -1088,6 +1088,46 @@ function App() {
             reply({ type: "voidspace:clip-moved", requestId: msg.requestId, clipId, ok: true });
             break;
           }
+          case "voidspace:apply-editor-state": {
+            // Restore saved per-clip state (volumes, mutes, positions)
+            // from a previous manual save. Applied as an overlay on top
+            // of the Firestore-loaded project so editor-level tweaks
+            // (volume knob, clip drag) survive page reloads.
+            const savedTracks = msg.tracks as any[] | undefined;
+            if (!Array.isArray(savedTracks)) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: "tracks[] required" });
+              break;
+            }
+            const curProj = useProjectStore.getState().project;
+            const curTracks = curProj?.timeline?.tracks ?? [];
+            let applied = 0;
+            // Build a clipId → saved clip map from the saved state
+            const savedClipMap = new Map<string, any>();
+            for (const st of savedTracks) {
+              for (const sc of (st.clips || [])) {
+                if (sc.id) savedClipMap.set(sc.id, sc);
+              }
+            }
+            // Apply saved volume/muted/startTime/duration to matching clips
+            const patchedTracks = curTracks.map((tr: any) => ({
+              ...tr,
+              clips: (tr.clips ?? []).map((c: any) => {
+                const saved = savedClipMap.get(c.id);
+                if (!saved) return c;
+                const next = { ...c };
+                if (typeof saved.volume === "number" && saved.volume !== c.volume) { next.volume = saved.volume; applied++; }
+                if (typeof saved.muted === "boolean" && saved.muted !== c.muted) { next.muted = saved.muted; applied++; }
+                return next;
+              }),
+            }));
+            if (applied > 0) {
+              useProjectStore.setState({
+                project: { ...curProj, timeline: { ...curProj.timeline, tracks: patchedTracks } },
+              });
+            }
+            reply({ type: "voidspace:editor-state-applied", requestId: msg.requestId, ok: true, applied });
+            break;
+          }
           case "voidspace:snapshot": {
             // Create a named snapshot in the editor's ActionHistory.
             // The chat uses this to bookmark the state before an agent
