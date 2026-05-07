@@ -1089,11 +1089,12 @@ function App() {
             break;
           }
           case "voidspace:apply-editor-state": {
-            // Restore saved per-clip state (volumes, mutes, positions)
-            // from a previous manual save. Applied as an overlay on top
-            // of the Firestore-loaded project so editor-level tweaks
-            // (volume knob, clip drag) survive page reloads.
             const savedTracks = msg.tracks as any[] | undefined;
+            console.log("[apply-editor-state] received", {
+              hasTracks: Array.isArray(savedTracks),
+              trackCount: savedTracks?.length,
+              totalSavedClips: savedTracks?.reduce((a: number, t: any) => a + (t.clips?.length ?? 0), 0),
+            });
             if (!Array.isArray(savedTracks)) {
               reply({ type: "voidspace:error", requestId: msg.requestId, error: "tracks[] required" });
               break;
@@ -1128,6 +1129,11 @@ function App() {
                 return next;
               }),
             }));
+            console.log("[apply-editor-state] result", {
+              currentClips: curTracks.reduce((a: number, t: any) => a + (t.clips?.length ?? 0), 0),
+              savedClipsAvailable: savedClipMap.size,
+              propertiesApplied: applied,
+            });
             if (applied > 0) {
               useProjectStore.setState({
                 project: { ...curProj, timeline: { ...curProj.timeline, tracks: patchedTracks } },

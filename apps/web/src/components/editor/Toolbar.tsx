@@ -104,6 +104,7 @@ export const Toolbar: React.FC = () => {
     if (isSaving) return;
     setIsSaving(true);
     const requestId = `save_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    console.log("[save] click → start", { requestId });
     try {
       const proj = useProjectStore.getState().project;
       const tracks = (proj?.timeline?.tracks ?? []).map((tr: any) => ({
@@ -121,25 +122,30 @@ export const Toolbar: React.FC = () => {
           muted: c.muted ?? false,
         })),
       }));
-      // Wait for the parent to confirm the save completed before flashing
-      // "Saved". Without this acknowledgement, users see the flash and
-      // reload before the actual Firestore writes finish.
+      console.log("[save] tracks serialized", {
+        trackCount: tracks.length,
+        clipCount: tracks.reduce((a: number, t: any) => a + (t.clips?.length ?? 0), 0),
+        kinds: tracks.map((t: any) => `${t.kind}:${t.clips?.length ?? 0}`),
+      });
       const ackPromise = new Promise<boolean>((resolve) => {
         const onMsg = (e: MessageEvent) => {
           if (e.data?.type === "voidspace:save-done" && e.data.requestId === requestId) {
             window.removeEventListener("message", onMsg);
+            console.log("[save] ack received", { requestId, ok: e.data.ok, error: e.data.error });
             resolve(!!e.data.ok);
           }
         };
         window.addEventListener("message", onMsg);
-        // Hard timeout — if no ack in 30s, fail visibly
         setTimeout(() => {
           window.removeEventListener("message", onMsg);
+          console.warn("[save] TIMEOUT — no ack in 30s", { requestId });
           resolve(false);
         }, 30000);
       });
+      console.log("[save] postMessage to parent", { requestId });
       window.parent.postMessage({ type: "voidspace:save-all", tracks, requestId }, "*");
       const ok = await ackPromise;
+      console.log("[save] complete", { requestId, ok });
       if (ok) {
         setSaveFlash(true);
         setTimeout(() => setSaveFlash(false), 1200);
