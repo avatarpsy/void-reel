@@ -74,6 +74,9 @@ interface ExportState {
   complete: boolean;
 }
 
+// BUILD MARKER — log on module load so we can confirm which build is running
+console.log("[BUILD] Toolbar.tsx v2-savedebug — Save with ack flow");
+
 export const Toolbar: React.FC = () => {
   const { project } = useProjectStore();
   const {
