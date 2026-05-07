@@ -19,6 +19,7 @@ import {
   Play,
   Send,
   Download,
+  Save,
 } from "lucide-react";
 import { useProjectStore } from "../../stores/project-store";
 import { useUIStore } from "../../stores/ui-store";
@@ -94,8 +95,33 @@ export const Toolbar: React.FC = () => {
   const [isPublishDialogOpen, setIsPublishDialogOpen] = useState(false);
   const [publishBlob, setPublishBlob] = useState<Blob | null>(null);
   const [publishFilename, setPublishFilename] = useState("");
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveFlash, setSaveFlash] = useState(false);
   const { importMedia } = useProjectStore();
   const { track } = useAnalytics();
+
+  const handleSave = useCallback(async () => {
+    if (isSaving) return;
+    setIsSaving(true);
+    try {
+      window.parent.postMessage({ type: "voidspace:save-all" }, "*");
+      setSaveFlash(true);
+      setTimeout(() => setSaveFlash(false), 1200);
+    } finally {
+      setTimeout(() => setIsSaving(false), 800);
+    }
+  }, [isSaving]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+        e.preventDefault();
+        handleSave();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [handleSave]);
 
   const handleStartTour = useCallback(() => {
     localStorage.removeItem(ONBOARDING_KEY);
@@ -995,6 +1021,26 @@ export const Toolbar: React.FC = () => {
           </TooltipTrigger>
           <TooltipContent>
             <p>History - Undo/Redo</p>
+          </TooltipContent>
+        </Tooltip>
+
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              onClick={handleSave}
+              disabled={isSaving}
+              className={`flex items-center gap-2 px-3 py-2 rounded-lg transition-colors ${
+                saveFlash
+                  ? "bg-green-500/20 text-green-400"
+                  : "bg-background-secondary hover:bg-background-tertiary text-text-secondary hover:text-text-primary"
+              } ${isSaving ? "opacity-50 cursor-not-allowed" : ""}`}
+            >
+              <Save size={14} />
+              <span className="text-sm font-medium">{saveFlash ? "Saved" : "Save"}</span>
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>
+            <p>Save project + chat (Ctrl+S)</p>
           </TooltipContent>
         </Tooltip>
 
