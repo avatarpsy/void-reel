@@ -1153,6 +1153,19 @@ export class ActionExecutor {
         break;
       }
 
+      case "audio/setMuted": {
+        const params = action.params as { clipId: string; muted: boolean };
+        timeline.tracks = timeline.tracks.map((track: MutableTrack) => ({
+          ...track,
+          clips: track.clips.map((clip: MutableClip) =>
+            clip.id === params.clipId
+              ? { ...clip, muted: params.muted }
+              : clip,
+          ),
+        }));
+        break;
+      }
+
       case "audio/setFade": {
         const params = action.params as {
           clipId: string;

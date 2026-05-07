@@ -482,6 +482,12 @@ export class InverseActionGenerator {
           volume: clip.volume,
         });
 
+      case "audio/setMuted":
+        return this.createInverseAction(action, "audio/setMuted", {
+          clipId: action.params.clipId,
+          muted: clip.muted ?? false,
+        });
+
       case "audio/setFade":
         return this.createInverseAction(action, "audio/setFade", {
           clipId: action.params.clipId,

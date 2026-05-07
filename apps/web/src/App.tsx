@@ -752,6 +752,70 @@ function App() {
         switch (t) {
           case "voidspace:get-state": {
             const proj = useProjectStore.getState().project;
+            // Read text clips from the LIVE title engine when populated;
+            // fall back to the Zustand `proj.textClips` snapshot when the
+            // engine is initialized-but-empty (Firestore data has loaded
+            // into the project doc but `loadTextClips()` hasn't fired yet,
+            // which happens during the first few hundred ms after page
+            // mount). `??` doesn't help here because `[]` is non-nullish —
+            // we have to length-check explicitly.
+            const titleEng = useEngineStore.getState().getTitleEngine();
+            const engineClips = titleEng?.getAllTextClips() ?? [];
+            const liveTextClips = engineClips.length > 0
+              ? engineClips
+              : (proj.textClips ?? []);
+            // Permanent diagnostic — surfaces the source-of-truth discrepancy
+            // when text clips visibly render on the timeline but the agent
+            // gets 0. Grep `[Voidspace get-state]` in the editor console.
+            console.log('[Voidspace get-state]', {
+              projectId: proj.id,
+              mediaTracksCount: (proj.timeline?.tracks ?? []).length,
+              mediaTrackIds: (proj.timeline?.tracks ?? []).map((t: any) => t.id),
+              engineClipsCount: engineClips.length,
+              snapshotTextClipsCount: (proj.textClips ?? []).length,
+              engineRef: titleEng ? 'present' : 'NULL',
+            });
+
+            const trackInfer = (tr: any): string => {
+              const id = String(tr?.id || '').toLowerCase();
+              const name = String(tr?.name || '').toLowerCase();
+              const haystack = `${id} ${name}`;
+              if (/captions?|subtitle|text/.test(haystack)) return 'captions';
+              if (/music|bgm|score/.test(haystack)) return 'music';
+              if (/narration|voice|vo|dialogue/.test(haystack)) return 'narration';
+              if (/sfx|sound[\s_-]?effect/.test(haystack)) return 'sfx';
+              return 'video';
+            };
+            // Media tracks: video, narration, music. The "track-captions"
+            // entry in timeline.tracks has empty clips[] (text clips live
+            // in the title engine, not here) — skip it so we don't emit
+            // an empty captions track on top of the real one below.
+            const mediaTracks = (proj.timeline?.tracks ?? [])
+              .filter((tr) => trackInfer(tr) !== 'captions')
+              .map((tr) => ({
+                id: tr.id,
+                name: tr.name,
+                kind: trackInfer(tr),
+                clips: (tr.clips ?? []).map((c: any) => ({
+                  id: c.id, mediaId: c.mediaId, startTime: c.startTime, duration: c.duration,
+                  inPoint: c.inPoint, outPoint: c.outPoint,
+                  volume: c.volume, muted: c.muted,
+                })),
+              }));
+            // Bucket live text clips into a single captions track.
+            // All Voidspace caption clips share trackId "track-captions".
+            const captionClips = liveTextClips.map((tc: any) => ({
+              id: tc.id,
+              kind: 'text' as const,
+              trackId: tc.trackId ?? 'track-captions',
+              startTime: tc.startTime,
+              duration: tc.duration,
+              endTime: tc.startTime + tc.duration,
+              text: typeof tc.text === 'string' ? tc.text.slice(0, 200) : '',
+            }));
+            const captionTracks = captionClips.length > 0
+              ? [{ id: 'track-captions', name: 'Captions', kind: 'captions' as const, clips: captionClips }]
+              : [];
             reply({
               type: "voidspace:state",
               requestId: msg.requestId,
@@ -760,14 +824,9 @@ function App() {
                 name: proj.name,
                 settings: proj.settings,
                 duration: proj.timeline?.duration ?? 0,
-                tracks: (proj.timeline?.tracks ?? []).map((tr) => ({
-                  id: tr.id, name: tr.name, kind: tr.id?.includes("music") ? "music" : tr.id?.includes("narration") ? "narration" : "video",
-                  clips: (tr.clips ?? []).map((c: any) => ({
-                    id: c.id, mediaId: c.mediaId, startTime: c.startTime, duration: c.duration,
-                    inPoint: c.inPoint, outPoint: c.outPoint,
-                  })),
-                })),
+                tracks: [...mediaTracks, ...captionTracks],
                 mediaCount: proj.mediaLibrary?.items?.length ?? 0,
+                textClipCount: captionClips.length,
               },
             });
             break;
@@ -846,6 +905,222 @@ function App() {
             } catch (err) {
               reply({ type: "voidspace:error", requestId: msg.requestId, error: String((err as any)?.message ?? err) });
             }
+            break;
+          }
+          // ── Voidspace agent — clip & media RPCs ──
+          // The studio agent uses these to read the media library and
+          // surgically mutate clips on tracks (crop in/out, move, swap
+          // duration, change volume, mute, add/remove). All four hook
+          // into the project store's existing action executor or do a
+          // direct property update + project re-set so undo/redo and the
+          // canvas renderer pick up the change in the same tick.
+          case "voidspace:list-media": {
+            const proj = useProjectStore.getState().project;
+            const items = (proj.mediaLibrary?.items ?? []).map((m: any) => ({
+              id: m.id,
+              name: m.name ?? null,
+              kind: m.type ?? m.kind ?? null,
+              url: m.url ?? m.src ?? null,
+              duration: m.duration ?? null,
+              width: m.width ?? null,
+              height: m.height ?? null,
+              hasAudio: m.hasAudio ?? null,
+            }));
+            reply({ type: "voidspace:media", requestId: msg.requestId, items });
+            break;
+          }
+          case "voidspace:patch-clip": {
+            const { clipId, patch } = msg as any;
+            if (!clipId || !patch || typeof patch !== "object") {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: "clipId + patch required" });
+              break;
+            }
+            const store = useProjectStore.getState();
+            const proj = store.project;
+
+            // Check if this is a text clip (caption). Text clips live in
+            // the title engine, not in timeline.tracks — they need a
+            // different update path.
+            const titleEngPatch = useEngineStore.getState().getTitleEngine();
+            const textClip = titleEngPatch?.getTextClip(clipId);
+            if (textClip) {
+              const updates: Record<string, unknown> = {};
+              if (typeof patch.startTime === "number") updates.startTime = patch.startTime;
+              if (typeof patch.duration === "number") updates.duration = Math.max(0.05, patch.duration);
+              const updated = titleEngPatch!.updateTextClip(clipId, updates);
+              useProjectStore.setState({ project: { ...proj, modifiedAt: Date.now() } });
+              reply({
+                type: "voidspace:clip-patched",
+                requestId: msg.requestId,
+                clip: updated ?? null,
+                ok: !!updated,
+              });
+              break;
+            }
+
+            // Media clip path: locate clip + track by walking the timeline.
+            let foundClip: any = null;
+            let foundTrackId: string | null = null;
+            for (const tr of proj.timeline?.tracks ?? []) {
+              const c = (tr.clips ?? []).find((cc: any) => cc.id === clipId);
+              if (c) { foundClip = c; foundTrackId = tr.id; break; }
+            }
+            if (!foundClip) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: `no clip with id ${clipId}` });
+              break;
+            }
+            const errors: string[] = [];
+            if (typeof patch.startTime === "number") {
+              const r = await store.moveClip(clipId, patch.startTime, foundTrackId ?? undefined);
+              if (!r.success) errors.push(`moveClip: ${r.error ?? "failed"}`);
+            }
+            if (typeof patch.inPoint === "number" || typeof patch.outPoint === "number") {
+              const r = await store.trimClip(
+                clipId,
+                typeof patch.inPoint === "number" ? patch.inPoint : undefined,
+                typeof patch.outPoint === "number" ? patch.outPoint : undefined,
+              );
+              if (!r.success) errors.push(`trimClip: ${r.error ?? "failed"}`);
+            }
+            if (typeof patch.duration === "number") {
+              const inP = typeof patch.inPoint === "number" ? patch.inPoint : (foundClip.inPoint ?? 0);
+              const r = await store.trimClip(clipId, inP, inP + patch.duration);
+              if (!r.success) errors.push(`trimClip(duration): ${r.error ?? "failed"}`);
+            }
+            if (typeof patch.volume === "number") {
+              const volStore = useProjectStore.getState() as any;
+              const volAction = {
+                type: "audio/setVolume" as const,
+                id: `vol-${Date.now().toString(36)}`,
+                timestamp: Date.now(),
+                params: { clipId, volume: Math.max(0, Math.min(4, patch.volume)) },
+              };
+              const vr = await volStore.actionExecutor.execute(volAction, volStore.project);
+              if (vr.success) {
+                useProjectStore.setState({ project: { ...volStore.project, modifiedAt: Date.now() } });
+              } else {
+                errors.push(`setVolume: ${vr.error?.message ?? "failed"}`);
+              }
+            }
+            if (typeof patch.muted === "boolean") {
+              const mutStore = useProjectStore.getState() as any;
+              const mutAction = {
+                type: "audio/setMuted" as const,
+                id: `mute-${Date.now().toString(36)}`,
+                timestamp: Date.now(),
+                params: { clipId, muted: patch.muted },
+              };
+              const mr = await mutStore.actionExecutor.execute(mutAction, mutStore.project);
+              if (mr.success) {
+                useProjectStore.setState({ project: { ...mutStore.project, modifiedAt: Date.now() } });
+              } else {
+                errors.push(`setMuted: ${mr.error?.message ?? "failed"}`);
+              }
+            }
+            let finalClip: any = null;
+            for (const tr of useProjectStore.getState().project.timeline?.tracks ?? []) {
+              const c = (tr.clips ?? []).find((cc: any) => cc.id === clipId);
+              if (c) { finalClip = c; break; }
+            }
+            reply({
+              type: "voidspace:clip-patched",
+              requestId: msg.requestId,
+              clip: finalClip,
+              errors: errors.length ? errors : undefined,
+              ok: errors.length === 0,
+            });
+            break;
+          }
+          case "voidspace:add-clip": {
+            const { trackId, mediaId, startTime } = msg as any;
+            if (!trackId || !mediaId || typeof startTime !== "number") {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: "trackId, mediaId, startTime required" });
+              break;
+            }
+            const r = await useProjectStore.getState().addClip(trackId, mediaId, startTime);
+            if (!r.success) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: r.error ?? "addClip failed" });
+              break;
+            }
+            // Look up the just-created clip — it's the newest one on
+            // the track at the requested startTime.
+            const tr = useProjectStore.getState().project.timeline?.tracks?.find((t: any) => t.id === trackId);
+            const newClip = (tr?.clips ?? []).find((c: any) => c.startTime === startTime && c.mediaId === mediaId);
+            reply({ type: "voidspace:clip-added", requestId: msg.requestId, clip: newClip ?? null, ok: true });
+            break;
+          }
+          case "voidspace:remove-clip": {
+            const { clipId } = msg as any;
+            if (!clipId) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: "clipId required" });
+              break;
+            }
+            const r = await useProjectStore.getState().removeClip(clipId);
+            if (!r.success) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: r.error ?? "removeClip failed" });
+              break;
+            }
+            reply({ type: "voidspace:clip-removed", requestId: msg.requestId, clipId, ok: true });
+            break;
+          }
+          case "voidspace:move-clip": {
+            const { clipId, startTime, trackId } = msg as any;
+            if (!clipId || typeof startTime !== "number") {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: "clipId + startTime required" });
+              break;
+            }
+            // Text clip path — move via title engine.
+            const titleEngMove = useEngineStore.getState().getTitleEngine();
+            const textClipMove = titleEngMove?.getTextClip(clipId);
+            if (textClipMove) {
+              titleEngMove!.updateTextClip(clipId, { startTime });
+              const proj = useProjectStore.getState().project;
+              useProjectStore.setState({ project: { ...proj, modifiedAt: Date.now() } });
+              reply({ type: "voidspace:clip-moved", requestId: msg.requestId, clipId, ok: true });
+              break;
+            }
+            // Media clip path.
+            const r = await useProjectStore.getState().moveClip(clipId, startTime, trackId);
+            if (!r.success) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: r.error ?? "moveClip failed" });
+              break;
+            }
+            reply({ type: "voidspace:clip-moved", requestId: msg.requestId, clipId, ok: true });
+            break;
+          }
+          case "voidspace:snapshot": {
+            // Create a named snapshot in the editor's ActionHistory.
+            // The chat uses this to bookmark the state before an agent
+            // turn so the user can revert via the HistoryPanel.
+            const snapStore = useProjectStore.getState() as any;
+            const snapName = typeof msg.name === "string" && msg.name ? msg.name : `Agent checkpoint ${new Date().toLocaleTimeString()}`;
+            const snap = snapStore.actionHistory.createSnapshot(snapName);
+            reply({ type: "voidspace:snapshot", requestId: msg.requestId, ok: true, snapshot: snap });
+            break;
+          }
+          case "voidspace:restore-snapshot": {
+            // Undo back to a previously created snapshot. This reverts
+            // all actions that happened after the snapshot was created.
+            const restStore = useProjectStore.getState() as any;
+            const targetSnap = msg.snapshot as { id: string; stackIndex: number } | undefined;
+            if (!targetSnap?.id) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: "snapshot required" });
+              break;
+            }
+            const allSnaps = restStore.actionHistory.getSnapshots();
+            const found = allSnaps.find((s: any) => s.id === targetSnap.id);
+            const targetIdx = found?.stackIndex ?? targetSnap.stackIndex;
+            if (typeof targetIdx !== "number") {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: "snapshot not found" });
+              break;
+            }
+            let undone = 0;
+            while (restStore.actionHistory.getUndoStackSize() > targetIdx) {
+              const ok = await restStore.undo();
+              if (!ok?.success) break;
+              undone++;
+            }
+            reply({ type: "voidspace:restore-snapshot", requestId: msg.requestId, ok: true, undone });
             break;
           }
           case "voidspace:export": {

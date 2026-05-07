@@ -976,6 +976,16 @@ export class ActionValidator {
         }
         break;
 
+      case "audio/setMuted":
+        if (typeof action.params.muted !== "boolean") {
+          errors.push({
+            code: "INVALID_PARAMS",
+            message: "Muted must be a boolean",
+            path: "params.muted",
+          });
+        }
+        break;
+
       case "audio/setFade":
         if (
           action.params.fadeIn !== undefined &&

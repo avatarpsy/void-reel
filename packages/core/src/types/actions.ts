@@ -189,6 +189,7 @@ export type TransitionAction =
 // Audio actions
 export type AudioAction =
   | { type: "audio/setVolume"; params: { clipId: string; volume: number } }
+  | { type: "audio/setMuted"; params: { clipId: string; muted: boolean } }
   | {
       type: "audio/setFade";
       params: { clipId: string; fadeIn?: number; fadeOut?: number };

@@ -44,6 +44,7 @@ const ACTION_DESCRIPTIONS: Record<
   "transition/add": (params) => `Add ${params.transitionType} transition`,
   "transition/remove": () => "Remove transition",
   "audio/setVolume": () => "Adjust volume",
+  "audio/setMuted": (params) => params.muted ? "Mute clip" : "Unmute clip",
   "audio/setFade": () => "Adjust fade",
   "subtitle/add": () => "Add subtitle",
   "subtitle/remove": () => "Remove subtitle",
