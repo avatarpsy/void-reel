@@ -104,7 +104,23 @@ export const Toolbar: React.FC = () => {
     if (isSaving) return;
     setIsSaving(true);
     try {
-      window.parent.postMessage({ type: "voidspace:save-all" }, "*");
+      const proj = useProjectStore.getState().project;
+      const tracks = (proj?.timeline?.tracks ?? []).map((tr: any) => ({
+        id: tr.id,
+        name: tr.name,
+        kind: tr.type || tr.kind || "video",
+        clips: (tr.clips ?? []).map((c: any) => ({
+          id: c.id,
+          mediaId: c.mediaId,
+          startTime: c.startTime,
+          duration: c.duration,
+          inPoint: c.inPoint,
+          outPoint: c.outPoint,
+          volume: c.volume ?? 1,
+          muted: c.muted ?? false,
+        })),
+      }));
+      window.parent.postMessage({ type: "voidspace:save-all", tracks }, "*");
       setSaveFlash(true);
       setTimeout(() => setSaveFlash(false), 1200);
     } finally {
