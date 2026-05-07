@@ -10,9 +10,9 @@
  * - 35.4: Inform user that AI requires internet connectivity
  */
 
-const CACHE_NAME = "openreel-v3-urlfix";
-const STATIC_CACHE_NAME = "openreel-static-v3-urlfix";
-const DYNAMIC_CACHE_NAME = "openreel-dynamic-v3-urlfix";
+const CACHE_NAME = "openreel-v4-sfxinline";
+const STATIC_CACHE_NAME = "openreel-static-v4-sfxinline";
+const DYNAMIC_CACHE_NAME = "openreel-dynamic-v4-sfxinline";
 
 /**
  * Static assets to cache on install

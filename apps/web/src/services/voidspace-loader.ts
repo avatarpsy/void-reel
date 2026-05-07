@@ -45,6 +45,7 @@ export interface VoidspaceSceneList {
   scene_count?: number;
   music_url?: string;
   music_title?: string;
+  music_volume?: number;
   content_type?: string;
   aspect_ratio?: string;
   video_url?: string;
@@ -247,6 +248,18 @@ interface SceneNarrationData {
   has_embedded_audio?: boolean;
 }
 
+interface SceneSfxData {
+  id: string;
+  sfx_url?: string;
+  url?: string;
+  prompt?: string;
+  start_ms?: number;
+  end_ms?: number;
+  duration_ms?: number;
+  volume?: number;
+  source_type?: string;
+}
+
 // ────────────────────────────────────────────
 // Auth helpers
 // ────────────────────────────────────────────
@@ -370,6 +383,35 @@ async function fetchSceneNarrations(
   const snapshot = await getDocs(ref);
   return snapshot.docs.map(
     (d) => ({ id: d.id, ...d.data() } as SceneNarrationData),
+  );
+}
+
+async function fetchSceneSfx(
+  userId: string,
+  sceneListId: string,
+  sceneNum: string,
+  inlineSfxList?: SceneSfxData[],
+): Promise<SceneSfxData[]> {
+  // Prefer the inline `sfx_list` array on the scene doc (cheap — already
+  // fetched as part of fetchScenes). Falls back to the legacy `sfxs/`
+  // subcollection only when the array is absent (old projects pre-array
+  // migration, or projects where Flutter wrote SFX directly).
+  if (Array.isArray(inlineSfxList) && inlineSfxList.length > 0) {
+    return inlineSfxList.map((s, i) => ({ id: s.id ?? `sfx_${i}`, ...s } as SceneSfxData));
+  }
+  const ref = collection(
+    db,
+    "users",
+    userId,
+    "scene_lists",
+    sceneListId,
+    "scenes",
+    sceneNum,
+    "sfxs",
+  );
+  const snapshot = await getDocs(ref);
+  return snapshot.docs.map(
+    (d) => ({ id: d.id, ...d.data() } as SceneSfxData),
   );
 }
 
@@ -776,12 +818,16 @@ export async function loadSceneListAsProject(
   const sceneMedia = await Promise.all(
     scenes.map(async (scene) => {
       const docId = scene._docId;
-      const [videos, images, narrations] = await Promise.all([
+      // sfx_list array on the scene doc is the canonical source.
+      // fetchSceneSfx falls back to subcollection only if absent.
+      const inlineSfx = (scene as any).sfx_list as any[] | undefined;
+      const [videos, images, narrations, sfxs] = await Promise.all([
         fetchSceneVideos(userId, sceneListId, docId),
         fetchSceneImages(userId, sceneListId, docId),
         fetchSceneNarrations(userId, sceneListId, docId),
+        fetchSceneSfx(userId, sceneListId, docId, inlineSfx),
       ]);
-      return { scene, videos, images, narrations };
+      return { scene, videos, images, narrations, sfxs };
     }),
   );
 
@@ -789,6 +835,7 @@ export async function loadSceneListAsProject(
   const mediaItems: MediaItem[] = [];
   const videoTrackClips: Clip[] = [];
   const narrationTrackClips: Clip[] = [];
+  const sfxTrackClips: Clip[] = [];
   const musicTrackClips: Clip[] = [];
   const musicTrackSpecs: Array<{
     mediaId: string;
@@ -878,7 +925,7 @@ export async function loadSceneListAsProject(
     slData.music_title || "Background Music",
   );
 
-  for (const { scene, videos, images, narrations } of sceneMedia) {
+  for (const { scene, videos, images, narrations, sfxs } of sceneMedia) {
     const sceneFallbackVideoUrl = await resolveMediaUrl(
       scene.video_url ?? scene.url ?? null,
     );
@@ -1131,6 +1178,53 @@ export async function loadSceneListAsProject(
       });
     }
 
+    // ── SFX clips ──
+    // Each SFX doc carries `sfx_url`, `start_ms` (offset into the scene),
+    // `duration_ms`, and `volume`. We mount them as audio clips on
+    // `track-sfx`, rebased onto the scene's cumulative start so they
+    // ride the same timeline coordinate space as narration/music.
+    for (const sfx of sfxs ?? []) {
+      const sfxRawUrl = sfx.sfx_url ?? sfx.url ?? null;
+      if (!sfxRawUrl) continue;
+      const sfxUrl = await resolveMediaUrl(sfxRawUrl);
+      if (!sfxUrl) continue;
+      const sfxBlob = await fetchMediaBlob(sfxUrl);
+      const sfxMediaId = `media-sfx-${stableHash(sfxRawUrl)}`;
+      if (!mediaItems.find((m) => m.id === sfxMediaId)) {
+        const sfxDur = typeof sfx.duration_ms === "number" ? sfx.duration_ms / 1000 : 2;
+        mediaItems.push({
+          id: sfxMediaId,
+          name: sfx.prompt || "SFX",
+          type: "audio",
+          fileHandle: null,
+          blob: sfxBlob ?? null,
+          metadata: mediaMeta({ duration: sfxDur, fileSize: sfxBlob?.size || 0 }),
+          thumbnailUrl: null,
+          waveformData: null,
+          originalUrl: sfxUrl,
+          category: "SFX",
+          role: "sfx",
+        });
+      }
+      const offsetSec = (typeof sfx.start_ms === "number" ? sfx.start_ms : 0) / 1000;
+      const durSec = typeof sfx.duration_ms === "number" ? sfx.duration_ms / 1000 : 2;
+      const startTime = currentTime + Math.max(0, offsetSec);
+      sfxTrackClips.push({
+        id: `clip-sfx-${sfx.id}`,
+        mediaId: sfxMediaId,
+        trackId: "track-sfx",
+        startTime,
+        duration: Math.max(0.05, durSec),
+        inPoint: 0,
+        outPoint: Math.max(0.05, durSec),
+        effects: [],
+        audioEffects: [],
+        transform: makeDefaultTransform(),
+        volume: typeof sfx.volume === "number" ? Math.max(0, Math.min(2, sfx.volume)) : 1,
+        keyframes: [],
+      });
+    }
+
     // ── Subtitles from word timestamps ──
     // Studio writes word_timestamps onto the narration doc post-TTS AND
     // onto the chosen video doc post-clip-STT. Earlier versions stamped
@@ -1285,7 +1379,9 @@ export async function loadSceneListAsProject(
         effects: [],
         audioEffects: [],
         transform: makeDefaultTransform(),
-        volume: 0.3,
+        volume: typeof slData.music_volume === "number"
+          ? Math.max(0, Math.min(2, slData.music_volume as number))
+          : 0.3,
         keyframes: [],
       });
     }
@@ -1302,7 +1398,9 @@ export async function loadSceneListAsProject(
       effects: [],
       audioEffects: [],
       transform: makeDefaultTransform(),
-      volume: 0.3,
+      volume: typeof slData.music_volume === "number"
+        ? Math.max(0, Math.min(2, slData.music_volume as number))
+        : 0.3,
       keyframes: [],
     });
   }
@@ -1385,6 +1483,20 @@ export async function loadSceneListAsProject(
       type: "audio",
       name: "Narration",
       clips: narrationTrackClips,
+      transitions: [],
+      locked: false,
+      hidden: false,
+      muted: false,
+      solo: false,
+    });
+  }
+
+  if (sfxTrackClips.length > 0) {
+    tracks.push({
+      id: "track-sfx",
+      type: "audio",
+      name: "SFX",
+      clips: sfxTrackClips,
       transitions: [],
       locked: false,
       hidden: false,
@@ -1520,7 +1632,7 @@ export function subscribeSceneListAsProject(
         // rebuild without polling.
         for (const sceneDoc of snap.docs) {
           const sceneId = sceneDoc.id;
-          for (const kind of ["images", "videos", "narrations"] as const) {
+          for (const kind of ["images", "videos", "narrations", "sfxs"] as const) {
             const sub = collection(
               db, "users", userId, "scene_lists", sceneListId,
               "scenes", sceneId, kind,
