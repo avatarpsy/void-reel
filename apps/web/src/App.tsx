@@ -1108,13 +1108,21 @@ function App() {
                 if (sc.id) savedClipMap.set(sc.id, sc);
               }
             }
-            // Apply saved volume/muted/startTime/duration to matching clips
+            // Apply saved properties (startTime, duration, inPoint, outPoint,
+            // volume, muted) to matching clips. Without this, user-driven
+            // editor edits (clip moves, trims) are lost on reload because
+            // the voidspace-loader recreates clips at default scene-cumulative
+            // positions, ignoring any manual repositioning.
             const patchedTracks = curTracks.map((tr: any) => ({
               ...tr,
               clips: (tr.clips ?? []).map((c: any) => {
                 const saved = savedClipMap.get(c.id);
                 if (!saved) return c;
                 const next = { ...c };
+                if (typeof saved.startTime === "number" && Math.abs(saved.startTime - c.startTime) > 0.01) { next.startTime = saved.startTime; applied++; }
+                if (typeof saved.duration === "number" && saved.duration > 0 && Math.abs(saved.duration - c.duration) > 0.01) { next.duration = saved.duration; applied++; }
+                if (typeof saved.inPoint === "number" && saved.inPoint !== c.inPoint) { next.inPoint = saved.inPoint; applied++; }
+                if (typeof saved.outPoint === "number" && saved.outPoint !== c.outPoint) { next.outPoint = saved.outPoint; applied++; }
                 if (typeof saved.volume === "number" && saved.volume !== c.volume) { next.volume = saved.volume; applied++; }
                 if (typeof saved.muted === "boolean" && saved.muted !== c.muted) { next.muted = saved.muted; applied++; }
                 return next;

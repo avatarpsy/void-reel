@@ -103,6 +103,7 @@ export const Toolbar: React.FC = () => {
   const handleSave = useCallback(async () => {
     if (isSaving) return;
     setIsSaving(true);
+    const requestId = `save_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     try {
       const proj = useProjectStore.getState().project;
       const tracks = (proj?.timeline?.tracks ?? []).map((tr: any) => ({
@@ -120,11 +121,31 @@ export const Toolbar: React.FC = () => {
           muted: c.muted ?? false,
         })),
       }));
-      window.parent.postMessage({ type: "voidspace:save-all", tracks }, "*");
-      setSaveFlash(true);
-      setTimeout(() => setSaveFlash(false), 1200);
+      // Wait for the parent to confirm the save completed before flashing
+      // "Saved". Without this acknowledgement, users see the flash and
+      // reload before the actual Firestore writes finish.
+      const ackPromise = new Promise<boolean>((resolve) => {
+        const onMsg = (e: MessageEvent) => {
+          if (e.data?.type === "voidspace:save-done" && e.data.requestId === requestId) {
+            window.removeEventListener("message", onMsg);
+            resolve(!!e.data.ok);
+          }
+        };
+        window.addEventListener("message", onMsg);
+        // Hard timeout — if no ack in 30s, fail visibly
+        setTimeout(() => {
+          window.removeEventListener("message", onMsg);
+          resolve(false);
+        }, 30000);
+      });
+      window.parent.postMessage({ type: "voidspace:save-all", tracks, requestId }, "*");
+      const ok = await ackPromise;
+      if (ok) {
+        setSaveFlash(true);
+        setTimeout(() => setSaveFlash(false), 1200);
+      }
     } finally {
-      setTimeout(() => setIsSaving(false), 800);
+      setIsSaving(false);
     }
   }, [isSaving]);
 
