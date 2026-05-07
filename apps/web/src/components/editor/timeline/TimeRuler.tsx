@@ -10,6 +10,10 @@ import {
   getBeatSyncBridge,
   type BeatSyncState,
 } from "../../../bridges/beat-sync-bridge";
+import {
+  getRamCacheState,
+  subscribeRamCache,
+} from "../../../bridges/ram-cache-bridge";
 
 interface TimeRulerProps {
   duration: number;
@@ -40,6 +44,9 @@ export const TimeRuler: React.FC<TimeRulerProps> = ({
     const unsubscribe = bridge.subscribe(setBeatState);
     return unsubscribe;
   }, []);
+
+  const [ramCache, setRamCache] = useState(getRamCacheState);
+  useEffect(() => subscribeRamCache(() => setRamCache(getRamCacheState())), []);
 
   const safePixelsPerSecond = pixelsPerSecond > 0 ? pixelsPerSecond : 100;
   const visibleStart = scrollX / safePixelsPerSecond;
@@ -182,6 +189,28 @@ export const TimeRuler: React.FC<TimeRulerProps> = ({
           style={{ left: `${marker.time * safePixelsPerSecond}px` }}
         />
       ))}
+
+      {/* RAM cache bar — green segments at the bottom of the ruler */}
+      {ramCache.totalFrames > 0 && ramCache.cachedFrames.length > 0 && (() => {
+        const fps = 30;
+        const segs: Array<{ startSec: number; endSec: number }> = [];
+        for (const fn of ramCache.cachedFrames) {
+          const last = segs[segs.length - 1];
+          if (last && fn / fps <= last.endSec + 2 / fps) { last.endSec = fn / fps; }
+          else { segs.push({ startSec: fn / fps, endSec: fn / fps }); }
+        }
+        return segs.map((seg, i) => (
+          <div key={`rc-${i}`} className="absolute bottom-0 pointer-events-none"
+            style={{
+              left: `${seg.startSec * safePixelsPerSecond}px`,
+              width: `${Math.max(2, (seg.endSec - seg.startSec + 1 / fps) * safePixelsPerSecond)}px`,
+              height: '3px',
+              background: '#22c55e',
+              borderRadius: '1px 1px 0 0',
+            }}
+          />
+        ));
+      })()}
 
       {beatState.beatAnalysis && (
         <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1.5 bg-orange-500/20 px-2 py-0.5 rounded text-[9px] text-orange-400 font-medium pointer-events-none">

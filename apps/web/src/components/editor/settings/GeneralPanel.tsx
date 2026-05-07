@@ -1,43 +1,27 @@
 import React from "react";
 import { Switch } from "@openreel/ui";
 import { Label } from "@openreel/ui";
-import { useSettingsStore, SERVICE_REGISTRY, type TtsProvider, type LlmProvider, type AggregatorProvider } from "../../../stores/settings-store";
+import { useSettingsStore } from "../../../stores/settings-store";
+
+const RAM_OPTIONS = [
+  { value: 0.5, label: "512 MB" },
+  { value: 1, label: "1 GB" },
+  { value: 2, label: "2 GB" },
+  { value: 4, label: "4 GB" },
+  { value: 8, label: "8 GB" },
+  { value: 16, label: "16 GB" },
+  { value: 32, label: "32 GB" },
+];
 
 export const GeneralPanel: React.FC = () => {
   const {
     autoSave,
     autoSaveInterval,
-    defaultTtsProvider,
-    defaultLlmProvider,
-    defaultAggregator,
-    configuredServices,
+    ramPreviewMaxGB,
     setAutoSave,
     setAutoSaveInterval,
-    setDefaultTtsProvider,
-    setDefaultLlmProvider,
-    setDefaultAggregator,
+    setRamPreviewMaxGB,
   } = useSettingsStore();
-
-  const ttsProviders = [
-    { id: "piper", label: "Piper (Free / Built-in)" },
-    ...SERVICE_REGISTRY.filter(
-      (s) => s.id === "elevenlabs" || configuredServices.includes(s.id),
-    ),
-  ];
-
-  const llmProviders = SERVICE_REGISTRY.filter(
-    (s) =>
-      s.id === "openai" ||
-      s.id === "anthropic" ||
-      configuredServices.includes(s.id),
-  );
-
-  const aggregatorProviders = SERVICE_REGISTRY.filter(
-    (s) =>
-      s.id === "kie-ai" ||
-      s.id === "freepik" ||
-      configuredServices.includes(s.id),
-  );
 
   return (
     <div className="space-y-6 pb-4">
@@ -78,72 +62,29 @@ export const GeneralPanel: React.FC = () => {
 
       <div className="h-px bg-border" />
 
-      {/* Default providers */}
+      {/* RAM Preview */}
       <div className="space-y-4">
-        <h3 className="text-sm font-medium text-text-primary">
-          Default AI Providers
-        </h3>
+        <h3 className="text-sm font-medium text-text-primary">RAM Preview</h3>
         <p className="text-xs text-text-muted">
-          Choose which service to use by default for AI features.
-          Configure API keys in the &quot;API Keys&quot; tab first.
+          Frames are cached in memory during playback. Second play is instant
+          and smooth. Higher limit = more cached footage.
         </p>
 
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <Label className="text-sm text-text-secondary">
-              Text to Speech/Voice To Speech/Sound Effects
-            </Label>
-            <select
-              value={defaultTtsProvider}
-              onChange={(e) => setDefaultTtsProvider(e.target.value as TtsProvider)}
-              className="h-9 rounded-md border border-input bg-background px-3 text-sm min-w-[140px]"
-            >
-              {ttsProviders.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.label}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="flex items-center justify-between">
-            <Label className="text-sm text-text-secondary">
-              AI Assistant (LLM)
-            </Label>
-            <select
-              value={defaultLlmProvider}
-              onChange={(e) => setDefaultLlmProvider(e.target.value as LlmProvider)}
-              className="h-9 rounded-md border border-input bg-background px-3 text-sm min-w-[140px]"
-            >
-              {llmProviders.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.label}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="flex items-center justify-between">
-            <div>
-              <Label className="text-sm text-text-secondary">
-                AI Aggregator
-              </Label>
-              <p className="text-xs text-text-muted mt-0.5">
-                Video/image generation, upscaling, and creative AI tools
-              </p>
-            </div>
-            <select
-              value={defaultAggregator}
-              onChange={(e) => setDefaultAggregator(e.target.value as AggregatorProvider)}
-              className="h-9 rounded-md border border-input bg-background px-3 text-sm min-w-[140px]"
-            >
-              {aggregatorProviders.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.label}
-                </option>
-              ))}
-            </select>
-          </div>
+        <div className="flex items-center justify-between">
+          <Label className="text-sm text-text-secondary">
+            Maximum RAM for preview cache
+          </Label>
+          <select
+            value={ramPreviewMaxGB}
+            onChange={(e) => setRamPreviewMaxGB(Number(e.target.value))}
+            className="h-9 rounded-md border border-input bg-background px-3 text-sm min-w-[120px]"
+          >
+            {RAM_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
         </div>
       </div>
     </div>

@@ -2,6 +2,7 @@ export * from "./video-engine";
 export * from "./video-effects-engine";
 export * from "./color-grading-engine";
 export * from "./frame-cache";
+export * from "./preview-frame-cache";
 export * from "./transition-engine";
 export * from "./animation-engine";
 export * from "./transform-animator";

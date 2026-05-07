@@ -18,13 +18,16 @@ import {
   Move,
   Loader2,
   ZoomIn,
+  Gauge,
 } from "lucide-react";
+import type { PreviewQuality } from "../../stores/timeline-store";
 import { IconButton } from "@openreel/ui";
 import { useProjectStore } from "../../stores/project-store";
 import { useTimelineStore } from "../../stores/timeline-store";
 import { useUIStore } from "../../stores/ui-store";
 import { useThemeStore } from "../../stores/theme-store";
 import { getRenderBridge } from "../../bridges/render-bridge";
+import { setRamCacheState } from "../../bridges/ram-cache-bridge";
 import {
   RendererFactory,
   type Renderer,
@@ -42,8 +45,10 @@ import {
   type Subtitle,
   type Track,
   rewriteToProxy,
+  PreviewFrameCache,
 } from "@openreel/core";
 import { useEngineStore } from "../../stores/engine-store";
+import { useSettingsStore } from "../../stores/settings-store";
 import {
   type HandlePosition,
   type InteractionMode,
@@ -72,11 +77,12 @@ import type { MotionPathConfig, GSAPMotionPathPoint } from "@openreel/core";
 
 const getAdaptivePoolSize = (width: number, height: number): number => {
   const pixels = width * height;
-  if (pixels >= 3840 * 2160) return 6;
-  if (pixels >= 2560 * 1440) return 5;
-  if (pixels >= 1920 * 1080) return 4;
-  return 3;
+  if (pixels >= 3840 * 2160) return 8;
+  if (pixels >= 2560 * 1440) return 7;
+  if (pixels >= 1920 * 1080) return 6;
+  return 5;
 };
+
 
 interface GPULayer {
   bitmap: ImageBitmap;
@@ -220,6 +226,8 @@ export const Preview: React.FC = () => {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [zoomLevel, setZoomLevel] = useState(1);
   const [showZoomMenu, setShowZoomMenu] = useState(false);
+  const [showQualityMenu, setShowQualityMenu] = useState(false);
+  const [showRamMenu, setShowRamMenu] = useState(false);
 
   const ZOOM_OPTIONS = [
     { label: "100%", value: 1 },
@@ -227,6 +235,27 @@ export const Preview: React.FC = () => {
     { label: "150%", value: 1.5 },
     { label: "200%", value: 2 },
   ];
+
+  const QUALITY_OPTIONS: { label: string; value: PreviewQuality }[] = [
+    { label: "Auto", value: "auto" },
+    { label: "Full", value: "full" },
+    { label: "1/2", value: "half" },
+    { label: "1/3", value: "third" },
+    { label: "1/4", value: "quarter" },
+    { label: "1/8", value: "eighth" },
+    { label: "1/16", value: "sixteenth" },
+  ];
+
+  const frameDropCountRef = useRef(0);
+  const frameTotalCountRef = useRef(0);
+
+  // ── RAM Preview cache ──────────────────────────────────────────────
+  const ramCacheRef = useRef(new PreviewFrameCache());
+  const [ramCacheCount, setRamCacheCount] = useState(0);
+  const ramMaxGB = useSettingsStore((s) => s.ramPreviewMaxGB);
+  useEffect(() => {
+    ramCacheRef.current.setMaxMemory(ramMaxGB * 1024 * 1024 * 1024);
+  }, [ramMaxGB]);
 
   const isDark = useThemeStore((state) => state.isDark);
 
@@ -248,6 +277,34 @@ export const Preview: React.FC = () => {
     };
   } | null>(null);
   const rafIdRef = useRef<number | null>(null);
+
+  // ── Prerender progress state ──
+  const [prerenderActive, setPrerenderActive] = useState(false);
+  const [prerenderProgress, setPrerenderProgress] = useState(0);
+  const prerenderCancelRef = useRef(false);
+
+  // Reusable downscale canvas for the RAM cache. Frames are stored at
+  // 1/2 resolution so 4× more fit in the same memory budget.
+  const cacheDownscaleCanvasRef = useRef<OffscreenCanvas | null>(null);
+  const cacheDownscaleCtxRef = useRef<OffscreenCanvasRenderingContext2D | null>(null);
+  const downscaleAndCache = useCallback((source: OffscreenCanvas | HTMLCanvasElement, frameNum: number) => {
+    try {
+      const dw = Math.max(2, Math.floor(source.width / 2));
+      const dh = Math.max(2, Math.floor(source.height / 2));
+      let dst = cacheDownscaleCanvasRef.current;
+      if (!dst || dst.width !== dw || dst.height !== dh) {
+        dst = new OffscreenCanvas(dw, dh);
+        cacheDownscaleCanvasRef.current = dst;
+        cacheDownscaleCtxRef.current = dst.getContext('2d');
+      }
+      const dctx = cacheDownscaleCtxRef.current;
+      if (!dctx) return;
+      dctx.drawImage(source, 0, 0, dw, dh);
+      createImageBitmap(dst).then((bmp) => {
+        ramCacheRef.current.set(frameNum, bmp);
+      }).catch(() => {});
+    } catch {}
+  }, []);
 
   // Track if we're currently interacting to prevent re-renders during resize/move
   const isInteractingRef = useRef<boolean>(false);
@@ -406,6 +463,21 @@ export const Preview: React.FC = () => {
     }
   }, [timelineTracks]);
 
+  // Invalidate RAM Preview cache on real timeline structure changes
+  // (not reference identity changes from Voidspace live-reload during playback)
+  const prevTracksHashRef = useRef('');
+  useEffect(() => {
+    const hash = timelineTracks.map(t =>
+      `${t.id}:${t.clips.map(c => `${c.id}|${c.startTime}|${c.duration}|${(c.effects||[]).length}`).join(',')}`
+    ).join('|');
+    if (hash === prevTracksHashRef.current) return;
+    prevTracksHashRef.current = hash;
+    const cache = ramCacheRef.current;
+    cache.invalidate();
+    setRamCacheCount(0);
+    setRamCacheState([], 0);
+  }, [timelineTracks]);
+
   // Keep a ref to allTextClips for use in playback effect
   const allTextClipsRef = useRef(allTextClips);
   useEffect(() => {
@@ -444,6 +516,8 @@ export const Preview: React.FC = () => {
     seekTo,
     seekRelative,
     setPlayheadPosition,
+    previewQuality,
+    setPreviewQuality,
   } = useTimelineStore();
 
   useEffect(() => {
@@ -2089,8 +2163,26 @@ export const Preview: React.FC = () => {
 
         const currentPlayhead = masterClock.currentTime;
 
+        // ── RAM cache: hit path for native playback ──
+        const _nfn = Math.round(currentPlayhead * 30);
+        ramCacheRef.current.setAnchor(_nfn);
+        const _ncached = ramCacheRef.current.get(_nfn);
+        if (_ncached) {
+          ctx.drawImage(_ncached, 0, 0, canvas.width, canvas.height);
+          const _nph = performance.now();
+          if (_nph - lastPlayheadUpdateRef.current >= PLAYHEAD_UPDATE_THROTTLE_MS) {
+            lastPlayheadUpdateRef.current = _nph;
+            setPlayheadPosition(currentPlayhead);
+          }
+          rafId = requestAnimationFrame(() => { drawFrame(); });
+          return;
+        }
+
         if (currentPlayhead >= actualEndTime) {
           cleanup();
+          const _endRange = ramCacheRef.current.getCachedRange();
+          setRamCacheCount(_endRange.length);
+          setRamCacheState(_endRange, Math.ceil(actualEndTime * 30));
           setPlayheadPosition(0);
           startPositionRef.current = 0;
           onEnd();
@@ -2332,6 +2424,20 @@ export const Preview: React.FC = () => {
           );
         }
 
+        // ── RAM cache: store frame from native playback ──
+        const _sfn = Math.round(currentPlayhead * 30);
+        try {
+          const _id = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          createImageBitmap(_id).then((bmp) => {
+            ramCacheRef.current.set(_sfn, bmp);
+            if (_sfn % 30 === 0) {
+              const range = ramCacheRef.current.getCachedRange();
+              setRamCacheState(range, Math.ceil(actualEndTime * 30));
+              setRamCacheCount(range.length);
+            }
+          }).catch(() => {});
+        } catch {}
+
         const nowPlayhead = performance.now();
         if (nowPlayhead - lastPlayheadUpdateRef.current >= PLAYHEAD_UPDATE_THROTTLE_MS) {
           lastPlayheadUpdateRef.current = nowPlayhead;
@@ -2406,6 +2512,9 @@ export const Preview: React.FC = () => {
       pause();
       return;
     }
+
+    frameDropCountRef.current = 0;
+    frameTotalCountRef.current = 0;
 
     let isActive = true;
     let nativeCleanup: (() => void) | null = null;
@@ -2596,6 +2705,9 @@ export const Preview: React.FC = () => {
               if (currentMediaTime >= mediaEndTime) {
                 input[Symbol.dispose]?.();
                 cleanupAudioResources();
+                const _range = ramCacheRef.current.getCachedRange();
+                setRamCacheCount(_range.length);
+                setRamCacheState(_range, Math.ceil(actualEndTime * 30));
 
                 const clipEndTime = clip.startTime + clip.duration;
                 const nextResult = findClipAtTime(clipEndTime);
@@ -2611,6 +2723,33 @@ export const Preview: React.FC = () => {
                   setPlayheadPosition(0);
                   startPositionRef.current = 0;
                   pause();
+                }
+                return;
+              }
+
+              // ── RAM cache: hit path ──
+              const _fps = 1000 / frameDuration;
+              const _fn = Math.round(currentPlayheadTime * _fps);
+              ramCacheRef.current.setAnchor(_fn);
+              const _cached = ramCacheRef.current.get(_fn);
+              if (_fn % 60 === 0) console.debug('[RAM Preview]', _cached ? 'HIT' : 'MISS', 'frame:', _fn, 'version:', ramCacheRef.current.currentVersion, 'stats:', ramCacheRef.current.getStats());
+              if (_cached) {
+                ctx.drawImage(_cached, 0, 0, canvas.width, canvas.height);
+                const _nowPh = performance.now();
+                if (_nowPh - lastPlayheadUpdateRef.current >= PLAYHEAD_UPDATE_THROTTLE_MS) {
+                  lastPlayheadUpdateRef.current = _nowPh;
+                  setPlayheadPosition(currentPlayheadTime);
+                }
+                frameTotalCountRef.current++;
+                const _elapsed = _nowPh - lastFrameTimestamp;
+                lastFrameTimestamp = _nowPh;
+                const _target = frameDuration / rateRef.current;
+                currentPlayheadTime += frameDuration / 1000;
+                currentMediaTime += (frameDuration / 1000) * currentSpeed;
+                const _delay = Math.max(0, _target - _elapsed);
+                if (isActive) {
+                  if (_delay > 0) setTimeout(() => { if (isActive) animationRef.current = requestAnimationFrame(processNextFrame); }, _delay);
+                  else animationRef.current = requestAnimationFrame(processNextFrame);
                 }
                 return;
               }
@@ -2714,10 +2853,10 @@ export const Preview: React.FC = () => {
                 | OffscreenCanvas = frameCanvas;
               try {
                 const frameBitmap = await createImageBitmap(frameCanvas);
-                processedFrame = await applyEffectsToFrame(
-                  clip.id,
-                  frameBitmap,
-                );
+                const hasEffects = clip.effects && clip.effects.length > 0;
+                processedFrame = hasEffects
+                  ? await applyEffectsToFrame(clip.id, frameBitmap)
+                  : frameBitmap;
               } catch {}
 
               const useGPU =
@@ -2758,6 +2897,20 @@ export const Preview: React.FC = () => {
                 );
               }
 
+              // ── RAM cache: store (sync capture, async bitmap) ──
+              try {
+                const _id = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                const _totalF = Math.ceil(actualEndTime * 30);
+                createImageBitmap(_id).then((bmp) => {
+                  ramCacheRef.current.set(_fn, bmp);
+                  if (_fn % 30 === 0) {
+                    const range = ramCacheRef.current.getCachedRange();
+                    setRamCacheState(range, _totalF);
+                    setRamCacheCount(range.length);
+                  }
+                }).catch(() => {});
+              } catch {}
+
               const nowPh = performance.now();
               if (nowPh - lastPlayheadUpdateRef.current >= PLAYHEAD_UPDATE_THROTTLE_MS) {
                 lastPlayheadUpdateRef.current = nowPh;
@@ -2769,6 +2922,12 @@ export const Preview: React.FC = () => {
               const actualFrameDuration =
                 duration > 0 ? duration * 1000 : frameDuration;
               const targetTime = actualFrameDuration / rateRef.current;
+
+              // Adaptive quality: track frame drops for auto mode
+              frameTotalCountRef.current++;
+              if (elapsed > targetTime * 1.5) {
+                frameDropCountRef.current++;
+              }
 
               const normalTimeAdvance = actualFrameDuration / 1000;
               const mediaTimeAdvance = normalTimeAdvance * currentSpeed;
@@ -3033,12 +3192,36 @@ export const Preview: React.FC = () => {
 
         const currentPlayhead = masterClock.currentTime;
 
+        // ── RAM cache: hit path for multi-track playback ──
+        const _mfn = Math.round(currentPlayhead * 30);
+        ramCacheRef.current.setAnchor(_mfn);
+        const _mcached = ramCacheRef.current.get(_mfn);
+        if (_mcached) {
+          const mainCanvas = canvasRef.current;
+          const mainCtx = mainCanvas?.getContext('2d');
+          if (mainCanvas && mainCtx) {
+            mainCtx.drawImage(_mcached, 0, 0, mainCanvas.width, mainCanvas.height);
+          }
+          masterClock.reportVideoTime(currentPlayhead);
+          const _mph = performance.now();
+          if (_mph - lastPlayheadUpdateRef.current >= PLAYHEAD_UPDATE_THROTTLE_MS) {
+            lastPlayheadUpdateRef.current = _mph;
+            setPlayheadPosition(currentPlayhead);
+          }
+          isProcessingFrame = false;
+          if (isActive) animationRef.current = requestAnimationFrame(processMultiTrackFrame);
+          return;
+        }
+
         try {
           if (currentPlayhead >= actualEndTime) {
             isProcessingFrame = false;
             cleanupPlaybackResources();
             cleanupAudioResources();
             masterClock.stop();
+            const _endRange = ramCacheRef.current.getCachedRange();
+            setRamCacheCount(_endRange.length);
+            setRamCacheState(_endRange, Math.ceil(actualEndTime * 30));
             setPlayheadPosition(0);
             startPositionRef.current = 0;
             pause();
@@ -3242,10 +3425,10 @@ export const Preview: React.FC = () => {
                       const frameBitmap = await createImageBitmap(
                         frameResult.canvas,
                       );
-                      processedFrame = await applyEffectsToFrame(
-                        clip.id,
-                        frameBitmap,
-                      );
+                      const clipHasEffects = clip.effects && clip.effects.length > 0;
+                      processedFrame = clipHasEffects
+                        ? await applyEffectsToFrame(clip.id, frameBitmap)
+                        : frameBitmap;
                     } catch {}
 
                     return { clip, transform, frame: processedFrame };
@@ -3504,7 +3687,16 @@ export const Preview: React.FC = () => {
 
             try {
               lastGoodFrameRef.current?.close();
-              lastGoodFrameRef.current = await createImageBitmap(offscreenCanvasRef.current!);
+              const _bmp = await createImageBitmap(offscreenCanvasRef.current!);
+              lastGoodFrameRef.current = _bmp;
+              // ── RAM cache: store downscaled frame ──
+              const _smfn = Math.round(currentPlayhead * 30);
+              downscaleAndCache(offscreenCanvasRef.current!, _smfn);
+              if (_smfn % 10 === 0) {
+                const range = ramCacheRef.current.getCachedRange();
+                setRamCacheState(range, Math.ceil(actualEndTime * 30));
+                setRamCacheCount(range.length);
+              }
             } catch {}
           } else if (lastGoodFrameRef.current) {
             ctx.drawImage(
@@ -5236,6 +5428,172 @@ export const Preview: React.FC = () => {
           >
             {isMuted ? <VolumeX size={16} /> : <Volume2 size={16} />}
           </button>
+
+          {/* Preview Quality */}
+          <div className="relative">
+            <button
+              onClick={() => setShowQualityMenu(!showQualityMenu)}
+              className="px-2 py-1 rounded-lg text-xs font-mono text-text-secondary hover:text-text-primary hover:bg-background-elevated transition-colors"
+              title="Preview Quality (lower = smoother playback)"
+            >
+              <div className="flex items-center gap-1">
+                <Gauge size={14} />
+                <span>{QUALITY_OPTIONS.find((q) => q.value === previewQuality)?.label ?? "Auto"}</span>
+              </div>
+            </button>
+            {showQualityMenu && (
+              <>
+                <div
+                  className="fixed inset-0 z-40"
+                  onClick={() => setShowQualityMenu(false)}
+                />
+                <div className="absolute bottom-full mb-1 left-1/2 -translate-x-1/2 bg-background-elevated border border-border rounded-lg shadow-xl py-1 z-50 min-w-[80px]">
+                  {QUALITY_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.value}
+                      onClick={() => {
+                        setPreviewQuality(opt.value);
+                        setShowQualityMenu(false);
+                      }}
+                      className={`w-full px-3 py-1.5 text-xs font-mono text-left hover:bg-background-secondary transition-colors ${
+                        previewQuality === opt.value
+                          ? "text-primary"
+                          : "text-text-secondary"
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Prerender — frame-by-frame deterministic cache fill (no gaps) */}
+          <button
+            onClick={async () => {
+              if (prerenderActive) {
+                prerenderCancelRef.current = true;
+                return;
+              }
+              if (isPlaying) togglePlayback();
+              const startFrom = playheadPositionRef.current;
+              prerenderCancelRef.current = false;
+              setPrerenderActive(true);
+              setPrerenderProgress(0);
+
+              const fps = 30;
+              const startFn = Math.round(startFrom * fps);
+              const endFn = Math.max(startFn + 1, Math.ceil(actualEndTime * fps));
+
+              try {
+                for (let fn = startFn; fn < endFn; fn++) {
+                  if (prerenderCancelRef.current) break;
+                  // Memory-budget guard
+                  const stats = ramCacheRef.current.getStats();
+                  if (stats.memoryBytes > stats.maxMemoryBytes * 0.95) {
+                    console.log('[RAM] prerender stopping at frame', fn, '— memory budget reached');
+                    break;
+                  }
+                  // Skip already-cached frames
+                  if (ramCacheRef.current.get(fn)) {
+                    if (fn % 50 === 0) setPrerenderProgress((fn - startFn) / (endFn - startFn));
+                    continue;
+                  }
+                  // Render this frame deterministically (await completion)
+                  const t = fn / fps;
+                  await renderFrameDirectlyRef.current(t);
+                  // Capture the rendered frame from offscreen and cache it
+                  if (offscreenCanvasRef.current) {
+                    downscaleAndCache(offscreenCanvasRef.current, fn);
+                  }
+                  // Yield to browser every 5 frames so UI stays responsive
+                  if (fn % 5 === 0) {
+                    setPrerenderProgress((fn - startFn) / (endFn - startFn));
+                    const range = ramCacheRef.current.getCachedRange();
+                    setRamCacheCount(range.length);
+                    setRamCacheState(range, endFn);
+                    await new Promise(r => setTimeout(r, 0));
+                  }
+                }
+              } catch (e) {
+                console.warn('[RAM] prerender error:', e);
+              }
+
+              // Final state push
+              const finalRange = ramCacheRef.current.getCachedRange();
+              setRamCacheCount(finalRange.length);
+              setRamCacheState(finalRange, endFn);
+              setPlayheadPosition(startFrom);
+              // Re-render the original frame so the canvas matches the playhead
+              await renderFrameDirectlyRef.current(startFrom);
+              setPrerenderActive(false);
+              setPrerenderProgress(0);
+              prerenderCancelRef.current = false;
+              console.log('[RAM] prerender done. cached:', finalRange.length, 'frames, mem:', Math.round(ramCacheRef.current.getStats().memoryBytes / 1024 / 1024), 'MB');
+            }}
+            className={`px-2 py-1 rounded-lg text-xs font-mono transition-colors ${
+              prerenderActive
+                ? "text-amber-400 hover:text-amber-300 bg-amber-500/10"
+                : "text-text-secondary hover:text-text-primary hover:bg-background-elevated"
+            }`}
+            title={prerenderActive
+              ? "Click to cancel prerender"
+              : "Prerender — render every frame deterministically into the cache"
+            }
+          >
+            <div className="flex items-center gap-1">
+              {prerenderActive ? (
+                <span>⚡ {Math.round(prerenderProgress * 100)}%</span>
+              ) : (
+                <span>⚡ Prerender</span>
+              )}
+            </div>
+          </button>
+
+          {/* RAM Preview indicator + limit selector */}
+          <div className="relative">
+            <button
+              onClick={() => setShowRamMenu(!showRamMenu)}
+              className={`px-2 py-1 rounded-lg text-xs font-mono transition-colors ${
+                ramCacheCount > 0
+                  ? "text-green-400 hover:text-green-300 hover:bg-background-elevated"
+                  : "text-text-secondary hover:text-text-primary hover:bg-background-elevated"
+              }`}
+              title={`RAM Preview: ${ramCacheCount} frames cached (${ramMaxGB} GB limit). Click to configure.`}
+            >
+              <div className="flex items-center gap-1">
+                {ramCacheCount > 0 && <span className="w-1.5 h-1.5 rounded-full bg-green-400" />}
+                <span>RAM {ramMaxGB}G</span>
+              </div>
+            </button>
+            {showRamMenu && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setShowRamMenu(false)} />
+                <div className="absolute bottom-full mb-1 left-1/2 -translate-x-1/2 bg-background-elevated border border-border rounded-lg shadow-xl py-1 z-50 min-w-[100px]">
+                  {[0.5, 1, 2, 4, 8, 16, 32].map((gb) => (
+                    <button
+                      key={gb}
+                      onClick={() => { useSettingsStore.getState().setRamPreviewMaxGB(gb); setShowRamMenu(false); }}
+                      className={`w-full px-3 py-1.5 text-xs font-mono text-left hover:bg-background-secondary transition-colors ${
+                        ramMaxGB === gb ? "text-primary" : "text-text-secondary"
+                      }`}
+                    >
+                      {gb >= 1 ? `${gb} GB` : `${gb * 1024} MB`}
+                    </button>
+                  ))}
+                  <div className="border-t border-border mt-1 pt-1">
+                    <button
+                      onClick={() => { ramCacheRef.current.clear(); setRamCacheCount(0); setShowRamMenu(false); }}
+                      className="w-full px-3 py-1.5 text-xs font-mono text-left text-red-400 hover:bg-background-secondary transition-colors"
+                    >
+                      Clear cache
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
 
           {/* Zoom Control */}
           <div className="relative">

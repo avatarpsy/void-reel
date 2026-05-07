@@ -103,7 +103,7 @@ export class ExportFrameDecoder {
       return false;
     }
 
-    const sinkOptions: Record<string, unknown> = { poolSize: 2 };
+    const sinkOptions: Record<string, unknown> = { poolSize: 4 };
     if (this.width) {
       const aspectRatio = videoTrack.displayHeight / videoTrack.displayWidth;
       sinkOptions.width = this.width;

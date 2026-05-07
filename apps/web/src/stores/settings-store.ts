@@ -57,6 +57,10 @@ export interface SettingsState {
   autoSaveInterval: number;
   language: string;
 
+  // Playback / RAM Preview
+  ramPreviewMaxGB: number; // max RAM for preview cache in GB
+  setRamPreviewMaxGB: (gb: number) => void;
+
   // AI/Service preferences
   defaultTtsProvider: TtsProvider;
   defaultLlmProvider: LlmProvider;
@@ -102,6 +106,8 @@ export const useSettingsStore = create<SettingsState>()(
         autoSave: true,
         autoSaveInterval: 5,
         language: "en",
+        ramPreviewMaxGB: 4,
+        setRamPreviewMaxGB: (gb: number) => set({ ramPreviewMaxGB: Math.max(0.125, Math.min(gb, 32)) }),
 
         defaultTtsProvider: "elevenlabs" as TtsProvider,
         defaultLlmProvider: "openai" as LlmProvider,

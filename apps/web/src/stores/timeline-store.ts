@@ -9,6 +9,8 @@ export const ZOOM_PRESETS = {
 
 export type PlaybackState = "stopped" | "playing" | "paused";
 
+export type PreviewQuality = "full" | "half" | "third" | "quarter" | "eighth" | "sixteenth" | "auto";
+
 export interface TimelineState {
   playheadPosition: number;
   playbackState: PlaybackState;
@@ -28,6 +30,7 @@ export interface TimelineState {
   expandedTracks: Set<string>;
   expandedClipKeyframes: Set<string>;
   keyframeEditMode: boolean;
+  previewQuality: PreviewQuality;
   play: () => void;
   pause: () => void;
   stop: () => void;
@@ -66,6 +69,8 @@ export interface TimelineState {
   setClipKeyframesExpanded: (clipId: string, expanded: boolean) => void;
   isClipKeyframesExpanded: (clipId: string) => boolean;
   setKeyframeEditMode: (enabled: boolean) => void;
+  setPreviewQuality: (quality: PreviewQuality) => void;
+  getPreviewScale: () => number;
 }
 
 export const useTimelineStore = create<TimelineState>()(
@@ -93,6 +98,7 @@ export const useTimelineStore = create<TimelineState>()(
     expandedTracks: new Set<string>(),
     expandedClipKeyframes: new Set<string>(),
     keyframeEditMode: false,
+    previewQuality: "auto" as PreviewQuality,
 
     play: () => {
       set({ playbackState: "playing" });
@@ -368,6 +374,24 @@ export const useTimelineStore = create<TimelineState>()(
 
     setKeyframeEditMode: (enabled: boolean) => {
       set({ keyframeEditMode: enabled });
+    },
+
+    setPreviewQuality: (quality: PreviewQuality) => {
+      set({ previewQuality: quality });
+    },
+
+    getPreviewScale: () => {
+      const { previewQuality } = get();
+      switch (previewQuality) {
+        case "full":      return 1;
+        case "half":      return 0.5;
+        case "third":     return 1 / 3;
+        case "quarter":   return 0.25;
+        case "eighth":    return 0.125;
+        case "sixteenth": return 0.0625;
+        case "auto":      return 0.5;
+        default:          return 1;
+      }
     },
   })),
 );

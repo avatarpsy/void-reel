@@ -29,8 +29,8 @@ export class FrameRingBuffer {
   private lastWriteTime: number = 0;
   private lastPresentTime: number = 0;
 
-  constructor(bufferSize: number = 3) {
-    this.bufferSize = Math.max(2, Math.min(bufferSize, 8));
+  constructor(bufferSize: number = 6) {
+    this.bufferSize = Math.max(2, Math.min(bufferSize, 12));
     this.buffers = new Array(this.bufferSize).fill(null);
   }
 
