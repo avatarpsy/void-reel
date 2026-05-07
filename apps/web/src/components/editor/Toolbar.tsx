@@ -110,6 +110,10 @@ export const Toolbar: React.FC = () => {
     console.log("[save] click → start", { requestId });
     try {
       const proj = useProjectStore.getState().project;
+      const mediaIndex = new Map<string, string>();
+      for (const m of (proj?.mediaLibrary?.items ?? [])) {
+        if (m.id && (m.url || m.src)) mediaIndex.set(m.id, m.url || m.src);
+      }
       const tracks = (proj?.timeline?.tracks ?? []).map((tr: any) => ({
         id: tr.id,
         name: tr.name,
@@ -117,6 +121,7 @@ export const Toolbar: React.FC = () => {
         clips: (tr.clips ?? []).map((c: any) => ({
           id: c.id,
           mediaId: c.mediaId,
+          url: mediaIndex.get(c.mediaId) || "",
           startTime: c.startTime,
           duration: c.duration,
           inPoint: c.inPoint,
