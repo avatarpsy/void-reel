@@ -215,6 +215,81 @@ export const Preview: React.FC = () => {
   );
   const audioBufferCacheRef = useRef<Map<string, AudioBuffer>>(new Map());
 
+  /** Returns the cache key for an audio buffer, accounting for multi-track audio files. */
+  const getAudioBufferCacheKey = (mediaId: string, audioTrackIndex?: number): string =>
+    audioTrackIndex !== undefined && audioTrackIndex > 0
+      ? `${mediaId}:${audioTrackIndex}`
+      : mediaId;
+
+  /**
+   * Loads an AudioBuffer for the given media item and audio track index.
+   * Uses mediabunny for non-primary tracks; falls back to decodeAudioData for the primary track.
+   */
+  const loadAudioBuffer = async (
+    audioContext: AudioContext | BaseAudioContext,
+    blob: Blob,
+    audioTrackIndex: number = 0,
+  ): Promise<AudioBuffer | null> => {
+    if (audioTrackIndex === 0) {
+      try {
+        const arrayBuffer = await blob.arrayBuffer();
+        return await audioContext.decodeAudioData(arrayBuffer);
+      } catch {
+        // Fall through to mediabunny extraction
+      }
+    }
+    // Use mediabunny to extract the specific audio track
+    try {
+      const { Input, ALL_FORMATS, BlobSource, AudioBufferSink } =
+        await import("mediabunny");
+      const input = new Input({ source: new BlobSource(blob), formats: ALL_FORMATS });
+      const audioTracks = await (input as any).getAudioTracks();
+      const track =
+        audioTracks[audioTrackIndex] ??
+        (await (input as any).getPrimaryAudioTrack()) ??
+        audioTracks[0] ??
+        null;
+      if (!track) {
+        (input as any)[Symbol.dispose]?.();
+        return null;
+      }
+      const canDecode = await track.canDecode();
+      if (!canDecode) {
+        (input as any)[Symbol.dispose]?.();
+        return null;
+      }
+      const sink = new AudioBufferSink(track);
+      const duration = await track.computeDuration();
+      if (!duration || duration <= 0) {
+        (input as any)[Symbol.dispose]?.();
+        return null;
+      }
+      // Collect all audio buffers from the sink
+      const chunks: { buffer: AudioBuffer; timestamp: number }[] = [];
+      for await (const wrapped of sink.buffers(0, duration)) {
+        chunks.push({ buffer: wrapped.buffer, timestamp: wrapped.timestamp });
+      }
+      (input as any)[Symbol.dispose]?.();
+      if (chunks.length === 0) return null;
+      // Concatenate all chunks into a single AudioBuffer
+      const sampleRate = chunks[0].buffer.sampleRate;
+      const numChannels = chunks[0].buffer.numberOfChannels;
+      const totalFrames = Math.ceil(duration * sampleRate);
+      const combined = audioContext.createBuffer(numChannels, totalFrames, sampleRate);
+      for (const chunk of chunks) {
+        const offsetFrames = Math.round(chunk.timestamp * sampleRate);
+        for (let ch = 0; ch < numChannels; ch++) {
+          const dest = combined.getChannelData(ch);
+          const src = chunk.buffer.getChannelData(ch);
+          dest.set(src, offsetFrames);
+        }
+      }
+      return combined;
+    } catch {
+      return null;
+    }
+  };
+
   const rendererRef = useRef<Renderer | null>(null);
   const rendererInitializedRef = useRef<boolean>(false);
 
@@ -505,6 +580,7 @@ export const Preview: React.FC = () => {
   const exportState = useUIStore((state) => state.exportState);
   const motionPathMode = useUIStore((state) => state.motionPathMode);
   const motionPathClipId = useUIStore((state) => state.motionPathClipId);
+  const select = useUIStore((state) => state.select);
 
   const {
     playheadPosition,
@@ -1014,14 +1090,24 @@ export const Preview: React.FC = () => {
             }
 
             let audioBuffer = audioBufferCacheRef.current.get(
-              audioClip.mediaId,
+              getAudioBufferCacheKey(audioClip.mediaId, audioClip.audioTrackIndex),
             );
             if (!audioBuffer) {
               try {
                 const audioContext = audioGraph.getAudioContext();
-                const arrayBuffer = await mediaBlob.arrayBuffer();
-                audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-                audioBufferCacheRef.current.set(audioClip.mediaId, audioBuffer);
+                const loaded = await loadAudioBuffer(
+                  audioContext,
+                  mediaItem.blob,
+                  audioClip.audioTrackIndex ?? 0,
+                );
+                if (!loaded) {
+                  continue;
+                }
+                audioBuffer = loaded;
+                audioBufferCacheRef.current.set(
+                  getAudioBufferCacheKey(audioClip.mediaId, audioClip.audioTrackIndex),
+                  audioBuffer,
+                );
               } catch (error) {
                 console.warn(
                   `[Preview] Failed to decode audio for clip ${audioClip.id}:`,
@@ -1109,7 +1195,8 @@ export const Preview: React.FC = () => {
 
     for (const track of allTracks) {
       for (const clip of track.clips) {
-        if (audioBufferCacheRef.current.has(clip.mediaId)) {
+        const cacheKey = getAudioBufferCacheKey(clip.mediaId, clip.audioTrackIndex);
+        if (audioBufferCacheRef.current.has(cacheKey)) {
           continue;
         }
 
@@ -1122,9 +1209,14 @@ export const Preview: React.FC = () => {
         if (!mediaBlob) continue;
 
         try {
-          const arrayBuffer = await mediaBlob.arrayBuffer();
-          const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-          audioBufferCacheRef.current.set(clip.mediaId, audioBuffer);
+          const audioBuffer = await loadAudioBuffer(
+            audioContext,
+            mediaItem.blob,
+            clip.audioTrackIndex ?? 0,
+          );
+          if (audioBuffer) {
+            audioBufferCacheRef.current.set(cacheKey, audioBuffer);
+          }
         } catch {
         }
       }
@@ -1147,7 +1239,9 @@ export const Preview: React.FC = () => {
             continue;
           }
 
-          const audioBuffer = audioBufferCacheRef.current.get(clip.mediaId);
+          const audioBuffer = audioBufferCacheRef.current.get(
+            getAudioBufferCacheKey(clip.mediaId, clip.audioTrackIndex),
+          );
           if (!audioBuffer) {
             continue;
           }
@@ -2125,7 +2219,9 @@ export const Preview: React.FC = () => {
                 mediaItem.metadata.channels > 0);
             if (!hasAudio) continue;
 
-            const audioBuffer = audioBufferCacheRef.current.get(audioClip.mediaId);
+            const audioBuffer = audioBufferCacheRef.current.get(
+              getAudioBufferCacheKey(audioClip.mediaId, audioClip.audioTrackIndex),
+            );
             if (audioBuffer) {
               schedules.push({
                 clipId: audioClip.id,
@@ -4143,6 +4239,13 @@ export const Preview: React.FC = () => {
 
   const activeShapeClip = selectedShapeClip;
 
+  const [hoveredGraphicClipId, setHoveredGraphicClipId] = useState<string | null>(null);
+
+  const activeGraphicClips = useMemo(() => {
+    // getActiveShapeClips returns all graphic clip types (shapes, SVGs, and stickers)
+    return getActiveShapeClips(allShapeClips, playheadPosition);
+  }, [allShapeClips, playheadPosition]);
+
   const shapeClipBounds = useMemo(() => {
     if (!selectedShapeClip || !canvasRef.current || !overlayRef.current)
       return null;
@@ -4201,6 +4304,93 @@ export const Preview: React.FC = () => {
       isShapeClip: true,
     };
   }, [selectedShapeClip, settings.width, settings.height, canvasSize]);
+
+  const getGraphicClipDisplayBounds = useCallback(
+    (clip: ShapeClip | SVGClip | StickerClip) => {
+      if (!canvasRef.current || !overlayRef.current) return null;
+
+      const canvas = canvasRef.current;
+      const overlay = overlayRef.current;
+      const overlayRect = overlay.getBoundingClientRect();
+      const canvasRect = canvas.getBoundingClientRect();
+
+      const { transform } = clip;
+      // Approximation of the displayed clip size in canvas-coordinate units,
+      // consistent with the value used in shapeClipBounds for the resize overlay.
+      const shapeSize = 200;
+
+      const canvasWidth = settings.width;
+      const canvasHeight = settings.height;
+
+      const canvasAspect = canvasWidth / canvasHeight;
+      const elementAspect = canvasRect.width / canvasRect.height;
+
+      let actualWidth: number;
+      let actualHeight: number;
+      let letterboxOffsetX = 0;
+      let letterboxOffsetY = 0;
+
+      if (elementAspect > canvasAspect) {
+        actualHeight = canvasRect.height;
+        actualWidth = actualHeight * canvasAspect;
+        letterboxOffsetX = (canvasRect.width - actualWidth) / 2;
+      } else {
+        actualWidth = canvasRect.width;
+        actualHeight = actualWidth / canvasAspect;
+        letterboxOffsetY = (canvasRect.height - actualHeight) / 2;
+      }
+
+      const displayScale = actualWidth / canvasWidth;
+
+      const shapeWidth = shapeSize * transform.scale.x * displayScale;
+      const shapeHeight = shapeSize * transform.scale.y * displayScale;
+
+      const posX = transform.position.x * canvasWidth * displayScale;
+      const posY = transform.position.y * canvasHeight * displayScale;
+
+      const canvasOffsetX = canvasRect.left - overlayRect.left + letterboxOffsetX;
+      const canvasOffsetY = canvasRect.top - overlayRect.top + letterboxOffsetY;
+
+      const centerX = canvasOffsetX + posX;
+      const centerY = canvasOffsetY + posY;
+
+      return {
+        x: centerX - shapeWidth / 2,
+        y: centerY - shapeHeight / 2,
+        width: shapeWidth,
+        height: shapeHeight,
+        centerX,
+        centerY,
+      };
+    },
+    [settings.width, settings.height],
+  );
+
+  const findGraphicClipAtPoint = useCallback(
+    (clientX: number, clientY: number): ShapeClip | SVGClip | StickerClip | null => {
+      if (!overlayRef.current) return null;
+      const overlayRect = overlayRef.current.getBoundingClientRect();
+      const pointX = clientX - overlayRect.left;
+      const pointY = clientY - overlayRect.top;
+
+      for (let i = activeGraphicClips.length - 1; i >= 0; i--) {
+        const clip = activeGraphicClips[i];
+        const bounds = getGraphicClipDisplayBounds(clip);
+        if (!bounds) continue;
+
+        if (
+          pointX >= bounds.x &&
+          pointX <= bounds.x + bounds.width &&
+          pointY >= bounds.y &&
+          pointY <= bounds.y + bounds.height
+        ) {
+          return clip;
+        }
+      }
+      return null;
+    },
+    [activeGraphicClips, getGraphicClipDisplayBounds],
+  );
 
   const selectedSubtitleId = useMemo(() => {
     const subtitleSelection = selectedItems.find(
@@ -4465,6 +4655,32 @@ export const Preview: React.FC = () => {
       };
     },
     [activeShapeClip],
+  );
+
+  const handleGraphicsMouseMove = useCallback(
+    (e: React.MouseEvent) => {
+      if (interactionMode !== "none") {
+        setHoveredGraphicClipId(null);
+        return;
+      }
+
+      const clip = findGraphicClipAtPoint(e.clientX, e.clientY);
+      setHoveredGraphicClipId(clip ? clip.id : null);
+    },
+    [interactionMode, findGraphicClipAtPoint],
+  );
+
+  const handleGraphicsClick = useCallback(
+    (e: React.MouseEvent) => {
+      if (interactionMode !== "none") return;
+
+      const clip = findGraphicClipAtPoint(e.clientX, e.clientY);
+      if (clip) {
+        select({ type: "shape-clip", id: clip.id });
+        e.stopPropagation();
+      }
+    },
+    [interactionMode, findGraphicClipAtPoint, select],
   );
 
   const handleMouseMove = useCallback(
@@ -5014,6 +5230,9 @@ export const Preview: React.FC = () => {
                   maxWidth: `${800 * zoomLevel}px`,
                 }
           }
+          onMouseMove={!isPlaying ? handleGraphicsMouseMove : undefined}
+          onClick={!isPlaying ? handleGraphicsClick : undefined}
+          onMouseLeave={() => setHoveredGraphicClipId(null)}
         >
           <canvas
             ref={canvasRef}
@@ -5021,7 +5240,7 @@ export const Preview: React.FC = () => {
             height={settings.height}
             className="w-full h-full object-contain bg-black"
             style={{
-              cursor: "default",
+              cursor: hoveredGraphicClipId && !isPlaying ? "pointer" : "default",
             }}
           />
 
@@ -5347,6 +5566,35 @@ export const Preview: React.FC = () => {
               </div>
             </div>
           )}
+
+          {/* Graphic Clip Hover Indicators */}
+          {!cropMode && !isPlaying &&
+            activeGraphicClips.map((clip) => {
+              if (clip.id === selectedShapeClipId) return null;
+              if (clip.id !== hoveredGraphicClipId) return null;
+              const bounds = getGraphicClipDisplayBounds(clip);
+              if (!bounds) return null;
+              return (
+                <div
+                  key={clip.id}
+                  className="absolute pointer-events-none z-10"
+                  style={{
+                    left: bounds.x,
+                    top: bounds.y,
+                    width: bounds.width,
+                    height: bounds.height,
+                  }}
+                >
+                  <div className="absolute inset-0 border-2 border-dashed border-white/80 rounded-sm" />
+                  <div
+                    aria-hidden="true"
+                    className="absolute -top-6 left-1/2 -translate-x-1/2 px-2 py-0.5 bg-black/70 rounded text-[10px] text-white whitespace-nowrap"
+                  >
+                    Click to select
+                  </div>
+                </div>
+              );
+            })}
         </div>
       </div>
 
