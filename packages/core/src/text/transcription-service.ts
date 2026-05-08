@@ -117,6 +117,18 @@ export class TranscriptionService {
     } else if (mediaItem.fileHandle) {
       const file = await mediaItem.fileHandle.getFile();
       arrayBuffer = await file.arrayBuffer();
+    } else if (mediaItem.originalUrl) {
+      // Remote-only media (Voidspace narration / music — referenced by
+      // URL, blob populated lazily). Fetch on demand so the user can
+      // generate captions on a chat-loaded narration without waiting
+      // for the export-engine prefetch path to fire.
+      const resp = await fetch(mediaItem.originalUrl, { mode: "cors" });
+      if (!resp.ok) {
+        throw new Error(
+          `Failed to fetch remote media (${resp.status}) for transcription`,
+        );
+      }
+      arrayBuffer = await resp.arrayBuffer();
     } else {
       throw new Error("No media source available for audio extraction");
     }

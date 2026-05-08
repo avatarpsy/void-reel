@@ -23,6 +23,13 @@ interface AutoSaveRecord {
   timestamp: number;
   slot: number;
   data: string;
+  /**
+   * Serialised ActionHistory (undoStack + redoStack + snapshots).
+   * Optional so old autosaves still load. Persisted alongside the
+   * project doc so chat per-message rewind bookmarks and the editor's
+   * native undo/redo survive a page reload.
+   */
+  historyData?: string;
 }
 
 const DEFAULT_CONFIG: AutoSaveConfig = {
@@ -101,12 +108,25 @@ class AutoSaveManager {
     });
   }
 
-  start(getProject: () => Project): void {
+  /**
+   * Optional accessor for the live ActionHistory's serialised state.
+   * The project store wires this so every autosave snapshot also
+   * captures undo/redo + named snapshots — without it, a page reload
+   * orphans every chat-side rewind bookmark.
+   */
+  private getHistoryData: (() => string | null) | null = null;
+
+  setHistoryProvider(getter: (() => string | null) | null): void {
+    this.getHistoryData = getter;
+  }
+
+  start(getProject: () => Project, getHistoryData?: () => string | null): void {
     if (!this.config.enabled) {
       return;
     }
 
     this.stop(); // Stop any existing auto-save
+    if (getHistoryData) this.getHistoryData = getHistoryData;
 
     // Initial save
     this.pendingProject = getProject();
@@ -170,6 +190,9 @@ class AutoSaveManager {
       throw new Error("Auto-save database not initialized");
     }
 
+    const historyData = (() => {
+      try { return this.getHistoryData?.() ?? null; } catch { return null; }
+    })();
     const record: AutoSaveRecord = {
       id: `${project.id}-slot-${this.currentSlot}`,
       projectId: project.id,
@@ -177,6 +200,7 @@ class AutoSaveManager {
       timestamp: Date.now(),
       slot: this.currentSlot,
       data: JSON.stringify(project),
+      ...(historyData ? { historyData } : {}),
     };
 
     await this.saveRecord(record);
@@ -293,6 +317,26 @@ class AutoSaveManager {
     } catch (error) {
       console.error("[AutoSave] Failed to check for recovery:", error);
       return [];
+    }
+  }
+
+  /**
+   * Like {@link recover} but also returns the persisted ActionHistory
+   * snapshot so callers can rehydrate undo/redo + named snapshots.
+   * Falls back to project-only when this autosave was written by an
+   * older client that didn't persist history.
+   */
+  async recoverWithHistory(saveId: string): Promise<{
+    project: Project;
+    historyData: string | null;
+  } | null> {
+    const project = await this.recover(saveId);
+    if (!project) return null;
+    try {
+      const record = await this.getRecord(saveId);
+      return { project, historyData: record?.historyData ?? null };
+    } catch {
+      return { project, historyData: null };
     }
   }
 

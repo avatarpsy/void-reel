@@ -69,8 +69,54 @@ export class InverseActionGenerator {
         action as SubtitleAction & Action,
         projectBefore,
       );
+    } else if (type.startsWith("text/")) {
+      return this.generateTextClipInverse(action as Action);
     }
 
+    return null;
+  }
+
+  /**
+   * Inverse for text/* actions.
+   *
+   *   text/add     → text/remove(clipId)
+   *   text/remove  → text/add(textClip)  (relies on `previous` payload)
+   *   text/update  → text/update(clipId, updates: previous)
+   *
+   * For update + remove the project-store wrapper MUST capture the
+   * pre-mutation state into `params.previous` (or `params.previous`
+   * for remove) before calling execute() — the engine's Map can't be
+   * round-tripped from a JSON project snapshot. Without `previous`
+   * we return null, which makes ActionHistory treat the entry as a
+   * non-undoable leaf.
+   */
+  private generateTextClipInverse(action: Action): Action | null {
+    const type = action.type;
+    if (type === "text/add") {
+      const params = action.params as { textClip: { id: string } };
+      return this.createInverseAction(action, "text/remove", {
+        clipId: params.textClip.id,
+      });
+    }
+    if (type === "text/remove") {
+      const params = action.params as { clipId: string; previous?: unknown };
+      if (!params.previous) return null;
+      return this.createInverseAction(action, "text/add", {
+        textClip: params.previous,
+      });
+    }
+    if (type === "text/update") {
+      const params = action.params as {
+        clipId: string;
+        updates: Record<string, unknown>;
+        previous?: Record<string, unknown>;
+      };
+      if (!params.previous) return null;
+      return this.createInverseAction(action, "text/update", {
+        clipId: params.clipId,
+        updates: params.previous,
+      });
+    }
     return null;
   }
 

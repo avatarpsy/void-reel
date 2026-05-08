@@ -165,6 +165,17 @@ export interface ProjectState {
     trimStart: boolean,
   ) => Promise<ActionResult>;
   getClip: (clipId: string) => Clip | undefined;
+  /**
+   * Text-clip mutations through ActionExecutor — call these instead of
+   * `useEngineStore.getState().getTitleEngine().updateTextClip(...)` so
+   * the change enters ActionHistory and is undoable.
+   */
+  updateTextClip: (
+    clipId: string,
+    updates: Record<string, unknown>,
+  ) => Promise<ActionResult>;
+  addTextClip: (textClip: any) => Promise<ActionResult>;
+  removeTextClip: (clipId: string) => Promise<ActionResult>;
   separateAudio: (clipId: string) => Promise<ActionResult>;
   updateClipTransform: (
     clipId: string,
@@ -415,7 +426,13 @@ export interface ProjectState {
 export const useProjectStore = create<ProjectState>()(
   subscribeWithSelector((set, get) => {
     const actionHistory = new ActionHistory();
-    const actionExecutor = new ActionExecutor(actionHistory);
+    // Inject the live TitleEngine accessor so text/* actions
+    // (caption add / remove / update) route through ActionExecutor
+    // and enter ActionHistory — without this, caption mutations were
+    // bypassing undo entirely (executor would silent-no-op text/*).
+    const actionExecutor = new ActionExecutor(actionHistory, {
+      getTitleEngine: () => useEngineStore.getState().getTitleEngine() ?? null,
+    });
 
     return {
       // Initial state - create empty project (Requirement 1.1)
@@ -435,7 +452,9 @@ export const useProjectStore = create<ProjectState>()(
         settings?: Partial<ProjectSettings>,
       ) => {
         const newHistory = new ActionHistory();
-        const newExecutor = new ActionExecutor(newHistory);
+        const newExecutor = new ActionExecutor(newHistory, {
+          getTitleEngine: () => useEngineStore.getState().getTitleEngine() ?? null,
+        });
         set({
           project: createEmptyProject(name, settings),
           actionHistory: newHistory,
@@ -466,7 +485,9 @@ export const useProjectStore = create<ProjectState>()(
         }
 
         const newHistory = new ActionHistory();
-        const newExecutor = new ActionExecutor(newHistory);
+        const newExecutor = new ActionExecutor(newHistory, {
+          getTitleEngine: () => useEngineStore.getState().getTitleEngine() ?? null,
+        });
 
         // Fix legacy projects where timeline.duration was never persisted
         const computedDuration = project.timeline.tracks.reduce((max, track) =>
@@ -1585,6 +1606,108 @@ export const useProjectStore = create<ProjectState>()(
         return undefined;
       },
 
+      /**
+       * Update a text-clip (caption / title overlay) through ActionExecutor
+       * so the change enters ActionHistory and is undoable. Captures the
+       * current values BEFORE the action runs so the inverse-generator
+       * has the data it needs — without `previous`, undo treats the
+       * entry as no-op.
+       *
+       * Use this from EVERY caption mutation site (UI panels, voidspace
+       * postMessage bridge, agent tools). Calling titleEngine.updateTextClip
+       * directly bypasses history and breaks both manual undo AND the
+       * chat's per-message snapshot revert.
+       */
+      updateTextClip: async (
+        clipId: string,
+        updates: Record<string, unknown>,
+      ): Promise<ActionResult> => {
+        const { project, actionExecutor } = get();
+        const engine = useEngineStore.getState().getTitleEngine();
+        if (!engine) {
+          return {
+            success: false,
+            error: { code: "INVALID_PARAMS", message: "title engine not mounted" },
+          };
+        }
+        const before = engine.getTextClip(clipId);
+        if (!before) {
+          return {
+            success: false,
+            error: { code: "CLIP_NOT_FOUND", message: `no text clip ${clipId}` },
+          };
+        }
+        // Capture only the fields being changed — keeps the inverse
+        // payload tight and avoids accidental "restore field that
+        // wasn't touched" undo behaviour.
+        const previous: Record<string, unknown> = {};
+        for (const k of Object.keys(updates)) {
+          previous[k] = (before as Record<string, unknown>)[k];
+        }
+        const action: Action = {
+          type: "text/update",
+          id: uuidv4(),
+          timestamp: Date.now(),
+          params: { clipId, updates, previous },
+        };
+        const result = await actionExecutor.execute(action, project);
+        if (result.success) {
+          set({ project: { ...project, modifiedAt: Date.now() } });
+        }
+        return result;
+      },
+
+      /**
+       * Add a text-clip through ActionExecutor. Caller passes the
+       * fully-formed TextClip (engine.createTextClip already gives
+       * one — pass its result here to register history). Inverse is
+       * text/remove(clipId).
+       */
+      addTextClip: async (textClip: any): Promise<ActionResult> => {
+        const { project, actionExecutor } = get();
+        const action: Action = {
+          type: "text/add",
+          id: uuidv4(),
+          timestamp: Date.now(),
+          params: { textClip },
+        };
+        const result = await actionExecutor.execute(action, project);
+        if (result.success) {
+          set({ project: { ...project, modifiedAt: Date.now() } });
+        }
+        return result;
+      },
+
+      /**
+       * Remove a text-clip through ActionExecutor. Captures the full
+       * clip data into `previous` so undo can fully reconstruct it.
+       */
+      removeTextClip: async (clipId: string): Promise<ActionResult> => {
+        const { project, actionExecutor } = get();
+        const engine = useEngineStore.getState().getTitleEngine();
+        const previous = engine?.getTextClip(clipId);
+        if (!previous) {
+          return {
+            success: false,
+            error: { code: "CLIP_NOT_FOUND", message: `no text clip ${clipId}` },
+          };
+        }
+        const action: Action = {
+          type: "text/remove",
+          id: uuidv4(),
+          timestamp: Date.now(),
+          // Deep-clone previous so engine-side mutations after this
+          // call (extremely unlikely on an already-removed clip but
+          // cheap insurance) can't taint the inverse payload.
+          params: { clipId, previous: JSON.parse(JSON.stringify(previous)) },
+        };
+        const result = await actionExecutor.execute(action, project);
+        if (result.success) {
+          set({ project: { ...project, modifiedAt: Date.now() } });
+        }
+        return result;
+      },
+
       copyClips: (clipIds: string[]) => {
         const { getClip } = get();
         const clips = clipIds
@@ -2554,19 +2677,34 @@ export const useProjectStore = create<ProjectState>()(
       // Auto-save methods
       initializeAutoSave: async () => {
         await initializeAutoSave();
-        autoSaveManager.start(() => {
-          const { project } = get();
-          const titleEngine = useEngineStore.getState().getTitleEngine();
-          const graphicsEngine = useEngineStore.getState().getGraphicsEngine();
+        autoSaveManager.start(
+          () => {
+            const { project } = get();
+            const titleEngine = useEngineStore.getState().getTitleEngine();
+            const graphicsEngine = useEngineStore.getState().getGraphicsEngine();
 
-          return {
-            ...project,
-            textClips: titleEngine?.getAllTextClips() || [],
-            shapeClips: graphicsEngine?.getAllShapeClips() || [],
-            svgClips: graphicsEngine?.getAllSVGClips() || [],
-            stickerClips: graphicsEngine?.getAllStickerClips() || [],
-          };
-        });
+            return {
+              ...project,
+              textClips: titleEngine?.getAllTextClips() || [],
+              shapeClips: graphicsEngine?.getAllShapeClips() || [],
+              svgClips: graphicsEngine?.getAllSVGClips() || [],
+              stickerClips: graphicsEngine?.getAllStickerClips() || [],
+            };
+          },
+          // Capture serialised ActionHistory alongside every autosave
+          // so undo/redo + named snapshots survive page reloads. Without
+          // this the chat's per-message rewind bookmarks become dangling
+          // pointers the moment the tab closes — the bookmark holds a
+          // stackIndex but the stack has been wiped.
+          () => {
+            try {
+              const { actionHistory } = get();
+              return JSON.stringify(actionHistory.serialize());
+            } catch {
+              return null;
+            }
+          },
+        );
 
         // Subscribe to project state changes to mark as dirty for auto-save
         // Uses Zustand's subscribeWithSelector middleware to detect changes to project object only
@@ -2577,6 +2715,17 @@ export const useProjectStore = create<ProjectState>()(
             autoSaveManager.markDirty();
           },
         );
+        // Also re-mark dirty when the actionHistory's stacks change —
+        // pure undo/redo (without a project mutation between) doesn't
+        // bump `project`, but the history itself differs and we want
+        // it persisted. The history's notify fires on every push /
+        // undo / redo / snapshot mutation.
+        try {
+          const { actionHistory } = get();
+          actionHistory.subscribe(() => autoSaveManager.markDirty());
+        } catch {
+          /* older builds without subscribe — no-op */
+        }
       },
 
       checkForRecovery: async () => {
@@ -2585,7 +2734,13 @@ export const useProjectStore = create<ProjectState>()(
       },
 
       recoverFromAutoSave: async (saveId: string) => {
-        const recoveredProject = await autoSaveManager.recover(saveId);
+        // Use the with-history variant so a reload restores undo/redo
+        // + named snapshots alongside the project. Old autosaves
+        // (no historyData) still recover with a fresh history — same
+        // behaviour as before this change.
+        const recovered = await autoSaveManager.recoverWithHistory(saveId);
+        const recoveredProject = recovered?.project ?? null;
+        const persistedHistory = recovered?.historyData ?? null;
         if (recoveredProject) {
           const storedMedia = await loadProjectMedia(recoveredProject.id);
           const blobMap = new Map(storedMedia.map((m) => [m.id, m.blob]));
@@ -2623,7 +2778,19 @@ export const useProjectStore = create<ProjectState>()(
           }
 
           const newHistory = new ActionHistory();
-          const newExecutor = new ActionExecutor(newHistory);
+          // Rehydrate undo/redo + named snapshots from the autosave
+          // record. Older autosaves (no historyData) leave history
+          // empty — same behaviour as before this change.
+          if (persistedHistory) {
+            try {
+              newHistory.restore(JSON.parse(persistedHistory));
+            } catch (e) {
+              console.warn("[recover] history restore failed, starting fresh:", e);
+            }
+          }
+          const newExecutor = new ActionExecutor(newHistory, {
+            getTitleEngine: () => useEngineStore.getState().getTitleEngine() ?? null,
+          });
           set({
             project: projectWithMedia,
             actionHistory: newHistory,

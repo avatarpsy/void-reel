@@ -10,6 +10,7 @@ import type {
   TransitionAction,
   AudioAction,
   SubtitleAction,
+  TextClipAction,
   MediaAction,
   ProjectAction,
 } from "../types/actions";
@@ -31,20 +32,56 @@ import type {
   MutableTrack,
   MutableClip,
 } from "../utils/immutable-updates";
+import type { TextClip } from "../text/types";
+import type { UpdateTextClipOptions } from "../text/title-engine";
 import { ActionValidator } from "./action-validator";
 import { ActionHistory } from "./action-history";
 import { InverseActionGenerator } from "./inverse-action-generator";
+
+/**
+ * Minimal interface the executor needs to apply text/* actions. The
+ * editor app's engine-store provides this — keeping it as an
+ * interface (rather than importing TitleEngine directly) means core
+ * stays decoupled from the engine's runtime instance lifecycle.
+ */
+export interface TitleEngineAdapter {
+  getTextClip(id: string): TextClip | undefined;
+  getAllTextClips(): TextClip[];
+  loadTextClips(clips: TextClip[]): void;
+  // Use TitleEngine's exact UpdateTextClipOptions so the editor's
+  // engine instance satisfies this adapter under strict structural
+  // typing — function params are contravariant, so a wider declared
+  // shape would reject TitleEngine's narrower implementation.
+  updateTextClip(
+    id: string,
+    updates: UpdateTextClipOptions,
+  ): TextClip | undefined;
+  deleteTextClip(id: string): boolean;
+  // Optional. The editor app may wire this to engine.loadTextClips
+  // with the existing list + the restored clip if a strict insert
+  // path is needed for text/add inverses.
+  insertTextClip?(clip: TextClip): void;
+}
+
+export interface ActionExecutorOptions {
+  /** Lazily resolved so the engine can be (re-)mounted after the
+   *  executor is constructed — common in the editor where the engine
+   *  initialises after the project store. */
+  getTitleEngine?: () => TitleEngineAdapter | null;
+}
 
 export class ActionExecutor {
   private validator: ActionValidator;
   private history: ActionHistory;
   private inverseGenerator: InverseActionGenerator;
   private lastAddedIds: Map<string, string> = new Map();
+  private getTitleEngine: () => TitleEngineAdapter | null;
 
-  constructor(history?: ActionHistory) {
+  constructor(history?: ActionHistory, options?: ActionExecutorOptions) {
     this.validator = new ActionValidator();
     this.history = history || new ActionHistory();
     this.inverseGenerator = new InverseActionGenerator();
+    this.getTitleEngine = options?.getTitleEngine ?? (() => null);
   }
 
   async execute(action: Action, project: Project): Promise<ActionResult> {
@@ -224,6 +261,8 @@ export class ActionExecutor {
       this.applyAudioAction(action as AudioAction, project);
     } else if (type.startsWith("subtitle/")) {
       this.applySubtitleAction(action as SubtitleAction, project);
+    } else if (type.startsWith("text/")) {
+      this.applyTextClipAction(action as TextClipAction, project);
     }
 
     // Recompute timeline duration from clips after any action that may affect it
@@ -1325,6 +1364,63 @@ export class ActionExecutor {
           timeline.subtitles = [...(timeline.subtitles || []), ...newSubtitles];
         }
         break;
+      }
+    }
+  }
+
+  /**
+   * Apply text-clip (caption / title) actions through the live
+   * TitleEngine. The engine owns the canonical Map<id, TextClip>
+   * — we mirror the change into project.textClips so saves carry
+   * the latest state, but the engine instance is the source of
+   * truth for renderers.
+   *
+   * Inverse: relies on `previous` being captured by the project-
+   * store wrapper before calling execute() (see InverseActionGenerator
+   * `text/*` cases). Without `previous` text/update has no
+   * symmetric undo and the InverseActionGenerator returns null —
+   * which means undo() will treat the entry as no-op.
+   */
+  private applyTextClipAction(action: TextClipAction, project: Project): void {
+    const engine = this.getTitleEngine();
+    if (!engine) {
+      // No engine wired — silently no-op. The validator already
+      // rejected the action when an engine was required, so we only
+      // hit this in test environments / headless renders.
+      return;
+    }
+    const type = action.type;
+    // Project.textClips is `readonly` at the type level but mutated
+    // in-place across the executor (same pattern as MutableTimeline).
+    const mProject = project as unknown as { textClips?: TextClip[] };
+    if (type === "text/add") {
+      const params = action.params;
+      if (engine.insertTextClip) {
+        engine.insertTextClip(params.textClip);
+      } else {
+        engine.loadTextClips([...engine.getAllTextClips(), params.textClip]);
+      }
+      mProject.textClips = [
+        ...(mProject.textClips ?? []).filter((c) => c.id !== params.textClip.id),
+        params.textClip,
+      ];
+      this.lastAddedIds.set("text", params.textClip.id);
+    } else if (type === "text/remove") {
+      const params = action.params;
+      engine.deleteTextClip(params.clipId);
+      mProject.textClips = (mProject.textClips ?? []).filter(
+        (c) => c.id !== params.clipId,
+      );
+    } else if (type === "text/update") {
+      const params = action.params;
+      const updated = engine.updateTextClip(
+        params.clipId,
+        params.updates as UpdateTextClipOptions,
+      );
+      if (updated) {
+        mProject.textClips = (mProject.textClips ?? []).map((c) =>
+          c.id === params.clipId ? updated : c,
+        );
       }
     }
   }

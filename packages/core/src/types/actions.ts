@@ -219,6 +219,58 @@ export type SubtitleAction =
     }
   | { type: "subtitle/remove"; params: { subtitleId: string } }
   | { type: "subtitle/setStyle"; params: { style: SubtitleStyle } };
+
+// Text-clip actions — caption / title overlays live in the TitleEngine
+// (Map<id, TextClip>), not in timeline.tracks. They were previously
+// mutated directly via titleEngine.updateTextClip() which bypassed
+// ActionHistory entirely, so caption edits couldn't be undone and the
+// chat's revert-on-edit-and-resend couldn't roll them back. These
+// actions route every text-clip mutation through ActionExecutor so
+// the editor's native undo/redo (and the named-snapshot revert via
+// undoStack walk) covers captions too.
+//
+// `previous` is set by the project-store wrapper from the current
+// engine state BEFORE the action runs — InverseActionGenerator reads
+// it to produce the symmetric undo. Without it the executor would
+// have to round-trip through the engine for every inverse, which is
+// both slower and a layering violation.
+export type TextClipAction =
+  | {
+      type: "text/add";
+      params: {
+        textClip: import("../text/types").TextClip;
+      };
+    }
+  | {
+      type: "text/remove";
+      params: {
+        clipId: string;
+        previous?: import("../text/types").TextClip; // captured for inverse
+      };
+    }
+  | {
+      type: "text/update";
+      params: {
+        clipId: string;
+        updates: {
+          text?: string;
+          startTime?: number;
+          duration?: number;
+          style?: Partial<import("../text/types").TextStyle>;
+          transform?: Partial<Transform>;
+          animation?: import("../text/types").TextAnimation;
+        };
+        previous?: {
+          text?: string;
+          startTime?: number;
+          duration?: number;
+          style?: Partial<import("../text/types").TextStyle>;
+          transform?: Partial<Transform>;
+          animation?: import("../text/types").TextAnimation;
+        };
+      };
+    };
+
 export type TimelineAction =
   | ProjectAction
   | MediaAction
@@ -229,4 +281,5 @@ export type TimelineAction =
   | KeyframeAction
   | TransitionAction
   | AudioAction
-  | SubtitleAction;
+  | SubtitleAction
+  | TextClipAction;

@@ -50,6 +50,11 @@ export interface Clip {
   readonly blendMode?: import("../video/types").BlendMode;
   readonly blendOpacity?: number;
   readonly volume: number;
+  /** Audio mute toggle, distinct from `volume === 0`. The action
+   *  executor's `audio/setMuted` writes this; inverse-action-generator
+   *  reads it to capture undo state. Optional for back-compat with
+   *  older saved projects that pre-date the field. */
+  readonly muted?: boolean;
   readonly fade?: { fadeIn: number; fadeOut: number };
   readonly automation?: {
     volume?: AutomationPoint[];

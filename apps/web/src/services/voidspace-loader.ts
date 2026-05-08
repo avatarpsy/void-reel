@@ -393,11 +393,16 @@ async function fetchSceneSfx(
   inlineSfxList?: SceneSfxData[],
 ): Promise<SceneSfxData[]> {
   // Prefer the inline `sfx_list` array on the scene doc (cheap — already
-  // fetched as part of fetchScenes). Falls back to the legacy `sfxs/`
-  // subcollection only when the array is absent (old projects pre-array
-  // migration, or projects where Flutter wrote SFX directly).
-  if (Array.isArray(inlineSfxList) && inlineSfxList.length > 0) {
-    return inlineSfxList.map((s, i) => ({ id: s.id ?? `sfx_${i}`, ...s } as SceneSfxData));
+  // fetched as part of fetchScenes). The array is AUTHORITATIVE when
+  // present at all (including when explicitly empty) — that means
+  // `sfx_list: []` is "no SFX, on purpose" not "fall through to subcoll".
+  //
+  // We only fall back to the legacy `sfxs/` subcollection when the
+  // field is genuinely absent (`undefined`). Conflating "absent" with
+  // "empty array" was a real bug — clearing SFX via `{ sfx_list: [] }`
+  // would silently re-hydrate from the stale subcollection.
+  if (Array.isArray(inlineSfxList)) {
+    return inlineSfxList.map((s, i) => ({ ...s, id: s.id ?? `sfx_${i}` } as SceneSfxData));
   }
   const ref = collection(
     db,
@@ -987,11 +992,17 @@ export async function loadSceneListAsProject(
           null,
       )) ?? null;
 
-    const sceneMusicMediaId =
-      (await ensureMusicMediaItem(
-        scene.music_url ?? slData.music_url ?? null,
-        scene.music_title || slData.music_title || "Background Music",
-      )) ?? fallbackMusicMediaId;
+    // `music_disabled: true` is the explicit "user deleted music for
+    // this scene" signal stamped by the editor's manual save. Without
+    // this check the loader would fall through to slData.music_url and
+    // silently un-delete the music slice on every reload.
+    const sceneMusicDisabled = (scene as any).music_disabled === true;
+    const sceneMusicMediaId = sceneMusicDisabled
+      ? null
+      : ((await ensureMusicMediaItem(
+          scene.music_url ?? slData.music_url ?? null,
+          scene.music_title || slData.music_title || "Background Music",
+        )) ?? fallbackMusicMediaId);
 
     const { startMs: musicStartMs, endMs: musicEndMs } =
       resolveSceneMusicTimingMs(scene);
@@ -1000,9 +1011,41 @@ export async function loadSceneListAsProject(
     const musicEndSec =
       musicEndMs != null ? Math.max(0, musicEndMs / 1000) : null;
 
+    // ── Resolve persisted video trim (Flutter parity) ──
+    // Either side can store a trim window for the scene's primary video:
+    //   - scene-level: `video_start_ms` / `video_end_ms` / `video_duration_ms`
+    //     (web-side patchClip mirror writes here so the agent's edit_clip
+    //      survives reload)
+    //   - video-doc level: `start_ms` / `end_ms` (Flutter automation pipeline
+    //     writes here)
+    // Scene-level wins when both are present so a per-scene tweak survives
+    // a video regen that mints a fresh primaryVideo doc.
+    const videoStartMsRaw =
+      typeof (scene as any).video_start_ms === "number"
+        ? (scene as any).video_start_ms
+        : typeof primaryVideo?.start_ms === "number"
+          ? primaryVideo.start_ms
+          : null;
+    const videoEndMsRaw =
+      typeof (scene as any).video_end_ms === "number"
+        ? (scene as any).video_end_ms
+        : typeof primaryVideo?.end_ms === "number"
+          ? primaryVideo.end_ms
+          : null;
+    const hasVideoTrim =
+      videoStartMsRaw != null &&
+      videoEndMsRaw != null &&
+      videoEndMsRaw > videoStartMsRaw;
+
     // Compute scene duration from available timing data
     let sceneDuration = DEFAULT_SCENE_DURATION;
-    if (primaryVideo?.duration_ms) {
+    if (hasVideoTrim) {
+      // A trim shrinks the scene's slot on the timeline. Narration /
+      // captions / SFX placed inside this scene rebase against the
+      // shorter window automatically because they all use `currentTime`
+      // (cumulative) + their own offsets.
+      sceneDuration = (videoEndMsRaw! - videoStartMsRaw!) / 1000;
+    } else if (primaryVideo?.duration_ms) {
       sceneDuration = primaryVideo.duration_ms / 1000;
     } else if (musicStartSec != null && musicEndSec != null) {
       sceneDuration = musicEndSec - musicStartSec;
@@ -1095,14 +1138,22 @@ export async function loadSceneListAsProject(
         role: "primary",
       });
 
+      // inPoint / outPoint are SOURCE-FILE coordinates (which slice of the
+      // underlying video to play); duration is timeline-slot length. When
+      // a trim window was persisted, both move together — see
+      // `hasVideoTrim` above. Without one, we play the whole source.
+      const clipInPoint = hasVideoTrim ? videoStartMsRaw! / 1000 : 0;
+      const clipOutPoint = hasVideoTrim
+        ? videoEndMsRaw! / 1000
+        : sceneDuration;
       videoTrackClips.push({
         id: `clip-video-${scene._docId}`,
         mediaId,
         trackId: "track-video",
         startTime: currentTime,
         duration: sceneDuration,
-        inPoint: 0,
-        outPoint: sceneDuration,
+        inPoint: clipInPoint,
+        outPoint: clipOutPoint,
         effects: [],
         audioEffects: [],
         transform: makeDefaultTransform(),
@@ -1112,7 +1163,13 @@ export async function loadSceneListAsProject(
     }
 
     // ── Narration clip ──
-    if (narrationUrl) {
+    // `narration_disabled: true` is the editor's "user removed narration"
+    // marker (manual save stamps it when the narration track has no clip
+    // for this scene). Skipping here also suppresses the caption build
+    // below — captions hang off narration timing, so a disabled narration
+    // implies disabled captions.
+    const sceneNarrationDisabled = (scene as any).narration_disabled === true;
+    if (narrationUrl && !sceneNarrationDisabled) {
       const narMediaId = `media-narration-${scene._docId}-${narration?.id ?? "fallback"}`;
       const narDurMs = typeof narration?.duration_ms === "number" ? narration.duration_ms : null;
       const narDuration = narDurMs != null ? narDurMs / 1000 : sceneDuration;
@@ -1209,8 +1266,16 @@ export async function loadSceneListAsProject(
       const offsetSec = (typeof sfx.start_ms === "number" ? sfx.start_ms : 0) / 1000;
       const durSec = typeof sfx.duration_ms === "number" ? sfx.duration_ms / 1000 : 2;
       const startTime = currentTime + Math.max(0, offsetSec);
+      // Scene-prefix the clip id. `sfx.id` is just an index within ONE
+      // scene's `sfx_list` (`sfx_0`, `sfx_1`, …) and collides across
+      // scenes the moment two scenes both have an SFX. Without the
+      // prefix, identical ids merged through `applyAdditiveMerge` show
+      // up as multiple stacked entries with the same id — exactly the
+      // "10 × clip-sfx-sfx_0 at startTime=92" pathology we hit in
+      // production. Prefixing with the scene doc id makes every clip
+      // distinct without changing the underlying media reuse.
       sfxTrackClips.push({
-        id: `clip-sfx-${sfx.id}`,
+        id: `clip-sfx-${scene._docId}-${sfx.id}`,
         mediaId: sfxMediaId,
         trackId: "track-sfx",
         startTime,
@@ -1230,13 +1295,18 @@ export async function loadSceneListAsProject(
     // onto the chosen video doc post-clip-STT. Earlier versions stamped
     // them only on the first scene's narration; check every available
     // source before giving up so every scene shows captions.
+    //
+    // Captions track narration. If narration was deliberately disabled
+    // for this scene, suppress the caption build too — otherwise we'd
+    // re-emit captions whose audio source is muted, which doesn't match
+    // what the editor showed at save time.
     const videoWithWords = videos.find(
       (v) => Array.isArray(v.word_timestamps) && v.word_timestamps.length > 0,
     );
     const narrationWithWords = narrations.find(
       (n) => Array.isArray(n.word_timestamps) && n.word_timestamps!.length > 0,
     );
-    const rawWordTs =
+    const rawWordTs = sceneNarrationDisabled ? null :
       narration?.word_timestamps ??
       narrationWithWords?.word_timestamps ??
       primaryVideo?.word_timestamps ??

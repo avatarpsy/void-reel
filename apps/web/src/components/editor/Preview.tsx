@@ -1097,7 +1097,7 @@ export const Preview: React.FC = () => {
                 const audioContext = audioGraph.getAudioContext();
                 const loaded = await loadAudioBuffer(
                   audioContext,
-                  mediaItem.blob,
+                  mediaBlob,
                   audioClip.audioTrackIndex ?? 0,
                 );
                 if (!loaded) {
@@ -1211,7 +1211,7 @@ export const Preview: React.FC = () => {
         try {
           const audioBuffer = await loadAudioBuffer(
             audioContext,
-            mediaItem.blob,
+            mediaBlob,
             clip.audioTrackIndex ?? 0,
           );
           if (audioBuffer) {

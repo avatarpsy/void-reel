@@ -72,6 +72,8 @@ export class ActionValidator {
       return this.validateAudioAction(action as AudioAction, project);
     } else if (type.startsWith("subtitle/")) {
       return this.validateSubtitleAction(action as SubtitleAction, project);
+    } else if (type.startsWith("text/")) {
+      return this.validateTextClipAction(action);
     }
 
     return [
@@ -80,6 +82,46 @@ export class ActionValidator {
         message: `Unknown action type: ${type}`,
       },
     ];
+  }
+
+  /**
+   * Light validation for text/* actions. The TitleEngine itself
+   * round-trips the actual TextClip schema; we just check the
+   * required identity fields are present.
+   */
+  private validateTextClipAction(action: Action): ValidationError[] {
+    const errors: ValidationError[] = [];
+    const type = action.type;
+    if (type === "text/add") {
+      const tc = (action.params as any)?.textClip;
+      if (!tc || typeof tc !== "object" || !tc.id) {
+        errors.push({
+          code: "INVALID_PARAMS",
+          message: "text/add requires params.textClip with an id",
+          path: "params.textClip",
+        });
+      }
+    } else if (type === "text/remove" || type === "text/update") {
+      const clipId = (action.params as any)?.clipId;
+      if (!clipId || typeof clipId !== "string") {
+        errors.push({
+          code: "INVALID_PARAMS",
+          message: `${type} requires params.clipId`,
+          path: "params.clipId",
+        });
+      }
+      if (type === "text/update") {
+        const updates = (action.params as any)?.updates;
+        if (!updates || typeof updates !== "object") {
+          errors.push({
+            code: "INVALID_PARAMS",
+            message: "text/update requires params.updates",
+            path: "params.updates",
+          });
+        }
+      }
+    }
+    return errors;
   }
 
   private validateProjectAction(

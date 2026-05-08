@@ -112,7 +112,11 @@ export const Toolbar: React.FC = () => {
       const proj = useProjectStore.getState().project;
       const mediaIndex = new Map<string, string>();
       for (const m of (proj?.mediaLibrary?.items ?? [])) {
-        if (m.id && (m.url || m.src)) mediaIndex.set(m.id, m.url || m.src);
+        // MediaItem keeps its remote URL on `originalUrl` (the local
+        // blob is held separately in `blob`). The save serializer only
+        // needs an addressable URL to round-trip the project, so a
+        // missing originalUrl just skips the entry rather than emit "".
+        if (m.id && m.originalUrl) mediaIndex.set(m.id, m.originalUrl);
       }
       const tracks = (proj?.timeline?.tracks ?? []).map((tr: any) => ({
         id: tr.id,

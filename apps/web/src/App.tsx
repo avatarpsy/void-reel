@@ -786,6 +786,16 @@ function App() {
               if (/sfx|sound[\s_-]?effect/.test(haystack)) return 'sfx';
               return 'video';
             };
+            // Build a mediaId → originalUrl index so the get-state reply
+            // includes resolvable URLs on every clip. Without this the
+            // page-side merge that mirrors editor state to scene_lists
+            // drops SFX clips (which require `clip.url` to bucket into
+            // scenes) on Ctrl+S — same gap the iframe Save button used
+            // to have before Toolbar.tsx started passing url through.
+            const mediaIndex = new Map<string, string>();
+            for (const m of (proj.mediaLibrary?.items ?? [])) {
+              if (m.id && m.originalUrl) mediaIndex.set(m.id, m.originalUrl);
+            }
             // Media tracks: video, narration, music. The "track-captions"
             // entry in timeline.tracks has empty clips[] (text clips live
             // in the title engine, not here) — skip it so we don't emit
@@ -797,7 +807,9 @@ function App() {
                 name: tr.name,
                 kind: trackInfer(tr),
                 clips: (tr.clips ?? []).map((c: any) => ({
-                  id: c.id, mediaId: c.mediaId, startTime: c.startTime, duration: c.duration,
+                  id: c.id, mediaId: c.mediaId,
+                  url: mediaIndex.get(c.mediaId) || '',
+                  startTime: c.startTime, duration: c.duration,
                   inPoint: c.inPoint, outPoint: c.outPoint,
                   volume: c.volume, muted: c.muted,
                 })),
@@ -938,22 +950,34 @@ function App() {
             const store = useProjectStore.getState();
             const proj = store.project;
 
-            // Check if this is a text clip (caption). Text clips live in
-            // the title engine, not in timeline.tracks — they need a
-            // different update path.
+            // Text-clip (caption) path. Routes through the project-
+            // store wrapper so the change enters ActionHistory and is
+            // both manually undoable AND covered by the chat's named
+            // snapshot revert. Bypassing the wrapper (calling
+            // titleEngine.updateTextClip directly, as we used to)
+            // skipped history entirely — caption changes were
+            // unrecoverable via undo OR snapshot restore.
             const titleEngPatch = useEngineStore.getState().getTitleEngine();
             const textClip = titleEngPatch?.getTextClip(clipId);
             if (textClip) {
               const updates: Record<string, unknown> = {};
               if (typeof patch.startTime === "number") updates.startTime = patch.startTime;
               if (typeof patch.duration === "number") updates.duration = Math.max(0.05, patch.duration);
-              const updated = titleEngPatch!.updateTextClip(clipId, updates);
-              useProjectStore.setState({ project: { ...proj, modifiedAt: Date.now() } });
+              if (Object.keys(updates).length === 0) {
+                reply({ type: "voidspace:clip-patched", requestId: msg.requestId, clip: textClip, ok: true });
+                break;
+              }
+              const r = await (useProjectStore.getState() as any).updateTextClip(clipId, updates);
+              const updated = useEngineStore.getState().getTitleEngine()?.getTextClip(clipId) ?? null;
+              if (!r?.success) {
+                reply({ type: "voidspace:error", requestId: msg.requestId, error: r?.error?.message ?? "updateTextClip failed" });
+                break;
+              }
               reply({
                 type: "voidspace:clip-patched",
                 requestId: msg.requestId,
-                clip: updated ?? null,
-                ok: !!updated,
+                clip: updated,
+                ok: true,
               });
               break;
             }
@@ -1039,7 +1063,9 @@ function App() {
             }
             const r = await useProjectStore.getState().addClip(trackId, mediaId, startTime);
             if (!r.success) {
-              reply({ type: "voidspace:error", requestId: msg.requestId, error: r.error ?? "addClip failed" });
+              const e: any = r.error;
+              const errStr = e && typeof e === "object" ? `${e.code ?? "ERROR"}: ${e.message ?? "addClip failed"}` : (typeof e === "string" ? e : "addClip failed");
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: errStr });
               break;
             }
             // Look up the just-created clip — it's the newest one on
@@ -1057,7 +1083,15 @@ function App() {
             }
             const r = await useProjectStore.getState().removeClip(clipId);
             if (!r.success) {
-              reply({ type: "voidspace:error", requestId: msg.requestId, error: r.error ?? "removeClip failed" });
+              // r.error is an ActionError object { code, message, details? }.
+              // Pass the .message string (with the code prefixed) so the
+              // bridge's String() coercion doesn't produce "[object Object]"
+              // and the chat agent sees something actionable.
+              const e: any = r.error;
+              const errStr = e && typeof e === "object"
+                ? `${e.code ?? "ERROR"}: ${e.message ?? "removeClip failed"}`
+                : (typeof e === "string" ? e : "removeClip failed");
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: errStr });
               break;
             }
             reply({ type: "voidspace:clip-removed", requestId: msg.requestId, clipId, ok: true });
@@ -1069,20 +1103,26 @@ function App() {
               reply({ type: "voidspace:error", requestId: msg.requestId, error: "clipId + startTime required" });
               break;
             }
-            // Text clip path — move via title engine.
+            // Text-clip path — route through the project-store wrapper
+            // so the move enters ActionHistory (manual undo + snapshot
+            // revert both depend on it).
             const titleEngMove = useEngineStore.getState().getTitleEngine();
             const textClipMove = titleEngMove?.getTextClip(clipId);
             if (textClipMove) {
-              titleEngMove!.updateTextClip(clipId, { startTime });
-              const proj = useProjectStore.getState().project;
-              useProjectStore.setState({ project: { ...proj, modifiedAt: Date.now() } });
+              const r = await (useProjectStore.getState() as any).updateTextClip(clipId, { startTime });
+              if (!r?.success) {
+                reply({ type: "voidspace:error", requestId: msg.requestId, error: r?.error?.message ?? "updateTextClip failed" });
+                break;
+              }
               reply({ type: "voidspace:clip-moved", requestId: msg.requestId, clipId, ok: true });
               break;
             }
             // Media clip path.
             const r = await useProjectStore.getState().moveClip(clipId, startTime, trackId);
             if (!r.success) {
-              reply({ type: "voidspace:error", requestId: msg.requestId, error: r.error ?? "moveClip failed" });
+              const e: any = r.error;
+              const errStr = e && typeof e === "object" ? `${e.code ?? "ERROR"}: ${e.message ?? "moveClip failed"}` : (typeof e === "string" ? e : "moveClip failed");
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: errStr });
               break;
             }
             reply({ type: "voidspace:clip-moved", requestId: msg.requestId, clipId, ok: true });
@@ -1143,9 +1183,19 @@ function App() {
             break;
           }
           case "voidspace:snapshot": {
-            // Create a named snapshot in the editor's ActionHistory.
-            // The chat uses this to bookmark the state before an agent
-            // turn so the user can revert via the HistoryPanel.
+            // Bookmark the current ActionHistory undoStack index. The
+            // chat uses this to mark "state before this agent turn"
+            // so editing-and-resending the same user message later
+            // walks ActionHistory back to here, replaying inverse
+            // actions for everything done since.
+            //
+            // This requires every timeline mutation in between to be
+            // recorded as an action with a valid inverse. The
+            // text-clip path (captions) used to bypass that — it now
+            // routes through projectStore.updateTextClip → text/update
+            // action. If you find a mutation that still doesn't show
+            // up in the HistoryPanel, route it through the executor
+            // (don't add a parallel snapshot mechanism).
             const snapStore = useProjectStore.getState() as any;
             const snapName = typeof msg.name === "string" && msg.name ? msg.name : `Agent checkpoint ${new Date().toLocaleTimeString()}`;
             const snap = snapStore.actionHistory.createSnapshot(snapName);
@@ -1153,8 +1203,11 @@ function App() {
             break;
           }
           case "voidspace:restore-snapshot": {
-            // Undo back to a previously created snapshot. This reverts
-            // all actions that happened after the snapshot was created.
+            // Walk ActionHistory back to the snapshot's undoStack
+            // index by replaying inverse actions one at a time
+            // through the native undo() — the same path the manual
+            // undo button uses. No parallel state-capture: the
+            // editor's history is the single source of truth.
             const restStore = useProjectStore.getState() as any;
             const targetSnap = msg.snapshot as { id: string; stackIndex: number } | undefined;
             if (!targetSnap?.id) {

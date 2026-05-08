@@ -48,6 +48,16 @@ const ACTION_DESCRIPTIONS: Record<
   "audio/setFade": () => "Adjust fade",
   "subtitle/add": () => "Add subtitle",
   "subtitle/remove": () => "Remove subtitle",
+  "text/add": () => "Add text",
+  "text/remove": () => "Remove text",
+  "text/update": (params) => {
+    const u = (params.updates ?? {}) as Record<string, unknown>;
+    if (typeof u.text === "string") return "Edit text";
+    if (typeof u.startTime === "number" || typeof u.duration === "number") return "Move/trim text";
+    if (u.style) return "Style text";
+    if (u.transform) return "Transform text";
+    return "Update text";
+  },
   "project/rename": () => "Rename project",
   "project/updateSettings": () => "Update settings",
   "media/import": () => "Import media",
@@ -270,6 +280,85 @@ export class ActionHistory {
 
   getRedoEntries(): HistoryEntry[] {
     return [...this.redoStack];
+  }
+
+  /**
+   * Serialise the live undo/redo stacks + named snapshots into a
+   * JSON-safe payload. Use this when persisting alongside the project
+   * (e.g. autosave to IndexedDB, manual save to .oreel) so history
+   * survives a page reload — without persistence, every snapshot
+   * bookmark held by an external system (chat per-message rewind,
+   * "Restore checkpoint" button) becomes a dangling pointer the
+   * moment the tab closes.
+   *
+   * Action params are JSON-cloned defensively in case a caller
+   * shoves non-serialisable junk (DOM nodes, FileSystemHandle) in;
+   * a single bad entry shouldn't poison the whole history.
+   */
+  serialize(): {
+    undoStack: HistoryEntry[];
+    redoStack: HistoryEntry[];
+    snapshots: HistorySnapshot[];
+    version: 1;
+  } {
+    const cloneEntry = (e: HistoryEntry): HistoryEntry => {
+      try {
+        return {
+          action: JSON.parse(JSON.stringify(e.action)),
+          inverseAction: e.inverseAction
+            ? JSON.parse(JSON.stringify(e.inverseAction))
+            : null,
+          timestamp: e.timestamp,
+          description: e.description,
+          groupId: e.groupId,
+        };
+      } catch {
+        // Non-serialisable entry — skip the action body, keep
+        // metadata so the stack length stays correct (snapshot
+        // stackIndex bookmarks rely on it). Action will silent-no-op
+        // on undo, which is the same behaviour as a missing inverse.
+        return {
+          action: { type: e.action.type, id: e.action.id, timestamp: e.action.timestamp, params: {} },
+          inverseAction: null,
+          timestamp: e.timestamp,
+          description: e.description,
+          groupId: e.groupId,
+        };
+      }
+    };
+    return {
+      version: 1,
+      undoStack: this.undoStack.map(cloneEntry),
+      redoStack: this.redoStack.map(cloneEntry),
+      snapshots: [...this.snapshots],
+    };
+  }
+
+  /**
+   * Hydrate from a previously-serialised payload. Replaces all
+   * stacks + snapshots — caller is responsible for ensuring the
+   * project state matches what the history claims to undo.
+   *
+   * Tolerates partially-corrupt payloads (missing fields, version
+   * mismatch): clears history rather than throwing, so a bad
+   * autosave never blocks the editor from opening.
+   */
+  restore(data: unknown): void {
+    if (!data || typeof data !== "object") {
+      this.clear();
+      return;
+    }
+    const d = data as Partial<ReturnType<ActionHistory["serialize"]>>;
+    if (d.version !== 1) {
+      this.clear();
+      return;
+    }
+    this.undoStack = Array.isArray(d.undoStack) ? d.undoStack : [];
+    this.redoStack = Array.isArray(d.redoStack) ? d.redoStack : [];
+    this.snapshots = Array.isArray(d.snapshots) ? d.snapshots : [];
+    this.currentGroupId = null;
+    this.lastActionTime = 0;
+    this.notify();
   }
 
   clear(): void {

@@ -622,7 +622,7 @@ export const InspectorPanel: React.FC = () => {
               </p>
             </div>
 
-            {clipType === "video" && (
+            {(clipType === "video" || clipType === "audio") && (
               <Section title="AI Auto-Captions" sectionId="auto-captions" defaultOpen={false}>
                 <div className="space-y-3">
                   <div>
