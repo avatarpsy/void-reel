@@ -803,13 +803,23 @@ export async function loadSceneListAsProject(
   // no parallel "agent writes per-scene + we reconcile" path — that's
   // the freshness/staleness machinery we just deleted.
   const projectStateRaw = (slData as Record<string, unknown>).project_state as
-    | { json?: string }
+    | { json?: string; history?: string }
     | undefined;
   if (projectStateRaw && typeof projectStateRaw.json === "string" && projectStateRaw.json) {
     try {
       const parsed = JSON.parse(projectStateRaw.json) as Project;
       if (parsed && typeof parsed === "object" && parsed.timeline) {
-        console.log(`[voidspace-loader] Using project_state blob (${projectStateRaw.json.length} bytes)`);
+        // Stash the serialised ActionHistory on the project as a
+        // non-standard `__historyData` field. App.tsx peels this off
+        // after `loadProject` runs and rehydrates the actionHistory.
+        // Without this, undo/redo + chat-message snapshot restore
+        // would silently die on every reload (the loader returns a
+        // fresh project but `loadProject` mints an empty
+        // ActionHistory, dropping all bookmarks).
+        if (typeof projectStateRaw.history === "string") {
+          (parsed as any).__historyData = projectStateRaw.history;
+        }
+        console.log(`[voidspace-loader] Using project_state blob (${projectStateRaw.json.length} bytes${projectStateRaw.history ? `, +${projectStateRaw.history.length}b history` : ""})`);
         return parsed;
       }
       console.warn("[voidspace-loader] project_state blob malformed, falling back to per-scene bootstrap");

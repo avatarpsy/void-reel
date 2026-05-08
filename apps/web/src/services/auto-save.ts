@@ -134,11 +134,11 @@ class AutoSaveManager {
    * stuck on the older state until the next mutation triggers another
    * sync.
    */
-  private remoteSync: ((project: Project) => Promise<void>) | null = null;
+  private remoteSync: ((project: Project, historyData: string | null) => Promise<void>) | null = null;
   private remoteSyncInFlight: Promise<void> | null = null;
   private remoteSyncDirty: boolean = false;
 
-  setRemoteSync(syncer: ((project: Project) => Promise<void>) | null): void {
+  setRemoteSync(syncer: ((project: Project, historyData: string | null) => Promise<void>) | null): void {
     this.remoteSync = syncer;
   }
 
@@ -255,16 +255,25 @@ class AutoSaveManager {
         const runner = async () => {
           try {
             // Loop until no further saves landed during the in-flight
-            // call. Each iteration syncs `pendingProject` (the most
-            // recent state captured by `markDirty` / `forceSave`).
-            // Bound the loop at 8 iterations as a safety net so we
-            // can't get pinned by pathological dirty-flag oscillation.
+            // call. Each iteration syncs `pendingProject` + the latest
+            // ActionHistory snapshot. Bound at 8 iterations as a
+            // safety net so pathological dirty-flag oscillation can't
+            // pin the runner.
             let iter = 0;
             do {
               this.remoteSyncDirty = false;
               const target = this.pendingProject ?? project;
+              // History data is captured at sync time, not record-build
+              // time, so the latest undo/redo state goes with the
+              // latest project. Otherwise the blob's history could lag
+              // its project by one mutation — a rapid undo right after
+              // a save would land in Firestore with the post-mutation
+              // project but the pre-mutation history.
+              let historyData: string | null = null;
+              try { historyData = this.getHistoryData?.() ?? null; }
+              catch { /* ignore */ }
               try {
-                await this.remoteSync!(target);
+                await this.remoteSync!(target, historyData);
               } catch (error) {
                 console.warn("[AutoSave] Remote sync failed:", error);
                 this.emit("error", { error, message: "Remote sync failed", remote: true });

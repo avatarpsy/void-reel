@@ -326,7 +326,7 @@ function App() {
         // call; we just hand over the bytes. If no parent listens
         // (running standalone), the postMessage is a no-op — the
         // local IndexedDB save is the durable copy.
-        autoSaveManager.setRemoteSync(async (project) => {
+        autoSaveManager.setRemoteSync(async (project, historyData) => {
           // Round-trip via requestId so the parent can ack/error.
           // Skip when there's no parent (running detached) — sending
           // to ourselves would silently never resolve.
@@ -354,11 +354,28 @@ function App() {
             requestId,
             sceneListId,
             project,
+            history: historyData,
           }, "*");
           const r = await ack;
           if (!r.ok) {
             throw new Error(`remote sync failed: ${r.error || "unknown"}`);
           }
+        });
+        // Capture ActionHistory state on every save so undo/redo +
+        // chat-message snapshots survive page reload via the blob.
+        // Without this, restoreSnapshot would silently no-op (the
+        // post-reload undoStack is empty, and restore expects to
+        // walk back to a stackIndex from the prior session).
+        autoSaveManager.setHistoryProvider(() => {
+          try {
+            const h = useProjectStore.getState().actionHistory as any;
+            if (h && typeof h.serialize === "function") {
+              return JSON.stringify(h.serialize());
+            }
+          } catch (e) {
+            console.warn("[Voidspace] history serialize failed:", e);
+          }
+          return null;
         });
 
         const saveCandidates = (
@@ -676,7 +693,28 @@ function App() {
             );
             if (firstLoad) {
               firstLoad = false;
+              // Peel the persisted ActionHistory blob off the project
+              // before loadProject (which mints a fresh history). We
+              // re-hydrate it onto the just-installed history below.
+              // Without this, undo/redo + named snapshots from the
+              // prior session are silently lost on every reload —
+              // breaking chat-message rollback (the snapshot's
+              // stackIndex is for the OLD history, the new one is
+              // empty, and restoreSnapshot quietly no-ops).
+              const persistedHistory = (project as any).__historyData as string | undefined;
+              if ((project as any).__historyData) delete (project as any).__historyData;
               loadProject(project);
+              if (persistedHistory) {
+                try {
+                  const h = useProjectStore.getState().actionHistory as any;
+                  if (h && typeof h.restore === "function") {
+                    h.restore(JSON.parse(persistedHistory));
+                    console.log(`[Voidspace] Restored ActionHistory (${persistedHistory.length}b)`);
+                  }
+                } catch (e) {
+                  console.warn("[Voidspace] history restore failed, starting fresh:", e);
+                }
+              }
               navigate("editor");
               console.log(
                 `[Voidspace] Loaded project: ${project.name} (${project.mediaLibrary.items.length} media items)`,
