@@ -1292,11 +1292,18 @@ function App() {
                 }));
                 item = newItem;
               }
-              // Swap the clip's mediaId via ActionExecutor (clip/setMediaId
-              // doesn't exist as a discrete action — patch through the
-              // project store directly + record a custom action so
-              // ActionHistory has an inverse). Pragmatic: setState the
-              // project, then markDirty for autosave.
+              // KNOWN LIMITATION: this swap bypasses ActionExecutor /
+              // ActionHistory because the openreel core doesn't ship a
+              // `clip/setMediaId` action type. Consequence: the user
+              // can't Ctrl+Z a regen swap (the inverse isn't in
+              // history). The agent's regen flow is destructive intent
+              // anyway — the user clicked Approve on a regenerated
+              // variation, not "tweak this clip". The OLD media item
+              // stays in mediaLibrary so a future "revert this regen"
+              // tool could swap back without re-fetching. If history
+              // round-trip becomes a requirement, add `clip/setMediaId`
+              // to packages/core/src/actions and route through
+              // actionExecutor.execute here.
               useProjectStore.setState((s: any) => {
                 const tracks = (s.project.timeline?.tracks ?? []).map((tr: any) => ({
                   ...tr,

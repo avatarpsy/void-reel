@@ -125,9 +125,18 @@ class AutoSaveManager {
    *
    * Failures are non-fatal: a remote-sync error logs but doesn't block
    * the local save (which is already durable via IndexedDB).
+   *
+   * Concurrency: only one remote sync runs at a time, but newer saves
+   * that land during an in-flight sync are NOT dropped — they set
+   * `remoteSyncDirty`, and when the in-flight call resolves the runner
+   * fires another sync with the latest `pendingProject`. Without this,
+   * a manual save during a debounced auto-save could leave Firestore
+   * stuck on the older state until the next mutation triggers another
+   * sync.
    */
   private remoteSync: ((project: Project) => Promise<void>) | null = null;
   private remoteSyncInFlight: Promise<void> | null = null;
+  private remoteSyncDirty: boolean = false;
 
   setRemoteSync(syncer: ((project: Project) => Promise<void>) | null): void {
     this.remoteSync = syncer;
@@ -231,17 +240,43 @@ class AutoSaveManager {
       slot: record.slot,
     });
 
-    // Remote sync (Voidspace Firestore blob). Coalesce concurrent
-    // calls — if a previous sync is still in flight, skip this one
-    // (the next save's blob is more recent and supersedes it).
-    if (this.remoteSync && !this.remoteSyncInFlight) {
-      const sync = this.remoteSync;
-      this.remoteSyncInFlight = sync(project)
-        .catch((error) => {
-          console.warn("[AutoSave] Remote sync failed:", error);
-          this.emit("error", { error, message: "Remote sync failed", remote: true });
-        })
-        .finally(() => { this.remoteSyncInFlight = null; });
+    // Remote sync (Voidspace Firestore blob). Single in-flight at a
+    // time, but never drop newer saves: if a sync is already running,
+    // mark `remoteSyncDirty` so the runner fires another sync with the
+    // latest `pendingProject` after the current one resolves. Without
+    // this, a save that lands during in-flight (e.g. manual Ctrl+S
+    // right after a debounced auto-save) wouldn't reach Firestore
+    // until the next mutation kicked off another sync — leaving the
+    // remote stale relative to local IndexedDB.
+    if (this.remoteSync) {
+      if (this.remoteSyncInFlight) {
+        this.remoteSyncDirty = true;
+      } else {
+        const runner = async () => {
+          try {
+            // Loop until no further saves landed during the in-flight
+            // call. Each iteration syncs `pendingProject` (the most
+            // recent state captured by `markDirty` / `forceSave`).
+            // Bound the loop at 8 iterations as a safety net so we
+            // can't get pinned by pathological dirty-flag oscillation.
+            let iter = 0;
+            do {
+              this.remoteSyncDirty = false;
+              const target = this.pendingProject ?? project;
+              try {
+                await this.remoteSync!(target);
+              } catch (error) {
+                console.warn("[AutoSave] Remote sync failed:", error);
+                this.emit("error", { error, message: "Remote sync failed", remote: true });
+              }
+              iter++;
+            } while (this.remoteSyncDirty && iter < 8);
+          } finally {
+            this.remoteSyncInFlight = null;
+          }
+        };
+        this.remoteSyncInFlight = runner();
+      }
     }
   }
 
@@ -251,10 +286,18 @@ class AutoSaveManager {
    * write to happen even when our hash thinks nothing changed (the
    * hash is best-effort and can miss edge cases like late TextEngine
    * mutations that haven't propagated to project.textClips yet).
+   *
+   * Awaits the remote sync too, so when this resolves the user can
+   * reload and the blob is guaranteed in Firestore. Without that
+   * extra await, the runner started by save() runs async and a quick
+   * reload after Ctrl+S could miss the most recent state.
    */
   async forceSave(project: Project): Promise<void> {
     this.pendingProject = project;
     await this.save(project);
+    if (this.remoteSyncInFlight) {
+      try { await this.remoteSyncInFlight; } catch { /* logged inside the runner */ }
+    }
     this.lastSavedHash = this.computeHash(project);
     this.isDirty = false;
   }
@@ -548,12 +591,6 @@ class AutoSaveManager {
         console.error("[AutoSave] Event callback error:", error);
       }
     });
-  }
-
-  async forceSave(project: Project): Promise<void> {
-    this.pendingProject = project;
-    this.isDirty = true;
-    await this.saveIfDirty();
   }
 
   destroy(): void {
