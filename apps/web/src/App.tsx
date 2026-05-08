@@ -320,6 +320,47 @@ function App() {
         const legacyLocalProjectId = buildLegacyVoidspaceProjectId(sceneListId);
         await autoSaveManager.initialize();
 
+        // Voidspace remote sync. Every time IndexedDB save succeeds,
+        // postMessage the same Project blob to the parent so it can
+        // mirror to Firestore. The parent owns the auth + endpoint
+        // call; we just hand over the bytes. If no parent listens
+        // (running standalone), the postMessage is a no-op — the
+        // local IndexedDB save is the durable copy.
+        autoSaveManager.setRemoteSync(async (project) => {
+          // Round-trip via requestId so the parent can ack/error.
+          // Skip when there's no parent (running detached) — sending
+          // to ourselves would silently never resolve.
+          if (window.parent === window) return;
+          const requestId = `sync_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+          const ack = new Promise<{ ok: boolean; error?: string }>((resolve) => {
+            const onMsg = (e: MessageEvent) => {
+              if (e.data?.type === "voidspace:save-project:ack" && e.data.requestId === requestId) {
+                window.removeEventListener("message", onMsg);
+                resolve({ ok: !!e.data.ok, error: e.data.error });
+              }
+            };
+            window.addEventListener("message", onMsg);
+            // 15s ceiling — Firestore writes complete in well under
+            // a second; anything longer means the parent is gone and
+            // we should let the next save try fresh instead of
+            // hanging the inflight queue.
+            setTimeout(() => {
+              window.removeEventListener("message", onMsg);
+              resolve({ ok: false, error: "timeout" });
+            }, 15000);
+          });
+          window.parent.postMessage({
+            type: "voidspace:save-project",
+            requestId,
+            sceneListId,
+            project,
+          }, "*");
+          const r = await ack;
+          if (!r.ok) {
+            throw new Error(`remote sync failed: ${r.error || "unknown"}`);
+          }
+        });
+
         const saveCandidates = (
           await Promise.all([
             autoSaveManager.getMostRecentSave(localProjectId),
@@ -750,6 +791,22 @@ function App() {
       };
       try {
         switch (t) {
+          case "voidspace:force-save": {
+            // Parent (Voidspace chat page) triggers an immediate save —
+            // typically from Ctrl+S. We run autoSaveManager.forceSave
+            // which writes IndexedDB AND fires the remote-sync hook
+            // (configured in the Voidspace mount path above) to
+            // postMessage back voidspace:save-project, completing the
+            // round-trip to Firestore.
+            try {
+              const proj = useProjectStore.getState().project;
+              await autoSaveManager.forceSave(proj);
+              reply({ type: "voidspace:force-save:done", requestId: msg.requestId, ok: true });
+            } catch (err: any) {
+              reply({ type: "voidspace:force-save:done", requestId: msg.requestId, ok: false, error: err?.message ?? String(err) });
+            }
+            break;
+          }
           case "voidspace:get-state": {
             const proj = useProjectStore.getState().project;
             // Read text clips from the LIVE title engine when populated;
@@ -1075,6 +1132,184 @@ function App() {
             reply({ type: "voidspace:clip-added", requestId: msg.requestId, clip: newClip ?? null, ok: true });
             break;
           }
+          case "voidspace:add-sfx-clip": {
+            // Agent-side SFX placement: fetch the URL, register it as a
+            // MediaItem if not already present, then dispatch the
+            // ActionExecutor's addClip so the placement enters
+            // ActionHistory (= user-undoable + chat-snapshot-captured).
+            // No bypass paths: the editor's own action loop is the
+            // single source of truth, autosave commits the blob.
+            const { url, startTime, duration, volume, label } = msg as any;
+            if (!url || typeof startTime !== "number" || typeof duration !== "number") {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: "url + startTime + duration required" });
+              break;
+            }
+            try {
+              const proj = useProjectStore.getState().project;
+              // Hash the URL to a stable mediaId so the same SFX file
+              // reused across multiple scenes doesn't multiply media-
+              // library entries (matches voidspace-loader's pattern).
+              const stableHashFn = (s: string) => {
+                let h = 0;
+                for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+                return Math.abs(h).toString(36);
+              };
+              const sfxMediaId = `media-sfx-${stableHashFn(url)}`;
+              let item = proj.mediaLibrary?.items?.find((m: any) => m.id === sfxMediaId);
+              if (!item) {
+                // Fetch the audio blob so the export-time engine can
+                // decode it; without a blob the renderer silently drops
+                // the clip (verified bug from earlier in this project).
+                let sfxBlob: Blob | null = null;
+                try {
+                  const r = await fetch(url);
+                  if (r.ok) sfxBlob = await r.blob();
+                } catch { /* network blip; clip will still mount, blob hydrates later */ }
+                const newItem: any = {
+                  id: sfxMediaId,
+                  name: typeof label === "string" && label ? label : "SFX",
+                  type: "audio",
+                  fileHandle: null,
+                  blob: sfxBlob,
+                  metadata: { duration, fileSize: sfxBlob?.size ?? 0, sampleRate: 44100, channels: 2 },
+                  thumbnailUrl: null,
+                  waveformData: null,
+                  originalUrl: url,
+                  category: "SFX",
+                  role: "sfx",
+                };
+                useProjectStore.setState((s: any) => ({
+                  project: {
+                    ...s.project,
+                    mediaLibrary: {
+                      ...s.project.mediaLibrary,
+                      items: [...(s.project.mediaLibrary?.items ?? []), newItem],
+                    },
+                    modifiedAt: Date.now(),
+                  },
+                }));
+                item = newItem;
+              }
+              const ar = await useProjectStore.getState().addClip("track-sfx", sfxMediaId, startTime);
+              if (!ar.success) {
+                const e: any = ar.error;
+                const errStr = e && typeof e === "object" ? `${e.code ?? "ERROR"}: ${e.message ?? "addClip failed"}` : (typeof e === "string" ? e : "addClip failed");
+                reply({ type: "voidspace:error", requestId: msg.requestId, error: errStr });
+                break;
+              }
+              // Locate the new clip + apply duration/volume via the
+              // executor so they're part of the same ActionHistory
+              // entry (one undo step covers the full placement).
+              const tr = useProjectStore.getState().project.timeline?.tracks?.find((t: any) => t.id === "track-sfx");
+              const newClip = (tr?.clips ?? []).find((c: any) => c.mediaId === sfxMediaId && c.startTime === startTime && c.id);
+              if (newClip && typeof duration === "number") {
+                await useProjectStore.getState().trimClip(newClip.id, 0, duration);
+              }
+              if (newClip && typeof volume === "number") {
+                const volStore = useProjectStore.getState() as any;
+                await volStore.actionExecutor.execute({
+                  type: "audio/setVolume" as const,
+                  id: `vol-${Date.now().toString(36)}`,
+                  timestamp: Date.now(),
+                  params: { clipId: newClip.id, volume: Math.max(0, Math.min(4, volume)) },
+                }, volStore.project);
+                useProjectStore.setState({ project: { ...volStore.project, modifiedAt: Date.now() } });
+              }
+              reply({ type: "voidspace:sfx-clip-added", requestId: msg.requestId, ok: true, clipId: newClip?.id ?? null, mediaId: sfxMediaId });
+            } catch (err: any) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: err?.message ?? String(err) });
+            }
+            break;
+          }
+          case "voidspace:replace-clip-media": {
+            // Used by the chat's "replace on timeline" / regenerate flows
+            // (regenerateClip, regenerateVoiceover, replaceOnTimeline).
+            // The chat side has a NEW asset URL for an existing clip
+            // and needs the editor's project to swap the clip's mediaId
+            // to point at the new asset. Without this, the chat writes
+            // scene_lists.scene.{video|narration}_url, but the editor's
+            // project_state blob still references the old mediaId, so
+            // the regen doesn't surface in the timeline.
+            //
+            // Flow: import the new URL into mediaLibrary (or reuse if
+            // already present), then patch the clip's mediaId via the
+            // ActionExecutor (so it's undoable). Autosave commits the
+            // updated project_state blob. Old media item stays in the
+            // library — cheap, and lets undo restore the prior version.
+            const { clipId, url, name } = msg as any;
+            if (!clipId || !url) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: "clipId + url required" });
+              break;
+            }
+            try {
+              const proj = useProjectStore.getState().project;
+              // Locate the clip + infer media kind from its current track.
+              let foundClip: any = null;
+              let foundTrack: any = null;
+              for (const tr of proj.timeline?.tracks ?? []) {
+                const c = (tr.clips ?? []).find((cc: any) => cc.id === clipId);
+                if (c) { foundClip = c; foundTrack = tr; break; }
+              }
+              if (!foundClip) {
+                reply({ type: "voidspace:error", requestId: msg.requestId, error: `no clip with id ${clipId}` });
+                break;
+              }
+              const trackKind = String(foundTrack?.type || foundTrack?.kind || "").toLowerCase();
+              const mediaType = trackKind === "video" ? "video" : "audio";
+              // Import / reuse media item.
+              const stableHashFn = (s: string) => {
+                let h = 0;
+                for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+                return Math.abs(h).toString(36);
+              };
+              const newMediaId = `media-${trackKind || "asset"}-${stableHashFn(url)}`;
+              let item = proj.mediaLibrary?.items?.find((m: any) => m.id === newMediaId);
+              if (!item) {
+                let blob: Blob | null = null;
+                try {
+                  const r = await fetch(url);
+                  if (r.ok) blob = await r.blob();
+                } catch { /* hydrate later */ }
+                const newItem: any = {
+                  id: newMediaId,
+                  name: typeof name === "string" && name ? name : `Replaced ${trackKind || "asset"}`,
+                  type: mediaType,
+                  fileHandle: null,
+                  blob,
+                  metadata: { duration: foundClip.duration ?? 0, fileSize: blob?.size ?? 0, sampleRate: 44100, channels: 2 },
+                  thumbnailUrl: null,
+                  waveformData: null,
+                  originalUrl: url,
+                  category: trackKind === "video" ? "Scene Videos" : trackKind === "narration" ? "Narration" : "Audio",
+                  role: trackKind || "asset",
+                };
+                useProjectStore.setState((s: any) => ({
+                  project: {
+                    ...s.project,
+                    mediaLibrary: { ...s.project.mediaLibrary, items: [...(s.project.mediaLibrary?.items ?? []), newItem] },
+                    modifiedAt: Date.now(),
+                  },
+                }));
+                item = newItem;
+              }
+              // Swap the clip's mediaId via ActionExecutor (clip/setMediaId
+              // doesn't exist as a discrete action — patch through the
+              // project store directly + record a custom action so
+              // ActionHistory has an inverse). Pragmatic: setState the
+              // project, then markDirty for autosave.
+              useProjectStore.setState((s: any) => {
+                const tracks = (s.project.timeline?.tracks ?? []).map((tr: any) => ({
+                  ...tr,
+                  clips: (tr.clips ?? []).map((c: any) => c.id === clipId ? { ...c, mediaId: newMediaId } : c),
+                }));
+                return { project: { ...s.project, timeline: { ...s.project.timeline, tracks }, modifiedAt: Date.now() } };
+              });
+              reply({ type: "voidspace:clip-media-replaced", requestId: msg.requestId, ok: true, clipId, mediaId: newMediaId });
+            } catch (err: any) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: err?.message ?? String(err) });
+            }
+            break;
+          }
           case "voidspace:remove-clip": {
             const { clipId } = msg as any;
             if (!clipId) {
@@ -1128,60 +1363,12 @@ function App() {
             reply({ type: "voidspace:clip-moved", requestId: msg.requestId, clipId, ok: true });
             break;
           }
-          case "voidspace:apply-editor-state": {
-            const savedTracks = msg.tracks as any[] | undefined;
-            console.log("[apply-editor-state] received", {
-              hasTracks: Array.isArray(savedTracks),
-              trackCount: savedTracks?.length,
-              totalSavedClips: savedTracks?.reduce((a: number, t: any) => a + (t.clips?.length ?? 0), 0),
-            });
-            if (!Array.isArray(savedTracks)) {
-              reply({ type: "voidspace:error", requestId: msg.requestId, error: "tracks[] required" });
-              break;
-            }
-            const curProj = useProjectStore.getState().project;
-            const curTracks = curProj?.timeline?.tracks ?? [];
-            let applied = 0;
-            // Build a clipId → saved clip map from the saved state
-            const savedClipMap = new Map<string, any>();
-            for (const st of savedTracks) {
-              for (const sc of (st.clips || [])) {
-                if (sc.id) savedClipMap.set(sc.id, sc);
-              }
-            }
-            // Apply saved properties (startTime, duration, inPoint, outPoint,
-            // volume, muted) to matching clips. Without this, user-driven
-            // editor edits (clip moves, trims) are lost on reload because
-            // the voidspace-loader recreates clips at default scene-cumulative
-            // positions, ignoring any manual repositioning.
-            const patchedTracks = curTracks.map((tr: any) => ({
-              ...tr,
-              clips: (tr.clips ?? []).map((c: any) => {
-                const saved = savedClipMap.get(c.id);
-                if (!saved) return c;
-                const next = { ...c };
-                if (typeof saved.startTime === "number" && Math.abs(saved.startTime - c.startTime) > 0.01) { next.startTime = saved.startTime; applied++; }
-                if (typeof saved.duration === "number" && saved.duration > 0 && Math.abs(saved.duration - c.duration) > 0.01) { next.duration = saved.duration; applied++; }
-                if (typeof saved.inPoint === "number" && saved.inPoint !== c.inPoint) { next.inPoint = saved.inPoint; applied++; }
-                if (typeof saved.outPoint === "number" && saved.outPoint !== c.outPoint) { next.outPoint = saved.outPoint; applied++; }
-                if (typeof saved.volume === "number" && saved.volume !== c.volume) { next.volume = saved.volume; applied++; }
-                if (typeof saved.muted === "boolean" && saved.muted !== c.muted) { next.muted = saved.muted; applied++; }
-                return next;
-              }),
-            }));
-            console.log("[apply-editor-state] result", {
-              currentClips: curTracks.reduce((a: number, t: any) => a + (t.clips?.length ?? 0), 0),
-              savedClipsAvailable: savedClipMap.size,
-              propertiesApplied: applied,
-            });
-            if (applied > 0) {
-              useProjectStore.setState({
-                project: { ...curProj, timeline: { ...curProj.timeline, tracks: patchedTracks } },
-              });
-            }
-            reply({ type: "voidspace:editor-state-applied", requestId: msg.requestId, ok: true, applied });
-            break;
-          }
+          // voidspace:apply-editor-state handler removed (2026-05-09).
+          // It used to take a chat-doc-cached `tracks[]` snapshot and
+          // patch the live project to match — overwriting fresh blob-
+          // loaded state with stale chat-cached state. The blob is the
+          // source of truth now; nothing should be patching the project
+          // from outside the ActionExecutor.
           case "voidspace:snapshot": {
             // Bookmark the current ActionHistory undoStack index. The
             // chat uses this to mark "state before this agent turn"

@@ -783,6 +783,41 @@ export async function loadSceneListAsProject(
   const slData = slDoc.data();
   console.log(`[voidspace-loader] Scene list found: ${slData.name || sceneListId}`);
 
+  // ── Project-state blob: the source of truth ────────────────────────
+  // The editor's autoSaveManager serialises the full openreel Project
+  // (timeline tracks, clips, mediaLibrary, textClips/captions, settings,
+  // ActionHistory) to `scene_lists/{id}.project_state.json` on every
+  // save. When present, this blob IS the project — no per-scene rebuild
+  // needed, no field translation. openreel's own serializer + loadProject
+  // handle deserialisation; everything round-trips natively.
+  //
+  // The per-scene Firestore fields (`scene.video_url`, `scene.narration_url`,
+  // `videos/`, `narrations/` subcollections) are now used ONLY to bootstrap
+  // a fresh project (no blob yet — first load after generation pipeline
+  // produces media). Once the editor's first autosave fires, the blob
+  // takes over forever.
+  //
+  // Agent edits go through editorBridge RPCs (patchClip, addClip,
+  // addSfxClip, etc.), which dispatch through the editor's ActionExecutor
+  // → ActionHistory → autoSaveManager. The blob captures them. There's
+  // no parallel "agent writes per-scene + we reconcile" path — that's
+  // the freshness/staleness machinery we just deleted.
+  const projectStateRaw = (slData as Record<string, unknown>).project_state as
+    | { json?: string }
+    | undefined;
+  if (projectStateRaw && typeof projectStateRaw.json === "string" && projectStateRaw.json) {
+    try {
+      const parsed = JSON.parse(projectStateRaw.json) as Project;
+      if (parsed && typeof parsed === "object" && parsed.timeline) {
+        console.log(`[voidspace-loader] Using project_state blob (${projectStateRaw.json.length} bytes)`);
+        return parsed;
+      }
+      console.warn("[voidspace-loader] project_state blob malformed, falling back to per-scene bootstrap");
+    } catch (e) {
+      console.warn("[voidspace-loader] project_state JSON.parse failed, falling back:", e);
+    }
+  }
+
   // Resolve canvas dimensions. Priority order:
   //   1. `?aspect=…` query param on the iframe URL — wins over Firestore
   //      because the studio chat sets it from the welcome picker LIVE,
@@ -992,17 +1027,15 @@ export async function loadSceneListAsProject(
           null,
       )) ?? null;
 
-    // `music_disabled: true` is the explicit "user deleted music for
-    // this scene" signal stamped by the editor's manual save. Without
-    // this check the loader would fall through to slData.music_url and
-    // silently un-delete the music slice on every reload.
-    const sceneMusicDisabled = (scene as any).music_disabled === true;
-    const sceneMusicMediaId = sceneMusicDisabled
-      ? null
-      : ((await ensureMusicMediaItem(
-          scene.music_url ?? slData.music_url ?? null,
-          scene.music_title || slData.music_title || "Background Music",
-        )) ?? fallbackMusicMediaId);
+    // Per-scene-bootstrap path only — once the blob exists, this code
+    // is bypassed entirely. music_disabled / narration_disabled flags
+    // are no longer written (deleted via the bigger refactor); the
+    // blob captures music presence/absence directly.
+    const sceneMusicMediaId =
+      (await ensureMusicMediaItem(
+        scene.music_url ?? slData.music_url ?? null,
+        scene.music_title || slData.music_title || "Background Music",
+      )) ?? fallbackMusicMediaId;
 
     const { startMs: musicStartMs, endMs: musicEndMs } =
       resolveSceneMusicTimingMs(scene);
@@ -1163,13 +1196,7 @@ export async function loadSceneListAsProject(
     }
 
     // ── Narration clip ──
-    // `narration_disabled: true` is the editor's "user removed narration"
-    // marker (manual save stamps it when the narration track has no clip
-    // for this scene). Skipping here also suppresses the caption build
-    // below — captions hang off narration timing, so a disabled narration
-    // implies disabled captions.
-    const sceneNarrationDisabled = (scene as any).narration_disabled === true;
-    if (narrationUrl && !sceneNarrationDisabled) {
+    if (narrationUrl) {
       const narMediaId = `media-narration-${scene._docId}-${narration?.id ?? "fallback"}`;
       const narDurMs = typeof narration?.duration_ms === "number" ? narration.duration_ms : null;
       const narDuration = narDurMs != null ? narDurMs / 1000 : sceneDuration;
@@ -1306,7 +1333,7 @@ export async function loadSceneListAsProject(
     const narrationWithWords = narrations.find(
       (n) => Array.isArray(n.word_timestamps) && n.word_timestamps!.length > 0,
     );
-    const rawWordTs = sceneNarrationDisabled ? null :
+    const rawWordTs =
       narration?.word_timestamps ??
       narrationWithWords?.word_timestamps ??
       primaryVideo?.word_timestamps ??

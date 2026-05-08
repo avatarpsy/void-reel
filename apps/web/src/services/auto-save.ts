@@ -116,6 +116,23 @@ class AutoSaveManager {
    */
   private getHistoryData: (() => string | null) | null = null;
 
+  /**
+   * Optional remote-sync hook. When set, `save()` invokes this callback
+   * with the project AFTER the IndexedDB write succeeds. Voidspace uses
+   * this to mirror the serialized project to a Firestore blob so the
+   * editor's native save shape survives page reloads — replacing the
+   * old per-field translation layer with a single round-trip.
+   *
+   * Failures are non-fatal: a remote-sync error logs but doesn't block
+   * the local save (which is already durable via IndexedDB).
+   */
+  private remoteSync: ((project: Project) => Promise<void>) | null = null;
+  private remoteSyncInFlight: Promise<void> | null = null;
+
+  setRemoteSync(syncer: ((project: Project) => Promise<void>) | null): void {
+    this.remoteSync = syncer;
+  }
+
   setHistoryProvider(getter: (() => string | null) | null): void {
     this.getHistoryData = getter;
   }
@@ -213,6 +230,33 @@ class AutoSaveManager {
       timestamp: record.timestamp,
       slot: record.slot,
     });
+
+    // Remote sync (Voidspace Firestore blob). Coalesce concurrent
+    // calls — if a previous sync is still in flight, skip this one
+    // (the next save's blob is more recent and supersedes it).
+    if (this.remoteSync && !this.remoteSyncInFlight) {
+      const sync = this.remoteSync;
+      this.remoteSyncInFlight = sync(project)
+        .catch((error) => {
+          console.warn("[AutoSave] Remote sync failed:", error);
+          this.emit("error", { error, message: "Remote sync failed", remote: true });
+        })
+        .finally(() => { this.remoteSyncInFlight = null; });
+    }
+  }
+
+  /**
+   * Force a save NOW, bypassing the dirty-hash short-circuit. Used by
+   * the manual Save button — the user clicked Save, they expect a
+   * write to happen even when our hash thinks nothing changed (the
+   * hash is best-effort and can miss edge cases like late TextEngine
+   * mutations that haven't propagated to project.textClips yet).
+   */
+  async forceSave(project: Project): Promise<void> {
+    this.pendingProject = project;
+    await this.save(project);
+    this.lastSavedHash = this.computeHash(project);
+    this.isDirty = false;
   }
 
   private saveRecord(record: AutoSaveRecord): Promise<void> {

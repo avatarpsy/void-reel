@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { useProjectStore } from "../../stores/project-store";
 import { useUIStore } from "../../stores/ui-store";
+import { autoSaveManager } from "../../services/auto-save";
 import {
   getExportEngine,
   getDeviceProfile,
@@ -106,62 +107,20 @@ export const Toolbar: React.FC = () => {
   const handleSave = useCallback(async () => {
     if (isSaving) return;
     setIsSaving(true);
-    const requestId = `save_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-    console.log("[save] click → start", { requestId });
+    console.log("[save] click → forceSave");
     try {
+      // Trigger an immediate native save. autoSaveManager writes the
+      // full Project to IndexedDB, then the remote-sync hook (set up
+      // in App.tsx for Voidspace mode) postMessages the same blob to
+      // the parent for Firestore persistence. No more per-track
+      // stripping — captions, animations, transforms, all round-trip.
       const proj = useProjectStore.getState().project;
-      const mediaIndex = new Map<string, string>();
-      for (const m of (proj?.mediaLibrary?.items ?? [])) {
-        // MediaItem keeps its remote URL on `originalUrl` (the local
-        // blob is held separately in `blob`). The save serializer only
-        // needs an addressable URL to round-trip the project, so a
-        // missing originalUrl just skips the entry rather than emit "".
-        if (m.id && m.originalUrl) mediaIndex.set(m.id, m.originalUrl);
-      }
-      const tracks = (proj?.timeline?.tracks ?? []).map((tr: any) => ({
-        id: tr.id,
-        name: tr.name,
-        kind: tr.type || tr.kind || "video",
-        clips: (tr.clips ?? []).map((c: any) => ({
-          id: c.id,
-          mediaId: c.mediaId,
-          url: mediaIndex.get(c.mediaId) || "",
-          startTime: c.startTime,
-          duration: c.duration,
-          inPoint: c.inPoint,
-          outPoint: c.outPoint,
-          volume: c.volume ?? 1,
-          muted: c.muted ?? false,
-        })),
-      }));
-      console.log("[save] tracks serialized", {
-        trackCount: tracks.length,
-        clipCount: tracks.reduce((a: number, t: any) => a + (t.clips?.length ?? 0), 0),
-        kinds: tracks.map((t: any) => `${t.kind}:${t.clips?.length ?? 0}`),
-      });
-      const ackPromise = new Promise<boolean>((resolve) => {
-        const onMsg = (e: MessageEvent) => {
-          if (e.data?.type === "voidspace:save-done" && e.data.requestId === requestId) {
-            window.removeEventListener("message", onMsg);
-            console.log("[save] ack received", { requestId, ok: e.data.ok, error: e.data.error });
-            resolve(!!e.data.ok);
-          }
-        };
-        window.addEventListener("message", onMsg);
-        setTimeout(() => {
-          window.removeEventListener("message", onMsg);
-          console.warn("[save] TIMEOUT — no ack in 30s", { requestId });
-          resolve(false);
-        }, 30000);
-      });
-      console.log("[save] postMessage to parent", { requestId });
-      window.parent.postMessage({ type: "voidspace:save-all", tracks, requestId }, "*");
-      const ok = await ackPromise;
-      console.log("[save] complete", { requestId, ok });
-      if (ok) {
-        setSaveFlash(true);
-        setTimeout(() => setSaveFlash(false), 1200);
-      }
+      await autoSaveManager.forceSave(proj);
+      console.log("[save] forceSave done");
+      setSaveFlash(true);
+      setTimeout(() => setSaveFlash(false), 1200);
+    } catch (err) {
+      console.error("[save] failed", err);
     } finally {
       setIsSaving(false);
     }
