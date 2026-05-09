@@ -10,7 +10,7 @@
  * - 35.4: Inform user that AI requires internet connectivity
  */
 
-const CACHE_NAME = "openreel-v4-sfxinline";
+const CACHE_NAME = "openreel-v5-aimusic";
 const STATIC_CACHE_NAME = "openreel-static-v4-sfxinline";
 const DYNAMIC_CACHE_NAME = "openreel-dynamic-v4-sfxinline";
 

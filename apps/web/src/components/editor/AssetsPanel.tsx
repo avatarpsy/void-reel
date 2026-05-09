@@ -37,6 +37,7 @@ import { AspectRatioMatchDialog } from "./dialogs/AspectRatioMatchDialog";
 // Voidspace fork: keep Voidspace media panel + add upstream's AI generation tab + Kie.ai dialog.
 import { VoidspaceMediaPanel } from "./VoidspaceMediaPanel";
 import { AIGenTab } from "./AIGenTab";
+import { AIMusicSection } from "./AIMusicSection";
 import { toast } from "../../stores/notification-store";
 import { saveFileHandle, saveDirectoryHandle } from "../../services/media-storage";
 import {
@@ -523,9 +524,9 @@ export const AssetsPanel: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTabRaw] = useState<
-    "media" | "text" | "graphics" | "voidspace" | "ai-gen"
+    "media" | "text" | "graphics" | "ai-music" | "voidspace" | "ai-gen"
   >("media");
-  const setActiveTab = useCallback((tab: "media" | "text" | "graphics" | "voidspace" | "ai-gen") => {
+  const setActiveTab = useCallback((tab: "media" | "text" | "graphics" | "ai-music" | "voidspace" | "ai-gen") => {
     setActiveTabRaw(tab);
   }, []);
 
@@ -588,6 +589,7 @@ export const AssetsPanel: React.FC = () => {
 
       setIsImporting(true);
       const fileArray = Array.from(files);
+      let failures = 0;
 
       try {
         for (let i = 0; i < fileArray.length; i++) {
@@ -598,15 +600,34 @@ export const AssetsPanel: React.FC = () => {
 
           const result = await importMedia(file);
 
+          if (!result.success) {
+            failures++;
+            const message = result.error?.message || "Import failed";
+            console.error(`[AssetsPanel] Import rejected for ${file.name}:`, result.error);
+            toast.error(`Couldn't import ${file.name}`, message);
+            continue;
+          }
+
           // If it's a video with audio, extract audio to separate track
-          if (result.success && file.type.startsWith("video/")) {
+          if (file.type.startsWith("video/")) {
             setImportProgress(`Extracting audio from ${file.name}...`);
             // Audio extraction is handled by the importMedia function
             // The audio track is created automatically when adding to timeline
           }
         }
+        if (failures === 0 && fileArray.length > 0) {
+          toast.success(
+            fileArray.length === 1
+              ? `Imported ${fileArray[0].name}`
+              : `Imported ${fileArray.length} files`,
+          );
+        }
       } catch (error) {
         console.error("Import failed:", error);
+        toast.error(
+          "Import failed",
+          error instanceof Error ? error.message : "Unknown error",
+        );
       } finally {
         setIsImporting(false);
         setImportProgress("");
@@ -829,7 +850,15 @@ export const AssetsPanel: React.FC = () => {
   );
 
   const triggerFileInput = useCallback(() => {
-    fileInputRef.current?.click();
+    const input = fileInputRef.current;
+    if (!input) {
+      console.warn("[AssetsPanel] fileInputRef not attached");
+      toast.error("Cannot open file picker", "Reload the page and try again.");
+      return;
+    }
+    // Reset value so picking the same file twice still fires onChange.
+    input.value = "";
+    input.click();
   }, []);
 
   const handleImportBackground = useCallback(
@@ -950,6 +979,19 @@ export const AssetsPanel: React.FC = () => {
             <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-t-full shadow-[0_-2px_8px_rgba(99,102,241,0.5)]" />
           )}
         </button>
+        <button
+          onClick={() => setActiveTab("ai-music")}
+          className={`pb-3 transition-all relative ${
+            activeTab === "ai-music"
+              ? "text-text-primary"
+              : "hover:text-text-secondary"
+          }`}
+        >
+          AI Music
+          {activeTab === "ai-music" && (
+            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-t-full shadow-[0_-2px_8px_rgba(99,102,241,0.5)]" />
+          )}
+        </button>
         {/* Cloud + AI tabs hidden in the studio shell — the chat
             sidebar is the authoritative AI surface, and Voidspace
             cloud media flows in automatically via the scene_list
@@ -1027,7 +1069,12 @@ export const AssetsPanel: React.FC = () => {
         type="file"
         multiple
         accept="video/*,audio/*,image/*"
-        onChange={(e) => handleFileImport(e.target.files)}
+        onChange={(e) => {
+          const files = e.target.files;
+          // Clear value so the same file can be re-picked.
+          e.target.value = "";
+          void handleFileImport(files);
+        }}
         className="hidden"
       />
 
@@ -1484,6 +1531,15 @@ export const AssetsPanel: React.FC = () => {
                 </button>
               ))}
             </div>
+          </div>
+        </ScrollArea>
+      )}
+
+      {/* AI Music Tab — paginated user-generated tracks from users/{uid}/music */}
+      {activeTab === "ai-music" && (
+        <ScrollArea className="flex-1">
+          <div className="px-5 pb-5">
+            <AIMusicSection />
           </div>
         </ScrollArea>
       )}
