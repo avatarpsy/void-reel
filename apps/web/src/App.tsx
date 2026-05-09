@@ -378,6 +378,61 @@ function App() {
           return null;
         });
 
+        // ── transitionBridge ↔ project state sync ────────────────────
+        // The renderer reads transitions from transitionBridge.trackTransitions
+        // (a separate Map), NOT from project.timeline.tracks.transitions.
+        // Without this subscriber, transitions saved in the blob would
+        // load into the project but never reach the renderer; undo would
+        // remove them from the project but the visible blend would
+        // persist. Reconcile on every project change so the bridge is a
+        // derived view of the canonical project state.
+        try {
+          const { getTransitionBridge } = await import("./bridges/transition-bridge");
+          const bridge = getTransitionBridge();
+          const initialProj = useProjectStore.getState().project;
+          if (!bridge.isInitialized()) {
+            bridge.initialize(initialProj.settings?.width ?? 1920, initialProj.settings?.height ?? 1080);
+          }
+          // Diff the bridge's view against project.timeline.tracks and
+          // patch (add/remove). Cheap O(N transitions) per tick — far
+          // smaller than the project's clip count.
+          const reconcile = () => {
+            try {
+              const proj = useProjectStore.getState().project;
+              for (const tr of (proj.timeline?.tracks ?? [])) {
+                const projectTransitions = (tr as any).transitions ?? [];
+                const bridgeTransitions = bridge.getTransitionsForTrack(tr.id);
+                const projectIds = new Set(projectTransitions.map((t: any) => t.id));
+                const bridgeIds = new Set(bridgeTransitions.map((t: any) => t.id));
+                // Removals: in bridge but not project.
+                for (const bt of bridgeTransitions) {
+                  if (!projectIds.has(bt.id)) {
+                    bridge.removeTransition(bt.id);
+                  }
+                }
+                // Additions: in project but not bridge.
+                for (const pt of projectTransitions) {
+                  if (bridgeIds.has(pt.id)) continue;
+                  const clipA = (tr.clips ?? []).find((c: any) => c.id === pt.clipAId);
+                  const clipB = (tr.clips ?? []).find((c: any) => c.id === pt.clipBId);
+                  if (!clipA || !clipB) continue;
+                  bridge.createTransition(clipA, clipB, pt.type, pt.duration, pt.params);
+                }
+              }
+            } catch (e) {
+              console.warn("[Voidspace] transition reconcile failed:", e);
+            }
+          };
+          // Initial reconcile (covers the blob-restore case where
+          // track.transitions came pre-populated).
+          reconcile();
+          // Subscribe to project changes for ongoing sync (action-
+          // executor mutations, undo, redo, blob reload).
+          useProjectStore.subscribe((s: any) => s.project, () => reconcile());
+        } catch (e) {
+          console.warn("[Voidspace] transitionBridge sync setup failed:", e);
+        }
+
         const saveCandidates = (
           await Promise.all([
             autoSaveManager.getMostRecentSave(localProjectId),
@@ -1148,6 +1203,188 @@ function App() {
               errors: errors.length ? errors : undefined,
               ok: errors.length === 0,
             });
+            break;
+          }
+          case "voidspace:apply-transition": {
+            // Add transitions between adjacent video clips. Routes through
+            // BOTH paths so the result persists AND renders:
+            //   1. ActionExecutor `transition/add` → writes to
+            //      track.transitions[]. Survives blob save, undoable
+            //      via ActionHistory, restored on reload.
+            //   2. transitionBridge.createTransition → registers with
+            //      the rendering engine so the canvas shows the blend
+            //      immediately. Without this the transition exists in
+            //      project state but the renderer doesn't see it.
+            // The project subscriber below reconciles the bridge from
+            // project.timeline.tracks.transitions on every change so
+            // undo/redo/load all keep both sides in sync.
+            const { kind, durationSec, applyAll, betweenClips } = msg as any;
+            if (typeof kind !== "string") {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: "kind required" });
+              break;
+            }
+            // Map user-friendly kinds to the engine's TransitionType.
+            // The engine supports: crossfade, dipToBlack, dipToWhite,
+            // wipe, slide, zoom, push. "fade" is the most natural
+            // user word for "smooth blend" → crossfade. "fade to
+            // black/white" → the dip variants.
+            const KIND_MAP: Record<string, string> = {
+              fade: "crossfade",
+              fadein: "crossfade",
+              fadeout: "crossfade",
+              "fade in": "crossfade",
+              "fade out": "crossfade",
+              "fade-in": "crossfade",
+              "fade-out": "crossfade",
+              crossfade: "crossfade",
+              "fade to black": "dipToBlack",
+              "fade-to-black": "dipToBlack",
+              dip: "dipToBlack",
+              dipToBlack: "dipToBlack",
+              dipToWhite: "dipToWhite",
+              "fade to white": "dipToWhite",
+              wipe: "wipe",
+              slide: "slide",
+              zoom: "zoom",
+              push: "push",
+            };
+            const cleanKind = kind.toLowerCase().trim();
+            // "cut" = remove all transitions on the video track.
+            const isCut = cleanKind === "cut" || cleanKind === "none" || cleanKind === "remove";
+            const transitionType = isCut ? null : (KIND_MAP[cleanKind] || KIND_MAP[kind] || "crossfade");
+            const duration = typeof durationSec === "number" && durationSec > 0
+              ? Math.min(2.0, Math.max(0.1, durationSec))
+              : 0.5;
+
+            try {
+              const proj = useProjectStore.getState().project;
+              const videoTrack = (proj.timeline?.tracks ?? []).find((t: any) => {
+                const id = String(t.id || "").toLowerCase();
+                const k = String(t.type || t.kind || "").toLowerCase();
+                return k === "video" || id === "track-video";
+              });
+              if (!videoTrack) {
+                reply({ type: "voidspace:error", requestId: msg.requestId, error: "no video track" });
+                break;
+              }
+              const sortedClips = [...(videoTrack.clips ?? [])].sort(
+                (a: any, b: any) => (a.startTime || 0) - (b.startTime || 0),
+              );
+              // CUT path: remove all transitions on the video track.
+              if (isCut) {
+                const exec = useProjectStore.getState() as any;
+                const existingTransitions = (videoTrack as any).transitions ?? [];
+                let removed = 0;
+                for (const t of existingTransitions) {
+                  const removeAction = {
+                    type: "transition/remove" as const,
+                    id: `tr-rm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+                    timestamp: Date.now(),
+                    params: { transitionId: t.id },
+                  };
+                  const r = await exec.actionExecutor.execute(removeAction, exec.project);
+                  if (r.success) removed++;
+                }
+                useProjectStore.setState({ project: { ...exec.project, modifiedAt: Date.now() } });
+                reply({ type: "voidspace:transition-applied", requestId: msg.requestId, ok: true, applied: 0, removed });
+                break;
+              }
+              // ADD path: figure out which clip pairs to bridge.
+              const pairs: Array<[any, any]> = [];
+              if (Array.isArray(betweenClips) && betweenClips.length > 0) {
+                for (const [aId, bId] of betweenClips) {
+                  const a = sortedClips.find((c: any) => c.id === aId);
+                  const b = sortedClips.find((c: any) => c.id === bId);
+                  if (a && b) pairs.push([a, b]);
+                }
+              } else if (applyAll) {
+                for (let i = 0; i < sortedClips.length - 1; i++) {
+                  pairs.push([sortedClips[i], sortedClips[i + 1]]);
+                }
+              }
+              if (pairs.length === 0) {
+                reply({ type: "voidspace:transition-applied", requestId: msg.requestId, ok: true, applied: 0, note: "no clip pairs resolved" });
+                break;
+              }
+              // Initialise the bridge if needed (it caches a renderer).
+              const bridge = (await import("./bridges/transition-bridge")).getTransitionBridge();
+              if (!bridge.isInitialized()) {
+                bridge.initialize(proj.settings?.width ?? 1920, proj.settings?.height ?? 1080);
+              }
+              // Dedup: if the same clip-pair already has a transition,
+              // remove it first so re-running this RPC replaces rather
+              // than stacks (without this, asking the agent twice
+              // doubles every transition; the executor doesn't dedup).
+              const exec = useProjectStore.getState() as any;
+              const existingForTrack = (videoTrack as any).transitions ?? [];
+              for (const [clipA, clipB] of pairs) {
+                const dupes = existingForTrack.filter((t: any) => t.clipAId === clipA.id && t.clipBId === clipB.id);
+                for (const d of dupes) {
+                  const removeAction = {
+                    type: "transition/remove" as const,
+                    id: `tr-rm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+                    timestamp: Date.now(),
+                    params: { transitionId: d.id },
+                  };
+                  await exec.actionExecutor.execute(removeAction, exec.project);
+                }
+              }
+              // Dispatch the action for EACH pair. transition/add writes
+              // to track.transitions; the project-store subscriber then
+              // reconciles the bridge below. Each pair gets a unique ID
+              // patched in post-add — the executor mints
+              // `transition-${Date.now()}` and a tight loop blows past
+              // 1ms granularity, so several entries collide on id
+              // unless we patch them. Without unique ids, undo /
+              // remove gets ambiguous.
+              let applied = 0;
+              for (const [clipA, clipB] of pairs) {
+                const addAction = {
+                  type: "transition/add" as const,
+                  id: `tr-add-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+                  timestamp: Date.now(),
+                  params: {
+                    clipAId: clipA.id,
+                    clipBId: clipB.id,
+                    transitionType,
+                    duration,
+                  },
+                };
+                const r = await exec.actionExecutor.execute(addAction, exec.project);
+                if (r.success) {
+                  applied++;
+                  // Patch the just-pushed transition's id in place to
+                  // guarantee uniqueness within this batch. Find by
+                  // matching clipAId+clipBId+ts on the track.
+                  const tracks = (exec.project.timeline?.tracks ?? []) as any[];
+                  for (const tr of tracks) {
+                    const trans = (tr as any).transitions;
+                    if (!Array.isArray(trans) || trans.length === 0) continue;
+                    const last = trans[trans.length - 1];
+                    if (last && last.clipAId === clipA.id && last.clipBId === clipB.id) {
+                      last.id = `transition-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
+                      break;
+                    }
+                  }
+                }
+              }
+              // Force a project setState so subscribers fire even if the
+              // executor mutated in place (zustand needs a new project
+              // ref to notify watchers). The transition-bridge sync
+              // subscriber (registered in the Voidspace mount path)
+              // will then push the new transitions into the renderer.
+              useProjectStore.setState({ project: { ...exec.project, modifiedAt: Date.now() } });
+              reply({
+                type: "voidspace:transition-applied",
+                requestId: msg.requestId,
+                ok: true,
+                applied,
+                kind: transitionType,
+                durationSec: duration,
+              });
+            } catch (err: any) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: err?.message ?? String(err) });
+            }
             break;
           }
           case "voidspace:add-clip": {
