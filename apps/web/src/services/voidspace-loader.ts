@@ -809,20 +809,82 @@ export async function loadSceneListAsProject(
     try {
       const parsed = JSON.parse(projectStateRaw.json) as Project;
       if (parsed && typeof parsed === "object" && parsed.timeline) {
-        // Stash the serialised ActionHistory on the project as a
-        // non-standard `__historyData` field. App.tsx peels this off
-        // after `loadProject` runs and rehydrates the actionHistory.
-        // Without this, undo/redo + chat-message snapshot restore
-        // would silently die on every reload (the loader returns a
-        // fresh project but `loadProject` mints an empty
-        // ActionHistory, dropping all bookmarks).
-        if (typeof projectStateRaw.history === "string") {
-          (parsed as any).__historyData = projectStateRaw.history;
+        // Empty-blob safety net. If the blob's timeline is completely
+        // empty (no tracks AND no media) but the chat doc has scenes,
+        // a stale autosave wiped the project state — likely from a
+        // wholesale loadProject() that beat the per-scene rebuild, an
+        // early-firing save during a transient empty state, or an
+        // agent edit chain that emptied the timeline. Without this
+        // guard, the loader prefers the empty blob forever and the
+        // user permanently loses access to their per-scene media —
+        // even though the scenes still exist in Firestore.
+        //
+        // Fall back to per-scene rebuild but keep the persisted
+        // history so snapshots survive (caller still gets the chance
+        // to navigate back via the History panel if they want).
+        const tracksCount = Array.isArray(parsed.timeline.tracks) ? parsed.timeline.tracks.length : 0;
+        const totalClips = (parsed.timeline.tracks ?? []).reduce((n: number, t: any) => n + ((t?.clips?.length) ?? 0), 0);
+        const mediaCount = parsed.mediaLibrary?.items?.length ?? 0;
+        const textClipsCount = (parsed as any).textClips?.length ?? 0;
+        const blobIsEmpty = tracksCount === 0 && totalClips === 0 && mediaCount === 0 && textClipsCount === 0;
+        const scenesArr = (slData as Record<string, unknown>).scenes;
+        const sceneListHasScenes = Array.isArray(scenesArr) ? scenesArr.length > 0 : false;
+        if (blobIsEmpty && sceneListHasScenes) {
+          console.warn(
+            `[voidspace-loader] project_state blob is EMPTY but scene_list has ${Array.isArray(scenesArr) ? scenesArr.length : 0} scenes — falling back to per-scene rebuild. Stale empty autosave detected.`,
+          );
+          // Stash the persisted history on the rebuild target, so we
+          // get assigned to the rebuilt project below.
+          if (typeof projectStateRaw.history === "string") {
+            (slData as any).__pendingHistoryData = projectStateRaw.history;
+          }
+          // Fall through to per-scene rebuild.
+        } else {
+          // Stash the serialised ActionHistory on the project as a
+          // non-standard `__historyData` field. App.tsx peels this off
+          // after `loadProject` runs and rehydrates the actionHistory.
+          // Without this, undo/redo + chat-message snapshot restore
+          // would silently die on every reload (the loader returns a
+          // fresh project but `loadProject` mints an empty
+          // ActionHistory, dropping all bookmarks).
+          if (typeof projectStateRaw.history === "string") {
+            (parsed as any).__historyData = projectStateRaw.history;
+          }
+          // Load-time transition scrub. Older blobs may contain transitions
+          // with duplicate ids (root cause: action-executor used to mint
+          // `transition-${Date.now()}` with no jitter, so a tight loop of
+          // adds collided). Duplicate ids poison the bridge's
+          // Map<id, transition> on register and the entire video preview
+          // goes black. Strip duplicate-id and orphan transitions here so
+          // a corrupt blob from before the executor fix is auto-healed on
+          // load instead of breaking the renderer.
+          let transitionsScrubbed = 0;
+          for (const tr of (parsed.timeline?.tracks ?? []) as any[]) {
+            const transitions: any[] = Array.isArray(tr.transitions) ? tr.transitions : [];
+            if (transitions.length === 0) continue;
+            const clipIds = new Set<string>((tr.clips ?? []).map((c: any) => c.id));
+            const seen = new Set<string>();
+            const cleaned: any[] = [];
+            for (const t of transitions) {
+              if (!t || typeof t.id !== "string") { transitionsScrubbed++; continue; }
+              if (seen.has(t.id)) { transitionsScrubbed++; continue; }
+              if (!clipIds.has(t.clipAId) || !clipIds.has(t.clipBId)) { transitionsScrubbed++; continue; }
+              seen.add(t.id);
+              cleaned.push(t);
+            }
+            if (cleaned.length !== transitions.length) {
+              tr.transitions = cleaned;
+            }
+          }
+          if (transitionsScrubbed > 0) {
+            console.warn(`[voidspace-loader] Scrubbed ${transitionsScrubbed} corrupt transition(s) from blob (duplicate id or missing clip refs). Project will render as hard cuts where transitions were dropped.`);
+          }
+          console.log(`[voidspace-loader] Using project_state blob (${projectStateRaw.json.length} bytes${projectStateRaw.history ? `, +${projectStateRaw.history.length}b history` : ""})`);
+          return parsed;
         }
-        console.log(`[voidspace-loader] Using project_state blob (${projectStateRaw.json.length} bytes${projectStateRaw.history ? `, +${projectStateRaw.history.length}b history` : ""})`);
-        return parsed;
+      } else {
+        console.warn("[voidspace-loader] project_state blob malformed, falling back to per-scene bootstrap");
       }
-      console.warn("[voidspace-loader] project_state blob malformed, falling back to per-scene bootstrap");
     } catch (e) {
       console.warn("[voidspace-loader] project_state JSON.parse failed, falling back:", e);
     }
@@ -1657,6 +1719,17 @@ export async function loadSceneListAsProject(
     timeline,
     textClips: captionTextClips,
   };
+
+  // If the empty-blob safety net flagged a stale history we should
+  // preserve, attach it here so App.tsx still rehydrates ActionHistory
+  // (so prior snapshots remain visible/clickable). Without this, the
+  // user loses their snapshot list when we fall back to per-scene
+  // rebuild from an empty-blob recovery.
+  const pendingHistory = (slData as any).__pendingHistoryData;
+  if (typeof pendingHistory === "string") {
+    (project as any).__historyData = pendingHistory;
+    console.log(`[voidspace-loader] Preserved history (${pendingHistory.length}b) across empty-blob fallback rebuild`);
+  }
 
   return project;
 }

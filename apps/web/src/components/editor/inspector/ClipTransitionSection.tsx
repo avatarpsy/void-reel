@@ -119,6 +119,22 @@ function calculateSlideOffsets(
   };
 }
 
+// Exported so the agent's transitions surface (apps/web/src/agent/
+// inspector-surfaces/transitions.ts) can run the EXACT same code path
+// the Inspector's "Apply Transitions" button runs. No reimplementation,
+// no drift — bug fixes here flow to both UIs.
+export function generateClipTransitionKeyframes(
+  clip: ClipLike,
+  entryConfig: TransitionConfig,
+  exitConfig: TransitionConfig,
+  _clipType: ClipType,
+  canvas: CanvasDimensions,
+): Keyframe[] {
+  return generateKeyframes(clip, entryConfig, exitConfig, _clipType, canvas);
+}
+
+export type { TransitionPreset, TransitionConfig, ClipLike, CanvasDimensions };
+
 function generateKeyframes(
   clip: ClipLike,
   entryConfig: TransitionConfig,

@@ -1,4 +1,5 @@
 import React, { useCallback, useState, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import {
   Command,
   ChevronDown,
@@ -1290,13 +1291,19 @@ export const Toolbar: React.FC = () => {
 
       <SettingsDialog />
 
-      {isHistoryOpen && (
+      {isHistoryOpen && typeof document !== "undefined" && createPortal(
+        // Portal to <body> so the panel escapes Toolbar's z-30 stacking
+        // context. Otherwise its z-index is bounded by Toolbar's, and
+        // the Timeline header (z-[100], in the EditorInterface stacking
+        // context) renders ON TOP of the panel — px/s zoom controls
+        // punch through. With portal, the panel sits in the root
+        // stacking context and `z-[160]` actually wins.
         <>
           <div
-            className="fixed inset-0 bg-black/20 z-40"
+            className="fixed inset-0 bg-black/20 z-[150]"
             onClick={() => setIsHistoryOpen(false)}
           />
-          <div className="fixed top-16 right-0 bottom-0 w-80 bg-background-secondary border-l border-border z-50 shadow-2xl animate-in slide-in-from-right duration-200">
+          <div className="fixed top-16 right-0 bottom-0 w-80 bg-background-secondary border-l border-border z-[160] shadow-2xl animate-in slide-in-from-right duration-200">
             <div className="flex items-center justify-between p-3 border-b border-border">
               <span className="text-sm font-medium text-text-primary">Action History</span>
               <button
@@ -1310,7 +1317,8 @@ export const Toolbar: React.FC = () => {
               <HistoryPanel />
             </div>
           </div>
-        </>
+        </>,
+        document.body,
       )}
     </div>
   );

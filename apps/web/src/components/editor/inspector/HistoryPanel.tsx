@@ -28,7 +28,8 @@ interface DisplayEntry {
 }
 
 export const HistoryPanel: React.FC = () => {
-  const { actionHistory, undo, redo, canUndo, canRedo, clipUndoStack, clipRedoStack } = useProjectStore();
+  const { actionHistory, undo, redo, canUndo, canRedo, clipUndoStack, clipRedoStack, restoreToSnapshot } = useProjectStore();
+  const [restoringId, setRestoringId] = useState<string | null>(null);
   const [combinedHistory, setCombinedHistory] = useState<DisplayEntry[]>([]);
   const [snapshots, setSnapshots] = useState<HistorySnapshot[]>([]);
   const [showSnapshots, setShowSnapshots] = useState(false);
@@ -106,6 +107,31 @@ export const HistoryPanel: React.FC = () => {
     [actionHistory],
   );
 
+  const handleRestoreSnapshot = useCallback(
+    async (id: string) => {
+      if (restoringId) return;
+      setRestoringId(id);
+      const before = actionHistory.getUndoStackSize();
+      try {
+        const r = await restoreToSnapshot(id);
+        const after = actionHistory.getUndoStackSize();
+        const snap = actionHistory.getSnapshots().find((s) => s.id === id);
+        console.log("[HistoryPanel] restoreSnapshot", {
+          id,
+          name: snap?.name,
+          targetIndex: snap?.stackIndex,
+          undoStackBefore: before,
+          undoStackAfter: after,
+          ok: (r as any)?.success,
+          error: (r as any)?.error,
+        });
+      } finally {
+        setRestoringId(null);
+      }
+    },
+    [restoreToSnapshot, restoringId, actionHistory],
+  );
+
   const formatTime = (timestamp: number): string => {
     const date = new Date(timestamp);
     return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -175,28 +201,39 @@ export const HistoryPanel: React.FC = () => {
               </p>
             )}
 
-            {snapshots.map((snapshot) => (
-              <div
-                key={snapshot.id}
-                className="flex items-center justify-between p-2 rounded hover:bg-background-tertiary group"
-              >
-                <div className="flex items-center gap-2">
-                  <Bookmark size={10} className="text-yellow-500" />
-                  <div>
-                    <p className="text-xs text-text-primary">{snapshot.name}</p>
-                    <p className="text-[10px] text-text-muted">
-                      {formatTime(snapshot.timestamp)}
-                    </p>
-                  </div>
-                </div>
-                <button
-                  onClick={() => handleDeleteSnapshot(snapshot.id)}
-                  className="p-1 rounded hover:bg-red-500/20 text-text-muted hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all"
+            {snapshots.map((snapshot) => {
+              const isRestoring = restoringId === snapshot.id;
+              return (
+                <div
+                  key={snapshot.id}
+                  className="flex items-center justify-between p-2 rounded hover:bg-background-tertiary group"
                 >
-                  <Trash2 size={10} />
-                </button>
-              </div>
-            ))}
+                  <button
+                    type="button"
+                    onClick={() => handleRestoreSnapshot(snapshot.id)}
+                    disabled={!!restoringId}
+                    title={`Restore to "${snapshot.name}" (rewinds the project to this checkpoint)`}
+                    className="flex items-center gap-2 flex-1 min-w-0 text-left disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <Bookmark size={10} className={isRestoring ? "text-primary animate-pulse" : "text-yellow-500"} />
+                    <div className="min-w-0">
+                      <p className="text-xs text-text-primary truncate">{snapshot.name}</p>
+                      <p className="text-[10px] text-text-muted">
+                        {formatTime(snapshot.timestamp)}
+                        {isRestoring ? " · restoring…" : ` · @${snapshot.stackIndex}`}
+                      </p>
+                    </div>
+                  </button>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); handleDeleteSnapshot(snapshot.id); }}
+                    disabled={!!restoringId}
+                    className="p-1 rounded hover:bg-red-500/20 text-text-muted hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all disabled:opacity-30"
+                  >
+                    <Trash2 size={10} />
+                  </button>
+                </div>
+              );
+            })}
 
             {isCreatingSnapshot ? (
               <div className="flex items-center gap-2 p-2">

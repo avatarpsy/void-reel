@@ -1760,7 +1760,25 @@ export const getTransitionAtTime = (
     for (const track of videoTracks) {
       const transitions = transitionBridge.getTransitionsForTrack(track.id);
 
+      // Renderer-side guard against corrupt blobs. If two transitions ever
+      // share an id (which previously happened when transition/add was
+      // dispatched in a tight loop and the executor minted ids with
+      // Date.now() alone), bridge's Map<id, transition> ends up
+      // disambiguating ambiguously, the wrong transition gets rendered
+      // for a given (clipA,clipB) window, and the canvas goes black for
+      // the entire video instead of just the broken transition. Skip any
+      // transition whose id collides with another on the same track, AND
+      // any whose clipA/clipB are missing — let the regular clip-render
+      // fallback below draw a clean hard cut instead of a black frame.
+      const seenIds = new Set<string>();
+      const dupIds = new Set<string>();
+      for (const t of transitions) {
+        if (seenIds.has(t.id)) dupIds.add(t.id);
+        seenIds.add(t.id);
+      }
+
       for (const transition of transitions) {
+        if (dupIds.has(transition.id)) continue;
         const clipA = track.clips.find((c) => c.id === transition.clipAId);
         const clipB = track.clips.find((c) => c.id === transition.clipBId);
 

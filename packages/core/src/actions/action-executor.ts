@@ -1001,8 +1001,15 @@ export class ActionExecutor {
           property: string;
           value: unknown;
         };
+        // Same id-collision lesson as transition/add: a wrapper that adds
+        // many keyframes in a tight loop (e.g. fade-in/out across N clips =
+        // 4*N keyframes/ms) needs jitter or every keyframe in the same
+        // millisecond shares an id and the keyframe-engine reads back the
+        // wrong value.
         const newKeyframe = {
-          id: `keyframe-${Date.now()}`,
+          id: `keyframe-${Date.now().toString(36)}-${Math.random()
+            .toString(36)
+            .slice(2, 11)}`,
           time: params.time,
           property: params.property,
           value: params.value,
@@ -1105,8 +1112,19 @@ export class ActionExecutor {
             (t: MutableTrack) => t.id === clipA.trackId,
           );
           if (track) {
+            // ID must include random jitter. Without it, a tight loop of
+            // transition/add actions (e.g. agent applying transitions to N
+            // adjacent clip pairs in <1ms) all land in the same Date.now()
+            // tick and collide on id. Duplicate ids corrupt the bridge's
+            // Map<id, transition> on register, and the renderer then draws
+            // a broken/black frame for the entire video while still setting
+            // hasRenderedFrame=true (so the fallback clip render never
+            // runs) — i.e. the whole preview goes black until the dupes are
+            // stripped from the saved blob.
             const newTransition: Transition = {
-              id: `transition-${Date.now()}`,
+              id: `transition-${Date.now().toString(36)}-${Math.random()
+                .toString(36)
+                .slice(2, 11)}`,
               clipAId: params.clipAId,
               clipBId: params.clipBId,
               type: params.transitionType,

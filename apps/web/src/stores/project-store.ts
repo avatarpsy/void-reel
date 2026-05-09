@@ -406,6 +406,10 @@ export interface ProjectState {
   redo: () => Promise<ActionResult>;
   canUndo: () => boolean;
   canRedo: () => boolean;
+  // Snapshot restore — walks undo/redo stack until undoStack.length matches
+  // snapshot.stackIndex, replaying inverse actions to bring the project
+  // back to the state it had when the snapshot was taken.
+  restoreToSnapshot: (snapshotId: string) => Promise<ActionResult>;
 
   // Execute arbitrary action
   executeAction: (action: Action) => Promise<ActionResult>;
@@ -2656,6 +2660,33 @@ export const useProjectStore = create<ProjectState>()(
         const { actionHistory, clipRedoStack } = get();
         // Check both redo sources: clip-specific stack takes precedence, then global action history
         return clipRedoStack.length > 0 || actionHistory.canRedo();
+      },
+
+      restoreToSnapshot: async (snapshotId: string) => {
+        const { actionHistory, actionExecutor } = get();
+        const snap = actionHistory.getSnapshots().find((s) => s.id === snapshotId);
+        if (!snap) {
+          return { success: false, error: { code: "INVALID_PARAMS", message: "Snapshot not found" } };
+        }
+        const target = snap.stackIndex;
+        let guard = 0;
+        const MAX_STEPS = 5000;
+        // Walk backwards: replay inverseActions until undoStack length matches.
+        // undoGroup() may pop multiple entries when an auto-grouped sequence
+        // exists, so re-read the size after each step instead of decrementing.
+        while (actionHistory.getUndoStackSize() > target && guard++ < MAX_STEPS) {
+          const r = await actionExecutor.undo(get().project);
+          if (!r.success) break;
+        }
+        // Walk forward (when restoring to a snapshot ahead of current).
+        while (actionHistory.getUndoStackSize() < target && guard++ < MAX_STEPS) {
+          const r = await actionExecutor.redo(get().project);
+          if (!r.success) break;
+        }
+        // Tick modifiedAt to push subscribers (transition-bridge reconciler,
+        // autosave) and fan out a fresh project ref.
+        set({ project: { ...get().project, modifiedAt: Date.now() } });
+        return { success: true };
       },
 
       // Execute arbitrary action

@@ -326,11 +326,38 @@ function App() {
         // call; we just hand over the bytes. If no parent listens
         // (running standalone), the postMessage is a no-op — the
         // local IndexedDB save is the durable copy.
+        // Latch that flips ON the first time we see a non-empty project
+        // for this scene list. Once flipped, we refuse to write an empty
+        // project to the remote blob — that's the path that historically
+        // wiped users' data: an early autosave (before per-scene rebuild
+        // populated) or a wholesale loadProject of an empty project state
+        // would race ahead of the rebuild and persist the empty state,
+        // permanently masking the per-scene Firestore docs from the
+        // loader (which prefers the blob). The latch is per-iframe and
+        // resets on reload — by which time the loader's empty-blob
+        // safety net has rebuilt from per-scene anyway.
+        let sawNonEmptyProject = false;
         autoSaveManager.setRemoteSync(async (project, historyData) => {
           // Round-trip via requestId so the parent can ack/error.
           // Skip when there's no parent (running detached) — sending
           // to ourselves would silently never resolve.
           if (window.parent === window) return;
+          // Empty-write firewall. See `sawNonEmptyProject` comment above.
+          const tracksCount = project.timeline?.tracks?.length ?? 0;
+          const totalClips = (project.timeline?.tracks ?? []).reduce(
+            (n: number, t: any) => n + ((t?.clips?.length) ?? 0), 0,
+          );
+          const mediaCount = project.mediaLibrary?.items?.length ?? 0;
+          const textClipsCount = (project as any).textClips?.length ?? 0;
+          const isEmpty = tracksCount === 0 && totalClips === 0 && mediaCount === 0 && textClipsCount === 0;
+          if (!isEmpty) {
+            sawNonEmptyProject = true;
+          } else if (sawNonEmptyProject) {
+            console.warn(
+              "[Voidspace] BLOCKED remote sync of empty project — would have wiped non-empty server state. Use the snapshot panel to recover, or manually save once a non-empty state is restored.",
+            );
+            return;
+          }
           const requestId = `sync_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
           const ack = new Promise<{ ok: boolean; error?: string }>((resolve) => {
             const onMsg = (e: MessageEvent) => {
@@ -378,60 +405,14 @@ function App() {
           return null;
         });
 
-        // ── transitionBridge ↔ project state sync ────────────────────
-        // The renderer reads transitions from transitionBridge.trackTransitions
-        // (a separate Map), NOT from project.timeline.tracks.transitions.
-        // Without this subscriber, transitions saved in the blob would
-        // load into the project but never reach the renderer; undo would
-        // remove them from the project but the visible blend would
-        // persist. Reconcile on every project change so the bridge is a
-        // derived view of the canonical project state.
-        try {
-          const { getTransitionBridge } = await import("./bridges/transition-bridge");
-          const bridge = getTransitionBridge();
-          const initialProj = useProjectStore.getState().project;
-          if (!bridge.isInitialized()) {
-            bridge.initialize(initialProj.settings?.width ?? 1920, initialProj.settings?.height ?? 1080);
-          }
-          // Diff the bridge's view against project.timeline.tracks and
-          // patch (add/remove). Cheap O(N transitions) per tick — far
-          // smaller than the project's clip count.
-          const reconcile = () => {
-            try {
-              const proj = useProjectStore.getState().project;
-              for (const tr of (proj.timeline?.tracks ?? [])) {
-                const projectTransitions = (tr as any).transitions ?? [];
-                const bridgeTransitions = bridge.getTransitionsForTrack(tr.id);
-                const projectIds = new Set(projectTransitions.map((t: any) => t.id));
-                const bridgeIds = new Set(bridgeTransitions.map((t: any) => t.id));
-                // Removals: in bridge but not project.
-                for (const bt of bridgeTransitions) {
-                  if (!projectIds.has(bt.id)) {
-                    bridge.removeTransition(bt.id);
-                  }
-                }
-                // Additions: in project but not bridge.
-                for (const pt of projectTransitions) {
-                  if (bridgeIds.has(pt.id)) continue;
-                  const clipA = (tr.clips ?? []).find((c: any) => c.id === pt.clipAId);
-                  const clipB = (tr.clips ?? []).find((c: any) => c.id === pt.clipBId);
-                  if (!clipA || !clipB) continue;
-                  bridge.createTransition(clipA, clipB, pt.type, pt.duration, pt.params);
-                }
-              }
-            } catch (e) {
-              console.warn("[Voidspace] transition reconcile failed:", e);
-            }
-          };
-          // Initial reconcile (covers the blob-restore case where
-          // track.transitions came pre-populated).
-          reconcile();
-          // Subscribe to project changes for ongoing sync (action-
-          // executor mutations, undo, redo, blob reload).
-          useProjectStore.subscribe((s: any) => s.project, () => reconcile());
-        } catch (e) {
-          console.warn("[Voidspace] transitionBridge sync setup failed:", e);
-        }
+        // (transitionBridge subscriber removed 2026-05-09 — Voidspace
+        // no longer uses track.transitions[] / TransitionEngine for
+        // anything. All transitions are per-clip opacity keyframes via
+        // the Inspector's native ClipTransitionSection path. The bridge
+        // file remains because the openreel-native Inspector UI imports
+        // it for its preset-list metadata helpers, but no Voidspace
+        // mutation routes through it anymore. The loader's transition
+        // scrub auto-heals any old blob with stale track.transitions[].)
 
         const saveCandidates = (
           await Promise.all([
@@ -1205,188 +1186,12 @@ function App() {
             });
             break;
           }
-          case "voidspace:apply-transition": {
-            // Add transitions between adjacent video clips. Routes through
-            // BOTH paths so the result persists AND renders:
-            //   1. ActionExecutor `transition/add` → writes to
-            //      track.transitions[]. Survives blob save, undoable
-            //      via ActionHistory, restored on reload.
-            //   2. transitionBridge.createTransition → registers with
-            //      the rendering engine so the canvas shows the blend
-            //      immediately. Without this the transition exists in
-            //      project state but the renderer doesn't see it.
-            // The project subscriber below reconciles the bridge from
-            // project.timeline.tracks.transitions on every change so
-            // undo/redo/load all keep both sides in sync.
-            const { kind, durationSec, applyAll, betweenClips } = msg as any;
-            if (typeof kind !== "string") {
-              reply({ type: "voidspace:error", requestId: msg.requestId, error: "kind required" });
-              break;
-            }
-            // Map user-friendly kinds to the engine's TransitionType.
-            // The engine supports: crossfade, dipToBlack, dipToWhite,
-            // wipe, slide, zoom, push. "fade" is the most natural
-            // user word for "smooth blend" → crossfade. "fade to
-            // black/white" → the dip variants.
-            const KIND_MAP: Record<string, string> = {
-              fade: "crossfade",
-              fadein: "crossfade",
-              fadeout: "crossfade",
-              "fade in": "crossfade",
-              "fade out": "crossfade",
-              "fade-in": "crossfade",
-              "fade-out": "crossfade",
-              crossfade: "crossfade",
-              "fade to black": "dipToBlack",
-              "fade-to-black": "dipToBlack",
-              dip: "dipToBlack",
-              dipToBlack: "dipToBlack",
-              dipToWhite: "dipToWhite",
-              "fade to white": "dipToWhite",
-              wipe: "wipe",
-              slide: "slide",
-              zoom: "zoom",
-              push: "push",
-            };
-            const cleanKind = kind.toLowerCase().trim();
-            // "cut" = remove all transitions on the video track.
-            const isCut = cleanKind === "cut" || cleanKind === "none" || cleanKind === "remove";
-            const transitionType = isCut ? null : (KIND_MAP[cleanKind] || KIND_MAP[kind] || "crossfade");
-            const duration = typeof durationSec === "number" && durationSec > 0
-              ? Math.min(2.0, Math.max(0.1, durationSec))
-              : 0.5;
-
-            try {
-              const proj = useProjectStore.getState().project;
-              const videoTrack = (proj.timeline?.tracks ?? []).find((t: any) => {
-                const id = String(t.id || "").toLowerCase();
-                const k = String(t.type || t.kind || "").toLowerCase();
-                return k === "video" || id === "track-video";
-              });
-              if (!videoTrack) {
-                reply({ type: "voidspace:error", requestId: msg.requestId, error: "no video track" });
-                break;
-              }
-              const sortedClips = [...(videoTrack.clips ?? [])].sort(
-                (a: any, b: any) => (a.startTime || 0) - (b.startTime || 0),
-              );
-              // CUT path: remove all transitions on the video track.
-              if (isCut) {
-                const exec = useProjectStore.getState() as any;
-                const existingTransitions = (videoTrack as any).transitions ?? [];
-                let removed = 0;
-                for (const t of existingTransitions) {
-                  const removeAction = {
-                    type: "transition/remove" as const,
-                    id: `tr-rm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
-                    timestamp: Date.now(),
-                    params: { transitionId: t.id },
-                  };
-                  const r = await exec.actionExecutor.execute(removeAction, exec.project);
-                  if (r.success) removed++;
-                }
-                useProjectStore.setState({ project: { ...exec.project, modifiedAt: Date.now() } });
-                reply({ type: "voidspace:transition-applied", requestId: msg.requestId, ok: true, applied: 0, removed });
-                break;
-              }
-              // ADD path: figure out which clip pairs to bridge.
-              const pairs: Array<[any, any]> = [];
-              if (Array.isArray(betweenClips) && betweenClips.length > 0) {
-                for (const [aId, bId] of betweenClips) {
-                  const a = sortedClips.find((c: any) => c.id === aId);
-                  const b = sortedClips.find((c: any) => c.id === bId);
-                  if (a && b) pairs.push([a, b]);
-                }
-              } else if (applyAll) {
-                for (let i = 0; i < sortedClips.length - 1; i++) {
-                  pairs.push([sortedClips[i], sortedClips[i + 1]]);
-                }
-              }
-              if (pairs.length === 0) {
-                reply({ type: "voidspace:transition-applied", requestId: msg.requestId, ok: true, applied: 0, note: "no clip pairs resolved" });
-                break;
-              }
-              // Initialise the bridge if needed (it caches a renderer).
-              const bridge = (await import("./bridges/transition-bridge")).getTransitionBridge();
-              if (!bridge.isInitialized()) {
-                bridge.initialize(proj.settings?.width ?? 1920, proj.settings?.height ?? 1080);
-              }
-              // Dedup: if the same clip-pair already has a transition,
-              // remove it first so re-running this RPC replaces rather
-              // than stacks (without this, asking the agent twice
-              // doubles every transition; the executor doesn't dedup).
-              const exec = useProjectStore.getState() as any;
-              const existingForTrack = (videoTrack as any).transitions ?? [];
-              for (const [clipA, clipB] of pairs) {
-                const dupes = existingForTrack.filter((t: any) => t.clipAId === clipA.id && t.clipBId === clipB.id);
-                for (const d of dupes) {
-                  const removeAction = {
-                    type: "transition/remove" as const,
-                    id: `tr-rm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-                    timestamp: Date.now(),
-                    params: { transitionId: d.id },
-                  };
-                  await exec.actionExecutor.execute(removeAction, exec.project);
-                }
-              }
-              // Dispatch the action for EACH pair. transition/add writes
-              // to track.transitions; the project-store subscriber then
-              // reconciles the bridge below. Each pair gets a unique ID
-              // patched in post-add — the executor mints
-              // `transition-${Date.now()}` and a tight loop blows past
-              // 1ms granularity, so several entries collide on id
-              // unless we patch them. Without unique ids, undo /
-              // remove gets ambiguous.
-              let applied = 0;
-              for (const [clipA, clipB] of pairs) {
-                const addAction = {
-                  type: "transition/add" as const,
-                  id: `tr-add-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
-                  timestamp: Date.now(),
-                  params: {
-                    clipAId: clipA.id,
-                    clipBId: clipB.id,
-                    transitionType,
-                    duration,
-                  },
-                };
-                const r = await exec.actionExecutor.execute(addAction, exec.project);
-                if (r.success) {
-                  applied++;
-                  // Patch the just-pushed transition's id in place to
-                  // guarantee uniqueness within this batch. Find by
-                  // matching clipAId+clipBId+ts on the track.
-                  const tracks = (exec.project.timeline?.tracks ?? []) as any[];
-                  for (const tr of tracks) {
-                    const trans = (tr as any).transitions;
-                    if (!Array.isArray(trans) || trans.length === 0) continue;
-                    const last = trans[trans.length - 1];
-                    if (last && last.clipAId === clipA.id && last.clipBId === clipB.id) {
-                      last.id = `transition-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
-                      break;
-                    }
-                  }
-                }
-              }
-              // Force a project setState so subscribers fire even if the
-              // executor mutated in place (zustand needs a new project
-              // ref to notify watchers). The transition-bridge sync
-              // subscriber (registered in the Voidspace mount path)
-              // will then push the new transitions into the renderer.
-              useProjectStore.setState({ project: { ...exec.project, modifiedAt: Date.now() } });
-              reply({
-                type: "voidspace:transition-applied",
-                requestId: msg.requestId,
-                ok: true,
-                applied,
-                kind: transitionType,
-                durationSec: duration,
-              });
-            } catch (err: any) {
-              reply({ type: "voidspace:error", requestId: msg.requestId, error: err?.message ?? String(err) });
-            }
-            break;
-          }
+          // voidspace:apply-transition removed (2026-05-09).
+          // Transitions are now reachable through the generic
+          // voidspace:apply-inspector-tool RPC with surface =
+          // "entry-exit-transitions". The chat agent migrated to the
+          // discovery triplet (list/get-schema/apply); the old single-
+          // purpose tool is gone with its bridge-coupled implementation.
           case "voidspace:add-clip": {
             const { trackId, mediaId, startTime } = msg as any;
             if (!trackId || !mediaId || typeof startTime !== "number") {
@@ -1651,6 +1456,128 @@ function App() {
           // loaded state with stale chat-cached state. The blob is the
           // source of truth now; nothing should be patching the project
           // from outside the ActionExecutor.
+          // ── Inspector-surface RPCs ──────────────────────────────────
+          // Single uniform interface the agent uses to drive every
+          // openreel Inspector section (transitions, blending, emphasis,
+          // effects, etc.). Each surface is a thin wrapper that imports
+          // and calls the EXACT same code path the Inspector section's
+          // "Apply" button uses — no reimplementation. Add new surfaces
+          // by dropping a file in src/agent/inspector-surfaces/ and
+          // registering it in that directory's index.ts. No changes
+          // here.
+          //
+          // Three RPCs implement the discovery-then-apply pattern so
+          // the chat agent never has to load every surface's full
+          // schema into its prompt:
+          //   list-inspector-tools      → names + 1-line descriptions
+          //   get-inspector-tool-schema → full schema for one surface
+          //   apply-inspector-tool      → run a surface against clip(s)
+          case "voidspace:list-inspector-tools": {
+            const { listSurfaces } = await import("./agent/inspector-surfaces");
+            reply({
+              type: "voidspace:inspector-tools",
+              requestId: (msg as any).requestId,
+              ok: true,
+              surfaces: listSurfaces(),
+            });
+            break;
+          }
+          case "voidspace:get-inspector-tool-schema": {
+            const args = msg as any;
+            const { getSurface } = await import("./agent/inspector-surfaces");
+            const s = getSurface(String(args.name ?? ""));
+            if (!s) {
+              reply({ type: "voidspace:error", requestId: args.requestId, error: `unknown inspector tool: ${args.name}` });
+              break;
+            }
+            reply({
+              type: "voidspace:inspector-tool-schema",
+              requestId: args.requestId,
+              ok: true,
+              name: s.name,
+              description: s.description,
+              appliesTo: s.appliesTo,
+              schema: s.schema,
+            });
+            break;
+          }
+          case "voidspace:apply-inspector-tool": {
+            // Args: { surface: string, clipIds?: string[], applyAll?: boolean, config: object }
+            const args = msg as any;
+            try {
+              const { getSurface, resolveTargetClips } = await import("./agent/inspector-surfaces");
+              const surface = getSurface(String(args.surface ?? ""));
+              if (!surface) {
+                reply({ type: "voidspace:error", requestId: args.requestId, error: `unknown surface: ${args.surface}` });
+                break;
+              }
+              if (!args.clipIds && !args.applyAll) {
+                reply({ type: "voidspace:error", requestId: args.requestId, error: "clipIds or applyAll required" });
+                break;
+              }
+              const project = useProjectStore.getState().project;
+              const targets = resolveTargetClips(project, surface, {
+                clipIds: Array.isArray(args.clipIds) ? args.clipIds : undefined,
+                applyAll: !!args.applyAll,
+              });
+              if (targets.length === 0) {
+                // Diagnostic so the agent can fix typos / wrong-kind targeting
+                // without an extra read_timeline round-trip.
+                let hint = "no matching clips";
+                if (Array.isArray(args.clipIds) && args.clipIds.length > 0) {
+                  // Check if those ids exist at all (any kind) so we can
+                  // distinguish "id typo" from "wrong kind for this surface".
+                  const allKnownIds = new Set<string>();
+                  for (const tr of project.timeline?.tracks ?? []) {
+                    for (const c of (tr as any).clips ?? []) allKnownIds.add(c.id);
+                  }
+                  for (const tc of (project as any).textClips ?? []) allKnownIds.add(tc.id);
+                  for (const k of ["shapeClips", "svgClips", "stickerClips"] as const) {
+                    for (const gc of (project as any)[k] ?? []) allKnownIds.add(gc.id);
+                  }
+                  const missing = (args.clipIds as string[]).filter((id) => !allKnownIds.has(id));
+                  const wrongKind = (args.clipIds as string[]).filter((id) => allKnownIds.has(id));
+                  if (missing.length > 0) hint = `unknown clipIds: ${missing.join(", ")}`;
+                  else if (wrongKind.length > 0) hint = `clip kind not in surface.appliesTo (${surface.appliesTo.join(",")}): ${wrongKind.join(", ")}`;
+                }
+                reply({
+                  type: "voidspace:inspector-tool-applied",
+                  requestId: args.requestId,
+                  ok: true, clipsTouched: 0,
+                  note: hint,
+                  appliesTo: surface.appliesTo,
+                });
+                break;
+              }
+              // Auto-snapshot before any agent-driven inspector mutation
+              // so the user can rewind from the Snapshots panel.
+              try {
+                const snapStore = useProjectStore.getState() as any;
+                snapStore.actionHistory.createSnapshot(
+                  `Before ${surface.name} · ${new Date().toLocaleTimeString()}`,
+                );
+              } catch {}
+              const ctx = { project, store: useProjectStore.getState() as Record<string, unknown> };
+              const results: Array<{ clipId: string; ok: boolean; note?: string; error?: string }> = [];
+              for (const t of targets) {
+                const r = await surface.apply(t, args.config, ctx);
+                results.push({ clipId: t.id, ok: r.ok, note: r.note, error: r.error });
+              }
+              const okCount = results.filter((r) => r.ok).length;
+              reply({
+                type: "voidspace:inspector-tool-applied",
+                requestId: args.requestId,
+                ok: true,
+                surface: surface.name,
+                clipsTouched: okCount,
+                clipsAttempted: results.length,
+                results,
+              });
+            } catch (err: any) {
+              reply({ type: "voidspace:error", requestId: args.requestId, error: err?.message ?? String(err) });
+            }
+            break;
+          }
           case "voidspace:snapshot": {
             // Bookmark the current ActionHistory undoStack index. The
             // chat uses this to mark "state before this agent turn"
