@@ -5,6 +5,54 @@ import { PostHogProvider } from "posthog-js/react";
 import App from "./App";
 import "./index.css";
 import { registerServiceWorker } from "./services/service-worker";
+import { auth } from "./config/firebase-config";
+
+// Auth-stamp every fetch that targets `/api/studio/local-asset`. The
+// endpoint requires a Firebase ID token (via Authorization: Bearer …
+// header, OR ?t=<idToken> query fallback), but multiple consumers
+// downstream — playback-controller's HTMLAudioElement fallback,
+// export-engine's audio prefetch, voidspace-loader's blob fetcher —
+// hit the URL with a plain `fetch()`. Without auth, they all 401, the
+// blob comes back null, and the audio engine silently drops the track.
+// Symptom users see: music_url is in Firestore, "Background Music"
+// shows on the timeline with a 5-minute clip, but no sound plays in
+// preview AND the exported MP4 has video-only audio (narration only).
+//
+// Patch is keyed on the URL path, not the consumer, so any future
+// fetch added in any package is auto-authed too. Cross-origin URLs
+// (Suno temp links, Kie outputs, Firebase Storage gs://…) keep their
+// existing query strings untouched.
+if (typeof window !== "undefined") {
+  const origFetch = window.fetch.bind(window);
+  window.fetch = async (input, init) => {
+    const rawUrl =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : (input as Request).url;
+    if (rawUrl && /\/api\/studio\/local-asset(\?|$)/.test(rawUrl) && !/[?&]t=/.test(rawUrl)) {
+      try {
+        const u = auth.currentUser;
+        const token = u ? await u.getIdToken(false) : "";
+        if (token) {
+          const sep = rawUrl.includes("?") ? "&" : "?";
+          const stamped = `${rawUrl}${sep}t=${encodeURIComponent(token)}`;
+          if (typeof input === "string" || input instanceof URL) {
+            return origFetch(stamped, init);
+          }
+          // Request object — preserve its method/headers/body but
+          // swap the URL. Request.clone() doesn't change the URL, so
+          // we rebuild via the constructor with `input` as init source.
+          return origFetch(new Request(stamped, input as Request), init);
+        }
+      } catch {
+        // Fall through to unauthenticated fetch — surface 401 to caller.
+      }
+    }
+    return origFetch(input, init);
+  };
+}
 
 const POSTHOG_KEY = import.meta.env.VITE_PUBLIC_POSTHOG_KEY;
 const POSTHOG_HOST = import.meta.env.VITE_PUBLIC_POSTHOG_HOST;

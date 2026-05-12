@@ -152,6 +152,35 @@ async function resolveMediaUrl(rawUrl?: string | null): Promise<string | null> {
 // through the same same-origin endpoint. See utils/cors-proxy.ts.
 import { rewriteToProxy } from "@openreel/core";
 
+/**
+ * Stamp a Firebase ID token onto same-origin `/api/studio/local-asset`
+ * URLs. The endpoint requires auth (requireUserId in studio-auth.ts)
+ * and accepts a `?t=<idToken>` query fallback for HTML elements /
+ * plain fetch calls that can't set an Authorization header. Without
+ * this, the editor's music / video / image blob fetches got 401 and
+ * silently fell back to `blob: null` — the audio engine drops the
+ * track ("No blob available for media item"), so BGM never plays in
+ * preview OR in the rendered MP4 even though the visuals on the
+ * timeline look correct.
+ *
+ * Only stamps onto local-asset URLs; cross-origin sources (Suno temp
+ * URLs, Kie outputs, Firebase Storage) keep their existing query
+ * strings untouched.
+ */
+async function maybeAuthStamp(url: string): Promise<string> {
+  if (!/\/api\/studio\/local-asset(\?|$)/.test(url)) return url;
+  const u = auth.currentUser;
+  if (!u) return url;
+  try {
+    const token = await u.getIdToken(false);
+    if (!token) return url;
+    const sep = url.includes("?") ? "&" : "?";
+    return `${url}${sep}t=${encodeURIComponent(token)}`;
+  } catch {
+    return url;
+  }
+}
+
 export async function fetchMediaBlob(
   url: string | null,
   timeoutMs = 15000,
@@ -163,7 +192,8 @@ export async function fetchMediaBlob(
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetch(targetUrl, {
+      const stamped = await maybeAuthStamp(targetUrl);
+      const res = await fetch(stamped, {
         method: "GET",
         mode: "cors",
         cache: "no-store",
@@ -855,26 +885,39 @@ export async function loadSceneListAsProject(
         let blobVideoSceneCount = 0;
         try {
           const firestoreScenes = await fetchScenes(userId, sceneListId);
-          const firestoreVideoSceneIds = new Set<string>();
+          const firestoreVideoSceneIds: string[] = [];
           for (const s of firestoreScenes) {
             const vu = (s as any).video_url;
             if (typeof vu === "string" && vu) {
-              firestoreVideoSceneIds.add(s._docId);
+              firestoreVideoSceneIds.push(s._docId);
             }
           }
-          firestoreVideoSceneCount = firestoreVideoSceneIds.size;
-          const blobVideoSceneIds = new Set<string>();
+          firestoreVideoSceneCount = firestoreVideoSceneIds.length;
+          // Match by prefix instead of regex. The per-scene rebuild
+          // mints media ids as `media-video-${scene._docId}-${primaryVideo.id ?? "fallback"}`,
+          // and primaryVideo.id is typically a UUID-with-dashes, so a
+          // single regex like `^media-video-(.+?)-([^-]+|fallback)$`
+          // splits the wrong way and pulls part of the UUID into the
+          // captured docId — making every scene look "missing from
+          // blob" even when it isn't. Iterating firestore docIds and
+          // checking startsWith on the blob's media library is
+          // unambiguous.
           const mediaItems = parsed.mediaLibrary?.items ?? [];
+          const mediaIds: string[] = [];
           for (const m of mediaItems as Array<{ id?: string }>) {
-            const match = typeof m?.id === "string"
-              ? m.id.match(/^media-video-(.+?)-(?:[^-]+|fallback)$/)
-              : null;
-            if (match) blobVideoSceneIds.add(match[1]);
+            if (typeof m?.id === "string" && m.id.startsWith("media-video-")) {
+              mediaIds.push(m.id);
+            }
           }
-          blobVideoSceneCount = blobVideoSceneIds.size;
+          const blobCoveredSceneIds = new Set<string>();
           for (const sceneId of firestoreVideoSceneIds) {
-            if (!blobVideoSceneIds.has(sceneId)) staleBlobMissing++;
+            const prefix = `media-video-${sceneId}-`;
+            if (mediaIds.some((mid) => mid.startsWith(prefix))) {
+              blobCoveredSceneIds.add(sceneId);
+            }
           }
+          blobVideoSceneCount = blobCoveredSceneIds.size;
+          staleBlobMissing = firestoreVideoSceneCount - blobVideoSceneCount;
         } catch (e) {
           // If the staleness probe fails, fall back to the existing
           // behaviour (return blob). The live subscription will retry
