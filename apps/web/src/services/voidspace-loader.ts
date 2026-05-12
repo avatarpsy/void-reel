@@ -152,7 +152,7 @@ async function resolveMediaUrl(rawUrl?: string | null): Promise<string | null> {
 // through the same same-origin endpoint. See utils/cors-proxy.ts.
 import { rewriteToProxy } from "@openreel/core";
 
-async function fetchMediaBlob(
+export async function fetchMediaBlob(
   url: string | null,
   timeoutMs = 15000,
 ): Promise<Blob | null> {
@@ -829,12 +829,76 @@ export async function loadSceneListAsProject(
         const blobIsEmpty = tracksCount === 0 && totalClips === 0 && mediaCount === 0 && textClipsCount === 0;
         const scenesArr = (slData as Record<string, unknown>).scenes;
         const sceneListHasScenes = Array.isArray(scenesArr) ? scenesArr.length > 0 : false;
+
+        // Stale-blob detection. The blob is only refreshed by the
+        // editor's autosave; per-scene Firestore writes from the chat
+        // (one per approveClip) bypass it entirely. So when the chat
+        // generates Scene N+1 AFTER the editor already autosaved with
+        // Scenes 1..N, the blob is missing the new scene's video and
+        // returning it here would silently drop Scene N+1 from the
+        // timeline (it'd never render, and the user would see only
+        // the older scenes in the editor).
+        //
+        // Detect this by comparing the set of scene docIds with a
+        // `video_url` in Firestore against the set of scene docIds
+        // represented in the blob's mediaLibrary. The per-scene
+        // rebuild path mints media item ids as
+        // `media-video-${scene._docId}-${primaryVideo?.id ?? "fallback"}`
+        // (see further down), so the docId is the stable prefix.
+        // When Firestore has scenes the blob hasn't seen, fall
+        // through to per-scene rebuild; `applyAdditiveMerge` on the
+        // editor side then folds the new scene's media + clip into
+        // the live project without disturbing existing user edits
+        // (text clips, layout drift) that already came from the blob.
+        let staleBlobMissing = 0;
+        let firestoreVideoSceneCount = 0;
+        let blobVideoSceneCount = 0;
+        try {
+          const firestoreScenes = await fetchScenes(userId, sceneListId);
+          const firestoreVideoSceneIds = new Set<string>();
+          for (const s of firestoreScenes) {
+            const vu = (s as any).video_url;
+            if (typeof vu === "string" && vu) {
+              firestoreVideoSceneIds.add(s._docId);
+            }
+          }
+          firestoreVideoSceneCount = firestoreVideoSceneIds.size;
+          const blobVideoSceneIds = new Set<string>();
+          const mediaItems = parsed.mediaLibrary?.items ?? [];
+          for (const m of mediaItems as Array<{ id?: string }>) {
+            const match = typeof m?.id === "string"
+              ? m.id.match(/^media-video-(.+?)-(?:[^-]+|fallback)$/)
+              : null;
+            if (match) blobVideoSceneIds.add(match[1]);
+          }
+          blobVideoSceneCount = blobVideoSceneIds.size;
+          for (const sceneId of firestoreVideoSceneIds) {
+            if (!blobVideoSceneIds.has(sceneId)) staleBlobMissing++;
+          }
+        } catch (e) {
+          // If the staleness probe fails, fall back to the existing
+          // behaviour (return blob). The live subscription will retry
+          // on the next snapshot tick.
+          console.warn(
+            "[voidspace-loader] stale-blob check failed (continuing with blob):",
+            e,
+          );
+        }
+
         if (blobIsEmpty && sceneListHasScenes) {
           console.warn(
             `[voidspace-loader] project_state blob is EMPTY but scene_list has ${Array.isArray(scenesArr) ? scenesArr.length : 0} scenes — falling back to per-scene rebuild. Stale empty autosave detected.`,
           );
           // Stash the persisted history on the rebuild target, so we
           // get assigned to the rebuilt project below.
+          if (typeof projectStateRaw.history === "string") {
+            (slData as any).__pendingHistoryData = projectStateRaw.history;
+          }
+          // Fall through to per-scene rebuild.
+        } else if (staleBlobMissing > 0) {
+          console.warn(
+            `[voidspace-loader] project_state blob is STALE — Firestore has ${firestoreVideoSceneCount} scene video(s), blob covers ${blobVideoSceneCount}. Missing ${staleBlobMissing}. Falling back to per-scene rebuild so the new clip(s) reach the timeline.`,
+          );
           if (typeof projectStateRaw.history === "string") {
             (slData as any).__pendingHistoryData = projectStateRaw.history;
           }
