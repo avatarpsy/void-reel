@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import {
   Search,
   Maximize2,
@@ -91,6 +91,19 @@ const MediaThumbnail: React.FC<{
   onRetryKieAI,
 }) => {
   const [isHovered, setIsHovered] = useState(false);
+
+  // Stable waveform heights derived from item.id. Math.random() in JSX
+  // re-rolled every render, producing visible jitter during playback.
+  const waveformHeights = useMemo(() => {
+    let seed = 0;
+    for (let i = 0; i < item.id.length; i++) {
+      seed = (seed * 31 + item.id.charCodeAt(i)) >>> 0;
+    }
+    return Array.from({ length: 10 }, () => {
+      seed = (seed * 1103515245 + 12345) >>> 0;
+      return 20 + ((seed >>> 16) % 80);
+    });
+  }, [item.id]);
 
   const getIcon = () => {
     switch (item.type) {
@@ -378,11 +391,11 @@ const MediaThumbnail: React.FC<{
         {/* Audio waveform placeholder */}
         {item.type === "audio" && (
           <div className="absolute top-1/2 left-0 right-0 h-4 flex items-center gap-px px-2 -translate-y-1/2">
-            {[...Array(10)].map((_, i) => (
+            {waveformHeights.map((height, i) => (
               <div
                 key={i}
                 className="flex-1 bg-primary/30 rounded-full"
-                style={{ height: `${Math.random() * 100}%` }}
+                style={{ height: `${height}%` }}
               />
             ))}
           </div>
@@ -493,7 +506,18 @@ const MediaThumbnail: React.FC<{
   );
 };
 
-const EmptyState: React.FC<{ onImport: () => void }> = ({ onImport }) => (
+// Hidden file input id — every clickable "import" affordance in this
+// panel points its `htmlFor` here so the picker opens via native
+// label-activation. We deliberately do NOT use `input.click()` —
+// that path silently no-ops in Chromium embedded-iframe contexts when
+// the user-activation token has been consumed (e.g. a microtask hop
+// between the click event and the .click() call). Native label
+// activation is dispatched at the browser layer in a real user
+// gesture, so it works regardless of iframe permissions or framework
+// event timing.
+const ASSETS_FILE_INPUT_ID = "assets-file-input";
+
+const EmptyState: React.FC = () => (
   <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
     <div className="w-16 h-16 rounded-2xl bg-background-tertiary border border-border flex items-center justify-center mb-4 shadow-inner">
       <Upload size={24} className="text-text-muted" />
@@ -504,12 +528,14 @@ const EmptyState: React.FC<{ onImport: () => void }> = ({ onImport }) => (
     <p className="text-xs text-text-muted mb-6">
       Drag files here or click to import
     </p>
-    <button
-      onClick={onImport}
-      className="px-4 py-2 bg-background-elevated hover:bg-background-tertiary border border-border text-text-primary text-xs font-medium rounded-lg transition-all hover:border-primary/50"
+    <label
+      htmlFor={ASSETS_FILE_INPUT_ID}
+      role="button"
+      tabIndex={0}
+      className="px-4 py-2 bg-background-elevated hover:bg-background-tertiary border border-border text-text-primary text-xs font-medium rounded-lg transition-all hover:border-primary/50 cursor-pointer inline-block [&_*]:pointer-events-none"
     >
       Import Media
-    </button>
+    </label>
   </div>
 );
 
@@ -521,7 +547,6 @@ const LoadingIndicator: React.FC<{ message: string }> = ({ message }) => (
 );
 
 export const AssetsPanel: React.FC = () => {
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTabRaw] = useState<
     "media" | "text" | "graphics" | "ai-music" | "voidspace" | "ai-gen"
@@ -849,18 +874,6 @@ export const AssetsPanel: React.FC = () => {
     [addMediaToTimeline],
   );
 
-  const triggerFileInput = useCallback(() => {
-    const input = fileInputRef.current;
-    if (!input) {
-      console.warn("[AssetsPanel] fileInputRef not attached");
-      toast.error("Cannot open file picker", "Reload the page and try again.");
-      return;
-    }
-    // Reset value so picking the same file twice still fires onChange.
-    input.value = "";
-    input.click();
-  }, []);
-
   const handleImportBackground = useCallback(
     async (preset: BackgroundPreset) => {
       setGeneratingBackground(preset.id);
@@ -928,11 +941,25 @@ export const AssetsPanel: React.FC = () => {
           Assets
         </span>
         <div className="flex gap-1">
-          <IconButton
-            icon={Plus}
-            onClick={triggerFileInput}
+          {/* `[&_*]:pointer-events-none` is load-bearing on every label
+              in this panel — without it a real mouse click lands on
+              the inner SVG `<path>` (Lucide icons render as
+              <svg><path/>…), which absorbs the hit. Chromium's
+              label-activation logic doesn't fire the associated input
+              from a descendant-originated click on SVG children, so
+              the picker never opens. Disabling pointer-events on every
+              descendant forces the click target to be the label itself
+              → label-activation dispatches the synthetic click on the
+              input → file picker opens. */}
+          <label
+            htmlFor={ASSETS_FILE_INPUT_ID}
             title="Import media"
-          />
+            role="button"
+            tabIndex={0}
+            className="inline-flex items-center justify-center h-6 w-6 rounded-md text-text-secondary hover:text-text-primary hover:bg-background-elevated cursor-pointer transition-colors [&_*]:pointer-events-none"
+          >
+            <Plus size={14} />
+          </label>
           <IconButton icon={Maximize2} title="Maximize panel" />
           <IconButton icon={X} title="Close panel" />
         </div>
@@ -1063,19 +1090,46 @@ export const AssetsPanel: React.FC = () => {
         </div>
       )}
 
-      {/* Hidden file input */}
+      {/* Hidden file input — target of every `<label htmlFor>` in this
+          panel.
+
+          CRITICAL: do NOT use `className="hidden"` (display: none).
+          Chromium's embedded-iframe picker policy suppresses the OS
+          file chooser for inputs whose computed display is `none` —
+          a trusted click reaches the input but the browser refuses
+          to show the picker because the element has no layout box.
+          Use the screen-reader-only recipe (1×1px, clipped, opacity:0):
+          element stays laid-out so the picker is eligible to open,
+          but invisible to the user. */}
       <input
-        ref={fileInputRef}
+        id={ASSETS_FILE_INPUT_ID}
         type="file"
         multiple
         accept="video/*,audio/*,image/*"
-        onChange={(e) => {
-          const files = e.target.files;
-          // Clear value so the same file can be re-picked.
-          e.target.value = "";
-          void handleFileImport(files);
+        style={{
+          position: "absolute",
+          width: 1,
+          height: 1,
+          padding: 0,
+          margin: -1,
+          overflow: "hidden",
+          clip: "rect(0,0,0,0)",
+          whiteSpace: "nowrap",
+          border: 0,
+          opacity: 0,
+          pointerEvents: "none",
         }}
-        className="hidden"
+        onChange={(e) => {
+          // Hand the FileList to the importer BEFORE clearing value.
+          // input.files is a live view — setting value = "" empties it
+          // in place, so a reference grabbed beforehand becomes length 0
+          // and handleFileImport's empty-guard returns silently. The
+          // importer's synchronous Array.from(files) snapshots the list,
+          // so clearing value right after is safe and still resets the
+          // input for the next pick.
+          void handleFileImport(e.target.files);
+          e.target.value = "";
+        }}
       />
 
       {/* Content based on active tab */}
@@ -1088,7 +1142,7 @@ export const AssetsPanel: React.FC = () => {
         >
           <div className="px-5 pb-5">
             {filteredItems.length === 0 ? (
-              <EmptyState onImport={triggerFileInput} />
+              <EmptyState />
             ) : (() => {
               // Bucket items by `category` (Voidspace stamps these:
               // "Scene Videos", "Narrations", "Music"). Items without a
@@ -1172,26 +1226,34 @@ export const AssetsPanel: React.FC = () => {
                     grouped list so user-imported additions sit alongside
                     the always-on import affordance instead of being
                     swallowed by the section sort. */}
+                {/* List/grid "Add media" tiles — labels (not buttons)
+                    so the picker opens via native form-control activation.
+                    Visual classes preserved verbatim from the previous
+                    <button> versions; semantics swap to role="button". */}
                 {mediaViewMode === "list" ? (
-                  <button
-                    onClick={triggerFileInput}
-                    className="w-full flex items-center gap-3 px-2 py-1.5 rounded-lg border-2 border-dashed border-border hover:border-text-secondary cursor-pointer transition-all group"
+                  <label
+                    htmlFor={ASSETS_FILE_INPUT_ID}
+                    role="button"
+                    tabIndex={0}
+                    className="w-full flex items-center gap-3 px-2 py-1.5 rounded-lg border-2 border-dashed border-border hover:border-text-secondary cursor-pointer transition-all group [&_*]:pointer-events-none"
                   >
                     <div className="w-12 h-8 rounded bg-background-tertiary flex items-center justify-center flex-shrink-0">
                       <Upload size={14} className="text-text-muted group-hover:text-text-secondary transition-colors" />
                     </div>
                     <span className="text-[11px] text-text-muted group-hover:text-text-secondary transition-colors font-medium">Add media</span>
-                  </button>
+                  </label>
                 ) : (
-                  <button
-                    onClick={triggerFileInput}
-                    className="w-full aspect-video bg-background-tertiary rounded-lg border-2 border-dashed border-border hover:border-text-secondary relative flex items-center justify-center cursor-pointer transition-all overflow-hidden shadow-sm group"
+                  <label
+                    htmlFor={ASSETS_FILE_INPUT_ID}
+                    role="button"
+                    tabIndex={0}
+                    className="w-full aspect-video bg-background-tertiary rounded-lg border-2 border-dashed border-border hover:border-text-secondary relative flex items-center justify-center cursor-pointer transition-all overflow-hidden shadow-sm group [&_*]:pointer-events-none"
                   >
                     <div className="flex flex-col items-center gap-1.5">
                       <Upload size={mediaViewMode === "small" ? 16 : 20} className="text-text-muted group-hover:text-text-secondary transition-colors" />
                       <span className="text-[10px] text-text-muted group-hover:text-text-secondary transition-colors">Add media</span>
                     </div>
-                  </button>
+                  </label>
                 )}
               </div>
             )}

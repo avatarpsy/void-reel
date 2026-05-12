@@ -986,6 +986,49 @@ export async function loadSceneListAsProject(
           if (transitionsScrubbed > 0) {
             console.warn(`[voidspace-loader] Scrubbed ${transitionsScrubbed} corrupt transition(s) from blob (duplicate id or missing clip refs). Project will render as hard cuts where transitions were dropped.`);
           }
+          // Music-track auto-heal. Older blobs minted before the
+          // per-scene-music collapse landed in the rebuild path stamped
+          // ONE music clip per scene on `track-music` even when the
+          // entire project used a single global BGM. The clips are
+          // contiguous (each scene picks up where the previous left
+          // off via lastMusicOutPointSec), so playback is seamless —
+          // but the timeline UI shows N stacked clips for what the
+          // user expects to see as ONE BGM track, and a fresh BGM
+          // approve doesn't visually replace the duplicates (the
+          // blob keeps them frozen forever). Collapse adjacent same-
+          // mediaId contiguous clips here so existing projects
+          // self-repair on next load. Per-scene-override case (genuinely
+          // different mediaIds per scene) is preserved.
+          let musicClipsCollapsed = 0;
+          for (const tr of (parsed.timeline?.tracks ?? []) as any[]) {
+            if (tr?.id !== "track-music" || !Array.isArray(tr.clips) || tr.clips.length < 2) continue;
+            const sorted = [...tr.clips].sort(
+              (a: any, b: any) => (a.startTime ?? 0) - (b.startTime ?? 0),
+            );
+            const EPS = 0.01;
+            const collapsed: any[] = [];
+            for (const c of sorted) {
+              const last = collapsed[collapsed.length - 1];
+              if (
+                last &&
+                last.mediaId === c.mediaId &&
+                Math.abs((last.startTime ?? 0) + (last.duration ?? 0) - (c.startTime ?? 0)) < EPS &&
+                Math.abs((last.outPoint ?? 0) - (c.inPoint ?? 0)) < EPS
+              ) {
+                last.duration = (c.startTime ?? 0) + (c.duration ?? 0) - (last.startTime ?? 0);
+                last.outPoint = c.outPoint;
+                musicClipsCollapsed++;
+              } else {
+                collapsed.push(c);
+              }
+            }
+            if (collapsed.length !== tr.clips.length) {
+              tr.clips = collapsed;
+            }
+          }
+          if (musicClipsCollapsed > 0) {
+            console.warn(`[voidspace-loader] Collapsed ${musicClipsCollapsed} duplicate per-scene music clip(s) into contiguous segments. Old per-scene-BGM blob auto-healed.`);
+          }
           console.log(`[voidspace-loader] Using project_state blob (${projectStateRaw.json.length} bytes${projectStateRaw.history ? `, +${projectStateRaw.history.length}b history` : ""})`);
           return parsed;
         }
@@ -1642,8 +1685,41 @@ export async function loadSceneListAsProject(
   }
 
   // ── Build music track clips ──
-  if (musicTrackSpecs.length > 0 && totalMusicDuration > 0) {
-    for (const spec of musicTrackSpecs) {
+  //
+  // Common case: ONE global `slData.music_url` applied to every scene.
+  // Each scene loop iteration above pushed its own spec (per-scene
+  // mediaIds + contiguous in/out points so a long BGM track gets sliced
+  // scene-by-scene). For a single global track that produced N clips on
+  // `track-music` — visually indistinguishable from "duplicate BGM"
+  // even though playback is seamless. The agent renders BGM ONCE at
+  // ~3-4 min length and just trims it to video length, so the user
+  // expects to see ONE clip spanning [0, totalVideoDuration].
+  //
+  // Collapse adjacent specs that (a) share the same mediaId and
+  // (b) chain contiguously (next.startTime ≈ prev.startTime + prev.duration
+  // AND next.inPoint ≈ prev.outPoint), merging them into a single
+  // clip. Per-scene-override case — different `scene.music_url` per
+  // scene, or non-contiguous source windows — stays split, because
+  // those are genuinely different audio segments.
+  const EPSILON = 0.01;
+  const mergedSpecs: typeof musicTrackSpecs = [];
+  for (const spec of musicTrackSpecs) {
+    const last = mergedSpecs[mergedSpecs.length - 1];
+    if (
+      last &&
+      last.mediaId === spec.mediaId &&
+      Math.abs(last.startTime + last.duration - spec.startTime) < EPSILON &&
+      Math.abs(last.outPoint - spec.inPoint) < EPSILON
+    ) {
+      last.duration = spec.startTime + spec.duration - last.startTime;
+      last.outPoint = spec.outPoint;
+    } else {
+      mergedSpecs.push({ ...spec });
+    }
+  }
+
+  if (mergedSpecs.length > 0 && totalMusicDuration > 0) {
+    for (const spec of mergedSpecs) {
       musicTrackClips.push({
         id: `clip-music-${spec.sceneDocId}`,
         mediaId: spec.mediaId,
