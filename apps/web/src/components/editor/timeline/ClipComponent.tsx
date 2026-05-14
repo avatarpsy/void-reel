@@ -485,9 +485,8 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
       {clip.keyframes && clip.keyframes.length > 0 && (
         <div className="absolute bottom-0 left-0 right-0 h-3 flex items-center pointer-events-none">
           {clip.keyframes.map((kf) => {
-            const relativeTime = kf.time - clip.startTime;
-            if (relativeTime < 0 || relativeTime > clip.duration) return null;
-            const posPercent = (relativeTime / clip.duration) * 100;
+            if (kf.time < 0 || kf.time > clip.duration) return null;
+            const posPercent = (kf.time / clip.duration) * 100;
             return (
               <div
                 key={kf.id}

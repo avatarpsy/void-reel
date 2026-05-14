@@ -1,6 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
 import {
-  Layers,
   ArrowRight,
   Smartphone,
   Monitor,
@@ -237,14 +236,6 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ initialTab }) => {
           </div>
 
           <div className="flex items-center justify-center gap-3">
-            <Button
-              variant="outline"
-              onClick={() => setViewMode("templates")}
-              className="rounded-xl"
-            >
-              <Layers size={16} />
-              Browse templates
-            </Button>
             <Button
               variant="outline"
               onClick={() => navigate("editor")}

@@ -72,8 +72,32 @@ export const surface: InspectorSurface<TransitionsConfig> = {
     const dur = Number((raw as any).duration) || 0;
     if (dur <= 0) return { ok: false, error: "clip has no duration" };
 
+    // Detect adjacent clips to avoid black dips at boundaries.
+    // Entry transitions are skipped when a predecessor ends at this clip's
+    // start; exit transitions are skipped when a successor starts at this
+    // clip's end. This prevents both clips from being invisible at the
+    // boundary frame.
+    const track = ctx.project.timeline.tracks.find(
+      (t) => t.id === clip.trackId,
+    );
+    const clipStart = Number((raw as any).startTime) || 0;
+    const clipEnd = clipStart + dur;
+    let hasPredecessor = false;
+    let hasSuccessor = false;
+    if (track) {
+      for (const other of track.clips) {
+        if (other.id === clip.id) continue;
+        const oStart = other.startTime ?? 0;
+        const oEnd = oStart + (other.duration ?? 0);
+        if (Math.abs(oEnd - clipStart) < 0.016) hasPredecessor = true;
+        if (Math.abs(oStart - clipEnd) < 0.016) hasSuccessor = true;
+      }
+    }
+
     const entryCfg = {
-      preset: (config?.entry?.preset ?? "none") as any,
+      preset: (hasPredecessor
+        ? "none"
+        : (config?.entry?.preset ?? "none")) as any,
       duration: Math.min(
         Math.max(0.05, config?.entry?.durationSec ?? 0.5),
         dur / 2,
@@ -81,7 +105,9 @@ export const surface: InspectorSurface<TransitionsConfig> = {
       easing: (config?.entry?.easing ?? "ease-out") as any,
     };
     const exitCfg = {
-      preset: (config?.exit?.preset ?? "none") as any,
+      preset: (hasSuccessor
+        ? "none"
+        : (config?.exit?.preset ?? "none")) as any,
       duration: Math.min(
         Math.max(0.05, config?.exit?.durationSec ?? 0.5),
         dur / 2,
@@ -134,6 +160,10 @@ export const surface: InspectorSurface<TransitionsConfig> = {
       parts.push(`entry ${entryCfg.preset} ${entryCfg.duration.toFixed(2)}s`);
     if (exitCfg.preset !== "none")
       parts.push(`exit ${exitCfg.preset} ${exitCfg.duration.toFixed(2)}s`);
+    if (hasPredecessor && config?.entry?.preset && config.entry.preset !== "none")
+      parts.push("(entry skipped — adjacent clip)");
+    if (hasSuccessor && config?.exit?.preset && config.exit.preset !== "none")
+      parts.push("(exit skipped — adjacent clip)");
     return { ok: true, note: parts.length ? parts.join(", ") : "cleared" };
   },
 };

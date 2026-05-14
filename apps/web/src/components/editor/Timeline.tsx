@@ -731,7 +731,7 @@ export const Timeline: React.FC = () => {
               title="Split clip at playhead (S)"
               className={`flex items-center gap-1.5 px-2 py-1 rounded transition-colors ${
                 selectedClipIds.length === 1
-                  ? "bg-orange-500/20 text-orange-400 hover:bg-orange-500/30 border border-orange-500/30"
+                  ? "bg-orange-500/20 text-orange-700 dark:text-orange-400 hover:bg-orange-500/30 border border-orange-500/30"
                   : "text-text-muted opacity-50 cursor-not-allowed"
               }`}
             >
@@ -762,24 +762,24 @@ export const Timeline: React.FC = () => {
             </DropdownMenuTrigger>
             <DropdownMenuContent side="top" align="start" sideOffset={8} className="w-48">
               <DropdownMenuItem onClick={() => addTrack("video")}>
-                <Film size={16} className="text-green-400" />
+                <Film size={16} className="text-green-700 dark:text-green-400" />
                 <span>Video Track</span>
               </DropdownMenuItem>
               <DropdownMenuItem onClick={() => addTrack("audio")}>
-                <Music size={16} className="text-blue-400" />
+                <Music size={16} className="text-blue-700 dark:text-blue-400" />
                 <span>Audio Track</span>
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem onClick={() => addTrack("image")}>
-                <Image size={16} className="text-purple-400" />
+                <Image size={16} className="text-purple-700 dark:text-purple-400" />
                 <span>Image Track</span>
               </DropdownMenuItem>
               <DropdownMenuItem onClick={() => addTrack("text")}>
-                <Type size={16} className="text-yellow-400" />
+                <Type size={16} className="text-yellow-700 dark:text-yellow-400" />
                 <span>Text Track</span>
               </DropdownMenuItem>
               <DropdownMenuItem onClick={() => addTrack("graphics")}>
-                <Shapes size={16} className="text-pink-400" />
+                <Shapes size={16} className="text-pink-700 dark:text-pink-400" />
                 <span>Graphics Track</span>
               </DropdownMenuItem>
             </DropdownMenuContent>
@@ -872,7 +872,7 @@ export const Timeline: React.FC = () => {
             onClick={toggleSnap}
             className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg transition-colors ${
               snapSettings.enabled
-                ? "bg-yellow-500/20 text-yellow-400 border border-yellow-500/30"
+                ? "bg-yellow-500/20 text-yellow-700 dark:text-yellow-400 border border-yellow-500/30"
                 : "hover:bg-background-elevated text-text-muted hover:text-text-secondary"
             }`}
             title={snapSettings.enabled ? "Disable snapping" : "Enable snapping"}

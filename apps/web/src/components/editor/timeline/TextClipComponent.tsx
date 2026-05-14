@@ -193,8 +193,8 @@ export const TextClipComponent: React.FC<TextClipComponentProps> = ({
             title="Drag to trim end"
           />
           <div className="w-full h-full flex items-center gap-1 px-3">
-            <Type size={12} className="text-amber-400 flex-shrink-0" />
-            <span className="text-[10px] font-medium text-amber-200 truncate">
+            <Type size={12} className="text-amber-700 dark:text-amber-400 flex-shrink-0" />
+            <span className="text-[10px] font-medium text-amber-900 dark:text-amber-200 truncate">
               {textClip.text || "Text"}
             </span>
           </div>

@@ -2,15 +2,11 @@ import type {
   VideoEngine,
   RenderedFrame,
   Effect,
-  Transition,
   Clip,
-  Track,
 } from "@openreel/core";
 import {
   VideoEffectsEngine,
   getVideoEffectsEngine,
-  TransitionEngine,
-  createTransitionEngine,
 } from "@openreel/core";
 import { useEngineStore } from "../stores/engine-store";
 import { useProjectStore } from "../stores/project-store";
@@ -67,7 +63,6 @@ const DEFAULT_CACHE_CONFIG: FrameCacheConfig = {
 export class RenderBridge {
   private videoEngine: VideoEngine | null = null;
   private videoEffectsEngine: VideoEffectsEngine | null = null;
-  private transitionEngine: TransitionEngine | null = null;
   private canvas: HTMLCanvasElement | null = null;
   private ctx: CanvasRenderingContext2D | null = null;
   private initialized = false;
@@ -121,9 +116,6 @@ export class RenderBridge {
     const project = useProjectStore.getState().project;
     const { width, height } = project.settings;
     this.videoEffectsEngine = getVideoEffectsEngine(width, height);
-
-    // Initialize TransitionEngine for transition rendering
-    this.transitionEngine = createTransitionEngine(width, height);
 
     this.initialized = true;
   }
@@ -344,123 +336,6 @@ export class RenderBridge {
    */
   getVideoEffectsEngine(): VideoEffectsEngine | null {
     return this.videoEffectsEngine;
-  }
-
-  // ============================================
-  // Transition Rendering Methods
-  // ============================================
-
-  /**
-   * Find a transition at the given time on a track
-   *
-   * - 8.1: Render transition effect during playback when transition exists between clips
-   * - 8.2: Composite both clips with transition applied when playhead is within transition
-   *
-   * **Feature: core-ui-integration, Property 24: Transition Compositing**
-   *
-   * @param track - The track to search for transitions
-   * @param time - The current time position
-   * @returns Transition info if time is within a transition, null otherwise
-   */
-  findTransitionAtTime(
-    track: Track,
-    time: number,
-  ): {
-    transition: Transition;
-    clipA: Clip;
-    clipB: Clip;
-    progress: number;
-  } | null {
-    if (!this.transitionEngine) {
-      return null;
-    }
-
-    for (const transition of track.transitions) {
-      // Find the clips involved in this transition
-      const clipA = track.clips.find((c) => c.id === transition.clipAId);
-      const clipB = track.clips.find((c) => c.id === transition.clipBId);
-
-      if (!clipA || !clipB) {
-        continue;
-      }
-
-      // Check if the current time is within this transition
-      if (this.transitionEngine.isTimeInTransition(transition, clipA, time)) {
-        const progress = this.transitionEngine.calculateTransitionProgress(
-          transition,
-          clipA,
-          time,
-        );
-        return { transition, clipA, clipB, progress };
-      }
-    }
-
-    return null;
-  }
-
-  /**
-   * Render a transition between two clips
-   *
-   * - 8.1: Render transition effect during playback
-   * - 8.2: Composite both clips with transition applied
-   * - 8.3: Update preview to reflect transition parameter changes
-   *
-   * **Feature: core-ui-integration, Property 24: Transition Compositing**
-   *
-   * @param outgoingFrame - The frame from the outgoing clip (clip A)
-   * @param incomingFrame - The frame from the incoming clip (clip B)
-   * @param transition - The transition configuration
-   * @param progress - Progress through the transition (0 to 1)
-   * @returns The blended frame or null if rendering failed
-   */
-  async renderTransition(
-    outgoingFrame: ImageBitmap,
-    incomingFrame: ImageBitmap,
-    transition: Transition,
-    progress: number,
-  ): Promise<ImageBitmap | null> {
-    if (!this.transitionEngine) {
-      return null;
-    }
-
-    try {
-      const result = await this.transitionEngine.renderTransition(
-        outgoingFrame,
-        incomingFrame,
-        transition,
-        progress,
-      );
-      return result.frame;
-    } catch (error) {
-      console.error("RenderBridge: Transition render error:", error);
-      return null;
-    }
-  }
-
-  /**
-   * Check if a time position is within any transition on a track
-   *
-   *
-   * @param track - The track to check
-   * @param time - The time position to check
-   * @returns True if time is within a transition
-   */
-  isTimeInTransition(track: Track, time: number): boolean {
-    return this.findTransitionAtTime(track, time) !== null;
-  }
-
-  /**
-   * Get the transition engine instance
-   */
-  getTransitionEngine(): TransitionEngine | null {
-    return this.transitionEngine;
-  }
-
-  /**
-   * Check if transition engine is available
-   */
-  hasTransitionEngine(): boolean {
-    return this.transitionEngine !== null;
   }
 
   /**
@@ -1074,12 +949,6 @@ export class RenderBridge {
 
     // Clear canvas
     this.clearCanvas();
-
-    // Dispose transition engine
-    if (this.transitionEngine) {
-      this.transitionEngine.dispose();
-      this.transitionEngine = null;
-    }
 
     // Reset state
     this.canvas = null;

@@ -169,10 +169,16 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({
 
   useEffect(() => {
     if (isOpen) {
-      setPresets(exportPresetsManager.getAllPresets());
+      const allPresets = exportPresetsManager.getAllPresets();
+      setPresets(allPresets);
       setPlatforms(exportPresetsManager.getPlatforms());
       setSelectedPlatform("recommended");
-      setSelectedPreset(null);
+
+      const aspect = getAspectRatioType(projectWidth, projectHeight);
+      const recommended = getRecommendedPresetsForAspectRatio(allPresets, aspect);
+      const initial =
+        recommended[0] ?? exportPresetsManager.getRecommendedPresets()[0] ?? null;
+      setSelectedPreset(initial);
 
       getDeviceProfile().then((profile) => {
         setDeviceProfile(profile);
@@ -248,8 +254,13 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({
       activeTab === "presets" && selectedPreset
         ? (selectedPreset.settings as VideoExportSettings)
         : customSettings;
-    onExport(settings);
+    // Close FIRST so the Radix overlay is torn down before
+    // showSaveFilePicker fires from handleCustomExport. The user-
+    // activation token from this click is sticky for ~5 seconds, well
+    // beyond the React unmount + microtask, so the picker still sees
+    // a valid activation.
     onClose();
+    onExport(settings);
   }, [activeTab, selectedPreset, customSettings, onExport, onClose]);
 
   const formatFileSize = (bitrate: number, durationSec: number): string => {

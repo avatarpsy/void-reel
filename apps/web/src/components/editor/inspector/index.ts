@@ -50,7 +50,6 @@ export { MusicLibraryPanel } from "./MusicLibraryPanel";
 export { TextToSpeechPanel } from "./TextToSpeechPanel";
 
 // Transitions & Keyframes
-export { TransitionInspector } from "./TransitionInspector";
 export { ClipTransitionSection } from "./ClipTransitionSection";
 export { KeyframesSection } from "./KeyframesSection";
 export { BlendingSection } from "./BlendingSection";

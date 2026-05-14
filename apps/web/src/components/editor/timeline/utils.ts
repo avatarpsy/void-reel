@@ -167,7 +167,7 @@ export const getTrackInfo = (track: Track, index: number): TrackInfo => {
         label: `A${index + 1}`,
         icon: Volume2,
         color: "bg-blue-500",
-        textColor: "text-blue-400",
+        textColor: "text-blue-700 dark:text-blue-400",
         bgLight: "bg-blue-500/20",
       };
     case "image":
@@ -175,7 +175,7 @@ export const getTrackInfo = (track: Track, index: number): TrackInfo => {
         label: `I${index + 1}`,
         icon: Image,
         color: "bg-purple-500",
-        textColor: "text-purple-400",
+        textColor: "text-purple-700 dark:text-purple-400",
         bgLight: "bg-purple-500/20",
       };
     case "text":
@@ -183,7 +183,7 @@ export const getTrackInfo = (track: Track, index: number): TrackInfo => {
         label: `T${index + 1}`,
         icon: Type,
         color: "bg-amber-500",
-        textColor: "text-amber-400",
+        textColor: "text-amber-700 dark:text-amber-400",
         bgLight: "bg-amber-500/20",
       };
     case "graphics":
@@ -191,7 +191,7 @@ export const getTrackInfo = (track: Track, index: number): TrackInfo => {
         label: `G${index + 1}`,
         icon: Shapes,
         color: "bg-green-500",
-        textColor: "text-green-400",
+        textColor: "text-green-700 dark:text-green-400",
         bgLight: "bg-green-500/20",
       };
     default:
@@ -199,7 +199,7 @@ export const getTrackInfo = (track: Track, index: number): TrackInfo => {
         label: `?${index + 1}`,
         icon: Layers,
         color: "bg-gray-500",
-        textColor: "text-gray-400",
+        textColor: "text-gray-700 dark:text-gray-400",
         bgLight: "bg-gray-500/20",
       };
   }
@@ -211,22 +211,22 @@ export const getClipStyle = (trackType: string): ClipStyle => {
       return {
         bg: "bg-primary/10",
         border: "border-primary/30",
-        text: "text-white/90",
-        selectedText: "text-white",
+        text: "text-gray-800 dark:text-white/90",
+        selectedText: "text-gray-900 dark:text-white",
       };
     case "audio":
       return {
         bg: "bg-blue-500/10",
         border: "border-blue-500/30",
         text: "text-text-secondary",
-        selectedText: "text-blue-400",
+        selectedText: "text-blue-700 dark:text-blue-400",
       };
     case "image":
       return {
         bg: "bg-purple-500/10",
         border: "border-purple-500/30",
-        text: "text-purple-300",
-        selectedText: "text-purple-400",
+        text: "text-purple-700 dark:text-purple-300",
+        selectedText: "text-purple-800 dark:text-purple-400",
       };
     default:
       return {

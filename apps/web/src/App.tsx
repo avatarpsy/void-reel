@@ -405,15 +405,6 @@ function App() {
           return null;
         });
 
-        // (transitionBridge subscriber removed 2026-05-09 — Voidspace
-        // no longer uses track.transitions[] / TransitionEngine for
-        // anything. All transitions are per-clip opacity keyframes via
-        // the Inspector's native ClipTransitionSection path. The bridge
-        // file remains because the openreel-native Inspector UI imports
-        // it for its preset-list metadata helpers, but no Voidspace
-        // mutation routes through it anymore. The loader's transition
-        // scrub auto-heals any old blob with stale track.transitions[].)
-
         const saveCandidates = (
           await Promise.all([
             autoSaveManager.getMostRecentSave(localProjectId),
@@ -1646,6 +1637,36 @@ function App() {
               const engine = core.getExportEngine();
               await engine.initialize();
 
+              // Pre-flight: audio decode needs an actual Blob (the Web Audio
+              // API decodes from an ArrayBuffer). Video rendering can pull
+              // frames from an <video> element via URL, but audio CANNOT.
+              // The voidspace loader fetches blobs at project-load time, but
+              // a slow network or partial failure can leave items with
+              // .blob === null — the audio engine then silently drops them
+              // and the rendered video has no sound. Re-fetch any missing
+              // blobs from `originalUrl` before kicking off the encoder.
+              try {
+                const { fetchMediaBlob } = await import("./services/voidspace-loader");
+                const missing = (proj.mediaLibrary?.items ?? []).filter(
+                  (m: any) => !m.blob && (m.originalUrl || (m as any).url),
+                );
+                if (missing.length > 0) {
+                  (e.source as Window | null)?.postMessage({
+                    type: "voidspace:export-progress",
+                    requestId: msg.requestId,
+                    fraction: 0,
+                    phase: `Loading ${missing.length} media file${missing.length === 1 ? "" : "s"}…`,
+                  }, "*");
+                  await Promise.all(missing.map(async (m: any) => {
+                    const url = m.originalUrl || m.url;
+                    const blob = await fetchMediaBlob(url);
+                    if (blob) m.blob = blob;
+                  }));
+                }
+              } catch (preflightErr) {
+                console.warn("[voidspace:export] blob preflight failed:", preflightErr);
+              }
+
               const w = proj.settings?.width ?? 1920;
               const h = proj.settings?.height ?? 1080;
               const settings: any = {
@@ -1921,8 +1942,19 @@ function App() {
   const forceWelcome =
     params.forceWelcome === "1" ||
     new URLSearchParams(window.location.search).get("forceWelcome") === "1";
+  // Suppress the landing/format-picker screen whenever the editor is
+  // hosted inside the studio-ai iframe (embed=1) or has been opened
+  // against a specific project (sceneListId / import). Showing it there
+  // gives the user clickable controls (Vertical/Horizontal/Square,
+  // Browse templates, Open editor) that would replace the active
+  // project state — a hard footgun. While the project is loading we
+  // already show LoadingSpinner; after load `navigate("editor")` fires.
+  // If the load fails we surface the explicit voidspaceError instead.
+  const sp = new URLSearchParams(window.location.search);
+  const isProjectContext =
+    sp.get("embed") === "1" || sp.has("sceneListId") || sp.has("import");
   const showWelcome =
-    ["welcome", "templates"].includes(route) || forceWelcome;
+    !isProjectContext && (["welcome", "templates"].includes(route) || forceWelcome);
   const initialTab =
     route === "templates"
       ? "templates"

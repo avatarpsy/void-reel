@@ -63,9 +63,7 @@ import {
   renderSubtitleToCanvas,
   drawFrameWithTransform,
   applyEffectsToFrame,
-  getTransitionAtTime,
   setImageLoadCallback,
-  renderTransitionFrame,
   getAnimatedTransform,
   applyEmphasisAnimation,
   CropModeView,
@@ -1460,159 +1458,6 @@ export const Preview: React.FC = () => {
 
       const activeShapeClips = getActiveShapeClips(allShapeClips, time);
       const activeTextClips = getActiveTextClips(allTextClips, time);
-
-      const transitionInfo = getTransitionAtTime(time, timelineTracks);
-
-      if (transitionInfo) {
-        try {
-          const outgoingFrame = await decodeClipFrame(
-            transitionInfo.clipA,
-            time,
-            canvas.width,
-            canvas.height,
-          );
-          const incomingFrame = await decodeClipFrame(
-            transitionInfo.clipB,
-            time,
-            canvas.width,
-            canvas.height,
-          );
-
-          if (outgoingFrame && incomingFrame) {
-            const processedOutgoing = await applyEffectsToFrame(
-              transitionInfo.clipA.id,
-              outgoingFrame,
-            );
-            const processedIncoming = await applyEffectsToFrame(
-              transitionInfo.clipB.id,
-              incomingFrame,
-            );
-
-            const validOutgoing =
-              processedOutgoing.width > 0 && processedOutgoing.height > 0
-                ? processedOutgoing
-                : outgoingFrame;
-            const validIncoming =
-              processedIncoming.width > 0 && processedIncoming.height > 0
-                ? processedIncoming
-                : incomingFrame;
-
-            const blendedFrame = await renderTransitionFrame(
-              transitionInfo,
-              validOutgoing,
-              validIncoming,
-            );
-
-            if (
-              blendedFrame &&
-              blendedFrame.width > 0 &&
-              blendedFrame.height > 0
-            ) {
-              if (shouldClearCanvas) {
-                ctx.fillStyle = "#000000";
-                ctx.fillRect(0, 0, canvas.width, canvas.height);
-                shouldClearCanvas = false;
-              }
-              renderOverlayClipsInTrackOrder(
-                ctx,
-                timelineTracks,
-                activeShapeClips,
-                activeTextClips,
-                time,
-                canvas.width,
-                canvas.height,
-                "below-video",
-              );
-              ctx.drawImage(blendedFrame, 0, 0);
-              renderOverlayClipsInTrackOrder(
-                ctx,
-                timelineTracks,
-                activeShapeClips,
-                activeTextClips,
-                time,
-                canvas.width,
-                canvas.height,
-                "above-video",
-              );
-              hasRenderedFrame = true;
-            }
-          } else if (outgoingFrame) {
-            const processed = await applyEffectsToFrame(
-              transitionInfo.clipA.id,
-              outgoingFrame,
-            );
-            const validFrame =
-              processed.width > 0 && processed.height > 0
-                ? processed
-                : outgoingFrame;
-            if (shouldClearCanvas) {
-              ctx.fillStyle = "#000000";
-              ctx.fillRect(0, 0, canvas.width, canvas.height);
-              shouldClearCanvas = false;
-            }
-            renderOverlayClipsInTrackOrder(
-              ctx,
-              timelineTracks,
-              activeShapeClips,
-              activeTextClips,
-              time,
-              canvas.width,
-              canvas.height,
-              "below-video",
-            );
-            ctx.drawImage(validFrame, 0, 0);
-            renderOverlayClipsInTrackOrder(
-              ctx,
-              timelineTracks,
-              activeShapeClips,
-              activeTextClips,
-              time,
-              canvas.width,
-              canvas.height,
-              "above-video",
-            );
-            hasRenderedFrame = true;
-          } else if (incomingFrame) {
-            const processed = await applyEffectsToFrame(
-              transitionInfo.clipB.id,
-              incomingFrame,
-            );
-            const validFrame =
-              processed.width > 0 && processed.height > 0
-                ? processed
-                : incomingFrame;
-            if (shouldClearCanvas) {
-              ctx.fillStyle = "#000000";
-              ctx.fillRect(0, 0, canvas.width, canvas.height);
-              shouldClearCanvas = false;
-            }
-            renderOverlayClipsInTrackOrder(
-              ctx,
-              timelineTracks,
-              activeShapeClips,
-              activeTextClips,
-              time,
-              canvas.width,
-              canvas.height,
-              "below-video",
-            );
-            ctx.drawImage(validFrame, 0, 0);
-            renderOverlayClipsInTrackOrder(
-              ctx,
-              timelineTracks,
-              activeShapeClips,
-              activeTextClips,
-              time,
-              canvas.width,
-              canvas.height,
-              "above-video",
-            );
-            hasRenderedFrame = true;
-          }
-        } catch (error) {
-          console.warn("[Preview] Transition render failed:", error);
-        }
-      }
 
       if (!hasRenderedFrame) {
         const hasVideoContent = videoTracks.some((track) =>
@@ -3072,7 +2917,7 @@ export const Preview: React.FC = () => {
       trackIndex: number,
     ) => {
       const mediaItem = getMediaItem(clip.mediaId);
-      if (!mediaItem?.blob) {
+      if (!mediaItem) {
         return null;
       }
 
@@ -3081,12 +2926,17 @@ export const Preview: React.FC = () => {
         return null;
       }
 
+      const blob = await resolveMediaBlob(mediaItem);
+      if (!blob) {
+        return null;
+      }
+
       try {
         const mediabunny = await import("mediabunny");
         const { Input, ALL_FORMATS, BlobSource, CanvasSink } = mediabunny;
 
         const input = new Input({
-          source: new BlobSource(mediaItem.blob),
+          source: new BlobSource(blob),
           formats: ALL_FORMATS,
         });
 

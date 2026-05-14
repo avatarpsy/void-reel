@@ -2683,8 +2683,7 @@ export const useProjectStore = create<ProjectState>()(
           const r = await actionExecutor.redo(get().project);
           if (!r.success) break;
         }
-        // Tick modifiedAt to push subscribers (transition-bridge reconciler,
-        // autosave) and fan out a fresh project ref.
+        // Tick modifiedAt to push subscribers (autosave) and fan out a fresh project ref.
         set({ project: { ...get().project, modifiedAt: Date.now() } });
         return { success: true };
       },

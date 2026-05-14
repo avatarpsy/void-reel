@@ -128,16 +128,6 @@ export {
 } from "./photo-bridge";
 
 export {
-  TransitionBridge,
-  getTransitionBridge,
-  initializeTransitionBridge,
-  disposeTransitionBridge,
-  type TransitionOperationResult,
-  type TransitionConfig,
-  type TransitionTypeInfo,
-} from "./transition-bridge";
-
-export {
   getMotionTrackingBridge,
   resetMotionTrackingBridge,
   type MotionTrackingState,

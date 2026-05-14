@@ -216,6 +216,29 @@ export const Toolbar: React.FC = () => {
       const engine = getExportEngine();
       await engine.initialize();
 
+      // Preflight: rehydrate any media items whose blob never finished
+      // loading (or got dropped). Without this, the audio engine logs
+      // "No blob available for media item …" and renders silence — the
+      // video plays back muted and the chat result card shows 0:00.
+      try {
+        const { fetchMediaBlob } = await import("../../services/voidspace-loader");
+        const missing = (project.mediaLibrary?.items ?? []).filter(
+          (m: any) => !m.blob && (m.originalUrl || (m as any).url),
+        );
+        if (missing.length > 0) {
+          setExportState((prev) => ({
+            ...prev,
+            phase: `Loading ${missing.length} media file${missing.length === 1 ? "" : "s"}...`,
+          }));
+          await Promise.all(missing.map(async (m: any) => {
+            const blob = await fetchMediaBlob(m.originalUrl || (m as any).url);
+            if (blob) m.blob = blob;
+          }));
+        }
+      } catch (e) {
+        console.warn("[runExport] blob preflight failed:", e);
+      }
+
       const generator = engine.exportVideo(project, videoSettings, writableStream);
       let finalResult: ExportResult | undefined;
 
@@ -258,7 +281,15 @@ export const Toolbar: React.FC = () => {
     };
     const mime = mimeMap[ext] || "application/octet-stream";
 
-    if ("showSaveFilePicker" in window) {
+    // Standalone editor (opened directly at /studio/, no chat parent):
+    // use the browser's native "Save As" dialog — original openreel
+    // behavior. Lets the user pick the destination per-export.
+    const isEmbedded =
+      typeof window !== "undefined" &&
+      (window.self !== window.top ||
+        new URLSearchParams(window.location.search).get("embed") === "1");
+
+    if (!isEmbedded && "showSaveFilePicker" in window) {
       const handle = await (window as unknown as {
         showSaveFilePicker: (opts: unknown) => Promise<FileSystemFileHandle>;
       }).showSaveFilePicker({
@@ -270,6 +301,14 @@ export const Toolbar: React.FC = () => {
       });
       return handle.createWritable();
     }
+
+    // Embedded in the Voidspace chat, OR browser without File System
+    // Access API: collect bytes in memory and let `triggerDownload`
+    // decide where they go (parent postMessage when embedded, browser
+    // download otherwise). The "same output folder for everything"
+    // contract lives in the chat — the editor can't know outputDir on
+    // its own (cross-frame setting), so it hands the blob to the
+    // parent which already has the path + Firebase auth.
 
     let buffer = new Uint8Array(16 * 1024 * 1024);
     let length = 0;
@@ -287,6 +326,24 @@ export const Toolbar: React.FC = () => {
     const triggerDownload = () => {
       const blob = new Blob([buffer.slice(0, length)], { type: mime });
       const url = URL.createObjectURL(blob);
+
+      // Embedded in chat → hand the blob to the parent, which persists
+      // it to the user's configured outputDir via save-render. Same
+      // folder as narrations / videos / frames (which the chat mirrors
+      // via mirror-asset). The parent revokes the URL after upload.
+      if (isEmbedded && window.parent) {
+        window.parent.postMessage({
+          type: "voidspace:editor-render-saved",
+          blobUrl: url,
+          filename,
+          mimeType: mime,
+          bytes: length,
+        }, "*");
+        return;
+      }
+
+      // Standalone fallback (Firefox, Safari, or any browser without
+      // File System Access API): plain download anchor.
       const a = document.createElement("a");
       a.href = url;
       a.download = filename;
@@ -617,8 +674,9 @@ export const Toolbar: React.FC = () => {
 
   const handleCustomExport = useCallback(
     async (settings: VideoExportSettings) => {
-      setIsExportDialogOpen(false);
-
+      // ExportDialog has already called onClose() before invoking us, so
+      // the overlay is gone and showSaveFilePicker can fire cleanly
+      // with the user-activation token from the Start Export click.
       try {
         const ext = settings.format === "mov" ? "mov" : settings.format === "webm" ? "webm" : "mp4";
           const outputFilename = `${project.name || "export"}.${ext}`;
@@ -1147,15 +1205,23 @@ export const Toolbar: React.FC = () => {
                   <TooltipContent>Publish to your social platforms</TooltipContent>
                 </Tooltip>
               )}
+              <div className="flex items-center">
+                <button
+                  onClick={() => setIsExportDialogOpen(true)}
+                  className="h-10 px-4 bg-primary/10 border border-primary/30 hover:bg-primary/20 text-primary font-bold rounded-l-lg flex items-center gap-2 transition-all hover:-translate-y-0.5"
+                  title="Open render settings"
+                >
+                  <Download size={14} />
+                  <span className="text-sm tracking-wider">RENDER</span>
+                </button>
               <DropdownMenu open={isExportOpen} onOpenChange={setIsExportOpen}>
                 <DropdownMenuTrigger asChild>
                   <button
-                    className={`h-10 px-4 bg-background-secondary border border-border hover:bg-background-elevated text-text-primary font-medium rounded-lg flex items-center gap-2 transition-all ${
+                    className={`h-10 px-2 bg-primary/10 border border-primary/30 border-l-0 hover:bg-primary/20 text-primary font-medium rounded-r-lg flex items-center transition-all ${
                       isExportOpen ? "" : "hover:-translate-y-0.5"
                     }`}
+                    title="Quick presets"
                   >
-                    <Download size={14} />
-                    <span className="text-sm tracking-wider">RENDER</span>
                     <ChevronDown
                       size={14}
                       className={`transition-transform duration-200 ${
@@ -1245,6 +1311,7 @@ export const Toolbar: React.FC = () => {
               </DropdownMenuContent>
             </DropdownMenu>
             </div>
+          </div>
           )}
         </div>
       </div>

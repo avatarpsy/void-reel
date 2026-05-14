@@ -30,10 +30,6 @@ import {
   initializeEffectsBridge,
   disposeEffectsBridge,
 } from "../../bridges/effects-bridge";
-import {
-  initializeTransitionBridge,
-  disposeTransitionBridge,
-} from "../../bridges/transition-bridge";
 
 /**
  * Auto-save initialization hook
@@ -110,17 +106,6 @@ const useEngineInitialization = () => {
         }
         if (!isMounted) return;
 
-        setInitStatus("Initializing transition bridge...");
-        try {
-          initializeTransitionBridge(width, height);
-        } catch (transitionError) {
-          console.error(
-            "[EditorInterface] TransitionBridge initialization failed:",
-            transitionError,
-          );
-        }
-        if (!isMounted) return;
-
         setBridgesReady(true);
       } catch (error) {
         console.error("Failed to initialize engines/bridges:", error);
@@ -143,7 +128,6 @@ const useEngineInitialization = () => {
       disposeMediaBridge();
       disposeRenderBridge();
       disposeEffectsBridge();
-      disposeTransitionBridge();
     };
   }, [initialize, initialized, initializing]);
 
