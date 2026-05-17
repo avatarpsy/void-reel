@@ -58,6 +58,21 @@ class AutoSaveManager {
 
   private pendingProject: Project | null = null;
   private isDirty: boolean = false;
+  /**
+   * Live getter for the latest project state. Captured from `start()`'s
+   * argument so `markDirty()` and `saveIfDirty()` can refresh
+   * `pendingProject` on demand, instead of only seeing the 30-second
+   * interval-tick snapshot.
+   *
+   * Previously the debounced save path read `pendingProject` verbatim,
+   * which was only assigned (1) at start(), and (2) inside the 30s
+   * setInterval. If the user edited a caption between interval ticks
+   * and then refreshed before the next tick, the debounce save
+   * computed a hash from the STALE snapshot, decided "no changes",
+   * and silently skipped the write — losing the edit. Stashing the
+   * getter and pulling fresh state at save time closes that window.
+   */
+  private getProjectFn: (() => Project) | null = null;
 
   constructor(config: Partial<AutoSaveConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -153,6 +168,7 @@ class AutoSaveManager {
 
     this.stop(); // Stop any existing auto-save
     if (getHistoryData) this.getHistoryData = getHistoryData;
+    this.getProjectFn = getProject;
 
     // Initial save
     this.pendingProject = getProject();
@@ -174,10 +190,25 @@ class AutoSaveManager {
       clearTimeout(this.debounceTimeoutId);
       this.debounceTimeoutId = null;
     }
+    // Drop the live getter so a subsequent markDirty() (e.g. from a
+    // late-firing subscription that hasn't been torn down yet) can't
+    // pull a stale closure from a previous session.
+    this.getProjectFn = null;
   }
 
   markDirty(): void {
     this.isDirty = true;
+    // Refresh the pending snapshot NOW so the debounced save below
+    // hashes against the latest project state — not against the
+    // pre-edit snapshot from the last 30s interval tick. Without
+    // this, edits whose only effect is a content-equivalent reference
+    // change (caption text, transform tweaks, anything the hash
+    // detects via `modifiedAt`) were silently coalesced as "no
+    // changes" and lost on refresh until the next interval tick.
+    if (this.getProjectFn) {
+      try { this.pendingProject = this.getProjectFn(); }
+      catch { /* fall back to last-known snapshot */ }
+    }
 
     // Debounce the save
     if (this.debounceTimeoutId) {
