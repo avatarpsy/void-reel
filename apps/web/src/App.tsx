@@ -1388,6 +1388,176 @@ function App() {
             }
             break;
           }
+          case "voidspace:add-bgm-clip": {
+            // Chat-side BGM approve / pill audition → add or replace
+            // the single BGM clip on track-music. Mirrors the
+            // voidspace-loader's bootstrap path so cold load + live
+            // commit converge on the same on-timeline shape (one
+            // music clip, mediaId stable-hashed from URL, spanning
+            // the full video duration, category 'Music' so the
+            // Assets panel surfaces it).
+            //
+            // Idempotent: if the URL has already been registered in
+            // the media library, the existing item is reused. If a
+            // music clip already exists on the track, its mediaId
+            // (and volume) are swapped in place rather than adding
+            // a duplicate clip — keeps the timeline shape "one BGM
+            // clip per project" that the renderer + voidspace-loader
+            // expect. If no clip exists yet, a fresh one is added
+            // covering the full timeline duration.
+            //
+            // Failure mode the chat used to hit: it patched
+            // scene_lists.music_url, called pingReload, and counted
+            // on the loader to materialise the BGM clip from the
+            // scene-list field. But the loader prefers the editor's
+            // project_state blob on every reload after the first
+            // save — and that blob was captured BEFORE the music_url
+            // patch, so the pingReload simply re-rendered the
+            // pre-music timeline. This handler is the missing path:
+            // the chat now drives the music clip into the live
+            // project, and the editor's autosave commits a blob
+            // that includes it.
+            const { url, volume, label } = msg as any;
+            if (!url) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: "url required" });
+              break;
+            }
+            try {
+              const proj = useProjectStore.getState().project;
+              // Total timeline duration = max end across every
+              // non-music, non-sfx track. Music spans the whole
+              // video; trimming to that length keeps the loader's
+              // collapse-contiguous logic happy and matches the
+              // editor's stored shape.
+              let totalDur = 0;
+              for (const t of (proj.timeline?.tracks ?? []) as any[]) {
+                if (t?.id === "track-music" || t?.id === "track-sfx") continue;
+                for (const c of (t.clips ?? []) as any[]) {
+                  const end = (c.startTime ?? 0) + (c.duration ?? 0);
+                  if (end > totalDur) totalDur = end;
+                }
+              }
+              // Tiny fallback so BGM still mounts on a fresh project
+              // that has no scene clips yet (rare — the gate fires
+              // after scenes are approved). 30s avoids zero-duration
+              // clips which break some renderers.
+              if (totalDur <= 0) totalDur = 30;
+
+              const stableHashFn = (s: string) => {
+                let h = 0;
+                for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+                return Math.abs(h).toString(36);
+              };
+              const newMediaId = `media-music-${stableHashFn(url)}`;
+
+              // Register media library item if not present.
+              let item = proj.mediaLibrary?.items?.find((m: any) => m.id === newMediaId);
+              if (!item) {
+                let blob: Blob | null = null;
+                try {
+                  const fr = await fetch(url);
+                  if (fr.ok) blob = await fr.blob();
+                } catch { /* hydrate later if fetch fails — clip still mounts */ }
+                const newItem: any = {
+                  id: newMediaId,
+                  name: typeof label === "string" && label ? label : "Background music",
+                  type: "audio",
+                  fileHandle: null,
+                  blob,
+                  metadata: { duration: totalDur, fileSize: blob?.size ?? 0, sampleRate: 44100, channels: 2 },
+                  thumbnailUrl: null,
+                  waveformData: null,
+                  originalUrl: url,
+                  category: "Music",
+                  role: "music",
+                };
+                useProjectStore.setState((s: any) => ({
+                  project: {
+                    ...s.project,
+                    mediaLibrary: { ...s.project.mediaLibrary, items: [...(s.project.mediaLibrary?.items ?? []), newItem] },
+                    modifiedAt: Date.now(),
+                  },
+                }));
+                item = newItem;
+              }
+
+              // Find existing music clip(s). Expected: 0 or 1 (the
+              // loader collapses duplicates). Multi-clip case is
+              // handled defensively — every existing clip's media is
+              // swapped to the new URL so a stale duplicate doesn't
+              // keep auditioning the old track.
+              const trMusic = (useProjectStore.getState().project.timeline?.tracks ?? []).find((t: any) => t.id === "track-music");
+              const existingClips: any[] = trMusic?.clips ?? [];
+              const clampedVolume = typeof volume === "number"
+                ? Math.max(0, Math.min(4, volume))
+                : null;
+
+              let resolvedClipId: string | null = null;
+
+              if (existingClips.length === 0) {
+                // No music clip yet — add one spanning the full
+                // timeline. The voidspace-loader's fallback path
+                // would have done this on cold load if music_url
+                // was on scene_lists BEFORE the editor's first
+                // autosave; once the blob exists, only this RPC
+                // can materialise the clip.
+                const ar = await useProjectStore.getState().addClip("track-music", newMediaId, 0);
+                if (!ar.success) {
+                  const e: any = ar.error;
+                  const errStr = e && typeof e === "object" ? `${e.code ?? "ERROR"}: ${e.message ?? "addClip failed"}` : (typeof e === "string" ? e : "addClip failed");
+                  reply({ type: "voidspace:error", requestId: msg.requestId, error: errStr });
+                  break;
+                }
+                const newTr = (useProjectStore.getState().project.timeline?.tracks ?? []).find((t: any) => t.id === "track-music");
+                const newClip = (newTr?.clips ?? []).find((c: any) => c.mediaId === newMediaId && c.startTime === 0);
+                if (newClip) {
+                  resolvedClipId = newClip.id;
+                  if (totalDur > 0) {
+                    await useProjectStore.getState().trimClip(newClip.id, 0, totalDur);
+                  }
+                  if (clampedVolume !== null) {
+                    const volStore = useProjectStore.getState() as any;
+                    try {
+                      await volStore.actionExecutor.execute({
+                        type: "audio/setVolume",
+                        id: `vol-${Date.now().toString(36)}`,
+                        timestamp: Date.now(),
+                        params: { clipId: newClip.id, volume: clampedVolume },
+                      }, volStore.project);
+                      useProjectStore.setState({ project: { ...volStore.project, modifiedAt: Date.now() } });
+                    } catch { /* volume is non-critical; clip still plays at default */ }
+                  }
+                }
+              } else {
+                // Replace mediaId on every existing music clip + apply
+                // volume in the same setState so the autosave sees one
+                // atomic commit. Bypasses ActionExecutor for the
+                // same reason replace-clip-media does (no
+                // clip/setMediaId action type in core).
+                useProjectStore.setState((s: any) => {
+                  const tracks = (s.project.timeline?.tracks ?? []).map((tr: any) => {
+                    if (tr.id !== "track-music") return tr;
+                    return {
+                      ...tr,
+                      clips: (tr.clips ?? []).map((c: any) => ({
+                        ...c,
+                        mediaId: newMediaId,
+                        ...(clampedVolume !== null ? { volume: clampedVolume } : {}),
+                      })),
+                    };
+                  });
+                  return { project: { ...s.project, timeline: { ...s.project.timeline, tracks }, modifiedAt: Date.now() } };
+                });
+                const refreshedTr = (useProjectStore.getState().project.timeline?.tracks ?? []).find((t: any) => t.id === "track-music");
+                resolvedClipId = (refreshedTr?.clips?.[0]?.id) ?? null;
+              }
+
+              reply({ type: "voidspace:bgm-clip-added", requestId: msg.requestId, ok: true, clipId: resolvedClipId, mediaId: newMediaId });
+            } catch (err: any) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: err?.message ?? String(err) });
+            }
+            break;
+          }
           case "voidspace:remove-clip": {
             const { clipId } = msg as any;
             if (!clipId) {
@@ -1548,7 +1718,7 @@ function App() {
                   `Before ${surface.name} · ${new Date().toLocaleTimeString()}`,
                 );
               } catch {}
-              const ctx = { project, store: useProjectStore.getState() as Record<string, unknown> };
+              const ctx = { project, store: useProjectStore.getState() as unknown as Record<string, unknown> };
               const results: Array<{ clipId: string; ok: boolean; note?: string; error?: string }> = [];
               for (const t of targets) {
                 const r = await surface.apply(t, args.config, ctx);
