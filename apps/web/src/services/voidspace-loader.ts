@@ -1360,6 +1360,33 @@ export async function loadSceneListAsProject(
       }
     }
 
+    // ── Frame media item ──
+    // Surface the scene's first-frame image in the editor's Assets
+    // panel under "Frames". The image isn't placed on the timeline
+    // (videoUrl handles that) but it must exist as its own media
+    // entry so the user can preview / re-insert / drag-drop it.
+    // Without this, generated frames lived only as `thumbnailUrl` on
+    // the video clip and the Assets panel showed no Frames section
+    // even when every scene had a first frame on disk.
+    if (imageUrl) {
+      const frameBlob = await fetchMediaBlob(imageUrl);
+      const frameMediaId = `media-frame-${scene._docId}-${primaryImage?.id ?? stableHash(imageUrl)}`;
+      mediaItems.push({
+        id: frameMediaId,
+        name: `Scene ${scene.scene_number} · Frame`,
+        type: "image",
+        fileHandle: null,
+        blob: frameBlob,
+        metadata: mediaMeta({ duration: 0, fileSize: frameBlob?.size || 0 }),
+        thumbnailUrl: imageUrl,
+        waveformData: null,
+        originalUrl: imageUrl,
+        category: "Frames",
+        sceneNumber: scene.scene_number,
+        role: "first_frame",
+      });
+    }
+
     // ── Video clip ──
     // Only place the actual rendered video on the timeline. Scenes
     // without a generated video URL are skipped entirely — no image
