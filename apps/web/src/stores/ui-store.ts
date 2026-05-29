@@ -64,6 +64,12 @@ export interface UIState {
   panels: Record<PanelId, PanelState>;
   shortcuts: KeyboardShortcuts;
   theme: "light" | "dark" | "system";
+  /** Editor surface mode. Driven per-session from the `mode` URL param
+   *  (mode=music boots the audio-first skin). NOT persisted — a music
+   *  session must not change the default for the next video session.
+   *  Cross-compat: a project may hold both audio and video tracks
+   *  regardless of mode; this only sets the editor's layout/emphasis. */
+  appMode: "video" | "music";
   showWaveforms: boolean;
   showThumbnails: boolean;
   showKeyframes: boolean;
@@ -108,6 +114,7 @@ export interface UIState {
   setShortcut: (action: keyof KeyboardShortcuts, shortcut: string) => void;
   resetShortcuts: () => void;
   setTheme: (theme: "light" | "dark" | "system") => void;
+  setAppMode: (mode: "video" | "music") => void;
   setShowWaveforms: (show: boolean) => void;
   setShowThumbnails: (show: boolean) => void;
   setShowKeyframes: (show: boolean) => void;
@@ -198,6 +205,7 @@ export const useUIStore = create<UIState>()(
         shortcuts: DEFAULT_SHORTCUTS,
 
         theme: "dark",
+        appMode: "video",
         showWaveforms: true,
         showThumbnails: true,
         showKeyframes: true,
@@ -433,6 +441,10 @@ export const useUIStore = create<UIState>()(
 
         setTheme: (theme: "light" | "dark" | "system") => {
           set({ theme });
+        },
+
+        setAppMode: (mode: "video" | "music") => {
+          set({ appMode: mode });
         },
 
         setShowWaveforms: (show: boolean) => {

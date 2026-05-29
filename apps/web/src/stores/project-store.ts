@@ -108,6 +108,11 @@ export interface ProjectState {
   replaceMediaAsset: (mediaId: string, file: File, sourceFolder?: string) => Promise<ActionResult>;
   renameMedia: (mediaId: string, name: string) => Promise<ActionResult>;
   getMediaItem: (mediaId: string) => MediaItem | undefined;
+  /** Patch lazily-generated waveform peaks onto a media item. Runtime
+   *  only — the serializer strips waveformData, so this drives timeline
+   *  rendering without persisting peaks into the project blob, and must
+   *  NOT bump modifiedAt (no autosave churn). */
+  setMediaWaveform: (mediaId: string, peaks: Float32Array) => void;
   /** Add a pending placeholder for a background KieAI task */
   addPlaceholderMedia: (item: MediaItem) => void;
   /** Replace a pending placeholder with the actual result blob */
@@ -944,6 +949,26 @@ export const useProjectStore = create<ProjectState>()(
         return project.mediaLibrary.items.find((item) => item.id === mediaId);
       },
 
+      setMediaWaveform: (mediaId: string, peaks: Float32Array) => {
+        const { project } = get();
+        const index = project.mediaLibrary.items.findIndex(
+          (item) => item.id === mediaId,
+        );
+        if (index === -1 || project.mediaLibrary.items[index].waveformData) {
+          return;
+        }
+        const items = [...project.mediaLibrary.items];
+        items[index] = { ...items[index], waveformData: peaks };
+        // No modifiedAt bump: waveformData is runtime-only (stripped by
+        // the serializer) so patching it must not trigger an autosave.
+        set({
+          project: {
+            ...project,
+            mediaLibrary: { ...project.mediaLibrary, items },
+          },
+        });
+      },
+
       addPlaceholderMedia: (item: MediaItem) => {
         const { project } = get();
         set({
@@ -1646,7 +1671,7 @@ export const useProjectStore = create<ProjectState>()(
         // wasn't touched" undo behaviour.
         const previous: Record<string, unknown> = {};
         for (const k of Object.keys(updates)) {
-          previous[k] = (before as Record<string, unknown>)[k];
+          previous[k] = (before as unknown as Record<string, unknown>)[k];
         }
         const action: Action = {
           type: "text/update",

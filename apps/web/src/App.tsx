@@ -824,6 +824,27 @@ function App() {
     return () => window.removeEventListener("message", onMessage);
   }, []);
 
+  // ── Editor surface mode (mode=music boots the audio-first skin) ──
+  //
+  // Read once on mount from the same query the host freezes into the
+  // iframe src (/studio/index.html?...&mode=music). The project model is
+  // identical in both modes — a music project and a video project are
+  // one cross-compatible Project — so this only flips the editor's
+  // layout/emphasis: in music mode we promote the audio mixer to a
+  // first-class surface. Not persisted (see ui-store).
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("mode") === "music") {
+        const ui = useUIStore.getState();
+        ui.setAppMode("music");
+        ui.setPanelVisible("audioMixer", true);
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
   // ── Voidspace chat ↔ editor RPC bridge (postMessage) ──
   //
   // The chat parent window can read and minimally control the editor

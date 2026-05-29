@@ -1,10 +1,11 @@
-import React, { useRef, useState, useEffect } from "react";
+import React, { useRef, useState, useEffect, useMemo } from "react";
 import { Image } from "lucide-react";
 import type { Clip, Track } from "@openreel/core";
 import { useProjectStore } from "../../../stores/project-store";
 import { useUIStore } from "../../../stores/ui-store";
 import { useTimelineStore } from "../../../stores/timeline-store";
-import { calculateSnap, generateWaveformPath, getClipStyle } from "./utils";
+import { ensureMediaWaveform } from "../../../services/waveform-service";
+import { calculateSnap, generateWaveformEnvelope, getClipStyle } from "./utils";
 import { ClipContextMenu } from "./ClipContextMenu";
 import { ContextMenu, ContextMenuTrigger } from "@openreel/ui";
 
@@ -47,7 +48,7 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
   onSnapIndicator,
   onTrimClip,
 }) => {
-  const { getMediaItem } = useProjectStore();
+  const { getMediaItem, setMediaWaveform } = useProjectStore();
   const { snapSettings } = useUIStore();
   const { playheadPosition } = useTimelineStore();
   const mediaItem = getMediaItem(clip.mediaId);
@@ -335,6 +336,45 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
     };
   }, [isTrimming, trimEdge, clip.id, pixelsPerSecond, onTrimClip]);
 
+  // Lazily generate + cache waveform peaks for any audio/video media
+  // that arrived without them (remote Voidspace assets, agent-added
+  // clips). Deduped + concurrency-limited in the service; the store
+  // patch is runtime-only (not persisted). Drives the envelope below
+  // and is not mode-gated, so waveforms show in video mode too.
+  useEffect(() => {
+    if (!mediaItem) return;
+    if (mediaItem.waveformData) return;
+    if (mediaItem.type !== "audio" && mediaItem.type !== "video") return;
+    let cancelled = false;
+    void ensureMediaWaveform(mediaItem).then((peaks) => {
+      if (!cancelled && peaks) setMediaWaveform(mediaItem.id, peaks);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [mediaItem?.id, mediaItem?.waveformData, mediaItem?.type, setMediaWaveform]);
+
+  // Resolution-aware, trim-accurate waveform envelope. Recomputed only
+  // when geometry / peaks / trim actually change.
+  const waveformBars = Math.max(8, Math.min(400, Math.round(width / 2)));
+  const sourceDuration = mediaItem?.metadata?.duration || 0;
+  const waveformPath = useMemo(() => {
+    const peaks = mediaItem?.waveformData;
+    if (!peaks || peaks.length === 0) return "";
+    const startFrac = sourceDuration > 0 ? clip.inPoint / sourceDuration : 0;
+    const endFrac =
+      sourceDuration > 0 && clip.outPoint > 0
+        ? clip.outPoint / sourceDuration
+        : 1;
+    return generateWaveformEnvelope(peaks, waveformBars, startFrac, endFrac);
+  }, [
+    mediaItem?.waveformData,
+    waveformBars,
+    clip.inPoint,
+    clip.outPoint,
+    sourceDuration,
+  ]);
+
   const thumbnailCount = Math.max(1, Math.floor(width / 60));
   const clipName = mediaItem?.name || clip.mediaId.slice(0, 8);
 
@@ -442,28 +482,30 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
 
       {(isAudio || isVideo) && (
         <>
-          <div className={`absolute inset-x-0 px-1 pointer-events-none ${isAudio ? "inset-y-0 flex items-center opacity-50" : "bottom-0 h-1/3 flex items-end opacity-30"}`}>
-            {mediaItem?.waveformData ? (
+          <div className={`absolute inset-x-0 px-1 pointer-events-none ${isAudio ? "inset-y-0 flex items-center opacity-60" : "bottom-0 h-1/3 flex items-end opacity-30"}`}>
+            {waveformPath ? (
+              <svg
+                className="w-full h-full"
+                preserveAspectRatio="none"
+                viewBox={`0 0 ${waveformBars} 100`}
+              >
+                <path
+                  d={waveformPath}
+                  className={isAudio ? "text-blue-400" : "text-green-300"}
+                  fill="currentColor"
+                  stroke="none"
+                />
+              </svg>
+            ) : isAudio ? (
               <svg
                 className="w-full h-full"
                 preserveAspectRatio="none"
                 viewBox="0 0 100 40"
               >
                 <path
-                  d={generateWaveformPath(mediaItem.waveformData, 100)}
+                  d="M0,20 Q10,14 20,20 T40,20 T60,20 T80,20 T100,20"
                   stroke="currentColor"
-                  className={isAudio ? "text-blue-400" : "text-green-300"}
-                  fill="none"
-                  strokeWidth="1"
-                  vectorEffect="non-scaling-stroke"
-                />
-              </svg>
-            ) : isAudio ? (
-              <svg className="w-full h-full" preserveAspectRatio="none">
-                <path
-                  d="M0,20 Q10,5 20,20 T40,20 T60,20 T80,20 T100,20"
-                  stroke="currentColor"
-                  className="text-blue-400"
+                  className="text-blue-400/40"
                   fill="none"
                   vectorEffect="non-scaling-stroke"
                 />

@@ -134,6 +134,63 @@ export const generateWaveformPath = (
   return points.join(" ");
 };
 
+/**
+ * Build a closed SVG path for a mirrored, filled waveform envelope.
+ *
+ * Drawn into a normalized `0 0 <bars> 100` viewBox (render the <svg>
+ * with preserveAspectRatio="none" so it fills the clip box). Each bar is
+ * the max amplitude of its source bucket, mirrored around the centre
+ * line — far more legible than a single polyline, and resolution-aware:
+ * `bars` scales with the clip's pixel width (capped) so wide clips stay
+ * crisp while narrow clips stay cheap.
+ *
+ * `startFrac`/`endFrac` slice the source peaks to the clip's trimmed
+ * [inPoint, outPoint] window so the drawn waveform matches what plays.
+ */
+export const generateWaveformEnvelope = (
+  peaks: Float32Array | number[],
+  bars: number,
+  startFrac = 0,
+  endFrac = 1,
+): string => {
+  if (!peaks || peaks.length === 0 || bars <= 0) return "";
+
+  const len = peaks.length;
+  const s0 = Math.max(0, Math.min(1, startFrac));
+  const e0 = Math.max(s0, Math.min(1, endFrac));
+  const startIdx = Math.floor(s0 * len);
+  const endIdx = Math.max(startIdx + 1, Math.floor(e0 * len));
+  const per = (endIdx - startIdx) / bars;
+
+  const CENTER = 50;
+  const HALF = 48;
+
+  const tops = new Array<number>(bars);
+  for (let i = 0; i < bars; i++) {
+    const from = startIdx + Math.floor(i * per);
+    const to = Math.min(endIdx, startIdx + Math.floor((i + 1) * per));
+    let max = 0;
+    for (let j = from; j < to; j++) {
+      const v = Math.abs(peaks[j] || 0);
+      if (v > max) max = v;
+    }
+    tops[i] = Math.min(1, max);
+  }
+
+  const top: string[] = [];
+  for (let i = 0; i < bars; i++) {
+    const y = CENTER - tops[i] * HALF;
+    top.push(`${i === 0 ? "M" : "L"}${i},${y.toFixed(2)}`);
+  }
+  const bottom: string[] = [];
+  for (let i = bars - 1; i >= 0; i--) {
+    const y = CENTER + tops[i] * HALF;
+    bottom.push(`L${i},${y.toFixed(2)}`);
+  }
+
+  return `${top.join(" ")} ${bottom.join(" ")} Z`;
+};
+
 export const formatTimecode = (
   timeInSeconds: number,
   frameRate: number = 30,
