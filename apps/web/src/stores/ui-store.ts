@@ -70,6 +70,11 @@ export interface UIState {
    *  Cross-compat: a project may hold both audio and video tracks
    *  regardless of mode; this only sets the editor's layout/emphasis. */
   appMode: "video" | "music";
+  /** Collapse the video preview pane to a sliver so the timeline takes
+   *  the screen (transport lives on the timeline toolbar). Preview stays
+   *  MOUNTED (the playback/audio engine lives in it) — collapse is CSS
+   *  only. Not persisted, like appMode. */
+  previewCollapsed: boolean;
   showWaveforms: boolean;
   showThumbnails: boolean;
   showKeyframes: boolean;
@@ -115,6 +120,8 @@ export interface UIState {
   resetShortcuts: () => void;
   setTheme: (theme: "light" | "dark" | "system") => void;
   setAppMode: (mode: "video" | "music") => void;
+  setPreviewCollapsed: (collapsed: boolean) => void;
+  togglePreviewCollapsed: () => void;
   setShowWaveforms: (show: boolean) => void;
   setShowThumbnails: (show: boolean) => void;
   setShowKeyframes: (show: boolean) => void;
@@ -206,6 +213,7 @@ export const useUIStore = create<UIState>()(
 
         theme: "dark",
         appMode: "video",
+        previewCollapsed: false,
         showWaveforms: true,
         showThumbnails: true,
         showKeyframes: true,
@@ -445,6 +453,14 @@ export const useUIStore = create<UIState>()(
 
         setAppMode: (mode: "video" | "music") => {
           set({ appMode: mode });
+        },
+
+        setPreviewCollapsed: (collapsed: boolean) => {
+          set({ previewCollapsed: collapsed });
+        },
+
+        togglePreviewCollapsed: () => {
+          set((state) => ({ previewCollapsed: !state.previewCollapsed }));
         },
 
         setShowWaveforms: (show: boolean) => {

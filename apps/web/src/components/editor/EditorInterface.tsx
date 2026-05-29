@@ -156,6 +156,7 @@ export const EditorInterface: React.FC = () => {
     getSelectedClipIds,
     panels,
     setPanelVisible,
+    previewCollapsed,
   } = useUIStore();
   const { project, updateClipKeyframes } = useProjectStore();
   const tracks = project.timeline.tracks;
@@ -287,8 +288,16 @@ export const EditorInterface: React.FC = () => {
       {/* Main App Toolbar */}
       <Toolbar />
 
-      {/* Workspace Area */}
-      <div className="flex-1 flex overflow-hidden">
+      {/* Workspace Area — collapses to a slim monitor when the video
+          preview is minimized, letting the timeline take the screen.
+          Preview stays mounted (its playback/audio engine lives in it). */}
+      <div
+        className={
+          previewCollapsed
+            ? "shrink-0 flex overflow-hidden h-[168px]"
+            : "flex-1 flex overflow-hidden"
+        }
+      >
         <PanelErrorBoundary name="Assets Panel">
           <AssetsPanel />
         </PanelErrorBoundary>
@@ -318,13 +327,16 @@ export const EditorInterface: React.FC = () => {
         )}
       </div>
 
-      {/* Resizable Handle */}
-      <div
-        className="h-1 bg-border hover:bg-primary/50 cursor-row-resize transition-colors z-10 relative group"
-        onMouseDown={handleMouseDown}
-      >
-        <div className="absolute inset-x-0 -top-1 -bottom-1 bg-transparent" />
-      </div>
+      {/* Resizable Handle — only meaningful when the preview is expanded
+          (collapsed mode lets the timeline flex to fill). */}
+      {!previewCollapsed && (
+        <div
+          className="h-1 bg-border hover:bg-primary/50 cursor-row-resize transition-colors z-10 relative group"
+          onMouseDown={handleMouseDown}
+        >
+          <div className="absolute inset-x-0 -top-1 -bottom-1 bg-transparent" />
+        </div>
+      )}
 
       {/* Audio Mixer (when open) */}
       {panels.audioMixer?.visible && (
@@ -336,10 +348,11 @@ export const EditorInterface: React.FC = () => {
         </PanelErrorBoundary>
       )}
 
-      {/* BOTTOM PANEL: Timeline */}
+      {/* BOTTOM PANEL: Timeline — flexes to fill when the preview is
+          minimized, otherwise a fixed, user-resizable height. */}
       <div
-        style={{ height: timelineHeight }}
-        className="shrink-0 flex flex-col"
+        style={previewCollapsed ? undefined : { height: timelineHeight }}
+        className={previewCollapsed ? "flex-1 min-h-0 flex flex-col" : "shrink-0 flex flex-col"}
       >
         <PanelErrorBoundary name="Timeline">
           <Timeline />

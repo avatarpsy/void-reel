@@ -1,11 +1,13 @@
-import React, { useRef, useState, useEffect, useMemo } from "react";
+import React, { useRef, useState, useEffect } from "react";
 import { Image } from "lucide-react";
 import type { Clip, Track } from "@openreel/core";
 import { useProjectStore } from "../../../stores/project-store";
 import { useUIStore } from "../../../stores/ui-store";
 import { useTimelineStore } from "../../../stores/timeline-store";
 import { ensureMediaWaveform } from "../../../services/waveform-service";
-import { calculateSnap, generateWaveformEnvelope, getClipStyle } from "./utils";
+import { calculateSnap, getClipStyle } from "./utils";
+import { WaveformCanvas } from "./WaveformCanvas";
+import { VolumeAutomationOverlay } from "./VolumeAutomationOverlay";
 import { ClipContextMenu } from "./ClipContextMenu";
 import { ContextMenu, ContextMenuTrigger } from "@openreel/ui";
 
@@ -354,26 +356,15 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
     };
   }, [mediaItem?.id, mediaItem?.waveformData, mediaItem?.type, setMediaWaveform]);
 
-  // Resolution-aware, trim-accurate waveform envelope. Recomputed only
-  // when geometry / peaks / trim actually change.
-  const waveformBars = Math.max(8, Math.min(400, Math.round(width / 2)));
+  // Trim-accurate waveform window (fractions of the source). The dense
+  // canvas render itself is memoized inside <WaveformCanvas>.
   const sourceDuration = mediaItem?.metadata?.duration || 0;
-  const waveformPath = useMemo(() => {
-    const peaks = mediaItem?.waveformData;
-    if (!peaks || peaks.length === 0) return "";
-    const startFrac = sourceDuration > 0 ? clip.inPoint / sourceDuration : 0;
-    const endFrac =
-      sourceDuration > 0 && clip.outPoint > 0
-        ? clip.outPoint / sourceDuration
-        : 1;
-    return generateWaveformEnvelope(peaks, waveformBars, startFrac, endFrac);
-  }, [
-    mediaItem?.waveformData,
-    waveformBars,
-    clip.inPoint,
-    clip.outPoint,
-    sourceDuration,
-  ]);
+  const wavePeaks = mediaItem?.waveformData ?? null;
+  const waveStartFrac = sourceDuration > 0 ? clip.inPoint / sourceDuration : 0;
+  const waveEndFrac =
+    sourceDuration > 0 && clip.outPoint > 0
+      ? clip.outPoint / sourceDuration
+      : 1;
 
   const thumbnailCount = Math.max(1, Math.floor(width / 60));
   const clipName = mediaItem?.name || clip.mediaId.slice(0, 8);
@@ -482,20 +473,14 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
 
       {(isAudio || isVideo) && (
         <>
-          <div className={`absolute inset-x-0 px-1 pointer-events-none ${isAudio ? "inset-y-0 flex items-center opacity-60" : "bottom-0 h-1/3 flex items-end opacity-30"}`}>
-            {waveformPath ? (
-              <svg
-                className="w-full h-full"
-                preserveAspectRatio="none"
-                viewBox={`0 0 ${waveformBars} 100`}
-              >
-                <path
-                  d={waveformPath}
-                  className={isAudio ? "text-blue-400" : "text-green-300"}
-                  fill="currentColor"
-                  stroke="none"
-                />
-              </svg>
+          <div className={`absolute inset-x-0 pointer-events-none ${isAudio ? "inset-y-0 px-px" : "bottom-0 h-2/5 px-px opacity-50"}`}>
+            {wavePeaks && wavePeaks.length > 0 ? (
+              <WaveformCanvas
+                peaks={wavePeaks}
+                startFrac={waveStartFrac}
+                endFrac={waveEndFrac}
+                color={isAudio ? "#7cb6ff" : "#9af0bf"}
+              />
             ) : isAudio ? (
               <svg
                 className="w-full h-full"
@@ -522,6 +507,14 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
             </div>
           )}
         </>
+      )}
+
+      {isAudio && clip.duration > 0 && (
+        <VolumeAutomationOverlay
+          clip={clip}
+          isSelected={isSelected}
+          interactionLocked={isDragging || isTrimming}
+        />
       )}
 
       {clip.keyframes && clip.keyframes.length > 0 && (

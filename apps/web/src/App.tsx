@@ -955,6 +955,10 @@ function App() {
                   startTime: c.startTime, duration: c.duration,
                   inPoint: c.inPoint, outPoint: c.outPoint,
                   volume: c.volume, muted: c.muted,
+                  // Expose fades + volume automation so the agent can
+                  // read current values before adjusting them.
+                  fade: c.fade ?? null,
+                  automation: c.automation ?? null,
                 })),
               }));
             // Bucket live text clips into a single captions track.

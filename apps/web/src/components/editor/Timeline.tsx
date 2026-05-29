@@ -50,9 +50,9 @@ import {
   TrackLane,
   BeatMarkerOverlay,
   MarkerIndicator,
-  formatTimecode,
   getTrackInfo,
 } from "./timeline/index";
+import { Transport } from "./Transport";
 
 export const Timeline: React.FC = () => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -908,8 +908,8 @@ export const Timeline: React.FC = () => {
           </Popover>
         </div>
 
-        <div className="font-mono text-primary text-sm font-bold tracking-wider bg-background-tertiary px-4 py-1.5 rounded-lg border border-primary/20 shadow-[0_0_12px_rgba(34,197,94,0.15)]">
-          {formatTimecode(playheadPosition)}
+        <div className="bg-background-tertiary px-3 py-1 rounded-lg border border-primary/20 shadow-[0_0_12px_rgba(34,197,94,0.12)]">
+          <Transport />
         </div>
 
         <div className="flex items-center gap-2">

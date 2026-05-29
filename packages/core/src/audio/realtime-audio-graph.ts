@@ -2,7 +2,7 @@ import {
   getMasterClock,
   MasterTimelineClock,
 } from "../playback/master-timeline-clock";
-import type { Effect } from "../types/timeline";
+import type { Effect, AutomationPoint } from "../types/timeline";
 
 export interface AudioClipSchedule {
   clipId: string;
@@ -15,6 +15,13 @@ export interface AudioClipSchedule {
   pan: number;
   effects: Effect[];
   speed: number;
+  /** Per-clip volume automation (rubber-band) — clip-relative seconds,
+   *  value = absolute gain (1 = unity). When present, drives a scheduled
+   *  gain envelope instead of the static `volume`. */
+  automationVolume?: AutomationPoint[];
+  /** Fade-in / fade-out length in seconds (clip-relative). */
+  fadeIn?: number;
+  fadeOut?: number;
 }
 
 export interface TrackConfig {
@@ -522,7 +529,6 @@ export class RealtimeAudioGraph {
     source.playbackRate.value = schedule.speed;
 
     const clipGain = this.audioContext.createGain();
-    clipGain.gain.value = schedule.volume;
 
     source.connect(clipGain);
     clipGain.connect(trackNodes.inputGain);
@@ -532,6 +538,19 @@ export class RealtimeAudioGraph {
       schedule.startTime -
       this.masterClock.currentTime;
     const duration = schedule.endTime - schedule.startTime;
+
+    // Static gain unless the clip has a volume rubber-band / fades — then
+    // schedule a gain envelope. Gated so untouched clips behave exactly
+    // as before (zero regression).
+    const hasEnvelope =
+      (schedule.automationVolume && schedule.automationVolume.length > 0) ||
+      !!schedule.fadeIn ||
+      !!schedule.fadeOut;
+    if (hasEnvelope) {
+      this.applyClipGainEnvelope(clipGain.gain, schedule, contextStartTime, duration);
+    } else {
+      clipGain.gain.value = schedule.volume;
+    }
 
     if (contextStartTime > this.audioContext.currentTime) {
       source.start(contextStartTime, schedule.mediaOffset, duration);
@@ -567,6 +586,86 @@ export class RealtimeAudioGraph {
         }
       }
     };
+  }
+
+  /**
+   * Schedule a time-varying gain envelope for a clip from its volume
+   * automation (rubber-band) + fades. Combines automation × fade into a
+   * single curve and schedules linear ramps through the breakpoints,
+   * anchored at the clip's timeline t=0 (`clipContextStart`). Handles
+   * starting mid-clip (playhead inside the clip) by seeding the value at
+   * the current clip-relative time.
+   */
+  private applyClipGainEnvelope(
+    gain: AudioParam,
+    schedule: AudioClipSchedule,
+    clipContextStart: number,
+    duration: number,
+  ): void {
+    const now = this.audioContext.currentTime;
+    const base = Number.isFinite(schedule.volume) ? schedule.volume : 1;
+    // Defensive: a non-finite / non-positive duration can't carry an
+    // envelope — fall back to static gain rather than schedule garbage.
+    if (!Number.isFinite(duration) || duration <= 0) {
+      gain.value = Math.max(0, Math.min(4, base));
+      return;
+    }
+    // Drop non-finite automation points so a stray NaN/Infinity can't
+    // throw inside setValueAtTime / linearRampToValueAtTime (which would
+    // abort scheduling of every later clip in the batch and kill audio).
+    const points = (schedule.automationVolume ?? [])
+      .filter((p) => Number.isFinite(p.time) && Number.isFinite(p.value))
+      .slice()
+      .sort((a, b) => a.time - b.time);
+    const fadeIn = Math.max(0, Number.isFinite(schedule.fadeIn) ? (schedule.fadeIn as number) : 0);
+    const fadeOut = Math.max(0, Number.isFinite(schedule.fadeOut) ? (schedule.fadeOut as number) : 0);
+    const clamp = (v: number) => (Number.isFinite(v) ? Math.max(0, Math.min(4, v)) : base);
+
+    const autoAt = (t: number): number => {
+      if (points.length === 0) return base;
+      if (t <= points[0].time) return points[0].value;
+      const last = points[points.length - 1];
+      if (t >= last.time) return last.value;
+      for (let i = 0; i < points.length - 1; i++) {
+        const a = points[i];
+        const b = points[i + 1];
+        if (t >= a.time && t <= b.time) {
+          const span = Math.max(1e-6, b.time - a.time);
+          return a.value + (b.value - a.value) * ((t - a.time) / span);
+        }
+      }
+      return base;
+    };
+    const fadeAt = (t: number): number => {
+      let g = 1;
+      if (fadeIn > 0 && t < fadeIn) g *= t / fadeIn;
+      if (fadeOut > 0 && t > duration - fadeOut)
+        g *= Math.max(0, (duration - t) / fadeOut);
+      return g;
+    };
+    const gainAt = (t: number) => clamp(autoAt(t) * fadeAt(t));
+
+    const bset = new Set<number>([0, duration]);
+    if (fadeIn > 0) bset.add(Math.min(duration, fadeIn));
+    if (fadeOut > 0) bset.add(Math.max(0, duration - fadeOut));
+    for (const p of points) bset.add(Math.max(0, Math.min(duration, p.time)));
+    const breaks = Array.from(bset)
+      .filter((t) => t >= 0 && t <= duration)
+      .sort((a, b) => a - b);
+
+    const startCtx = Math.max(now, clipContextStart);
+    const t0 = Math.max(0, startCtx - clipContextStart);
+    try {
+      gain.cancelScheduledValues(now);
+      gain.setValueAtTime(gainAt(t0), startCtx);
+      for (const tb of breaks) {
+        if (tb <= t0) continue;
+        gain.linearRampToValueAtTime(gainAt(tb), clipContextStart + tb);
+      }
+    } catch {
+      // Never let a bad envelope abort scheduling of later clips.
+      gain.value = clamp(base);
+    }
   }
 
   scheduleClips(schedules: AudioClipSchedule[]): void {

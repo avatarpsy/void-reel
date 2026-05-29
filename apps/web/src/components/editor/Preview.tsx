@@ -6,10 +6,6 @@ import React, {
   useMemo,
 } from "react";
 import {
-  Play,
-  Pause,
-  SkipBack,
-  SkipForward,
   Volume2,
   VolumeX,
   Monitor,
@@ -21,7 +17,6 @@ import {
   Gauge,
 } from "lucide-react";
 import type { PreviewQuality } from "../../stores/timeline-store";
-import { IconButton } from "@openreel/ui";
 import { useProjectStore } from "../../stores/project-store";
 import { useTimelineStore } from "../../stores/timeline-store";
 import { useUIStore } from "../../stores/ui-store";
@@ -587,8 +582,6 @@ export const Preview: React.FC = () => {
     isScrubbing,
     pause,
     togglePlayback,
-    seekTo,
-    seekRelative,
     setPlayheadPosition,
     previewQuality,
     setPreviewQuality,
@@ -1260,6 +1253,10 @@ export const Preview: React.FC = () => {
             pan: 0,
             effects: audioEffects,
             speed: clip.speed ?? 1,
+            // Volume rubber-band + fades → scheduled gain envelope (live).
+            automationVolume: clipData?.automation?.volume,
+            fadeIn: clipData?.fade?.fadeIn,
+            fadeOut: clipData?.fade?.fadeOut,
           });
         }
       }
@@ -4920,25 +4917,6 @@ export const Preview: React.FC = () => {
     updateClipTransform,
   ]);
 
-  const handleScrubClick = useCallback(
-    (e: React.MouseEvent<HTMLDivElement>) => {
-      const rect = e.currentTarget.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const percentage = Math.max(0, Math.min(1, x / rect.width));
-      const newTime = percentage * (actualEndTime || 10);
-      seekTo(newTime);
-    },
-    [actualEndTime, seekTo],
-  );
-
-  const handleSkipBack = useCallback(() => {
-    seekRelative(-5);
-  }, [seekRelative]);
-
-  const handleSkipForward = useCallback(() => {
-    seekRelative(5);
-  }, [seekRelative]);
-
   const handleFullscreen = useCallback(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -4979,9 +4957,6 @@ export const Preview: React.FC = () => {
     return () =>
       document.removeEventListener("fullscreenchange", handleFullscreenChange);
   }, []);
-
-  const progressPercentage =
-    actualEndTime > 0 ? (playheadPosition / actualEndTime) * 100 : 0;
 
   const showResizeHandles = !isPlaying && selectedClip && clipBounds;
 
@@ -5456,20 +5431,7 @@ export const Preview: React.FC = () => {
             : "z-20 bg-background-secondary"
         }`}
       >
-        {/* Scrub Bar - integrated at top of controls */}
-        <div
-          className="h-1.5 bg-background-tertiary cursor-pointer group hover:h-2.5 transition-all relative"
-          onClick={handleScrubClick}
-        >
-          <div
-            className="h-full bg-primary relative pointer-events-none shadow-[0_0_10px_rgba(34,197,94,0.5)]"
-            style={{ width: `${progressPercentage}%` }}
-          >
-            <div className="absolute right-0 top-1/2 -translate-y-1/2 w-3 h-3 bg-white rounded-full shadow-md opacity-0 group-hover:opacity-100 transition-opacity transform scale-0 group-hover:scale-100 duration-100 border border-black/20" />
-          </div>
-        </div>
-
-        {/* Controls row */}
+        {/* Controls row (transport moved to the timeline toolbar) */}
         <div className="h-12 px-6 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <div className="font-mono text-text-primary tabular-nums text-sm w-24 tracking-wider">
@@ -5488,31 +5450,6 @@ export const Preview: React.FC = () => {
               {rendererType.toUpperCase()}
             </span>
           )}
-        </div>
-
-        <div className="flex items-center gap-6">
-          <IconButton
-            icon={SkipBack}
-            onClick={handleSkipBack}
-            title="Skip back 5s"
-          />
-          <button
-            onClick={() => {
-              togglePlayback();
-            }}
-            className="w-10 h-10 rounded-full bg-primary hover:bg-primary-hover active:bg-primary-active flex items-center justify-center text-white transition-all shadow-[0_0_15px_rgba(34,197,94,0.4)] hover:shadow-[0_0_25px_rgba(34,197,94,0.6)] transform hover:scale-105"
-          >
-            {isPlaying ? (
-              <Pause size={18} fill="currentColor" />
-            ) : (
-              <Play size={18} fill="currentColor" className="ml-0.5" />
-            )}
-          </button>
-          <IconButton
-            icon={SkipForward}
-            onClick={handleSkipForward}
-            title="Skip forward 5s"
-          />
         </div>
 
         <div className="flex gap-2 items-center">

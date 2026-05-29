@@ -21,6 +21,8 @@ import {
   Send,
   Download,
   Save,
+  Minimize2,
+  Maximize2,
 } from "lucide-react";
 import { useProjectStore } from "../../stores/project-store";
 import { useUIStore } from "../../stores/ui-store";
@@ -87,6 +89,8 @@ export const Toolbar: React.FC = () => {
     toggleKeyframeEditor,
     panels,
     togglePanel,
+    previewCollapsed,
+    togglePreviewCollapsed,
   } = useUIStore();
   // Theme is driven by the parent website (studio-ai page sets
   // ?theme= and posts voidspace:theme messages). Keeping
@@ -1026,6 +1030,24 @@ export const Toolbar: React.FC = () => {
           </TooltipTrigger>
           <TooltipContent>
             <p>Settings & API Keys</p>
+          </TooltipContent>
+        </Tooltip>
+
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              onClick={() => togglePreviewCollapsed()}
+              className={`p-2 rounded-lg transition-colors ${
+                previewCollapsed
+                  ? "bg-primary/20 text-primary"
+                  : "hover:bg-background-elevated text-text-secondary hover:text-text-primary"
+              }`}
+            >
+              {previewCollapsed ? <Maximize2 size={16} /> : <Minimize2 size={16} />}
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>
+            <p>{previewCollapsed ? "Show video preview" : "Minimize video preview"}</p>
           </TooltipContent>
         </Tooltip>
 
