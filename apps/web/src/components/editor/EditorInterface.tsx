@@ -294,7 +294,7 @@ export const EditorInterface: React.FC = () => {
       <div
         className={
           previewCollapsed
-            ? "shrink-0 flex overflow-hidden h-[168px]"
+            ? "shrink-0 flex overflow-hidden h-[248px]"
             : "flex-1 flex overflow-hidden"
         }
       >

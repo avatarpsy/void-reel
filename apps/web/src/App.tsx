@@ -839,6 +839,10 @@ function App() {
         const ui = useUIStore.getState();
         ui.setAppMode("music");
         ui.setPanelVisible("audioMixer", true);
+        // The video canvas is useless for a music project — boot with it
+        // minimized so the timeline + mixer own the screen. The user can
+        // maximize it any time from the top-bar toggle.
+        ui.setPreviewCollapsed(true);
       }
     } catch {
       /* ignore */
