@@ -250,17 +250,29 @@ export const VolumeAutomationOverlay: React.FC<Props> = ({ clip, isSelected, int
             onMouseDown={onLineDown}
           />
         )}
-        {/* visible envelope line */}
-        <path
-          d={path}
-          fill="none"
-          stroke="#fbbf24"
-          strokeWidth={interactive ? 2 : 1.5}
-          vectorEffect="non-scaling-stroke"
-          style={{ pointerEvents: "none" }}
-          opacity={isSelected ? 0.95 : 0.55}
-        />
+        {/* Visible envelope line. On an UNSELECTED clip we only draw it
+            when there's actual automation to show (informative); a flat
+            unity line on every clip is just clutter. Selecting the clip
+            always reveals the bright, editable line — that's the
+            "select to edit volume" affordance. */}
+        {(isSelected || hasPoints) && (
+          <path
+            d={path}
+            fill="none"
+            stroke="#fbbf24"
+            strokeWidth={interactive ? 2 : 1.5}
+            vectorEffect="non-scaling-stroke"
+            style={{ pointerEvents: "none" }}
+            opacity={isSelected ? 0.95 : 0.5}
+          />
+        )}
       </svg>
+      {/* "Volume" hint on the selected clip so the line reads as editable. */}
+      {interactive && (
+        <div className="absolute top-0.5 left-1 text-[9px] font-medium text-amber-300/80 pointer-events-none select-none">
+          VOL
+        </div>
+      )}
       {interactive &&
         points.map((p, i) => (
           <div
