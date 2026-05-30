@@ -288,16 +288,11 @@ export const EditorInterface: React.FC = () => {
       {/* Main App Toolbar */}
       <Toolbar />
 
-      {/* Workspace Area — collapses to a slim monitor when the video
-          preview is minimized, letting the timeline take the screen.
-          Preview stays mounted (its playback/audio engine lives in it). */}
-      <div
-        className={
-          previewCollapsed
-            ? "shrink-0 flex overflow-hidden h-[248px]"
-            : "flex-1 flex overflow-hidden"
-        }
-      >
+      {/* Workspace Area — always flexes to fill whatever the timeline
+          leaves. Minimizing the video grows the timeline (below), which
+          shrinks this row to a strip. Preview stays mounted (its
+          playback/audio engine lives in it). */}
+      <div className="flex-1 flex overflow-hidden min-h-0">
         <PanelErrorBoundary name="Assets Panel">
           <AssetsPanel />
         </PanelErrorBoundary>
