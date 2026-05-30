@@ -89,7 +89,7 @@ export class ActionValidator {
    * round-trips the actual TextClip schema; we just check the
    * required identity fields are present.
    */
-  private validateTextClipAction(action: Action): ValidationError[] {
+  private validateTextClipAction(action: TimelineAction): ValidationError[] {
     const errors: ValidationError[] = [];
     const type = action.type;
     if (type === "text/add") {

@@ -4,7 +4,10 @@ import posthog from "posthog-js";
 import { PostHogProvider } from "posthog-js/react";
 import App from "./App";
 import "./index.css";
-import { registerServiceWorker } from "./services/service-worker";
+import {
+  cleanupStaleServiceWorkers,
+  registerServiceWorker,
+} from "./services/service-worker";
 import { auth } from "./config/firebase-config";
 
 // Auth-stamp every fetch that targets `/api/studio/local-asset`. The
@@ -65,6 +68,7 @@ if (POSTHOG_KEY && POSTHOG_HOST) {
   });
 }
 
+void cleanupStaleServiceWorkers();
 registerServiceWorker().then((registration) => {
   if (registration) {
   }

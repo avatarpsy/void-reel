@@ -835,14 +835,17 @@ function App() {
   useEffect(() => {
     try {
       const params = new URLSearchParams(window.location.search);
+      const ui = useUIStore.getState();
       if (params.get("mode") === "music") {
-        const ui = useUIStore.getState();
         ui.setAppMode("music");
         // The video canvas is useless for a music project — boot with it
         // minimized so the timeline owns the screen. The user can maximize
         // it any time from the top-bar toggle. The mixer stays a toggle
         // (Music icon in the toolbar) rather than competing for space.
         ui.setPreviewCollapsed(true);
+      } else {
+        ui.setAppMode("video");
+        ui.setPreviewCollapsed(false);
       }
     } catch {
       /* ignore */
@@ -2138,9 +2141,10 @@ function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [handleKeyDown]);
 
+  const searchParams = new URLSearchParams(window.location.search);
   const forceWelcome =
-    params.forceWelcome === "1" ||
-    new URLSearchParams(window.location.search).get("forceWelcome") === "1";
+    params.forceWelcome === "1" || searchParams.get("forceWelcome") === "1";
+  const welcomeMode = searchParams.get("mode") === "music" ? "music" : "video";
   // Suppress the landing/format-picker screen whenever the editor is
   // hosted inside the studio-ai iframe (embed=1) or has been opened
   // against a specific project (sceneListId / import). Showing it there
@@ -2179,7 +2183,7 @@ function App() {
         ) : isSharePage ? (
           <SharePage shareId={params.shareId!} />
         ) : showWelcome ? (
-          <WelcomeScreen initialTab={initialTab} />
+          <WelcomeScreen initialTab={initialTab} mode={welcomeMode} />
         ) : (
           <Suspense fallback={<LoadingSpinner message="Loading editor..." />}>
             <EditorInterface />

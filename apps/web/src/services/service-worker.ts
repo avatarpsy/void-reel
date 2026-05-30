@@ -294,6 +294,27 @@ class ServiceWorkerManager {
 // Singleton instance
 export const serviceWorkerManager = new ServiceWorkerManager();
 
+export async function cleanupStaleServiceWorkers(): Promise<void> {
+  if (typeof window === "undefined" || typeof navigator === "undefined") return;
+
+  try {
+    const regs = await navigator.serviceWorker?.getRegistrations?.();
+    if (regs && regs.length > 0) {
+      await Promise.all(regs.map((r) => r.unregister().catch(() => false)));
+      console.info(`[SW] Unregistered ${regs.length} stale service worker(s)`);
+    }
+    if (typeof caches !== "undefined" && caches.keys) {
+      const keys = await caches.keys();
+      if (keys.length > 0) {
+        await Promise.all(keys.map((k) => caches.delete(k).catch(() => false)));
+        console.info(`[SW] Cleared ${keys.length} stale CacheStorage bucket(s)`);
+      }
+    }
+  } catch {
+    /* best-effort cleanup */
+  }
+}
+
 /**
  * Register service worker on app startup
  */
@@ -324,7 +345,8 @@ export async function registerServiceWorker(): Promise<ServiceWorkerRegistration
     const isEmbedded =
       window.self !== window.top ||
       new URLSearchParams(window.location.search).get("embed") === "1";
-    if (isEmbedded) {
+    const isVoidspaceStudio = window.location.pathname.startsWith("/studio");
+    if (isEmbedded || isVoidspaceStudio) {
       // Aggressive cleanup: unregister AND nuke all CacheStorage
       // entries the stale SW populated. Without the cache wipe,
       // subsequent loads can still get tainted responses (the cache
@@ -333,26 +355,7 @@ export async function registerServiceWorker(): Promise<ServiceWorkerRegistration
       //     SW intercepted asset requests pointing at :5173).
       //   - Second-load 404s on hashed bundles (cache held an HTML
       //     fallback for what should have been a JS chunk).
-      try {
-        const regs = await navigator.serviceWorker?.getRegistrations?.();
-        if (regs && regs.length > 0) {
-          await Promise.all(regs.map((r) => r.unregister().catch(() => false)));
-          console.info(
-            `[SW] Unregistered ${regs.length} stale service worker(s) for embedded run`,
-          );
-        }
-        if (typeof caches !== "undefined" && caches.keys) {
-          const keys = await caches.keys();
-          if (keys.length > 0) {
-            await Promise.all(keys.map((k) => caches.delete(k).catch(() => false)));
-            console.info(
-              `[SW] Cleared ${keys.length} stale CacheStorage bucket(s) for embedded run`,
-            );
-          }
-        }
-      } catch {
-        /* best-effort cleanup */
-      }
+      await cleanupStaleServiceWorkers();
       return null;
     }
   }
