@@ -237,6 +237,16 @@ export const EditorInterface: React.FC = () => {
   const [timelineHeight, setTimelineHeight] = useState(320);
   const isDraggingRef = useRef(false);
 
+  // "Minimize video" grows the timeline so the preview row shrinks to a
+  // strip (the preview stays mounted — only its box shrinks). One
+  // consistent resize model: the grip always adjusts this height.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    setTimelineHeight(
+      previewCollapsed ? Math.max(320, window.innerHeight - 300) : 320,
+    );
+  }, [previewCollapsed]);
+
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     isDraggingRef.current = true;
@@ -322,16 +332,18 @@ export const EditorInterface: React.FC = () => {
         )}
       </div>
 
-      {/* Resizable Handle — only meaningful when the preview is expanded
-          (collapsed mode lets the timeline flex to fill). */}
-      {!previewCollapsed && (
-        <div
-          className="h-1 bg-border hover:bg-primary/50 cursor-row-resize transition-colors z-10 relative group"
-          onMouseDown={handleMouseDown}
-        >
-          <div className="absolute inset-x-0 -top-1 -bottom-1 bg-transparent" />
-        </div>
-      )}
+      {/* Premium resize grip — always docked on the timeline's top edge
+          with a centered grip pill + a tall invisible hit-band so it's
+          always easy to grab (the old 1px hairline got lost behind the
+          mixer / was hidden when the preview was minimized). */}
+      <div
+        className="group relative h-2 shrink-0 bg-background-secondary border-t border-border hover:bg-primary/10 cursor-row-resize transition-colors z-30 flex items-center justify-center"
+        onMouseDown={handleMouseDown}
+        title="Drag to resize the timeline"
+      >
+        <div className="absolute inset-x-0 -top-1.5 -bottom-1.5" />
+        <div className="h-1 w-10 rounded-full bg-border group-hover:bg-primary/60 transition-colors pointer-events-none" />
+      </div>
 
       {/* Audio Mixer (when open) */}
       {panels.audioMixer?.visible && (
@@ -343,11 +355,12 @@ export const EditorInterface: React.FC = () => {
         </PanelErrorBoundary>
       )}
 
-      {/* BOTTOM PANEL: Timeline — flexes to fill when the preview is
-          minimized, otherwise a fixed, user-resizable height. */}
+      {/* BOTTOM PANEL: Timeline — fixed, user-resizable height. The
+          workspace row above always flexes to fill the remainder, so
+          minimizing the video just grows this height (one resize model). */}
       <div
-        style={previewCollapsed ? undefined : { height: timelineHeight }}
-        className={previewCollapsed ? "flex-1 min-h-0 flex flex-col" : "shrink-0 flex flex-col"}
+        style={{ height: timelineHeight }}
+        className="shrink-0 flex flex-col min-h-0"
       >
         <PanelErrorBoundary name="Timeline">
           <Timeline />

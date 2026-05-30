@@ -550,7 +550,7 @@ export const AssetsPanel: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTabRaw] = useState<
     "media" | "text" | "graphics" | "ai-music" | "voidspace" | "ai-gen"
-  >("media");
+  >(useUIStore.getState().appMode === "music" ? "ai-music" : "media");
   const setActiveTab = useCallback((tab: "media" | "text" | "graphics" | "ai-music" | "voidspace" | "ai-gen") => {
     setActiveTabRaw(tab);
   }, []);
