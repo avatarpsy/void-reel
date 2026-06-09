@@ -70,6 +70,14 @@ export interface UIState {
    *  Cross-compat: a project may hold both audio and video tracks
    *  regardless of mode; this only sets the editor's layout/emphasis. */
   appMode: "video" | "music";
+  /** What occupies the center workspace column: the video "preview" or the
+   *  audio "mixer". Defaults from appMode on load (music → mixer, video →
+   *  preview) but the user can swap either way via the toolbar button, so a
+   *  music project can still show the video player and a video project can
+   *  show the mixer. The Preview component stays MOUNTED even when the mixer
+   *  is shown (its playback/audio engine drives the timeline) — only its box
+   *  is hidden. Not persisted, like appMode. */
+  centerView: "preview" | "mixer";
   /** Collapse the video preview pane to a sliver so the timeline takes
    *  the screen (transport lives on the timeline toolbar). Preview stays
    *  MOUNTED (the playback/audio engine lives in it) — collapse is CSS
@@ -120,6 +128,8 @@ export interface UIState {
   resetShortcuts: () => void;
   setTheme: (theme: "light" | "dark" | "system") => void;
   setAppMode: (mode: "video" | "music") => void;
+  setCenterView: (view: "preview" | "mixer") => void;
+  toggleCenterView: () => void;
   setPreviewCollapsed: (collapsed: boolean) => void;
   togglePreviewCollapsed: () => void;
   setShowWaveforms: (show: boolean) => void;
@@ -190,8 +200,10 @@ const DEFAULT_SNAP_SETTINGS: SnapSettings = {
 };
 
 const DEFAULT_PANELS: Record<PanelId, PanelState> = {
-  mediaLibrary: { visible: true, width: 300 },
-  inspector: { visible: true, width: 300 },
+  // 320 == the old fixed `w-80`. Now user-resizable via PanelResizer
+  // (persisted; clamped 200–800 by setPanelWidth).
+  mediaLibrary: { visible: true, width: 320 },
+  inspector: { visible: true, width: 320 },
   effects: { visible: false, width: 300 },
   audioMixer: { visible: false, width: 300 },
   colorGrading: { visible: false, width: 400 },
@@ -213,6 +225,7 @@ export const useUIStore = create<UIState>()(
 
         theme: "dark",
         appMode: "video",
+        centerView: "preview",
         previewCollapsed: false,
         showWaveforms: true,
         showThumbnails: true,
@@ -453,6 +466,16 @@ export const useUIStore = create<UIState>()(
 
         setAppMode: (mode: "video" | "music") => {
           set({ appMode: mode });
+        },
+
+        setCenterView: (view: "preview" | "mixer") => {
+          set({ centerView: view });
+        },
+
+        toggleCenterView: () => {
+          set((state) => ({
+            centerView: state.centerView === "mixer" ? "preview" : "mixer",
+          }));
         },
 
         setPreviewCollapsed: (collapsed: boolean) => {

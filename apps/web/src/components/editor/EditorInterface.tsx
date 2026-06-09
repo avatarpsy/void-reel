@@ -5,6 +5,7 @@ import { AssetsPanel } from "./AssetsPanel";
 import { Preview } from "./Preview";
 import { InspectorPanel } from "./InspectorPanel";
 import { Timeline } from "./Timeline";
+import { PanelResizer } from "./PanelResizer";
 import { KeyframeEditorPanel } from "./KeyframeEditorPanel";
 import { AudioMixer } from "../audio-mixer";
 import { KeyboardShortcutsOverlay } from "./KeyboardShortcutsOverlay";
@@ -157,7 +158,14 @@ export const EditorInterface: React.FC = () => {
     panels,
     setPanelVisible,
     previewCollapsed,
+    centerView,
   } = useUIStore();
+  // The center workspace column shows EITHER the video preview or the audio
+  // mixer, chosen by `centerView` (toolbar button swaps it; music projects
+  // default to "mixer", video to "preview"). When the mixer is shown the
+  // Preview component stays MOUNTED but hidden so its playback/audio engine
+  // keeps driving the timeline — see the workspace row below.
+  const showMixerCenter = centerView === "mixer";
   const { project, updateClipKeyframes } = useProjectStore();
   const tracks = project.timeline.tracks;
 
@@ -259,7 +267,13 @@ export const EditorInterface: React.FC = () => {
       if (!isDraggingRef.current) return;
 
       const newHeight = window.innerHeight - e.clientY;
-      const maxHeight = window.innerHeight * 0.6;
+      // Let the timeline climb all the way to just under the top toolbar
+      // (toolbar h-16 = 64px + the 8px grip = 72px). The old percentage
+      // caps sat below the collapsed default, so the grip snapped down on
+      // first grab and got "stuck in the middle". Capping at the toolbar
+      // edge lets the timeline go fully to the top; the workspace
+      // (assets / mixer / inspector) shrinks above it like a normal NLE.
+      const maxHeight = window.innerHeight - 72;
       setTimelineHeight(Math.max(200, Math.min(newHeight, maxHeight)));
     };
 
@@ -307,9 +321,32 @@ export const EditorInterface: React.FC = () => {
           <AssetsPanel />
         </PanelErrorBoundary>
 
-        <PanelErrorBoundary name="Preview">
-          <Preview />
-        </PanelErrorBoundary>
+        {/* Drag handle: resize the Assets panel */}
+        <PanelResizer panelId="mediaLibrary" side="right" />
+
+        {showMixerCenter ? (
+          <>
+            {/* Preview stays MOUNTED but display:none — its rAF render
+                loop + audio scheduler drive timeline playback even with
+                no visible video surface. Unmounting it would kill
+                playback. Only the box is replaced by the mixer. */}
+            <div className="hidden" aria-hidden="true">
+              <PanelErrorBoundary name="Preview">
+                <Preview />
+              </PanelErrorBoundary>
+            </div>
+            <PanelErrorBoundary name="Audio Mixer">
+              <AudioMixer variant="center" visible />
+            </PanelErrorBoundary>
+          </>
+        ) : (
+          <PanelErrorBoundary name="Preview">
+            <Preview />
+          </PanelErrorBoundary>
+        )}
+
+        {/* Drag handle: resize the Inspector panel */}
+        <PanelResizer panelId="inspector" side="left" />
 
         <PanelErrorBoundary name="Inspector">
           <InspectorPanel />
@@ -345,8 +382,9 @@ export const EditorInterface: React.FC = () => {
         <div className="h-1 w-10 rounded-full bg-border group-hover:bg-primary/60 transition-colors pointer-events-none" />
       </div>
 
-      {/* Audio Mixer (when open) */}
-      {panels.audioMixer?.visible && (
+      {/* Audio Mixer dock — only when the mixer is NOT already shown in the
+          center column (otherwise it would be a duplicate). */}
+      {!showMixerCenter && panels.audioMixer?.visible && (
         <PanelErrorBoundary name="Audio Mixer">
           <AudioMixer
             visible

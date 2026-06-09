@@ -1,6 +1,6 @@
 import React, { useRef, useState, useEffect, useCallback } from "react";
-import { v4 as uuidv4 } from "uuid";
-import type { Clip } from "@openreel/core";
+import type { Clip, Keyframe, EasingType } from "@openreel/core";
+import { KeyframeEngine } from "@openreel/core";
 import { useProjectStore } from "../../../stores/project-store";
 
 interface Props {
@@ -12,33 +12,76 @@ interface Props {
   interactionLocked: boolean;
 }
 
-/** Max displayable gain (×). Unity (1.0) sits at the 50% line. */
+/** Max displayable gain (×). Mirrors the Inspector's "volume" property
+ *  range (0–2, default 1). Unity (1.0) sits at the 50% line. */
 const MAX_GAIN = 2;
 /** Movement (px) before a press counts as a drag rather than a click. */
 const DRAG_THRESHOLD = 4;
 
-type Point = { time: number; value: number };
+// Shared engine instance — same class the Inspector's KeyframesSection uses,
+// so add/move/remove math is identical across both surfaces.
+const keyframeEngine = new KeyframeEngine();
+
+type Point = { id: string; time: number; value: number; easing: EasingType };
+
+const clampGain = (v: number) => Math.max(0, Math.min(MAX_GAIN, v));
+
+/** How many segments to sample when drawing an eased curve between
+ *  keyframes. The native KeyframeEngine applies per-keyframe easing
+ *  (ease-in/out, bezier handles, …); sampling it — instead of drawing a
+ *  straight line between points — is what makes the timeline envelope
+ *  match the Inspector keyframe editor and the actual rendered audio. */
+const CURVE_SAMPLES = 64;
 
 /**
  * Audition / Premiere–style volume envelope drawn over the SELECTED audio
- * clip. Interactions (all undoable via the action-executor):
- *   • Click the line          → add a keyframe at that point
- *   • Drag the line (no keys)  → set the clip's overall gain
+ * clip.
+ *
+ * ┌─ SINGLE SOURCE OF TRUTH ───────────────────────────────────────────┐
+ * │ This overlay reads & writes the SAME NATIVE openreel keyframes that  │
+ * │ the Inspector's Keyframes panel uses: `clip.keyframes` rows with     │
+ * │ `property === "volume"` (value = gain, 1 = unity, range 0–2), edited │
+ * │ through `useProjectStore().updateClipKeyframes` + the shared         │
+ * │ `KeyframeEngine`. There is NO separate automation store.            │
+ * │                                                                     │
+ * │ Consequences (the whole point of this design):                      │
+ * │  • A keyframe added on the timeline shows up in the Inspector's      │
+ * │    Animate-Property → "Volume" list, and vice-versa.                 │
+ * │  • The agent's native keyframe tools operate on the same rows.       │
+ * │  • Save / load (autosave clones the whole project) round-trips them. │
+ * │                                                                     │
+ * │ DO NOT reintroduce a parallel `clip.automation.volume` store — that  │
+ * │ is exactly what desynced the timeline, Inspector, and agent before. │
+ * └─────────────────────────────────────────────────────────────────────┘
+ *
+ * Interactions (all flow through the native keyframe store):
+ *   • Click the line          → add a volume keyframe at that point
+ *   • Drag the line (no keys)  → set the clip's flat volume (audio/setVolume)
  *   • Drag a keyframe          → move it in time + value
  *   • Alt / right / dbl-click  → remove a keyframe
  *
  * The overlay ROOT is pointer-events:none — only the thin line hit-band
  * and the keyframe handles capture the mouse — so empty clip area still
- * passes through to the clip for drag-to-move even while selected. A press
- * is classified as click-vs-drag with a small threshold, so a click on the
- * line reliably adds a keyframe (the old double-click was eaten by the
- * line's own mousedown handler — that was the "keyframes don't work" bug).
+ * passes through to the clip for drag-to-move even while selected.
  */
 export const VolumeAutomationOverlay: React.FC<Props> = ({ clip, isSelected, interactionLocked }) => {
   const boxRef = useRef<HTMLDivElement>(null);
-  const committed: Point[] = (clip.automation?.volume ?? [])
+  const updateClipKeyframes = useProjectStore((s) => s.updateClipKeyframes);
+
+  // The clip's native keyframe rows, split into the volume ones (what this
+  // overlay draws/edits) and everything else (preserved untouched on write).
+  const allKeyframes: Keyframe[] = (clip.keyframes ?? []).slice();
+  const committed: Point[] = allKeyframes
+    .filter((k) => k.property === "volume")
+    .map((k) => ({
+      id: k.id,
+      time: k.time,
+      value: typeof k.value === "number" ? k.value : 1,
+      // Carry the keyframe's native easing so dragging a point preserves
+      // its curve and so the drawn path can sample it (see curvePoints).
+      easing: (k.easing ?? "linear") as EasingType,
+    }))
     .filter((p) => Number.isFinite(p.time) && Number.isFinite(p.value))
-    .map((p) => ({ time: p.time, value: p.value }))
     .sort((a, b) => a.time - b.time);
   const baseVolume = Number.isFinite(clip.volume) ? clip.volume : 1;
   const interactive = isSelected && !interactionLocked;
@@ -61,30 +104,62 @@ export const VolumeAutomationOverlay: React.FC<Props> = ({ clip, isSelected, int
   const volume = draftVolume ?? baseVolume;
   const hasPoints = points.length > 0;
 
-  const dispatch = useCallback(
-    async (type: string, params: Record<string, unknown>) => {
+  // ── Native keyframe writes (identical mechanism to KeyframesSection) ──
+  // Merge a new set of VOLUME points back into the clip's full keyframe
+  // list, preserving every non-volume keyframe and each volume row's
+  // existing easing (new rows default to "linear").
+  const commitVolumePoints = useCallback(
+    (volumePoints: Point[]) => {
+      const easingById = new Map<string, EasingType>();
+      for (const k of clip.keyframes ?? []) {
+        if (k.property === "volume") easingById.set(k.id, k.easing);
+      }
+      const others = (clip.keyframes ?? []).filter((k) => k.property !== "volume");
+      const volumeRows: Keyframe[] = volumePoints.map((p) => ({
+        id: p.id,
+        time: p.time,
+        property: "volume",
+        value: clampGain(p.value),
+        // Prefer the easing carried on the dragged point; fall back to the
+        // committed row's easing, then linear. Never resets a curve.
+        easing: p.easing ?? easingById.get(p.id) ?? ("linear" as EasingType),
+      }));
+      const merged = [...others, ...volumeRows].sort((a, b) => a.time - b.time);
+      updateClipKeyframes(clip.id, merged);
+    },
+    [clip.id, clip.keyframes, updateClipKeyframes],
+  );
+
+  // Flat-line drag with no keyframes sets the clip's base volume. This is
+  // the native per-clip `volume` field (the same value the Inspector audio
+  // controls edit) — routed through the undoable audio/setVolume action.
+  const setClipVolume = useCallback(
+    async (vol: number) => {
       const store = useProjectStore.getState();
       const exec = (store as unknown as {
         actionExecutor?: { execute: (a: unknown, p: unknown) => Promise<{ success?: boolean }> };
       }).actionExecutor;
       if (!exec) return;
       try {
-        const r = await exec.execute({ type, id: uuidv4(), timestamp: Date.now(), params }, store.project);
+        const r = await exec.execute(
+          { type: "audio/setVolume", id: `vol-${clip.id}-${Math.round(vol * 1000)}`, timestamp: 0, params: { clipId: clip.id, volume: clampGain(vol) } },
+          store.project,
+        );
         if (r?.success) {
-          useProjectStore.setState({ project: { ...store.project, modifiedAt: Date.now() } });
+          useProjectStore.setState({ project: { ...store.project } });
         }
       } catch (e) {
-        console.warn("[volume-automation] dispatch failed", e);
+        console.warn("[volume-automation] setVolume failed", e);
       }
     },
-    [],
+    [clip.id],
   );
 
   const yToValue = (clientY: number): number => {
     const rect = boxRef.current?.getBoundingClientRect();
     if (!rect || rect.height === 0) return baseVolume;
     const frac = 1 - Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
-    return Math.max(0, Math.min(MAX_GAIN, frac * MAX_GAIN));
+    return clampGain(frac * MAX_GAIN);
   };
   const xToTime = (clientX: number): number => {
     const rect = boxRef.current?.getBoundingClientRect();
@@ -96,20 +171,26 @@ export const VolumeAutomationOverlay: React.FC<Props> = ({ clip, isSelected, int
   const timeToPct = (t: number) =>
     clip.duration > 0 ? Math.max(0, Math.min(100, (t / clip.duration) * 100)) : 0;
 
-  // Value of the envelope at a given time (for inserting a keyframe on the line).
+  // The current volume points as native Keyframe rows, so we can feed them
+  // straight into the shared KeyframeEngine for both drawing and value
+  // lookup — guaranteeing the timeline matches the Inspector + render.
+  const asKeyframes = (pts: Point[]): Keyframe[] =>
+    pts.map((p) => ({
+      id: p.id,
+      time: p.time,
+      property: "volume",
+      value: p.value,
+      easing: p.easing ?? ("linear" as EasingType),
+    }));
+
+  // Value of the envelope at a given time (for inserting a keyframe on the
+  // line) — delegates to KeyframeEngine.getValueAtTime, the SAME function
+  // the render + Inspector use, so a keyframe dropped on the line lands
+  // exactly on the eased curve (no more straight-line approximation).
   const valueAtTime = (t: number): number => {
     if (!hasPoints) return volume;
-    if (t <= points[0].time) return points[0].value;
-    const last = points[points.length - 1];
-    if (t >= last.time) return last.value;
-    for (let i = 0; i < points.length - 1; i++) {
-      const a = points[i], b = points[i + 1];
-      if (t >= a.time && t <= b.time) {
-        const span = Math.max(1e-6, b.time - a.time);
-        return a.value + (b.value - a.value) * ((t - a.time) / span);
-      }
-    }
-    return volume;
+    const r = keyframeEngine.getValueAtTime(asKeyframes(points), t);
+    return typeof r.value === "number" ? r.value : volume;
   };
 
   useEffect(() => {
@@ -129,7 +210,7 @@ export const VolumeAutomationOverlay: React.FC<Props> = ({ clip, isSelected, int
       } else {
         const arr = (draftPointsRef.current ?? committedRef.current).map((p) => ({ ...p }));
         if (arr[g.index]) {
-          arr[g.index] = { time: xToTime(e.clientX), value: yToValue(e.clientY) };
+          arr[g.index] = { ...arr[g.index], time: xToTime(e.clientX), value: yToValue(e.clientY) };
           draftPointsRef.current = arr;
           setDraftPoints(arr);
         }
@@ -142,19 +223,19 @@ export const VolumeAutomationOverlay: React.FC<Props> = ({ clip, isSelected, int
       if (!g) return;
       if (g.kind === "line") {
         if (g.moved && draftVolumeRef.current != null) {
-          void dispatch("audio/setVolume", { clipId: clip.id, volume: draftVolumeRef.current });
+          void setClipVolume(draftVolumeRef.current);
         } else if (!g.moved) {
-          // click on the line → add a keyframe there
+          // click on the line → add a native volume keyframe there
           const t = xToTime(e.clientX);
-          const next = [...committedRef.current, { time: t, value: valueAtTime(t) }].sort(
-            (a, b) => a.time - b.time,
+          const kf = keyframeEngine.addKeyframe(clip.id, "volume", t, valueAtTime(t), "linear");
+          updateClipKeyframes(
+            clip.id,
+            [...(clip.keyframes ?? []), kf].sort((a, b) => a.time - b.time),
           );
-          void dispatch("audio/addAutomation", { clipId: clip.id, points: next });
         }
       } else {
         if (g.moved && draftPointsRef.current) {
-          const sorted = draftPointsRef.current.slice().sort((a, b) => a.time - b.time);
-          void dispatch("audio/addAutomation", { clipId: clip.id, points: sorted });
+          commitVolumePoints(draftPointsRef.current);
         }
         // a click (no move) on a keyframe is a no-op (use alt/right/dbl to remove)
       }
@@ -184,10 +265,8 @@ export const VolumeAutomationOverlay: React.FC<Props> = ({ clip, isSelected, int
     if (!interactive) return;
     e.stopPropagation();
     if (e.altKey || e.button === 2) {
-      void dispatch("audio/addAutomation", {
-        clipId: clip.id,
-        points: committed.filter((_, i) => i !== index),
-      });
+      const target = committed[index];
+      if (target) updateClipKeyframes(clip.id, keyframeEngine.removeKeyframe(clip.keyframes ?? [], target.id));
       return;
     }
     committedRef.current = committed;
@@ -200,18 +279,29 @@ export const VolumeAutomationOverlay: React.FC<Props> = ({ clip, isSelected, int
     if (!interactive) return;
     e.stopPropagation();
     e.preventDefault();
-    void dispatch("audio/addAutomation", {
-      clipId: clip.id,
-      points: committed.filter((_, i) => i !== index),
-    });
+    const target = committed[index];
+    if (target) updateClipKeyframes(clip.id, keyframeEngine.removeKeyframe(clip.keyframes ?? [], target.id));
   };
 
   const lineY = valToPct(volume);
+  // Draw the envelope by SAMPLING the native KeyframeEngine across the clip,
+  // so each segment shows its real easing curve (ease-in/out, bezier, …) —
+  // identical to what the Inspector keyframe editor and the rendered audio
+  // produce. A straight polyline between points (the old approach) silently
+  // mismatched any non-linear keyframe.
   const path = hasPoints
     ? (() => {
-        const s = [`M 0 ${valToPct(points[0].value).toFixed(2)}`];
-        for (const p of points) s.push(`L ${timeToPct(p.time).toFixed(2)} ${valToPct(p.value).toFixed(2)}`);
-        s.push(`L 100 ${valToPct(points[points.length - 1].value).toFixed(2)}`);
+        const kfs = asKeyframes(points);
+        // Engine holds the first value before the first key and the last
+        // value after the last key, so sampling 0..duration covers the
+        // flat lead-in / lead-out for free.
+        const s: string[] = [];
+        for (let i = 0; i <= CURVE_SAMPLES; i++) {
+          const t = clip.duration * (i / CURVE_SAMPLES);
+          const r = keyframeEngine.getValueAtTime(kfs, t);
+          const v = typeof r.value === "number" ? r.value : volume;
+          s.push(`${i === 0 ? "M" : "L"} ${timeToPct(t).toFixed(2)} ${valToPct(v).toFixed(2)}`);
+        }
         return s.join(" ");
       })()
     : `M 0 ${lineY.toFixed(2)} L 100 ${lineY.toFixed(2)}`;
@@ -276,7 +366,7 @@ export const VolumeAutomationOverlay: React.FC<Props> = ({ clip, isSelected, int
       {interactive &&
         points.map((p, i) => (
           <div
-            key={`${i}-${p.time.toFixed(3)}`}
+            key={p.id}
             onMouseDown={onPointDown(i)}
             onDoubleClick={removePoint(i)}
             onContextMenu={removePoint(i)}

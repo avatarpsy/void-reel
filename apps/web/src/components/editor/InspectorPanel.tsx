@@ -46,6 +46,7 @@ import {
   ParticleEffectsSection,
   AudioTextSyncPanel,
   AlignmentSection,
+  SunoAudioPanel,
 } from "./inspector";
 import { OPENREEL_TTS_URL } from "../../config/api-endpoints";
 import {
@@ -182,6 +183,9 @@ export const InspectorPanel: React.FC = () => {
   const { getClip, getMediaItem, addSubtitle, updateSubtitle, getSubtitle } =
     useProjectStore();
   const project = useProjectStore((state) => state.project);
+  // User-resizable panel width (persisted via panels.inspector.width; the
+  // drag handle lives in EditorInterface as a flex sibling).
+  const inspectorWidth = useUIStore((state) => state.panels.inspector.width ?? 320);
   const { getSelectedClipIds } = useUIStore();
   const selectedItems = useUIStore((state) => state.selectedItems);
   const selectedClipIds = getSelectedClipIds();
@@ -603,7 +607,8 @@ export const InspectorPanel: React.FC = () => {
   return (
     <div
       data-tour="inspector"
-      className="w-80 bg-background-secondary border-l border-border flex flex-col overflow-y-auto h-full custom-scrollbar"
+      style={{ width: inspectorWidth }}
+      className="bg-background-secondary border-l border-border flex flex-col overflow-y-auto h-full custom-scrollbar shrink-0"
     >
       <div className="p-5">
         <h3 className="text-sm font-bold text-text-primary mb-5 tracking-tight">
@@ -707,6 +712,13 @@ export const InspectorPanel: React.FC = () => {
             {clipType === "audio" && (
               <Section title="Beat Sync" sectionId="beat-sync" defaultOpen={false}>
                 <AudioTextSyncPanel clipId={clipId} />
+              </Section>
+            )}
+
+            {/* AI Audio (Suno) - Cover, extend, vocals, instrumental, stems, WAV, lyrics */}
+            {clipType === "audio" && (
+              <Section title="AI Audio (Suno)" sectionId="suno-audio" defaultOpen={false}>
+                <SunoAudioPanel clipId={clipId} />
               </Section>
             )}
 

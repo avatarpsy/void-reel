@@ -134,6 +134,10 @@ function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
         originalUrl: freshHasUrl ? fr.originalUrl : existing.originalUrl,
         thumbnailUrl: existing.thumbnailUrl ?? fr.thumbnailUrl,
         metadata: existing.metadata ?? fr.metadata,
+        // Carry the native relink hint onto pre-existing items that
+        // predate sourceFile stamping. Prefer the existing one — a prior
+        // relink stored the REAL file name/size there.
+        sourceFile: existing.sourceFile ?? fr.sourceFile,
       });
     }
   }
@@ -839,13 +843,17 @@ function App() {
       if (params.get("mode") === "music") {
         ui.setAppMode("music");
         // The video canvas is useless for a music project — boot with it
-        // minimized so the timeline owns the screen. The user can maximize
-        // it any time from the top-bar toggle. The mixer stays a toggle
-        // (Music icon in the toolbar) rather than competing for space.
+        // minimized so the timeline owns the screen, and show the audio
+        // mixer in the center column instead of the video player. The user
+        // can swap back to the video player any time via the top-bar
+        // preview/mixer toggle button (centerView) — both views work in
+        // both modes.
         ui.setPreviewCollapsed(true);
+        ui.setCenterView("mixer");
       } else {
         ui.setAppMode("video");
         ui.setPreviewCollapsed(false);
+        ui.setCenterView("preview");
       }
     } catch {
       /* ignore */
@@ -1093,6 +1101,61 @@ function App() {
               hasAudio: m.hasAudio ?? null,
             }));
             reply({ type: "voidspace:media", requestId: msg.requestId, items });
+            break;
+          }
+          case "voidspace:add-media-from-url": {
+            // Parent's Add-Media popup (StudioMediaPickerModal) picked/
+            // generated/uploaded a media URL and handed it back here.
+            // Import it into the asset library via the SAME native path a
+            // local upload uses (importMedia decodes the blob → real
+            // duration/dimensions/thumbnails/waveform), then tag
+            // originalUrl so the item rehydrates from the cloud on reload
+            // (the embedded project_state blob can't carry the raw blob).
+            // Library-only: we do NOT auto-place it on the timeline — the
+            // user drags it in, exactly like an uploaded file.
+            const { url, name } = msg as { url?: string; name?: string };
+            if (!url || typeof url !== "string") {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: "url required" });
+              break;
+            }
+            try {
+              const { fetchMediaBlob } = await import("./services/voidspace-loader");
+              const blob = await fetchMediaBlob(url);
+              if (!blob) {
+                reply({ type: "voidspace:error", requestId: msg.requestId, error: "could not fetch media" });
+                break;
+              }
+              const fname =
+                (typeof name === "string" && name) ||
+                url.split("/").pop()?.split("?")[0] ||
+                "imported-media";
+              const file = new File([blob], fname, { type: blob.type || "application/octet-stream" });
+              const result = await importMedia(file);
+              if (result.success && result.actionId) {
+                // Tag originalUrl on the freshly-imported item so a reload
+                // rehydrates it from the cloud URL instead of a dropped blob.
+                useProjectStore.setState((s: any) => ({
+                  project: {
+                    ...s.project,
+                    mediaLibrary: {
+                      ...s.project.mediaLibrary,
+                      items: (s.project.mediaLibrary?.items ?? []).map((m: any) =>
+                        m.id === result.actionId
+                          ? { ...m, originalUrl: m.originalUrl ?? url, category: m.category ?? "Imported" }
+                          : m,
+                      ),
+                    },
+                    modifiedAt: Date.now(),
+                  },
+                }));
+                reply({ type: "voidspace:media-added", requestId: msg.requestId, ok: true, mediaId: result.actionId });
+              } else {
+                const e: any = result.error;
+                reply({ type: "voidspace:error", requestId: msg.requestId, error: e?.message ?? "import failed" });
+              }
+            } catch (err: any) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: err?.message ?? String(err) });
+            }
             break;
           }
           case "voidspace:patch-clip": {
@@ -1449,7 +1512,7 @@ function App() {
             // the chat now drives the music clip into the live
             // project, and the editor's autosave commits a blob
             // that includes it.
-            const { url, volume, label } = msg as any;
+            const { url, volume, label, durationSec } = msg as any;
             if (!url) {
               reply({ type: "voidspace:error", requestId: msg.requestId, error: "url required" });
               break;
@@ -1474,6 +1537,11 @@ function App() {
               // after scenes are approved). 30s avoids zero-duration
               // clips which break some renderers.
               if (totalDur <= 0) totalDur = 30;
+              // Standalone music (mode=music) has no video clips to span —
+              // an explicit durationSec (the song's real length) is
+              // authoritative so the music clip renders at full width
+              // instead of the 30s video fallback.
+              if (typeof durationSec === "number" && durationSec > 0) totalDur = durationSec;
 
               const stableHashFn = (s: string) => {
                 let h = 0;

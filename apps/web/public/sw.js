@@ -10,9 +10,12 @@
  * - 35.4: Inform user that AI requires internet connectivity
  */
 
-const CACHE_NAME = "openreel-v5-aimusic";
-const STATIC_CACHE_NAME = "openreel-static-v4-sfxinline";
-const DYNAMIC_CACHE_NAME = "openreel-dynamic-v4-sfxinline";
+// Cache version bumped (vsicon) so the activate handler purges every older
+// "openreel-*" cache — including any that held a stale index.html / favicon
+// from a previous build. Bump the suffix on any asset-affecting change.
+const CACHE_NAME = "openreel-v6-vsicon";
+const STATIC_CACHE_NAME = "openreel-static-v5-vsicon";
+const DYNAMIC_CACHE_NAME = "openreel-dynamic-v5-vsicon";
 
 /**
  * Static assets to cache on install

@@ -57,6 +57,7 @@ import {
   loadDirectoryHandle,
 } from "../services/media-storage";
 import { restoreMediaItem } from "../utils/media-recovery";
+import { collectFolder, buildRelinkPlan, type RelinkableItem } from "../services/media-relink";
 import { projectManager } from "../services/project-manager";
 
 /**
@@ -514,18 +515,22 @@ export const useProjectStore = create<ProjectState>()(
           error: null,
         });
 
-        // Auto-restore placeholder assets from saved FileSystemFileHandles (same machine)
+        // Auto-restore placeholder assets from saved FileSystemFileHandles
+        // (same machine). Includes items WITHOUT sourceFile — Voidspace
+        // scene media carries only originalUrl/sceneNumber/role, and the
+        // Tier-2 matcher relinks those from the saved folder.
         const placeholders = fixedProject.mediaLibrary.items.filter(
-          (item) => item.isPlaceholder && item.sourceFile,
+          (item) => item.isPlaceholder,
         );
         if (placeholders.length > 0 && "FileSystemFileHandle" in window) {
           (async () => {
             let restored = 0;
             const stillMissing: typeof placeholders = [];
 
-            // Tier 1: try individual file handles (follow file across folder moves)
+            // Tier 1: try individual file handles (follow file across folder
+            // moves). Only items that recorded a sourceFile have a handle key.
             for (const item of placeholders) {
-              if (!item.sourceFile) continue;
+              if (!item.sourceFile) { stillMissing.push(item); continue; }
               try {
                 const handle = await loadFileHandle(item.sourceFile.name, item.sourceFile.size);
                 if (!handle) { stillMissing.push(item); continue; }
@@ -537,25 +542,33 @@ export const useProjectStore = create<ProjectState>()(
               }
             }
 
-            // Tier 2: scan the stored relink folder for files not found via handle
+            // Tier 2: recursively scan the stored relink folder with the
+            // manifest-aware matcher (same logic as the Assets panel's
+            // "Relink from Folder"). Handles subfolder layouts and
+            // sourceFile-less Voidspace scene media.
             if (stillMissing.length > 0) {
               try {
                 const dirInfo = await loadDirectoryHandle(fixedProject.id);
                 if (dirInfo) {
-                  const fileMap = new Map<string, { file: File; folder: string }>();
-                  const entries = (dirInfo.handle as unknown as { entries: () => AsyncIterableIterator<[string, FileSystemHandle]> }).entries();
-                  for await (const [, fh] of entries) {
-                    if ((fh as FileSystemHandle).kind === "file") {
-                      const f = await (fh as FileSystemFileHandle).getFile();
-                      fileMap.set(`${f.name.toLowerCase()}:${f.size}`, { file: f, folder: dirInfo.folderName });
-                    }
-                  }
-                  for (const item of stillMissing) {
-                    if (!item.sourceFile) continue;
-                    const entry = fileMap.get(`${item.sourceFile.name.toLowerCase()}:${item.sourceFile.size}`);
-                    if (entry) {
+                  const { files, manifests } = await collectFolder(dirInfo.handle);
+                  if (files.length > 0) {
+                    const relinkable: RelinkableItem[] = stillMissing.map((item) => ({
+                      id: item.id,
+                      name: item.name,
+                      type: item.type,
+                      originalUrl: item.originalUrl,
+                      category: item.category,
+                      sceneNumber: item.sceneNumber,
+                      role: item.role,
+                      fileSize: item.metadata?.fileSize,
+                      sourceFile: item.sourceFile,
+                    }));
+                    const plan = buildRelinkPlan(relinkable, files, manifests, {
+                      currentProjectId: fixedProject.id,
+                    });
+                    for (const match of plan.matches) {
                       try {
-                        await get().replaceMediaAsset(item.id, entry.file, entry.folder);
+                        await get().replaceMediaAsset(match.itemId, match.file.file, dirInfo.folderName);
                         restored++;
                       } catch { /* skip */ }
                     }
@@ -565,7 +578,7 @@ export const useProjectStore = create<ProjectState>()(
             }
 
             if (restored > 0) {
-              console.info(`[ProjectStore] Auto-restored ${restored} asset(s) from file handles`);
+              console.info(`[ProjectStore] Auto-restored ${restored} asset(s) from saved folder/handles`);
             }
           })();
         }

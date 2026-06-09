@@ -81,14 +81,30 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
   // When initialTab="templates" (embedded from Nuxt page), hide the inner header
   const isEmbedded = initialTab === "templates";
 
-  const openNewProject = useCallback((params?: Record<string, string>) => {
+  // The format / music cards are the on-ramp into the Voidspace studio,
+  // which pairs the editor with the AI chat sidebar ("chat on the side").
+  // That workspace lives at the Nuxt `/ai` route — NOT inside this
+  // standalone openreel app — so we navigate the top-level window there,
+  // carrying the chosen aspect (or music mode) as a query param the studio
+  // page reads on mount (see `/ai` aspect/mode seeding).
+  //
+  // We deliberately do NOT set `window.location.hash = "#/new"` here. This
+  // landing is served at `/studio/?forceWelcome=1`; because `forceWelcome=1`
+  // lives in the query string, the openreel `showWelcome` guard keeps this
+  // screen mounted even after the hash flips to `#/new` — the blank project
+  // gets created but is never revealed, and there's no chat beside it.
+  // Leaving the app for `/ai` both fixes that trap and is the intended
+  // studio on-ramp.
+  const openStudio = useCallback((params: Record<string, string>) => {
     const query = new URLSearchParams(params).toString();
-    window.location.hash = query ? `#/new?${query}` : "#/new";
+    const target = query ? `/ai?${query}` : "/ai";
+    // Use the top window in case we are ever rendered inside a frame;
+    // same-origin so the href assignment never throws.
+    (window.top ?? window).location.href = target;
   }, []);
 
-  // Picking a format creates a blank editor project directly. The chat
-  // composer remains available from the AI Chat button, but it is not part
-  // of the clean create-video/create-music on-ramp.
+  // Picking a format opens the studio at the chosen aspect, with the AI
+  // chat ready on the side.
   const handleStartInStudio = useCallback(
     (option: FormatOption) => {
       track(AnalyticsEvents.PROJECT_CREATED, {
@@ -96,9 +112,9 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
         aspect: option.aspect,
         source: "studio_landing",
       });
-      openNewProject({ preset: option.preset });
+      openStudio({ aspect: option.aspect });
     },
-    [openNewProject, track],
+    [openStudio, track],
   );
 
   const handleStartMusic = useCallback(() => {
@@ -107,8 +123,8 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
       aspect: "16:9",
       source: "studio_music_landing",
     });
-    openNewProject();
-  }, [openNewProject, track]);
+    openStudio({ mode: "music" });
+  }, [openStudio, track]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {

@@ -23,6 +23,8 @@ import {
   Save,
   Minimize2,
   Maximize2,
+  SlidersHorizontal,
+  MonitorPlay,
 } from "lucide-react";
 import { useProjectStore } from "../../stores/project-store";
 import { useUIStore } from "../../stores/ui-store";
@@ -91,7 +93,14 @@ export const Toolbar: React.FC = () => {
     togglePanel,
     previewCollapsed,
     togglePreviewCollapsed,
+    centerView,
+    toggleCenterView,
   } = useUIStore();
+  // The center column shows either the video player or the audio mixer.
+  // When the mixer occupies the center there is no video surface to
+  // minimise and the dock-mixer toggle would be redundant, so those two
+  // controls are hidden then. The swap button itself is always shown.
+  const showMixerCenter = centerView === "mixer";
   // Theme is driven by the parent website (studio-ai page sets
   // ?theme= and posts voidspace:theme messages). Keeping
   // useThemeStore unused here so the toolbar doesn't fight the
@@ -1033,23 +1042,48 @@ export const Toolbar: React.FC = () => {
           </TooltipContent>
         </Tooltip>
 
+        {/* Center-column swap: video player ⇄ audio mixer. Always available
+            in BOTH modes so a music project can show the video player and a
+            video project can show the mixer. Mirrors centerView in ui-store;
+            EditorInterface keeps Preview mounted-but-hidden when the mixer
+            is up, so playback never stops. */}
         <Tooltip>
           <TooltipTrigger asChild>
             <button
-              onClick={() => togglePreviewCollapsed()}
+              onClick={() => toggleCenterView()}
               className={`p-2 rounded-lg transition-colors ${
-                previewCollapsed
+                showMixerCenter
                   ? "bg-primary/20 text-primary"
                   : "hover:bg-background-elevated text-text-secondary hover:text-text-primary"
               }`}
             >
-              {previewCollapsed ? <Maximize2 size={16} /> : <Minimize2 size={16} />}
+              {showMixerCenter ? <MonitorPlay size={16} /> : <SlidersHorizontal size={16} />}
             </button>
           </TooltipTrigger>
           <TooltipContent>
-            <p>{previewCollapsed ? "Show video preview" : "Minimize video preview"}</p>
+            <p>{showMixerCenter ? "Show video player" : "Show audio mixer"}</p>
           </TooltipContent>
         </Tooltip>
+
+        {!showMixerCenter && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                onClick={() => togglePreviewCollapsed()}
+                className={`p-2 rounded-lg transition-colors ${
+                  previewCollapsed
+                    ? "bg-primary/20 text-primary"
+                    : "hover:bg-background-elevated text-text-secondary hover:text-text-primary"
+                }`}
+              >
+                {previewCollapsed ? <Maximize2 size={16} /> : <Minimize2 size={16} />}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p>{previewCollapsed ? "Show video preview" : "Minimize video preview"}</p>
+            </TooltipContent>
+          </Tooltip>
+        )}
 
         <Tooltip>
           <TooltipTrigger asChild>
@@ -1083,23 +1117,25 @@ export const Toolbar: React.FC = () => {
           </TooltipContent>
         </Tooltip>
 
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              onClick={() => togglePanel("audioMixer")}
-              className={`p-2 rounded-lg transition-colors ${
-                panels.audioMixer?.visible
-                  ? "bg-primary/20 text-primary"
-                  : "hover:bg-background-elevated text-text-secondary hover:text-text-primary"
-              }`}
-            >
-              <Music size={16} />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>
-            <p>Audio Mixer – track volume and master level</p>
-          </TooltipContent>
-        </Tooltip>
+        {!showMixerCenter && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                onClick={() => togglePanel("audioMixer")}
+                className={`p-2 rounded-lg transition-colors ${
+                  panels.audioMixer?.visible
+                    ? "bg-primary/20 text-primary"
+                    : "hover:bg-background-elevated text-text-secondary hover:text-text-primary"
+                }`}
+              >
+                <Music size={16} />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p>Audio Mixer – track volume and master level</p>
+            </TooltipContent>
+          </Tooltip>
+        )}
 
         <Tooltip>
           <TooltipTrigger asChild>

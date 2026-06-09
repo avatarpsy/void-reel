@@ -49,6 +49,15 @@ export interface MediaItem {
   /** KieAI task ID used to poll for completion */
   readonly kieaiTaskId?: string;
   /**
+   * Suno (Kie) generation lineage — stamped on audio produced by the
+   * inspector's AI audio ops. Together `sunoTaskId` + `sunoAudioId`
+   * identify the source track for Suno-native follow-ups (separate
+   * stems, WAV export, timestamped lyrics, native extend). Persisted in
+   * project JSON so the chain survives save/reload.
+   */
+  readonly sunoTaskId?: string;
+  readonly sunoAudioId?: string;
+  /**
    * Category tag used by the AssetsPanel to group items into named
    * sections — e.g. "Scene Videos", "Narrations", "Frames", "Music".
    * When unset, the panel falls back to the flat list keyed off

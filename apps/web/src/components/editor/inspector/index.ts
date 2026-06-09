@@ -48,6 +48,7 @@ export { AudioDuckingSection } from "./AudioDuckingSection";
 export { AutoCutSilenceSection } from "./AutoCutSilenceSection";
 export { MusicLibraryPanel } from "./MusicLibraryPanel";
 export { TextToSpeechPanel } from "./TextToSpeechPanel";
+export { SunoAudioPanel } from "./SunoAudioPanel";
 
 // Transitions & Keyframes
 export { ClipTransitionSection } from "./ClipTransitionSection";

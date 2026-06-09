@@ -1253,8 +1253,19 @@ export const Preview: React.FC = () => {
             pan: 0,
             effects: audioEffects,
             speed: clip.speed ?? 1,
-            // Volume rubber-band + fades → scheduled gain envelope (live).
-            automationVolume: clipData?.automation?.volume,
+            // Volume keyframes + fades → scheduled gain envelope (live).
+            // SOURCE: the NATIVE clip.keyframes rows with property "volume"
+            // (value = gain, 1 = unity) — the SAME store the Inspector's
+            // Keyframes panel and the timeline VOL overlay edit. Do NOT read
+            // a separate clip.automation.volume here; that parallel store was
+            // removed to keep timeline / inspector / agent in sync.
+            automationVolume: (clipData?.keyframes ?? [])
+              .filter((k) => k.property === "volume")
+              .map((k) => ({
+                time: k.time,
+                value: typeof k.value === "number" ? k.value : 1,
+              }))
+              .sort((a, b) => a.time - b.time),
             fadeIn: clipData?.fade?.fadeIn,
             fadeOut: clipData?.fade?.fadeOut,
           });

@@ -257,6 +257,89 @@ export async function fetchMediaBlob(
   return null;
 }
 
+// ────────────────────────────────────────────
+// sourceFile prediction (native relink hint)
+// ────────────────────────────────────────────
+
+/** Mirror "kind" → category subfolder, matching the server's layout
+ *  (Voidspace-Website server/api/studio/mirror-asset.post.ts). */
+const MIRROR_KIND_TO_FOLDER: Record<string, string> = {
+  video: "videos",
+  image: "frames",
+  narration: "narrations",
+  music: "music",
+};
+const MIRROR_KIND_TO_DEFAULT_EXT: Record<string, string> = {
+  video: ".mp4",
+  image: ".jpg",
+  narration: ".mp3",
+  music: ".mp3",
+};
+
+/** Same slug rules as the server's `safeSlug`. */
+function mirrorSlug(input: string, max: number): string {
+  return String(input || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, max);
+}
+
+function extFromUrl(url: string, kind: string): string {
+  try {
+    const path = new URL(url).pathname;
+    const slash = path.lastIndexOf("/");
+    const dot = path.lastIndexOf(".");
+    if (dot > slash && dot >= 0) return path.slice(dot).toLowerCase();
+  } catch {
+    /* not a parseable URL — fall through to default */
+  }
+  return MIRROR_KIND_TO_DEFAULT_EXT[kind] || "";
+}
+
+/**
+ * Predict the on-disk `sourceFile` hint for a Voidspace-generated asset
+ * so the editor's NATIVE handle-restore + relink path treats scene media
+ * like any user-imported file (instead of relying on URL/scene fallbacks).
+ *
+ * The name mirrors the server's save convention
+ * (`scene-<n>[-<role>]<ext>`, `bgm<ext>` for music). When the URL is the
+ * local-asset proxy form it already carries the EXACT basename the server
+ * wrote (`…/local-asset?…&filename=scene-1-primary.mp4`), so prefer that.
+ * `size` is the live blob size when available (matches the mirrored file
+ * byte-for-byte); 0 once the source URL has expired. The relink matcher's
+ * structural `scene-<n>` strategy absorbs any assetId/extension variance.
+ */
+function deriveMirrorSourceFile(
+  kind: "video" | "image" | "narration" | "music",
+  sceneNumber: number | undefined,
+  role: string | undefined,
+  url: string,
+  blob: Blob | null,
+): MediaItem["sourceFile"] {
+  let name: string | undefined;
+  // Proxy URLs embed the real on-disk basename.
+  if (/[?&]filename=/.test(url) && /local-asset/i.test(url)) {
+    try {
+      name = new URL(url, "http://_local_").searchParams.get("filename")?.toLowerCase() || undefined;
+    } catch {
+      /* ignore */
+    }
+  }
+  if (!name) {
+    const ext = extFromUrl(url, kind);
+    const sceneTag = typeof sceneNumber === "number" ? `scene-${sceneNumber}` : "scene-x";
+    const roleTag = role ? `-${mirrorSlug(role, 16)}` : "";
+    name = kind === "music" ? `bgm${ext}` : `${sceneTag}${roleTag}${ext}`;
+  }
+  return {
+    name,
+    size: blob?.size ?? 0,
+    lastModified: 0,
+    folder: MIRROR_KIND_TO_FOLDER[kind],
+  };
+}
+
 interface SceneImageData {
   id: string;
   url?: string;
@@ -1172,6 +1255,7 @@ export async function loadSceneListAsProject(
       originalUrl: resolvedUrl,
       category: "Music",
       role: "music",
+      sourceFile: deriveMirrorSourceFile("music", undefined, undefined, resolvedUrl, musicBlob),
     });
 
     if (!fallbackMusicMediaId) {
@@ -1384,6 +1468,7 @@ export async function loadSceneListAsProject(
         category: "Frames",
         sceneNumber: scene.scene_number,
         role: "first_frame",
+        sourceFile: deriveMirrorSourceFile("image", scene.scene_number, "first_frame", imageUrl, frameBlob),
       });
     }
 
@@ -1418,6 +1503,7 @@ export async function loadSceneListAsProject(
         category: "Scene Videos",
         sceneNumber: scene.scene_number,
         role: "primary",
+        sourceFile: deriveMirrorSourceFile("video", scene.scene_number, "primary", videoUrl, videoBlob),
       });
 
       // inPoint / outPoint are SOURCE-FILE coordinates (which slice of the
@@ -1469,6 +1555,9 @@ export async function loadSceneListAsProject(
         category: "Narrations",
         sceneNumber: scene.scene_number,
         role: "narration",
+        // Narration is mirrored WITHOUT a role tag (server caller passes
+        // none) → `scene-<n>.mp3`; pass role undefined to match that.
+        sourceFile: deriveMirrorSourceFile("narration", scene.scene_number, undefined, narrationUrl, narrationBlob),
       });
 
       // Bullet-proof source-clip in/out resolution.

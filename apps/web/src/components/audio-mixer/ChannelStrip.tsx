@@ -22,17 +22,18 @@ const LevelMeter: React.FC<{ level: number; peak: number }> = ({
   const levelPercent = Math.min(100, Math.max(0, level * 100));
   const peakPercent = Math.min(100, Math.max(0, peak * 100));
 
-  // Determine color based on level
+  // Level fill color — brand PINK for normal/hot, red only for true clipping
+  // (>90%). Pink keeps the mixer on-brand instead of the stock green VU look.
   const getColor = (percent: number) => {
     if (percent > 90) return "bg-red-500";
-    if (percent > 75) return "bg-yellow-500";
-    return "bg-green-500";
+    if (percent > 75) return "bg-pink-300";
+    return "bg-pink-500";
   };
 
   return (
     <div className="flex gap-0.5 h-32 w-4">
       {/* Left channel */}
-      <div className="flex-1 bg-gray-800 rounded-sm overflow-hidden relative">
+      <div className="flex-1 bg-background-elevated rounded-sm overflow-hidden relative">
         <div
           className={`absolute bottom-0 left-0 right-0 transition-all duration-75 ${getColor(
             levelPercent,
@@ -41,12 +42,12 @@ const LevelMeter: React.FC<{ level: number; peak: number }> = ({
         />
         {/* Peak indicator */}
         <div
-          className="absolute left-0 right-0 h-0.5 bg-white"
+          className="absolute left-0 right-0 h-0.5 bg-text-primary/70"
           style={{ bottom: `${peakPercent}%` }}
         />
       </div>
       {/* Right channel (mirror for stereo) */}
-      <div className="flex-1 bg-gray-800 rounded-sm overflow-hidden relative">
+      <div className="flex-1 bg-background-elevated rounded-sm overflow-hidden relative">
         <div
           className={`absolute bottom-0 left-0 right-0 transition-all duration-75 ${getColor(
             levelPercent,
@@ -54,7 +55,7 @@ const LevelMeter: React.FC<{ level: number; peak: number }> = ({
           style={{ height: `${levelPercent}%` }}
         />
         <div
-          className="absolute left-0 right-0 h-0.5 bg-white"
+          className="absolute left-0 right-0 h-0.5 bg-text-primary/70"
           style={{ bottom: `${peakPercent}%` }}
         />
       </div>
@@ -81,7 +82,7 @@ const Fader: React.FC<{
 
   return (
     <div className="flex flex-col items-center gap-1">
-      <span className="text-xs text-gray-400 font-mono w-12 text-center">
+      <span className="text-xs text-text-muted font-mono w-12 text-center">
         {formatDb(dbValue)} dB
       </span>
       <input
@@ -92,19 +93,19 @@ const Fader: React.FC<{
         value={value}
         onChange={handleChange}
         disabled={disabled}
-        className="h-24 w-2 appearance-none bg-gray-700 rounded-full cursor-pointer
+        className="h-24 w-2 appearance-none bg-background-elevated rounded-full cursor-pointer
  [writing-mode:vertical-lr] [direction:rtl]
  disabled:opacity-50 disabled:cursor-not-allowed
  [&::-webkit-slider-thumb]:appearance-none
  [&::-webkit-slider-thumb]:w-4
  [&::-webkit-slider-thumb]:h-6
- [&::-webkit-slider-thumb]:bg-gray-300
+ [&::-webkit-slider-thumb]:bg-pink-500
  [&::-webkit-slider-thumb]:rounded
  [&::-webkit-slider-thumb]:cursor-pointer
  [&::-webkit-slider-thumb]:shadow-md
  [&::-moz-range-thumb]:w-4
  [&::-moz-range-thumb]:h-6
- [&::-moz-range-thumb]:bg-gray-300
+ [&::-moz-range-thumb]:bg-pink-500
  [&::-moz-range-thumb]:rounded
  [&::-moz-range-thumb]:cursor-pointer
  [&::-moz-range-thumb]:border-0"
@@ -131,7 +132,7 @@ const PanKnob: React.FC<{
 
   return (
     <div className="flex flex-col items-center gap-1">
-      <span className="text-xs text-gray-400 font-mono">
+      <span className="text-xs text-text-muted font-mono">
         {formatPan(value)}
       </span>
       <input
@@ -142,17 +143,17 @@ const PanKnob: React.FC<{
         value={value}
         onChange={handleChange}
         disabled={disabled}
-        className="w-16 h-2 appearance-none bg-gray-700 rounded-full cursor-pointer
+        className="w-16 h-2 appearance-none bg-background-elevated rounded-full cursor-pointer
  disabled:opacity-50 disabled:cursor-not-allowed
  [&::-webkit-slider-thumb]:appearance-none
  [&::-webkit-slider-thumb]:w-3
  [&::-webkit-slider-thumb]:h-3
- [&::-webkit-slider-thumb]:bg-blue-500
+ [&::-webkit-slider-thumb]:bg-pink-400
  [&::-webkit-slider-thumb]:rounded-full
  [&::-webkit-slider-thumb]:cursor-pointer
  [&::-moz-range-thumb]:w-3
  [&::-moz-range-thumb]:h-3
- [&::-moz-range-thumb]:bg-blue-500
+ [&::-moz-range-thumb]:bg-pink-400
  [&::-moz-range-thumb]:rounded-full
  [&::-moz-range-thumb]:cursor-pointer
  [&::-moz-range-thumb]:border-0"
@@ -214,13 +215,13 @@ export const ChannelStrip: React.FC<ChannelStripProps> = ({
 
   return (
     <div
-      className={`flex flex-col items-center gap-2 p-3 bg-gray-800 rounded-lg min-w-[80px]
+      className={`flex flex-col items-center gap-2 p-3 bg-background-tertiary border border-border rounded-lg min-w-[80px]
  ${isEffectivelyMuted ? "opacity-60" : ""}`}
       data-testid={`channel-strip-${channel.trackId}`}
     >
       {/* Track name */}
       <div
-        className="text-xs text-gray-300 font-medium truncate w-full text-center"
+        className="text-xs text-text-secondary font-medium truncate w-full text-center"
         title={channel.trackName}
       >
         <span className="mr-1">{trackTypeIcon}</span>
@@ -252,8 +253,8 @@ export const ChannelStrip: React.FC<ChannelStripProps> = ({
           className={`px-2 py-1 text-xs font-bold rounded transition-colors
  ${
    channel.muted
-     ? "bg-red-600 text-white"
-     : "bg-gray-700 text-gray-400 hover:bg-gray-600"
+     ? "bg-red-500 text-white"
+     : "bg-background-elevated text-text-muted hover:bg-background-elevated/70"
  }`}
           aria-label={channel.muted ? "Unmute track" : "Mute track"}
           aria-pressed={channel.muted}
@@ -267,8 +268,8 @@ export const ChannelStrip: React.FC<ChannelStripProps> = ({
           className={`px-2 py-1 text-xs font-bold rounded transition-colors
  ${
    channel.solo
-     ? "bg-yellow-500 text-black"
-     : "bg-gray-700 text-gray-400 hover:bg-gray-600"
+     ? "bg-amber-400 text-black"
+     : "bg-background-elevated text-text-muted hover:bg-background-elevated/70"
  }`}
           aria-label={channel.solo ? "Unsolo track" : "Solo track"}
           aria-pressed={channel.solo}

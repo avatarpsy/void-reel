@@ -288,7 +288,14 @@ export function AIMusicSection() {
       )}
 
       {tracks.length > 0 && (
-        <div className="grid grid-cols-2 gap-3">
+        // Fixed-size tiles that REFLOW with panel width: auto-fill + a fixed
+        // track width keeps each album-art tile the same size and just changes
+        // how many columns fit (2 → 3 → 4 as the Assets panel widens) — instead
+        // of `grid-cols-2`, which stretched each tile as the panel grew.
+        // `minmax(0,150px)` lets a tile shrink below 150 only when the panel is
+        // narrower than one tile, so it never overflows. Inline style (not a
+        // Tailwind arbitrary class) so JIT/purge can't drop it from the bundle.
+        <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(0, 150px))" }}>
           {tracks.map((track) => (
             <AIMusicTile
               key={track.id}

@@ -16,6 +16,14 @@ export interface AudioMixerProps {
   visible?: boolean;
   /** Callback when the mixer is closed */
   onClose?: () => void;
+  /**
+   * Layout variant.
+   *  • "dock"   (default) — a fixed-height strip docked under the workspace
+   *    (the classic video-mode toggle panel). Backward compatible.
+   *  • "center" — fills the center column in place of the video preview
+   *    (music mode). Flexes to the available height; no close button.
+   */
+  variant?: "dock" | "center";
 }
 
 /**
@@ -38,19 +46,21 @@ const MasterChannel: React.FC<{
   const levelPercent = Math.min(100, Math.max(0, rmsLevel * 100));
   const peakPercent = Math.min(100, Math.max(0, peakLevel * 100));
 
+  // Master meter: brand pink, red only at true clipping (>90%). Matches the
+  // per-channel strips so the whole console reads as one on-brand surface.
   const getColor = (percent: number) => {
     if (percent > 90) return "bg-red-500";
-    if (percent > 75) return "bg-yellow-500";
-    return "bg-green-500";
+    if (percent > 75) return "bg-pink-300";
+    return "bg-pink-500";
   };
 
   return (
-    <div className="flex flex-col items-center gap-2 p-3 bg-gray-900 rounded-lg min-w-[100px] border border-gray-700">
-      <div className="text-xs text-gray-300 font-bold">MASTER</div>
+    <div className="flex flex-col items-center gap-2 p-3 bg-background-secondary rounded-lg min-w-[100px] border border-border">
+      <div className="text-xs text-text-secondary font-bold">MASTER</div>
 
       {/* Stereo level meter */}
       <div className="flex gap-1 h-32 w-6">
-        <div className="flex-1 bg-gray-800 rounded-sm overflow-hidden relative">
+        <div className="flex-1 bg-background-elevated rounded-sm overflow-hidden relative">
           <div
             className={`absolute bottom-0 left-0 right-0 transition-all duration-75 ${getColor(
               levelPercent,
@@ -58,11 +68,11 @@ const MasterChannel: React.FC<{
             style={{ height: `${levelPercent}%` }}
           />
           <div
-            className="absolute left-0 right-0 h-0.5 bg-white"
+            className="absolute left-0 right-0 h-0.5 bg-text-primary/70"
             style={{ bottom: `${peakPercent}%` }}
           />
         </div>
-        <div className="flex-1 bg-gray-800 rounded-sm overflow-hidden relative">
+        <div className="flex-1 bg-background-elevated rounded-sm overflow-hidden relative">
           <div
             className={`absolute bottom-0 left-0 right-0 transition-all duration-75 ${getColor(
               levelPercent,
@@ -70,15 +80,15 @@ const MasterChannel: React.FC<{
             style={{ height: `${levelPercent}%` }}
           />
           <div
-            className="absolute left-0 right-0 h-0.5 bg-white"
+            className="absolute left-0 right-0 h-0.5 bg-text-primary/70"
             style={{ bottom: `${peakPercent}%` }}
           />
         </div>
       </div>
 
-      {/* Master fader */}
+      {/* Master fader — brighter pink so the master reads as the primary fader */}
       <div className="flex flex-col items-center gap-1">
-        <span className="text-xs text-gray-400 font-mono w-12 text-center">
+        <span className="text-xs text-text-muted font-mono w-12 text-center">
           {formatDb(dbValue)} dB
         </span>
         <input
@@ -88,18 +98,18 @@ const MasterChannel: React.FC<{
           step="0.01"
           value={volume}
           onChange={handleChange}
-          className="h-24 w-2 appearance-none bg-gray-700 rounded-full cursor-pointer
+          className="h-24 w-2 appearance-none bg-background-elevated rounded-full cursor-pointer
  [writing-mode:vertical-lr] [direction:rtl]
  [&::-webkit-slider-thumb]:appearance-none
  [&::-webkit-slider-thumb]:w-4
  [&::-webkit-slider-thumb]:h-6
- [&::-webkit-slider-thumb]:bg-orange-500
+ [&::-webkit-slider-thumb]:bg-pink-600
  [&::-webkit-slider-thumb]:rounded
  [&::-webkit-slider-thumb]:cursor-pointer
  [&::-webkit-slider-thumb]:shadow-md
  [&::-moz-range-thumb]:w-4
  [&::-moz-range-thumb]:h-6
- [&::-moz-range-thumb]:bg-orange-500
+ [&::-moz-range-thumb]:bg-pink-600
  [&::-moz-range-thumb]:rounded
  [&::-moz-range-thumb]:cursor-pointer
  [&::-moz-range-thumb]:border-0"
@@ -119,7 +129,9 @@ const MasterChannel: React.FC<{
 export const AudioMixer: React.FC<AudioMixerProps> = ({
   visible = true,
   onClose,
+  variant = "dock",
 }) => {
+  const isCenter = variant === "center";
   const project = useProjectStore((state) => state.project);
   const muteTrack = useProjectStore((state) => state.muteTrack);
   const soloTrack = useProjectStore((state) => state.soloTrack);
@@ -297,18 +309,29 @@ export const AudioMixer: React.FC<AudioMixerProps> = ({
 
   return (
     <div
-      className="bg-gray-900 border-t border-gray-700 p-4"
+      className={
+        isCenter
+          ? "flex-1 min-w-0 flex flex-col bg-background-secondary border-l border-r border-border p-4 overflow-hidden"
+          : "bg-gray-900 border-t border-gray-700 p-4"
+      }
       data-testid="audio-mixer"
       role="region"
       aria-label="Audio Mixing Console"
     >
       {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="text-lg font-semibold text-white">Audio Mixer</h2>
+      <div className="flex items-center justify-between mb-4 shrink-0">
+        <div className="flex items-center gap-2">
+          <h2 className="text-lg font-semibold text-text-primary">Audio Mixer</h2>
+          {isCenter && (
+            <span className="text-[11px] uppercase tracking-wider text-pink-400 font-medium">
+              Music mode
+            </span>
+          )}
+        </div>
         {onClose && (
           <button
             onClick={onClose}
-            className="text-gray-400 hover:text-white transition-colors"
+            className="text-text-muted hover:text-text-primary transition-colors"
             aria-label="Close mixer"
           >
             ✕
@@ -317,7 +340,11 @@ export const AudioMixer: React.FC<AudioMixerProps> = ({
       </div>
 
       {/* Channel strips container */}
-      <div className="flex gap-2 overflow-x-auto pb-2">
+      <div
+        className={`flex gap-2 overflow-x-auto pb-2 ${
+          isCenter ? "flex-1 items-start content-start overflow-y-auto" : ""
+        }`}
+      >
         {/* Track channel strips (Requirement 20.1) */}
         {channels.length > 0 ? (
           channels.map((channel) => (
@@ -332,7 +359,7 @@ export const AudioMixer: React.FC<AudioMixerProps> = ({
             />
           ))
         ) : (
-          <div className="text-gray-500 text-sm py-8 px-4">
+          <div className="text-text-muted text-sm py-8 px-4">
             No audio tracks in timeline. Add audio or video tracks to see
             channel strips.
           </div>
@@ -340,7 +367,7 @@ export const AudioMixer: React.FC<AudioMixerProps> = ({
 
         {/* Separator */}
         {channels.length > 0 && (
-          <div className="w-px bg-gray-700 mx-2 self-stretch" />
+          <div className="w-px bg-border mx-2 self-stretch" />
         )}
 
         {/* Master channel */}
@@ -353,11 +380,11 @@ export const AudioMixer: React.FC<AudioMixerProps> = ({
       </div>
 
       {/* Status bar */}
-      <div className="mt-3 pt-3 border-t border-gray-800 flex items-center justify-between text-xs text-gray-500">
+      <div className="mt-3 pt-3 border-t border-border flex items-center justify-between text-xs text-text-muted shrink-0">
         <span>
           {channels.length} channel{channels.length !== 1 ? "s" : ""}
           {hasSoloedTracks && (
-            <span className="ml-2 text-yellow-500">• Solo active</span>
+            <span className="ml-2 text-amber-400">• Solo active</span>
           )}
         </span>
         <span>

@@ -23,6 +23,7 @@ import {
   Grid2x2,
   List,
   Sparkles,
+  Link2,
 } from "lucide-react";
 import {
   BACKGROUND_PRESETS,
@@ -40,6 +41,7 @@ import { AIGenTab } from "./AIGenTab";
 import { AIMusicSection } from "./AIMusicSection";
 import { toast } from "../../stores/notification-store";
 import { saveFileHandle, saveDirectoryHandle } from "../../services/media-storage";
+import { collectFolder, buildRelinkPlan, type RelinkableItem } from "../../services/media-relink";
 import {
   IconButton,
   Input,
@@ -47,6 +49,7 @@ import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
+  ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@openreel/ui";
 import { KieAIImageDialog } from "./kieai/KieAIImageDialog";
@@ -78,6 +81,8 @@ const MediaThumbnail: React.FC<{
   onAddToTimeline: () => void;
   onKieAI?: () => void;
   onRetryKieAI?: () => void;
+  onRelinkItem: () => void;
+  onRelinkAll?: () => void;
 }> = ({
   item,
   isSelected,
@@ -89,6 +94,8 @@ const MediaThumbnail: React.FC<{
   onAddToTimeline,
   onKieAI,
   onRetryKieAI,
+  onRelinkItem,
+  onRelinkAll,
 }) => {
   const [isHovered, setIsHovered] = useState(false);
 
@@ -346,6 +353,18 @@ const MediaThumbnail: React.FC<{
             <Plus size={13} className="mr-2" />
             Add to Timeline
           </ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuItem onClick={(e) => { (e as React.MouseEvent).stopPropagation?.(); onRelinkItem(); }}>
+            <Link2 size={13} className="mr-2" />
+            Relink this item…
+          </ContextMenuItem>
+          {onRelinkAll && (
+            <ContextMenuItem onClick={(e) => { (e as React.MouseEvent).stopPropagation?.(); onRelinkAll(); }}>
+              <RefreshCw size={13} className="mr-2" />
+              Relink all missing…
+            </ContextMenuItem>
+          )}
+          <ContextMenuSeparator />
           <ContextMenuItem onClick={(e) => { (e as React.MouseEvent).stopPropagation?.(); onDelete(); }} className="text-red-400 focus:text-red-400">
             <Trash2 size={13} className="mr-2" />
             Delete
@@ -497,6 +516,18 @@ const MediaThumbnail: React.FC<{
           <Plus size={13} className="mr-2" />
           Add to Timeline
         </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem onClick={() => onRelinkItem()}>
+          <Link2 size={13} className="mr-2" />
+          Relink this item…
+        </ContextMenuItem>
+        {onRelinkAll && (
+          <ContextMenuItem onClick={() => onRelinkAll()}>
+            <RefreshCw size={13} className="mr-2" />
+            Relink all missing…
+          </ContextMenuItem>
+        )}
+        <ContextMenuSeparator />
         <ContextMenuItem onClick={() => onDelete()} className="text-red-400 focus:text-red-400">
           <Trash2 size={13} className="mr-2" />
           Delete
@@ -517,7 +548,10 @@ const MediaThumbnail: React.FC<{
 // event timing.
 const ASSETS_FILE_INPUT_ID = "assets-file-input";
 
-const EmptyState: React.FC = () => (
+const EmptyState: React.FC<{ embedded: boolean; onPick: () => void }> = ({
+  embedded,
+  onPick,
+}) => (
   <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
     <div className="w-16 h-16 rounded-2xl bg-background-tertiary border border-border flex items-center justify-center mb-4 shadow-inner">
       <Upload size={24} className="text-text-muted" />
@@ -526,16 +560,25 @@ const EmptyState: React.FC = () => (
       No media imported
     </p>
     <p className="text-xs text-text-muted mb-6">
-      Drag files here or click to import
+      {embedded ? "Drag files here, or add media" : "Drag files here or click to import"}
     </p>
-    <label
-      htmlFor={ASSETS_FILE_INPUT_ID}
-      role="button"
-      tabIndex={0}
-      className="px-4 py-2 bg-background-elevated hover:bg-background-tertiary border border-border text-text-primary text-xs font-medium rounded-lg transition-all hover:border-primary/50 cursor-pointer inline-block [&_*]:pointer-events-none"
-    >
-      Import Media
-    </label>
+    {embedded ? (
+      <button
+        onClick={onPick}
+        className="px-4 py-2 bg-background-elevated hover:bg-background-tertiary border border-border text-text-primary text-xs font-medium rounded-lg transition-all hover:border-primary/50 cursor-pointer inline-block"
+      >
+        Add Media
+      </button>
+    ) : (
+      <label
+        htmlFor={ASSETS_FILE_INPUT_ID}
+        role="button"
+        tabIndex={0}
+        className="px-4 py-2 bg-background-elevated hover:bg-background-tertiary border border-border text-text-primary text-xs font-medium rounded-lg transition-all hover:border-primary/50 cursor-pointer inline-block [&_*]:pointer-events-none"
+      >
+        Import Media
+      </label>
+    )}
   </div>
 );
 
@@ -592,6 +635,48 @@ export const AssetsPanel: React.FC = () => {
 
   // UI store
   const { select, isSelected, startDrag } = useUIStore();
+  // User-resizable panel width (persisted via panels.mediaLibrary.width;
+  // the drag handle lives in EditorInterface as a flex sibling).
+  const assetsWidth = useUIStore((s) => s.panels.mediaLibrary.width ?? 320);
+  const setPanelWidth = useUIStore((s) => s.setPanelWidth);
+  // Header expand button: toggle the Assets panel between its normal width
+  // and a wide preset so the user can see more columns of media at once
+  // (complements the drag handle). 320 is the default; 560 is "expanded".
+  const EXPANDED_W = 560;
+  const DEFAULT_W = 320;
+  const toggleExpandAssets = useCallback(() => {
+    const cur = useUIStore.getState().panels.mediaLibrary.width ?? DEFAULT_W;
+    setPanelWidth("mediaLibrary", cur >= EXPANDED_W ? DEFAULT_W : EXPANDED_W);
+  }, [setPanelWidth]);
+
+  // When embedded in the Voidspace chat (the studio shell), the "+" / "Add
+  // media" affordances open the parent's rich Add-Media popup
+  // (StudioMediaPickerModal: Library / Search web / Generate with AI) via
+  // postMessage instead of the bare native file picker. Standalone (no
+  // parent) falls back to the native picker. The parent posts the chosen
+  // media back as `voidspace:add-media-from-url`, which App.tsx imports
+  // into this library. One modal, one set of gen/search/credit plumbing —
+  // no React reimplementation of the website feature.
+  const isEmbedded = useMemo(
+    () =>
+      typeof window !== "undefined" &&
+      (window.self !== window.top ||
+        new URLSearchParams(window.location.search).get("embed") === "1"),
+    [],
+  );
+  const openMediaPicker = useCallback(
+    (initialKind?: "image" | "video" | "audio") => {
+      try {
+        window.parent?.postMessage(
+          { type: "voidspace:open-media-picker", initialKind },
+          "*",
+        );
+      } catch {
+        /* no parent / cross-origin — ignore */
+      }
+    },
+    [],
+  );
 
   // Count missing assets
   const missingAssetsCount = mediaItems.filter(
@@ -742,65 +827,117 @@ export const AssetsPanel: React.FC = () => {
     [replaceMediaAsset],
   );
 
-  const handleRelinkFromFolder = useCallback(async () => {
-    if (!("showDirectoryPicker" in window)) {
-      toast.error("Folder picker not supported", "Please relink assets individually using the refresh button on each missing asset.");
-      return;
-    }
-    let dirHandle: FileSystemDirectoryHandle;
-    try {
-      dirHandle = await (window as unknown as { showDirectoryPicker: () => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker();
-    } catch {
-      return; // user cancelled
-    }
-
-    const { project } = useProjectStore.getState();
-    const placeholders = project.mediaLibrary.items.filter((item) => item.isPlaceholder);
-    if (placeholders.length === 0) return;
-
-    // Persist the directory handle for future auto-restore
-    try { await saveDirectoryHandle(project.id, dirHandle); } catch { /* best-effort */ }
-
-    // Build a name:size → {File, handle} map for reliable matching
-    const fileMap = new Map<string, { file: File; handle: FileSystemFileHandle }>();
-    const entries = (dirHandle as unknown as { entries: () => AsyncIterableIterator<[string, FileSystemHandle]> }).entries();
-    for await (const [, fh] of entries) {
-      if ((fh as FileSystemHandle).kind === "file") {
-        const fileHandle = fh as FileSystemFileHandle;
-        const file = await fileHandle.getFile();
-        fileMap.set(`${file.name.toLowerCase()}:${file.size}`, { file, handle: fileHandle });
+  // Shared relink core: point at a folder, recursively scan it, match
+  // each requested item to a real file (manifest-aware — understands the
+  // Voidspace `voidspace-projects/<id>/{videos,frames,narrations,music}`
+  // save layout), then re-import + persist handles so the link survives
+  // future reloads via the project-store auto-restore tiers.
+  const runRelink = useCallback(
+    async (itemsToRelink: MediaItem[], contextLabel: string) => {
+      if (!("showDirectoryPicker" in window)) {
+        toast.error(
+          "Folder picker not supported",
+          "Your browser doesn't support folder selection. Use the Replace (↻) button on a single asset instead.",
+        );
+        return;
       }
-    }
+      if (itemsToRelink.length === 0) return;
 
-    setIsImporting(true);
-    let linked = 0;
-    for (const item of placeholders) {
-      // Match on original source file name + size (same strategy as auto-restore)
-      const key = item.sourceFile
-        ? `${item.sourceFile.name.toLowerCase()}:${item.sourceFile.size}`
-        : null;
-      const entry = key ? fileMap.get(key) : null;
-      if (entry) {
-        setImportProgress(`Relinking ${item.name}…`);
-        try {
-          // Save individual file handle for future auto-restore
-          try { await saveFileHandle(entry.file.name, entry.file.size, entry.handle); } catch { /* best-effort */ }
-          await replaceMediaAsset(item.id, entry.file, dirHandle.name);
-          linked++;
-        } catch (err) {
-          console.error(`[AssetsPanel] Failed to relink ${item.name}:`, err);
+      let dirHandle: FileSystemDirectoryHandle;
+      try {
+        dirHandle = await (window as unknown as { showDirectoryPicker: () => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker();
+      } catch {
+        return; // user cancelled
+      }
+
+      setIsImporting(true);
+      setImportProgress(`Scanning ${dirHandle.name}…`);
+      try {
+        const { files, manifests } = await collectFolder(dirHandle);
+        if (files.length === 0) {
+          toast.error("Folder is empty", "No media files were found in the selected folder (searched subfolders too).");
+          return;
         }
-      }
-    }
-    setIsImporting(false);
-    setImportProgress("");
 
-    if (linked > 0) {
-      toast.success(`Relinked ${linked} of ${placeholders.length} asset${placeholders.length !== 1 ? "s" : ""}`);
-    } else {
-      toast.error("No matches found", "None of the files in the selected folder matched the missing assets by filename.");
-    }
-  }, [replaceMediaAsset]);
+        const { project: currentProject } = useProjectStore.getState();
+        const relinkable: RelinkableItem[] = itemsToRelink.map((item) => ({
+          id: item.id,
+          name: item.name,
+          type: item.type,
+          originalUrl: item.originalUrl,
+          category: item.category,
+          sceneNumber: item.sceneNumber,
+          role: item.role,
+          fileSize: item.metadata?.fileSize,
+          sourceFile: item.sourceFile,
+        }));
+
+        const plan = buildRelinkPlan(relinkable, files, manifests, {
+          currentProjectId: currentProject.id,
+        });
+
+        if (plan.matches.length === 0) {
+          toast.error(
+            "No matches found",
+            `None of the files in ${dirHandle.name} matched ${contextLabel}. Pick the folder Voidspace saved this project to (it usually contains a "voidspace-projects" folder).`,
+          );
+          return;
+        }
+
+        // Persist the directory handle once — auto-restore re-scans it
+        // (recursively, via the same matcher) on every future load.
+        try { await saveDirectoryHandle(currentProject.id, dirHandle); } catch { /* best-effort */ }
+
+        let linked = 0;
+        const nameById = new Map(itemsToRelink.map((i) => [i.id, i.name]));
+        for (const match of plan.matches) {
+          const label = nameById.get(match.itemId) ?? match.file.name;
+          setImportProgress(`Relinking ${label}…`);
+          try {
+            // Save the individual file handle so Tier-1 auto-restore can
+            // follow this exact file even if it later moves folders.
+            try { await saveFileHandle(match.file.file.name, match.file.size, match.file.handle); } catch { /* best-effort */ }
+            await replaceMediaAsset(match.itemId, match.file.file, dirHandle.name);
+            linked++;
+          } catch (err) {
+            console.error(`[AssetsPanel] Failed to relink ${label}:`, err);
+          }
+        }
+
+        const skipped = itemsToRelink.length - linked;
+        if (linked > 0 && skipped === 0) {
+          toast.success(`Relinked ${linked} asset${linked !== 1 ? "s" : ""}`);
+        } else if (linked > 0) {
+          toast.success(
+            `Relinked ${linked} of ${itemsToRelink.length}`,
+            `${skipped} item${skipped !== 1 ? "s" : ""} had no match in that folder.`,
+          );
+        } else {
+          toast.error("Nothing relinked", "Matches were found but couldn't be imported. Check the files aren't corrupt.");
+        }
+      } catch (err) {
+        console.error("[AssetsPanel] Relink failed:", err);
+        toast.error("Relink failed", err instanceof Error ? err.message : "Unknown error");
+      } finally {
+        setIsImporting(false);
+        setImportProgress("");
+      }
+    },
+    [replaceMediaAsset],
+  );
+
+  const handleRelinkFromFolder = useCallback(async () => {
+    const { project: currentProject } = useProjectStore.getState();
+    const placeholders = currentProject.mediaLibrary.items.filter((item) => item.isPlaceholder);
+    await runRelink(placeholders, "the missing assets");
+  }, [runRelink]);
+
+  const handleRelinkSingleItem = useCallback(
+    async (item: MediaItem) => {
+      await runRelink([item], `"${item.name}"`);
+    },
+    [runRelink],
+  );
 
   // Handle drag start for timeline placement
   const handleItemDragStart = useCallback(
@@ -929,7 +1066,8 @@ export const AssetsPanel: React.FC = () => {
   return (
     <div
       data-tour="assets"
-      className="w-80 bg-background-secondary border-r border-border flex flex-col h-full relative"
+      style={{ width: assetsWidth }}
+      className="bg-background-secondary border-r border-border flex flex-col h-full relative shrink-0"
     >
       {/* Loading overlay */}
       {isImporting && (
@@ -951,16 +1089,30 @@ export const AssetsPanel: React.FC = () => {
               descendant forces the click target to be the label itself
               → label-activation dispatches the synthetic click on the
               input → file picker opens. */}
-          <label
-            htmlFor={ASSETS_FILE_INPUT_ID}
-            title="Import media"
-            role="button"
-            tabIndex={0}
-            className="inline-flex items-center justify-center h-6 w-6 rounded-md text-text-secondary hover:text-text-primary hover:bg-background-elevated cursor-pointer transition-colors [&_*]:pointer-events-none"
-          >
-            <Plus size={14} />
-          </label>
-          <IconButton icon={Maximize2} title="Maximize panel" />
+          {isEmbedded ? (
+            <button
+              onClick={() => openMediaPicker()}
+              title="Add media — upload, search the web, or generate with AI"
+              className="inline-flex items-center justify-center h-6 w-6 rounded-md text-text-secondary hover:text-text-primary hover:bg-background-elevated cursor-pointer transition-colors"
+            >
+              <Plus size={14} />
+            </button>
+          ) : (
+            <label
+              htmlFor={ASSETS_FILE_INPUT_ID}
+              title="Import media"
+              role="button"
+              tabIndex={0}
+              className="inline-flex items-center justify-center h-6 w-6 rounded-md text-text-secondary hover:text-text-primary hover:bg-background-elevated cursor-pointer transition-colors [&_*]:pointer-events-none"
+            >
+              <Plus size={14} />
+            </label>
+          )}
+          <IconButton
+            icon={Maximize2}
+            title={assetsWidth >= EXPANDED_W ? "Shrink panel" : "Expand panel — more columns"}
+            onClick={toggleExpandAssets}
+          />
           <IconButton icon={X} title="Close panel" />
         </div>
       </div>
@@ -1142,7 +1294,7 @@ export const AssetsPanel: React.FC = () => {
         >
           <div className="px-5 pb-5">
             {filteredItems.length === 0 ? (
-              <EmptyState />
+              <EmptyState embedded={isEmbedded} onPick={() => openMediaPicker()} />
             ) : (() => {
               // Bucket items by `category` (Voidspace stamps these:
               // "Scene Videos", "Narrations", "Music"). Items without a
@@ -1191,13 +1343,27 @@ export const AssetsPanel: React.FC = () => {
                             {items.length}
                           </span>
                         </div>
-                        <div className={
-                          mediaViewMode === "list"
-                            ? "flex flex-col gap-1.5"
-                            : mediaViewMode === "small"
-                              ? "grid grid-cols-3 gap-2"
-                              : "grid grid-cols-2 gap-3"
-                        }>
+                        {/* Fixed-size cards that REFLOW with panel width.
+                            auto-fill + a fixed track width keeps each card the
+                            same size and just changes how many columns fit
+                            (2 → 3 → 4 as you widen the panel) — instead of a
+                            fixed `grid-cols-N`, which stretches each card as
+                            the panel grows. `minmax(0,Npx)` lets a card shrink
+                            below N only when the panel is narrower than one
+                            card, so it never overflows. Inline style (not a
+                            Tailwind arbitrary class) so it can never be dropped
+                            by JIT/purge in the prebuilt bundle. */}
+                        <div
+                          className={mediaViewMode === "list" ? "flex flex-col gap-1.5" : "grid"}
+                          style={
+                            mediaViewMode === "list"
+                              ? undefined
+                              : {
+                                  gap: mediaViewMode === "small" ? 8 : 12,
+                                  gridTemplateColumns: `repeat(auto-fill, minmax(0, ${mediaViewMode === "small" ? 84 : 132}px))`,
+                                }
+                          }
+                        >
                           {items.map((item) => (
                             <MediaThumbnail
                               key={item.id}
@@ -1211,6 +1377,8 @@ export const AssetsPanel: React.FC = () => {
                               onAddToTimeline={() => handleAddToTimeline(item)}
                               onKieAI={item.type === "image" && !item.isPending && !item.kieaiError ? () => handleOpenKieAI(item) : undefined}
                               onRetryKieAI={item.kieaiError && item.kieaiTaskId ? () => handleRetryKieAI(item) : undefined}
+                              onRelinkItem={() => handleRelinkSingleItem(item)}
+                              onRelinkAll={missingAssetsCount > 0 ? handleRelinkFromFolder : undefined}
                             />
                           ))}
                         </div>
@@ -1231,17 +1399,39 @@ export const AssetsPanel: React.FC = () => {
                     Visual classes preserved verbatim from the previous
                     <button> versions; semantics swap to role="button". */}
                 {mediaViewMode === "list" ? (
-                  <label
-                    htmlFor={ASSETS_FILE_INPUT_ID}
-                    role="button"
-                    tabIndex={0}
-                    className="w-full flex items-center gap-3 px-2 py-1.5 rounded-lg border-2 border-dashed border-border hover:border-text-secondary cursor-pointer transition-all group [&_*]:pointer-events-none"
+                  isEmbedded ? (
+                    <button
+                      onClick={() => openMediaPicker()}
+                      className="w-full flex items-center gap-3 px-2 py-1.5 rounded-lg border-2 border-dashed border-border hover:border-text-secondary cursor-pointer transition-all group"
+                    >
+                      <div className="w-12 h-8 rounded bg-background-tertiary flex items-center justify-center flex-shrink-0">
+                        <Plus size={14} className="text-text-muted group-hover:text-text-secondary transition-colors" />
+                      </div>
+                      <span className="text-[11px] text-text-muted group-hover:text-text-secondary transition-colors font-medium">Add media</span>
+                    </button>
+                  ) : (
+                    <label
+                      htmlFor={ASSETS_FILE_INPUT_ID}
+                      role="button"
+                      tabIndex={0}
+                      className="w-full flex items-center gap-3 px-2 py-1.5 rounded-lg border-2 border-dashed border-border hover:border-text-secondary cursor-pointer transition-all group [&_*]:pointer-events-none"
+                    >
+                      <div className="w-12 h-8 rounded bg-background-tertiary flex items-center justify-center flex-shrink-0">
+                        <Upload size={14} className="text-text-muted group-hover:text-text-secondary transition-colors" />
+                      </div>
+                      <span className="text-[11px] text-text-muted group-hover:text-text-secondary transition-colors font-medium">Add media</span>
+                    </label>
+                  )
+                ) : isEmbedded ? (
+                  <button
+                    onClick={() => openMediaPicker()}
+                    className="w-full aspect-video bg-background-tertiary rounded-lg border-2 border-dashed border-border hover:border-text-secondary relative flex items-center justify-center cursor-pointer transition-all overflow-hidden shadow-sm group"
                   >
-                    <div className="w-12 h-8 rounded bg-background-tertiary flex items-center justify-center flex-shrink-0">
-                      <Upload size={14} className="text-text-muted group-hover:text-text-secondary transition-colors" />
+                    <div className="flex flex-col items-center gap-1.5">
+                      <Plus size={mediaViewMode === "small" ? 16 : 20} className="text-text-muted group-hover:text-text-secondary transition-colors" />
+                      <span className="text-[10px] text-text-muted group-hover:text-text-secondary transition-colors">Add media</span>
                     </div>
-                    <span className="text-[11px] text-text-muted group-hover:text-text-secondary transition-colors font-medium">Add media</span>
-                  </label>
+                  </button>
                 ) : (
                   <label
                     htmlFor={ASSETS_FILE_INPUT_ID}
@@ -1299,7 +1489,7 @@ export const AssetsPanel: React.FC = () => {
                 ),
               )}
             </div>
-            <div className="grid grid-cols-4 gap-2">
+            <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(0, 64px))" }}>
               {filteredBackgrounds.map((preset) => (
                 <button
                   key={preset.id}
@@ -1330,7 +1520,7 @@ export const AssetsPanel: React.FC = () => {
             <h4 className="text-xs font-medium text-text-secondary mb-3">
               Shapes
             </h4>
-            <div className="grid grid-cols-4 gap-2">
+            <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(0, 64px))" }}>
               {[
                 {
                   type: "rectangle" as ShapeType,
@@ -1437,7 +1627,7 @@ export const AssetsPanel: React.FC = () => {
             <h4 className="text-xs font-medium text-text-secondary mb-3">
               Stickers & Emojis
             </h4>
-            <div className="grid grid-cols-4 gap-2">
+            <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(0, 64px))" }}>
               {["😀", "🎉", "❤️", "⭐", "🔥", "👍", "🎬", "🎵"].map(
                 (emoji, i) => (
                   <button
