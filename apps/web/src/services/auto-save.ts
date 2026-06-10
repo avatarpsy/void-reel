@@ -58,6 +58,13 @@ class AutoSaveManager {
 
   private pendingProject: Project | null = null;
   private isDirty: boolean = false;
+
+  /** Public read of the dirty flag — lets the unload/visibility handlers
+   *  flush a final save ONLY when there are actually unsaved edits, instead
+   *  of writing to Firestore on every tab switch. */
+  get hasUnsavedChanges(): boolean {
+    return this.isDirty;
+  }
   /**
    * Live getter for the latest project state. Captured from `start()`'s
    * argument so `markDirty()` and `saveIfDirty()` can refresh

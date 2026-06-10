@@ -899,6 +899,41 @@ function App() {
         if (typeof window !== "undefined") {
           window.addEventListener("beforeunload", unsubscribe, { once: true });
         }
+
+        // Save-on-leave. Autosave runs on a 30s interval + 2s debounce, so
+        // edits made in the last couple of seconds before the user closes
+        // the tab (or switches away on mobile) were lost remotely — they
+        // survived only in this device's IndexedDB. `visibilitychange →
+        // hidden` is the RELIABLE hook: it fires while the page is still
+        // alive (tab switch, app background), so the postMessage→parent→
+        // Firestore round-trip completes. `pagehide` is the best-effort
+        // last-gasp on actual close. We only flush when genuinely dirty so
+        // a tab switch doesn't write to Firestore needlessly.
+        if (typeof document !== "undefined") {
+          const flushOnLeave = () => {
+            try {
+              if (!autoSaveManager.hasUnsavedChanges) return;
+              const proj = useProjectStore.getState().project;
+              if (proj) void autoSaveManager.forceSave(proj);
+            } catch {
+              /* best-effort — never block unload */
+            }
+          };
+          const onVisibility = () => {
+            if (document.visibilityState === "hidden") flushOnLeave();
+          };
+          document.addEventListener("visibilitychange", onVisibility);
+          window.addEventListener("pagehide", flushOnLeave);
+          // Fold the listener teardown into the same beforeunload cleanup.
+          window.addEventListener(
+            "beforeunload",
+            () => {
+              document.removeEventListener("visibilitychange", onVisibility);
+              window.removeEventListener("pagehide", flushOnLeave);
+            },
+            { once: true },
+          );
+        }
       } catch (err) {
         console.error("[Voidspace] Failed to load scene list:", err);
         setVoidspaceError(

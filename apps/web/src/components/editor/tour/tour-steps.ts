@@ -12,17 +12,36 @@ export const TOUR_STEPS: TourStep[] = [
     id: "welcome",
     target: null,
     title: "Welcome to Voidspace Studio",
-    description: "Let's take a quick tour of the editor",
+    description:
+      "This is an AI-assisted editor — you can edit two ways: just ask the assistant, or do it yourself on the timeline. Here's a 30-second tour.",
+    position: "center",
+  },
+  {
+    // The single most important onboarding step for an agent-first product:
+    // teach that the chat assistant is the fastest way to work. It lives in
+    // the parent shell (outside this iframe), so this is a CENTERED card —
+    // we can't spotlight a cross-document element. Keep the example asks
+    // generic so the one step reads right for both video and music projects.
+    id: "agent",
+    target: null,
+    title: "Edit by chatting — your AI director",
+    description:
+      "The fastest way to work here is to just ask. Open the chat panel and tell the assistant what you want — it can script, generate, and edit the timeline for you. You can always fine-tune by hand afterwards.",
+    tips: [
+      "“Add a scene about …”  ·  “Make it shorter”",
+      "“Change the music”  ·  “Regenerate scene 2”",
+      "“Add captions and background music”",
+    ],
     position: "center",
   },
   {
     id: "assets",
     target: "[data-tour='assets']",
     title: "Assets Panel",
-    description: "Your creative toolkit. Import media, add text and graphics, and use stickers and custom SVGs.",
+    description: "Your creative toolkit. Import media, reuse past generations from the Library, and add text, graphics, music and SFX.",
     tips: [
       "Drag & drop videos, audio, images",
-      "Shapes & custom SVG imports",
+      "Library tab — reuse anything you've generated",
       "Stickers, backgrounds & overlays",
     ],
     position: "right",
@@ -64,7 +83,8 @@ export const TOUR_STEPS: TourStep[] = [
     id: "complete",
     target: null,
     title: "You're Ready!",
-    description: "Start creating! Press ? anytime for keyboard shortcuts.",
+    description:
+      "Ask the assistant in the chat panel, or edit the timeline yourself — they work hand in hand. Press ? anytime for keyboard shortcuts.",
     position: "center",
   },
 ];
