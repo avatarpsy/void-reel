@@ -287,10 +287,36 @@ export async function importResultToLibrary(
   }
   const mediaId = imported.actionId;
 
-  // Stamp Suno lineage + a friendly name on the media item. Direct
-  // setState mirrors AIMusicSection.ensureInLibrary — the store has no
-  // generic patch method and a focused write keeps this self-contained.
-  if (lineage.sunoTaskId || lineage.sunoAudioId) {
+  // Persist the KEPT take to the user's LOCAL disk (zero Firebase) so it
+  // survives a reload + Kie's ~3-day temp-URL TTL AND shows up in the
+  // cross-project Library tab under "Music". This is what makes Suno results
+  // findable in the assets browser the same way SFX is — previously the take
+  // lived ONLY in IndexedDB (vulnerable to eviction, invisible to the
+  // manifest-scanned Library). Mirrors the SFX flow in App.tsx
+  // (voidspace:add-sfx-clip): importMedia already cached the blob in IndexedDB;
+  // here we add the disk copy via save-render?kind=music and repoint originalUrl
+  // at the durable /api/studio/local-asset URL. Best-effort + non-blocking —
+  // with no outputDir / not authed the IndexedDB copy stands alone, exactly as
+  // before this change (we just skip the disk layer + URL repoint).
+  let durableUrl: string | undefined;
+  try {
+    const { saveMediaToDisk } = await import("../recording-save");
+    const saved = await saveMediaToDisk(blob, safe, ext, "music");
+    if (saved?.url) durableUrl = saved.url; // /api/studio/local-asset?...&kind=music
+  } catch (e) {
+    console.warn("[suno] disk save failed:", e);
+  }
+
+  // Stamp the friendly name, the durable originalUrl (so reloads + a buyer's
+  // re-render resolve from disk after Kie expires), a Library-friendly category
+  // (groups under "Music" in the Media tab), and Suno lineage (lights up the
+  // downstream native ops: separate / wav / lyrics / native-extend). Direct
+  // setState mirrors AIMusicSection.ensureInLibrary — the store has no generic
+  // patch method and a focused write keeps this self-contained. Always runs now
+  // (not gated on lineage) because originalUrl + category must be set even for
+  // upload-origin results (cover / add-vocals / add-instrumental) that carry no
+  // Suno taskId.
+  {
     const { project } = useProjectStore.getState();
     if (project) {
       useProjectStore.setState({
@@ -300,7 +326,14 @@ export async function importResultToLibrary(
             ...project.mediaLibrary,
             items: project.mediaLibrary.items.map((m) =>
               m.id === mediaId
-                ? { ...m, name: safe, sunoTaskId: lineage.sunoTaskId, sunoAudioId: lineage.sunoAudioId }
+                ? {
+                    ...m,
+                    name: safe,
+                    category: "Music",
+                    ...(durableUrl ? { originalUrl: durableUrl } : {}),
+                    ...(lineage.sunoTaskId ? { sunoTaskId: lineage.sunoTaskId } : {}),
+                    ...(lineage.sunoAudioId ? { sunoAudioId: lineage.sunoAudioId } : {}),
+                  }
                 : m,
             ),
           },

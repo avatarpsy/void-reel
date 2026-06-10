@@ -51,6 +51,8 @@ export interface SavedRecording {
  * Firebase). `kind` selects the save-render bucket → per-type subfolder:
  *   - "recordings" → recordings/   (raw webcam/screen/audio takes)
  *   - "sfx"        → sfx/          (generated sound-effects)
+ *   - "music"      → music/        (kept Suno AI audio: cover/extend/vocals/
+ *                                   instrumental/stems/wav — see suno/index.ts)
  * save-render.post.ts derives canvas-free files and returns a durable
  * /api/studio/local-asset serve URL that survives reload + Kie's 3-day TTL.
  * Best-effort + non-blocking: null if no open project / no outputDir / not authed.
@@ -59,7 +61,7 @@ export async function saveMediaToDisk(
   blob: Blob,
   label: string,
   ext: string,
-  kind: "recordings" | "sfx" = "recordings",
+  kind: "recordings" | "sfx" | "music" = "recordings",
 ): Promise<SavedRecording | null> {
   try {
     if (!blob || blob.size === 0) return null;
