@@ -49,10 +49,12 @@ export interface SavedRecording {
 /**
  * Persist a media blob to the user's LOCAL folder, DISK-ONLY (no GCS / no
  * Firebase). `kind` selects the save-render bucket → per-type subfolder:
- *   - "recordings" → recordings/   (raw webcam/screen/audio takes)
+ *   - "recordings" → recordings/   (raw webcam/screen takes — local-only)
  *   - "sfx"        → sfx/          (generated sound-effects)
  *   - "music"      → music/        (kept Suno AI audio: cover/extend/vocals/
  *                                   instrumental/stems/wav — see suno/index.ts)
+ *   - "narration"  → narrations/   (recorded VOICE takes — the user's mic-only
+ *                                   recording; lands in the Library under Voice)
  * save-render.post.ts derives canvas-free files and returns a durable
  * /api/studio/local-asset serve URL that survives reload + Kie's 3-day TTL.
  * Best-effort + non-blocking: null if no open project / no outputDir / not authed.
@@ -61,7 +63,7 @@ export async function saveMediaToDisk(
   blob: Blob,
   label: string,
   ext: string,
-  kind: "recordings" | "sfx" | "music" = "recordings",
+  kind: "recordings" | "sfx" | "music" | "narration" = "recordings",
 ): Promise<SavedRecording | null> {
   try {
     if (!blob || blob.size === 0) return null;

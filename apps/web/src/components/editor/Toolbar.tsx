@@ -29,7 +29,7 @@ import {
 import { useProjectStore } from "../../stores/project-store";
 import { useUIStore } from "../../stores/ui-store";
 import { autoSaveManager } from "../../services/auto-save";
-import { saveRecordingToDisk } from "../../services/recording-save";
+import { saveRecordingToDisk, saveMediaToDisk } from "../../services/recording-save";
 import {
   getExportEngine,
   getDeviceProfile,
@@ -859,6 +859,26 @@ export const Toolbar: React.FC = () => {
       const primaryResult = await importMedia(primaryFile);
       if (primaryResult.success) {
         importCount++;
+        // An audio-only recording IS the user's voice — file it under "Voice"
+        // in the Media tab (instead of the generic "Imported" bucket it landed
+        // in, which is why it seemed to "disappear"). The disk save below uses
+        // the `narration` kind so it ALSO shows in the cross-project Library
+        // under Voice. Webcam/screen takes keep their default category.
+        if (isAudio && primaryResult.actionId) {
+          const vid = primaryResult.actionId;
+          useProjectStore.setState((s: any) => ({
+            project: {
+              ...s.project,
+              mediaLibrary: {
+                ...s.project.mediaLibrary,
+                items: (s.project.mediaLibrary?.items ?? []).map((m: any) =>
+                  m.id === vid ? { ...m, category: "Voice", role: m.role ?? "voice" } : m,
+                ),
+              },
+              modifiedAt: Date.now(),
+            },
+          }));
+        }
       } else {
         errors.push(
           primaryResult.error?.message || `Failed to import ${primaryLabel.toLowerCase()} recording`,
@@ -907,10 +927,13 @@ export const Toolbar: React.FC = () => {
       // effort and non-blocking — the in-editor copy already works without it.
       let savedToDisk = false;
       try {
-        const primarySave = await saveRecordingToDisk(
+        // Audio takes save to narrations/ (kind 'narration') so they reach the
+        // Library under Voice; webcam/screen takes stay local-only in recordings/.
+        const primarySave = await saveMediaToDisk(
           primaryFile,
           `${primaryLabel}_${timestamp}`,
           "webm",
+          isAudio ? "narration" : "recordings",
         );
         savedToDisk = !!primarySave;
         if (primarySave?.url && primaryResult.success && primaryResult.actionId) {

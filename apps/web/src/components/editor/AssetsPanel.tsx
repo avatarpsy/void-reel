@@ -1340,7 +1340,7 @@ export const AssetsPanel: React.FC = () => {
               }
               // Stable section order: Voidspace categories first, then
               // any other category alphabetically, then user imports.
-              const ORDER = ["Scene Videos", "Narrations", "Music", "Frames"];
+              const ORDER = ["Scene Videos", "Narrations", "Voice", "Music", "Frames"];
               const sectionKeys = Array.from(buckets.keys()).sort((a, b) => {
                 const ai = ORDER.indexOf(a);
                 const bi = ORDER.indexOf(b);

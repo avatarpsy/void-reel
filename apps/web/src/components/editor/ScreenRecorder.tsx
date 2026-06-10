@@ -527,7 +527,7 @@ export const ScreenRecorder: React.FC<ScreenRecorderProps> = ({
           </div>
           )}
 
-          {showWebcam && (
+          {(showWebcam || showAudioOnly) && (
             <div className="space-y-3">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2 text-sm font-medium text-text-primary">
@@ -558,8 +558,8 @@ export const ScreenRecorder: React.FC<ScreenRecorderProps> = ({
                 />
               )}
               <p className="text-[10px] text-text-muted">
-                Projects on screen while you record and auto-scrolls to your
-                speech. Drag it near your camera; adjust text size live.
+                Overlays the player while you record and auto-scrolls as you
+                speak — adjust the speed and text size live, or pause it.
               </p>
             </div>
           )}
