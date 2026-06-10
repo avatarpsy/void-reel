@@ -35,6 +35,7 @@ import { useProjectStore } from "../../stores/project-store";
 import { useUIStore } from "../../stores/ui-store";
 import type { MediaItem } from "@openreel/core";
 import { AspectRatioMatchDialog } from "./dialogs/AspectRatioMatchDialog";
+import { LibraryPanel } from "./LibraryPanel";
 // Voidspace fork: keep Voidspace media panel + add upstream's AI generation tab + Kie.ai dialog.
 import { VoidspaceMediaPanel } from "./VoidspaceMediaPanel";
 import { AIGenTab } from "./AIGenTab";
@@ -592,9 +593,9 @@ const LoadingIndicator: React.FC<{ message: string }> = ({ message }) => (
 export const AssetsPanel: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTabRaw] = useState<
-    "media" | "text" | "graphics" | "ai-music" | "voidspace" | "ai-gen"
+    "media" | "library" | "text" | "graphics" | "ai-music" | "voidspace" | "ai-gen"
   >(useUIStore.getState().appMode === "music" ? "ai-music" : "media");
-  const setActiveTab = useCallback((tab: "media" | "text" | "graphics" | "ai-music" | "voidspace" | "ai-gen") => {
+  const setActiveTab = useCallback((tab: "media" | "library" | "text" | "graphics" | "ai-music" | "voidspace" | "ai-gen") => {
     setActiveTabRaw(tab);
   }, []);
 
@@ -1137,6 +1138,19 @@ export const AssetsPanel: React.FC = () => {
         >
           Media
           {activeTab === "media" && (
+            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-t-full shadow-[0_-2px_8px_rgba(99,102,241,0.5)]" />
+          )}
+        </button>
+        <button
+          onClick={() => setActiveTab("library")}
+          className={`pb-3 transition-all relative ${
+            activeTab === "library"
+              ? "text-text-primary"
+              : "hover:text-text-secondary"
+          }`}
+        >
+          Library
+          {activeTab === "library" && (
             <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-t-full shadow-[0_-2px_8px_rgba(99,102,241,0.5)]" />
           )}
         </button>
@@ -1803,6 +1817,9 @@ export const AssetsPanel: React.FC = () => {
           </div>
         </ScrollArea>
       )}
+
+      {/* Library tab — cross-project, local-first reuse of past generations */}
+      {activeTab === "library" && <LibraryPanel />}
 
       {/* Voidspace Cloud Media Tab */}
       {activeTab === "voidspace" && <VoidspaceMediaPanel />}
