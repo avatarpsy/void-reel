@@ -46,10 +46,20 @@ export interface SavedRecording {
   localPath?: string; // absolute path on disk (for the success toast)
 }
 
-export async function saveRecordingToDisk(
+/**
+ * Persist a media blob to the user's LOCAL folder, DISK-ONLY (no GCS / no
+ * Firebase). `kind` selects the save-render bucket → per-type subfolder:
+ *   - "recordings" → recordings/   (raw webcam/screen/audio takes)
+ *   - "sfx"        → sfx/          (generated sound-effects)
+ * save-render.post.ts derives canvas-free files and returns a durable
+ * /api/studio/local-asset serve URL that survives reload + Kie's 3-day TTL.
+ * Best-effort + non-blocking: null if no open project / no outputDir / not authed.
+ */
+export async function saveMediaToDisk(
   blob: Blob,
   label: string,
   ext: string,
+  kind: "recordings" | "sfx" = "recordings",
 ): Promise<SavedRecording | null> {
   try {
     if (!blob || blob.size === 0) return null;
@@ -60,7 +70,7 @@ export async function saveRecordingToDisk(
     if (!token) return null;
 
     const qs = new URLSearchParams({
-      kind: "recordings",
+      kind,
       ext,
       outputDir: resolveOutputDir(),
       projectId,
@@ -82,4 +92,13 @@ export async function saveRecordingToDisk(
     console.warn("[recording-save] disk save failed:", e);
     return null;
   }
+}
+
+/** Back-compat wrapper — recordings are the default disk kind. */
+export async function saveRecordingToDisk(
+  blob: Blob,
+  label: string,
+  ext: string,
+): Promise<SavedRecording | null> {
+  return saveMediaToDisk(blob, label, ext, "recordings");
 }

@@ -1443,11 +1443,49 @@ function App() {
                 // Fetch the audio blob so the export-time engine can
                 // decode it; without a blob the renderer silently drops
                 // the clip (verified bug from earlier in this project).
+                // Kie temp URLs (tempfile.redpandaai.co) serve NO CORS header,
+                // so a direct cross-origin fetch from this iframe throws and
+                // we'd never get the bytes to persist. Route through the
+                // same-origin media-proxy (allow-lists the Kie hosts) so the
+                // fetch succeeds and we can save it to IndexedDB + disk.
                 let sfxBlob: Blob | null = null;
+                const fetchUrl = /^https?:\/\//i.test(url) && !url.startsWith(window.location.origin)
+                  ? `/api/studio/media-proxy?url=${encodeURIComponent(url)}`
+                  : url;
                 try {
-                  const r = await fetch(url);
+                  const r = await fetch(fetchUrl);
                   if (r.ok) sfxBlob = await r.blob();
                 } catch { /* network blip; clip will still mount, blob hydrates later */ }
+                // Persist the SFX so it survives reload + Kie's 3-day TTL,
+                // DISK-ONLY (zero Firebase — SFX is small and only matters for
+                // the creator + a buyer's re-render, which publish materializes
+                // from the timeline). Two local layers, mirroring how an
+                // imported file is saved (openreel native save):
+                //   1. IndexedDB blob (saveMediaBlob) — the openreel media store
+                //      keyed by mediaId; hydrateLibraryMediaBlobs restores it.
+                //   2. The user's disk folder via save-render?kind=sfx (sfx/),
+                //      and we repoint originalUrl at that durable local-asset URL
+                //      so a reload after the Kie link dies still resolves.
+                let durableUrl = url;
+                if (sfxBlob) {
+                  try {
+                    const { saveMediaBlob } = await import("./services/media-storage");
+                    await saveMediaBlob(proj.id, sfxMediaId, sfxBlob, {
+                      duration, fileSize: sfxBlob.size, sampleRate: 44100, channels: 2,
+                    } as any);
+                  } catch (e) { console.warn("[sfx] IndexedDB save failed:", e); }
+                  try {
+                    const { saveMediaToDisk } = await import("./services/recording-save");
+                    const ext = (sfxBlob.type || "").includes("wav") ? "wav" : "mp3";
+                    const saved = await saveMediaToDisk(
+                      sfxBlob,
+                      typeof label === "string" && label ? label : "sfx",
+                      ext,
+                      "sfx",
+                    );
+                    if (saved?.url) durableUrl = saved.url; // /api/studio/local-asset?...&kind=sfx
+                  } catch (e) { console.warn("[sfx] disk save failed:", e); }
+                }
                 const newItem: any = {
                   id: sfxMediaId,
                   name: typeof label === "string" && label ? label : "SFX",
@@ -1457,7 +1495,7 @@ function App() {
                   metadata: { duration, fileSize: sfxBlob?.size ?? 0, sampleRate: 44100, channels: 2 },
                   thumbnailUrl: null,
                   waveformData: null,
-                  originalUrl: url,
+                  originalUrl: durableUrl,
                   category: "SFX",
                   role: "sfx",
                 };
@@ -1472,6 +1510,31 @@ function App() {
                   },
                 }));
                 item = newItem;
+              }
+              // Ensure the dedicated SFX track exists. voidspace-loader only
+              // creates `track-sfx` when the project ALREADY had SFX clips, so
+              // the first SFX added to a fresh project would fail addClip with
+              // "Track with ID track-sfx not found" (the generated SFX would be
+              // saved but never placed). addTrack() mints a random id, so we
+              // push the fixed-id track directly, matching the loader's shape.
+              {
+                const cur = useProjectStore.getState().project;
+                const hasSfxTrack = (cur.timeline?.tracks ?? []).some((t: any) => t.id === "track-sfx");
+                if (!hasSfxTrack) {
+                  useProjectStore.setState({
+                    project: {
+                      ...cur,
+                      timeline: {
+                        ...cur.timeline,
+                        tracks: [
+                          ...(cur.timeline?.tracks ?? []),
+                          { id: "track-sfx", type: "audio", name: "SFX", clips: [], transitions: [], locked: false, hidden: false, muted: false, solo: false } as any,
+                        ],
+                      },
+                      modifiedAt: Date.now(),
+                    },
+                  });
+                }
               }
               const ar = await useProjectStore.getState().addClip("track-sfx", sfxMediaId, startTime);
               if (!ar.success) {
