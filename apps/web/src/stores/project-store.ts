@@ -659,14 +659,24 @@ export const useProjectStore = create<ProjectState>()(
               if (thumb.dataUrl) {
                 thumbUrl = thumb.dataUrl;
               } else if (thumb.canvas) {
-                // Convert canvas to dataUrl
+                // Convert canvas to a DATA url (not a blob: object URL). Object
+                // URLs are scoped to the current document and become dead the
+                // moment the page reloads — that's why a recording's thumbnail
+                // turned into a broken image in Assets after refresh. A data:
+                // URL is self-contained, serializes into project_state, and
+                // survives reloads with no re-hydration needed.
                 try {
                   if (thumb.canvas instanceof OffscreenCanvas) {
                     const blob = await thumb.canvas.convertToBlob({
                       type: "image/jpeg",
                       quality: 0.7,
                     });
-                    thumbUrl = URL.createObjectURL(blob);
+                    thumbUrl = await new Promise<string>((resolve, reject) => {
+                      const fr = new FileReader();
+                      fr.onload = () => resolve(fr.result as string);
+                      fr.onerror = () => reject(fr.error);
+                      fr.readAsDataURL(blob);
+                    });
                   } else if (thumb.canvas instanceof HTMLCanvasElement) {
                     thumbUrl = thumb.canvas.toDataURL("image/jpeg", 0.7);
                   }

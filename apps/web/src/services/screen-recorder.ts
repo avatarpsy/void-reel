@@ -10,7 +10,18 @@ export type RecordingStatus =
   | "processing"
   | "error";
 
+/**
+ * What to capture:
+ *   • 'screen' — screen only (+ optional system audio / mic).
+ *   • 'camera' — webcam only (talking head); mic is the audio source. No screen prompt.
+ *   • 'both'   — screen as the primary recording + webcam as a SEPARATE file (PIP).
+ *   • 'audio'  — microphone only (voiceover); no video, no screen prompt.
+ */
+export type RecordingMode = "screen" | "camera" | "both" | "audio";
+
 export interface RecordingOptions {
+  /** Capture mode. Defaults to 'both' when webcam.enabled, else 'screen'. */
+  mode?: RecordingMode;
   video: {
     resolution: VideoResolution;
     frameRate: FrameRate;
@@ -24,6 +35,42 @@ export interface RecordingOptions {
     enabled: boolean;
     resolution: WebcamResolution;
   };
+  /** Selected input device ids (empty/undefined = system default). */
+  audioDeviceId?: string;
+  videoDeviceId?: string;
+  /**
+   * The PROJECT's aspect ratio (width / height). When set, webcam capture is
+   * constrained to match it (e.g. a 9:16 project records portrait, 1:1 records
+   * square) so the recorded clip fills the project frame instead of being
+   * letterboxed/cropped. Undefined → capture at the resolution's native 16:9.
+   * NEVER used to mutate the project's own settings — capture only.
+   */
+  targetAspect?: number;
+}
+
+/**
+ * Resolve a webcam capture size from a quality tier + target aspect. The tier's
+ * pixel count anchors the SHORT side (480/720/1080) so quality is consistent
+ * across orientations; the long side follows the aspect ratio.
+ */
+export function webcamDimsForAspect(
+  res: WebcamResolution,
+  aspect?: number,
+): { width: number; height: number; aspect: number } {
+  const base = RESOLUTION_MAP[res];
+  const ar = aspect && aspect > 0 ? aspect : base.width / base.height;
+  const shortSide = base.height; // 480 / 720 / 1080
+  if (ar >= 1) {
+    const height = shortSide;
+    return { width: Math.round((height * ar) / 2) * 2, height, aspect: ar };
+  }
+  const width = shortSide;
+  return { width, height: Math.round((width / ar) / 2) * 2, aspect: ar };
+}
+
+export interface MediaDeviceOption {
+  deviceId: string;
+  label: string;
 }
 
 export interface RecordingState {
@@ -35,8 +82,12 @@ export interface RecordingState {
 }
 
 export interface RecordingResult {
+  /** The PRIMARY recording: screen (screen/both), webcam (camera), or audio (audio). */
   screenBlob: Blob;
+  /** The secondary webcam file — only in 'both' mode. */
   webcamBlob?: Blob;
+  /** Which mode produced this result, so consumers import it correctly. */
+  mode?: RecordingMode;
 }
 
 const RESOLUTION_MAP: Record<
@@ -83,6 +134,7 @@ export class ScreenRecorderService {
     new Map();
   private isStopping: boolean = false;
   private lastResult: RecordingResult | null = null;
+  private mode: RecordingMode = "screen";
 
   on(event: RecordingEventType, handler: RecordingEventHandler): () => void {
     if (!this.eventHandlers.has(event)) {
@@ -99,27 +151,37 @@ export class ScreenRecorderService {
   async requestPermissions(
     options: RecordingOptions,
   ): Promise<{ screenStream: MediaStream; webcamStream?: MediaStream }> {
+    const mode: RecordingMode = options.mode ?? (options.webcam.enabled ? "both" : "screen");
+    this.mode = mode;
+
+    const wantsScreen = mode === "screen" || mode === "both";
+    const wantsWebcam = mode === "camera" || mode === "both";
+    // In camera/audio modes the mic IS the audio source; in screen/both it's optional.
+    const wantsMic = options.audio.microphone || mode === "camera" || mode === "audio";
+
     const resolution = RESOLUTION_MAP[options.video.resolution];
 
-    const displayMediaOptions = {
-      video: {
-        width: { ideal: resolution.width },
-        height: { ideal: resolution.height },
-        frameRate: { ideal: options.video.frameRate },
-      },
-      audio: options.audio.systemAudio,
-    };
+    let screenStream: MediaStream | undefined;
+    if (wantsScreen) {
+      screenStream = await navigator.mediaDevices.getDisplayMedia({
+        video: {
+          width: { ideal: resolution.width },
+          height: { ideal: resolution.height },
+          frameRate: { ideal: options.video.frameRate },
+        },
+        audio: options.audio.systemAudio,
+      });
+    }
 
-    this.screenStream =
-      await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);
-
-    if (options.audio.microphone) {
+    let micStream: MediaStream | undefined;
+    if (wantsMic) {
       try {
-        this.micStream = await navigator.mediaDevices.getUserMedia({
+        micStream = await navigator.mediaDevices.getUserMedia({
           audio: {
             echoCancellation: true,
             noiseSuppression: true,
             autoGainControl: true,
+            ...(options.audioDeviceId ? { deviceId: { exact: options.audioDeviceId } } : {}),
           },
         });
       } catch {
@@ -127,20 +189,52 @@ export class ScreenRecorderService {
       }
     }
 
-    if (options.webcam.enabled) {
-      const webcamRes = RESOLUTION_MAP[options.webcam.resolution];
+    let webcamStream: MediaStream | undefined;
+    if (wantsWebcam) {
+      // Capture at the PROJECT's aspect ratio so the clip fills the frame
+      // (a 9:16 project records portrait, 1:1 square). aspectRatio:{ideal}
+      // lets the browser crop the camera's native landscape sensor to match.
+      const dims = webcamDimsForAspect(options.webcam.resolution, options.targetAspect);
       try {
-        this.webcamStream = await navigator.mediaDevices.getUserMedia({
+        webcamStream = await navigator.mediaDevices.getUserMedia({
           video: {
-            width: { ideal: webcamRes.width },
-            height: { ideal: webcamRes.height },
-            facingMode: "user",
+            width: { ideal: dims.width },
+            height: { ideal: dims.height },
+            aspectRatio: { ideal: dims.aspect },
+            // Request a steady frame rate (best-effort `ideal`, no hard `min` —
+            // a hard floor throws OverconstrainedError on cameras that can't
+            // sustain it and would break recording entirely). Without any fps
+            // hint the camera runs variable-frame-rate and plays back choppy.
+            frameRate: { ideal: options.video.frameRate },
+            ...(options.videoDeviceId
+              ? { deviceId: { exact: options.videoDeviceId } }
+              : { facingMode: "user" }),
           },
           audio: false,
         });
       } catch {
         console.warn("Webcam access denied, continuing without webcam");
       }
+    }
+
+    // Assign the PRIMARY stream (recorded into screenChunks) + optional
+    // secondary (webcam PIP, 'both' only) based on mode. The mic is folded
+    // into the primary's audio in startRecording().
+    if (mode === "screen" || mode === "both") {
+      this.screenStream = screenStream!;
+      this.webcamStream = mode === "both" ? webcamStream ?? null : null;
+      this.micStream = micStream ?? null;
+    } else if (mode === "camera") {
+      if (!webcamStream) throw new Error("Webcam access denied");
+      this.screenStream = webcamStream; // primary = webcam video
+      this.webcamStream = null;
+      this.micStream = micStream ?? null; // mic = audio
+    } else {
+      // audio-only: the mic IS the primary recording.
+      if (!micStream) throw new Error("Microphone access denied");
+      this.screenStream = micStream;
+      this.webcamStream = null;
+      this.micStream = null; // already the primary; don't double-add
     }
 
     return {
@@ -178,13 +272,23 @@ export class ScreenRecorderService {
         .forEach((track) => combinedStream.addTrack(track));
     }
 
-    const screenMimeType = this.getBestMimeType();
-    const screenBitrate = BITRATE_MAP[options.video.resolution];
+    const isAudio = this.mode === "audio";
+    const screenMimeType = this.getBestMimeType(isAudio);
+    // Camera mode's PRIMARY recording is the webcam, so bitrate-budget it to the
+    // webcam resolution (e.g. 720p → 5 Mbps), not the screen-capture resolution
+    // (1080p → 12 Mbps). Over-budgeting a small webcam stream wastes real-time
+    // encoder headroom and contributes to dropped frames / jitter.
+    const screenBitrate =
+      this.mode === "camera"
+        ? BITRATE_MAP[options.webcam.resolution]
+        : BITRATE_MAP[options.video.resolution];
 
-    this.screenRecorder = new MediaRecorder(combinedStream, {
-      mimeType: screenMimeType,
-      videoBitsPerSecond: screenBitrate,
-    });
+    this.screenRecorder = new MediaRecorder(
+      combinedStream,
+      isAudio
+        ? { mimeType: screenMimeType, audioBitsPerSecond: 128000 }
+        : { mimeType: screenMimeType, videoBitsPerSecond: screenBitrate },
+    );
 
     this.screenRecorder.ondataavailable = (e) => {
       if (e.data.size > 0) {
@@ -196,11 +300,19 @@ export class ScreenRecorderService {
       this.emit("error", e);
     };
 
-    this.screenStream.getVideoTracks()[0].onended = () => {
-      this.stopRecording();
-    };
+    // When the user ends screen-share from the browser chrome, stop. Audio-only
+    // and camera-only have no screen-share track to listen on.
+    const primaryVideoTrack = this.screenStream.getVideoTracks()[0];
+    if (primaryVideoTrack) {
+      primaryVideoTrack.onended = () => {
+        this.stopRecording();
+      };
+    }
 
-    if (this.webcamStream && options.webcam.enabled) {
+    // Secondary webcam recorder — only set in 'both' mode (camera mode puts the
+    // webcam in the primary stream). Gate on the stream itself, not on the
+    // legacy webcam.enabled flag, since `mode` now drives capture.
+    if (this.webcamStream) {
       const webcamMimeType = this.getBestMimeType();
       const webcamBitrate = BITRATE_MAP[options.webcam.resolution];
 
@@ -282,6 +394,7 @@ export class ScreenRecorderService {
 
     const results: RecordingResult = {
       screenBlob: new Blob(),
+      mode: this.mode,
     };
 
     const stopPromises: Promise<void>[] = [];
@@ -295,7 +408,9 @@ export class ScreenRecorderService {
         ),
       );
     } else if (this.screenChunks.length > 0) {
-      results.screenBlob = new Blob(this.screenChunks, { type: "video/webm" });
+      results.screenBlob = new Blob(this.screenChunks, {
+        type: this.mode === "audio" ? "audio/webm" : "video/webm",
+      });
     }
 
     if (this.webcamRecorder && this.webcamRecorder.state !== "inactive") {
@@ -355,14 +470,22 @@ export class ScreenRecorderService {
     });
   }
 
-  private getBestMimeType(): string {
-    const types = [
-      "video/webm;codecs=vp9,opus",
-      "video/webm;codecs=vp8,opus",
-      "video/webm;codecs=h264,opus",
-      "video/webm",
-      "video/mp4",
-    ];
+  private getBestMimeType(audioOnly = false): string {
+    // For real-time capture, codec ENCODE SPEED matters far more than
+    // compression ratio. VP9 software-encodes slowly and drops frames under
+    // load → the jittery, laggy recordings users hit. Prefer hardware-friendly
+    // H.264, then the light VP8 encoder, and only fall back to VP9 last. The
+    // editor decodes all of these fine; this is purely about smooth capture.
+    const types = audioOnly
+      ? ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"]
+      : [
+          "video/webm;codecs=h264,opus", // hardware-accelerated where available
+          "video/webm;codecs=vp8,opus",  // light, fast software encode — smooth
+          "video/mp4;codecs=h264,aac",   // hardware h264 (newer Chrome)
+          "video/webm;codecs=vp9,opus",  // heavy encode — last resort
+          "video/webm",
+          "video/mp4",
+        ];
 
     for (const type of types) {
       if (MediaRecorder.isTypeSupported(type)) {
@@ -370,7 +493,7 @@ export class ScreenRecorderService {
       }
     }
 
-    return "video/webm";
+    return audioOnly ? "audio/webm" : "video/webm";
   }
 
   private cleanup(): void {
@@ -385,6 +508,31 @@ export class ScreenRecorderService {
     this.webcamRecorder = null;
     this.screenChunks = [];
     this.webcamChunks = [];
+  }
+
+  /**
+   * List available microphones + cameras. Labels are only populated once the
+   * user has granted media permission at least once (browser privacy rule),
+   * so callers that need names should acquire a stream first (e.g. the dialog
+   * preview).
+   */
+  static async listMediaDevices(): Promise<{
+    mics: MediaDeviceOption[];
+    cameras: MediaDeviceOption[];
+  }> {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const pick = (kind: MediaDeviceKind) =>
+        devices
+          .filter((d) => d.kind === kind && d.deviceId)
+          .map((d, i) => ({
+            deviceId: d.deviceId,
+            label: d.label || `${kind === "audioinput" ? "Microphone" : "Camera"} ${i + 1}`,
+          }));
+      return { mics: pick("audioinput"), cameras: pick("videoinput") };
+    } catch {
+      return { mics: [], cameras: [] };
+    }
   }
 
   static isSupported(): boolean {
@@ -438,6 +586,7 @@ export function formatDuration(ms: number): string {
 }
 
 export const DEFAULT_RECORDING_OPTIONS: RecordingOptions = {
+  mode: "screen",
   video: {
     resolution: "1080p",
     frameRate: 30,

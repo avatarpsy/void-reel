@@ -1,10 +1,14 @@
 import { create } from "zustand";
 import {
   screenRecorderService,
+  ScreenRecorderService,
   DEFAULT_RECORDING_OPTIONS,
+  webcamDimsForAspect,
   type RecordingOptions,
   type RecordingStatus,
   type RecordingResult,
+  type RecordingMode,
+  type MediaDeviceOption,
 } from "../services/screen-recorder";
 
 interface RecorderState {
@@ -17,8 +21,21 @@ interface RecorderState {
   result: RecordingResult | null;
   isModalOpen: boolean;
   isControlsMinimized: boolean;
+  /** Optional teleprompter: the user's script + whether it's projected while recording. */
+  teleprompterEnabled: boolean;
+  teleprompterScript: string;
+  /** Device pickers: a live config preview + the available mics/cameras. */
+  previewStream: MediaStream | null;
+  audioDevices: MediaDeviceOption[];
+  videoDevices: MediaDeviceOption[];
 
   setOptions: (options: Partial<RecordingOptions>) => void;
+  setTeleprompter: (patch: { enabled?: boolean; script?: string }) => void;
+  setMic: (deviceId: string) => void;
+  setCamera: (deviceId: string) => void;
+  /** Acquire a live config preview for the mode (unlocks device labels). */
+  startPreview: (mode: RecordingMode) => Promise<void>;
+  stopPreview: () => void;
   setVideoOption: <K extends keyof RecordingOptions["video"]>(
     key: K,
     value: RecordingOptions["video"][K],
@@ -71,6 +88,75 @@ export const useRecorderStore = create<RecorderState>((set, get) => {
     result: null,
     isModalOpen: false,
     isControlsMinimized: false,
+    teleprompterEnabled: false,
+    teleprompterScript: "",
+    previewStream: null,
+    audioDevices: [],
+    videoDevices: [],
+
+    setTeleprompter: (patch) =>
+      set((state) => ({
+        teleprompterEnabled: patch.enabled ?? state.teleprompterEnabled,
+        teleprompterScript: patch.script ?? state.teleprompterScript,
+      })),
+
+    setMic: (deviceId) => {
+      set((s) => ({ options: { ...s.options, audioDeviceId: deviceId } }));
+      const mode = get().options.mode ?? "screen";
+      // Re-acquire the preview with the newly chosen mic so it takes effect live.
+      if (get().previewStream || mode === "camera" || mode === "both" || mode === "audio") {
+        void get().startPreview(mode);
+      }
+    },
+    setCamera: (deviceId) => {
+      set((s) => ({ options: { ...s.options, videoDeviceId: deviceId } }));
+      const mode = get().options.mode ?? "screen";
+      if (mode === "camera" || mode === "both") void get().startPreview(mode);
+    },
+
+    startPreview: async (mode) => {
+      const { options } = get();
+      get().stopPreview();
+      const wantsVideo = mode === "camera" || mode === "both";
+      const wantsAudio =
+        options.audio.microphone || mode === "camera" || mode === "both" || mode === "audio";
+      if (!wantsVideo && !wantsAudio) return;
+      try {
+        // Match the live preview to the project aspect too, so what the user
+        // frames is what gets recorded (see webcamDimsForAspect).
+        const dims = webcamDimsForAspect(options.webcam.resolution, options.targetAspect);
+        const videoConstraint: MediaTrackConstraints = {
+          width: { ideal: dims.width },
+          height: { ideal: dims.height },
+          aspectRatio: { ideal: dims.aspect },
+          frameRate: { ideal: options.video.frameRate },
+          ...(options.videoDeviceId
+            ? { deviceId: { exact: options.videoDeviceId } }
+            : { facingMode: "user" }),
+        };
+        const constraints: MediaStreamConstraints = {
+          video: wantsVideo ? videoConstraint : false,
+          audio: wantsAudio
+            ? options.audioDeviceId
+              ? { deviceId: { exact: options.audioDeviceId } }
+              : true
+            : false,
+        };
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        set({ previewStream: stream, error: null });
+        // Labels are only available once permission is granted — refresh now.
+        const { mics, cameras } = await ScreenRecorderService.listMediaDevices();
+        set({ audioDevices: mics, videoDevices: cameras });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Could not access the selected device";
+        set({ previewStream: null, error: message });
+      }
+    },
+    stopPreview: () => {
+      const { previewStream } = get();
+      previewStream?.getTracks().forEach((t) => t.stop());
+      set({ previewStream: null });
+    },
 
     setOptions: (newOptions) => {
       set((state) => ({
@@ -180,6 +266,7 @@ export const useRecorderStore = create<RecorderState>((set, get) => {
 
     cancelRecording: () => {
       screenRecorderService.cancelRecording();
+      get().stopPreview();
       set({
         status: "idle",
         duration: 0,
@@ -191,6 +278,7 @@ export const useRecorderStore = create<RecorderState>((set, get) => {
 
     reset: () => {
       screenRecorderService.cancelRecording();
+      get().stopPreview();
       set({
         status: "idle",
         duration: 0,

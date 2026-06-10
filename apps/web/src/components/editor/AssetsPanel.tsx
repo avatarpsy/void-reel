@@ -999,7 +999,15 @@ export const AssetsPanel: React.FC = () => {
         const projectWidth = currentProject.settings.width;
         const projectHeight = currentProject.settings.height;
 
-        if (videoWidth !== projectWidth || videoHeight !== projectHeight) {
+        // Only prompt to change project dimensions when the ASPECT RATIO
+        // actually differs (that's when cropping/letterboxing happens). A clip
+        // that matches the aspect at a different pixel size (e.g. a 810×1440
+        // webcam take in a 1080×1920 project — both 9:16) scales cleanly to
+        // fill the frame, so we add it silently and NEVER nudge the user to
+        // change their project's aspect ratio.
+        const videoAspect = videoWidth / videoHeight;
+        const projectAspect = projectWidth / projectHeight;
+        if (Math.abs(videoAspect - projectAspect) > 0.01) {
           setAspectRatioDialogData({ videoWidth, videoHeight, itemToAdd: item });
           setShowAspectRatioDialog(true);
           return;

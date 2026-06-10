@@ -29,6 +29,7 @@ import {
 import { useProjectStore } from "../../stores/project-store";
 import { useUIStore } from "../../stores/ui-store";
 import { autoSaveManager } from "../../services/auto-save";
+import { saveRecordingToDisk } from "../../services/recording-save";
 import {
   getExportEngine,
   getDeviceProfile,
@@ -828,11 +829,15 @@ export const Toolbar: React.FC = () => {
   );
 
   const handleRecordingComplete = useCallback(
-    async (screenBlob: Blob, webcamBlob?: Blob) => {
+    async (
+      screenBlob: Blob,
+      webcamBlob?: Blob,
+      mode?: "screen" | "camera" | "both" | "audio",
+    ) => {
       if (!screenBlob || screenBlob.size === 0) {
         toast.error(
           "Recording failed",
-          "No video data was captured. Please try again.",
+          "No data was captured. Please try again.",
         );
         return;
       }
@@ -844,18 +849,24 @@ export const Toolbar: React.FC = () => {
       let importCount = 0;
       const errors: string[] = [];
 
-      const screenFile = new File([screenBlob], `Screen_${timestamp}.webm`, {
-        type: screenBlob.type || "video/webm",
+      // The PRIMARY recording is named by what it actually is: audio-only →
+      // an audio track, camera → a webcam clip, screen/both → the screen.
+      const isAudio = mode === "audio" || (screenBlob.type || "").startsWith("audio");
+      const primaryLabel = isAudio ? "Audio" : mode === "camera" ? "Webcam" : "Screen";
+      const primaryFile = new File([screenBlob], `${primaryLabel}_${timestamp}.webm`, {
+        type: screenBlob.type || (isAudio ? "audio/webm" : "video/webm"),
       });
-      const screenResult = await importMedia(screenFile);
-      if (screenResult.success) {
+      const primaryResult = await importMedia(primaryFile);
+      if (primaryResult.success) {
         importCount++;
       } else {
         errors.push(
-          screenResult.error?.message || "Failed to import screen recording",
+          primaryResult.error?.message || `Failed to import ${primaryLabel.toLowerCase()} recording`,
         );
       }
 
+      // 'both' mode also produces a separate webcam file.
+      let webcamMediaId: string | null = null;
       if (webcamBlob && webcamBlob.size > 0) {
         const webcamFile = new File([webcamBlob], `Webcam_${timestamp}.webm`, {
           type: webcamBlob.type || "video/webm",
@@ -863,6 +874,7 @@ export const Toolbar: React.FC = () => {
         const webcamResult = await importMedia(webcamFile);
         if (webcamResult.success) {
           importCount++;
+          webcamMediaId = webcamResult.actionId ?? null;
         } else {
           errors.push(
             webcamResult.error?.message || "Failed to import webcam recording",
@@ -870,12 +882,71 @@ export const Toolbar: React.FC = () => {
         }
       }
 
+      // Tag the imported item's originalUrl with the durable local-asset
+      // serve URL so (a) the agent's timeline context carries a URL the
+      // transcribe/build-scenes tools can read from disk, and (b) the item
+      // rehydrates after IndexedDB eviction (same idiom as
+      // voidspace:add-media-from-url in App.tsx).
+      const tagOriginalUrl = (mediaId: string, url: string) => {
+        useProjectStore.setState((s: any) => ({
+          project: {
+            ...s.project,
+            mediaLibrary: {
+              ...s.project.mediaLibrary,
+              items: (s.project.mediaLibrary?.items ?? []).map((m: any) =>
+                m.id === mediaId ? { ...m, originalUrl: m.originalUrl ?? url } : m,
+              ),
+            },
+            modifiedAt: Date.now(),
+          },
+        }));
+      };
+
+      // Durability: also save the raw take(s) to the user's local folder so
+      // they persist beyond IndexedDB and the project reopens later. Best-
+      // effort and non-blocking — the in-editor copy already works without it.
+      let savedToDisk = false;
+      try {
+        const primarySave = await saveRecordingToDisk(
+          primaryFile,
+          `${primaryLabel}_${timestamp}`,
+          "webm",
+        );
+        savedToDisk = !!primarySave;
+        if (primarySave?.url && primaryResult.success && primaryResult.actionId) {
+          tagOriginalUrl(primaryResult.actionId, primarySave.url);
+        }
+        if (webcamBlob && webcamBlob.size > 0) {
+          const webcamSave = await saveRecordingToDisk(webcamBlob, `Webcam_${timestamp}`, "webm");
+          if (webcamSave?.url && webcamMediaId) {
+            tagOriginalUrl(webcamMediaId, webcamSave.url);
+          }
+        }
+      } catch {
+        /* non-fatal — recording is still usable from the asset library */
+      }
+
       if (importCount > 0) {
+        // Persist the new recording to project_state IMMEDIATELY. importMedia
+        // only mutates the in-memory project + IndexedDB blob; the library item
+        // doesn't reach the durable project_state blob (local autosave +
+        // Firestore) until the next periodic autosave. If the user reloads in
+        // that window, the item vanishes from Assets (the blob orphans in
+        // IndexedDB) — the "my recordings disappeared" bug. A forceSave here
+        // closes that window so a recording survives a reload the instant it's
+        // taken. Best-effort; the in-editor copy works regardless.
+        try {
+          await autoSaveManager.forceSave(useProjectStore.getState().project);
+        } catch (err) {
+          console.warn("[recording] forceSave after import failed:", err);
+        }
         toast.success(
           `${importCount} recording${importCount > 1 ? "s" : ""} imported!`,
-          webcamBlob && webcamBlob.size > 0
-            ? "Screen and webcam added to assets. Use the timeline to composite them."
-            : "Screen recording added to assets.",
+          savedToDisk
+            ? "Saved to your Voidspace folder and added to assets."
+            : webcamBlob && webcamBlob.size > 0
+              ? "Screen and webcam added to assets. Use the timeline to composite them."
+              : `${primaryLabel} recording added to assets.`,
         );
       } else if (errors.length > 0) {
         toast.error("Import failed", errors.join(". "));

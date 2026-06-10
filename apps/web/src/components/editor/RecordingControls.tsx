@@ -30,7 +30,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     return (
       <button
         onClick={expandControls}
-        className="fixed bottom-6 right-6 z-[200] flex items-center gap-2 px-4 py-2 bg-red-600 rounded-full shadow-2xl hover:bg-red-700 transition-all group"
+        className="fixed top-4 right-4 z-[2147483000] flex items-center gap-2 px-4 py-2 bg-red-600 rounded-full shadow-2xl hover:bg-red-700 transition-all group"
       >
         <div className="w-3 h-3 bg-white rounded-full animate-pulse" />
         <span className="text-sm font-bold text-white">
@@ -40,8 +40,12 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     );
   }
 
+  // Anchored TOP-center (not bottom): the editor runs in an embedded iframe and
+  // a bottom-anchored bar can fall below the visible viewport on tall windows /
+  // HiDPI / zoom. The top of the recording overlay is always on-screen, so the
+  // Stop control can never be lost. Max z-index keeps it above the preview.
   return (
-    <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[200]">
+    <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[2147483000]">
       <div className="flex items-center gap-4 px-6 py-4 bg-background-secondary/95 backdrop-blur-xl border border-border rounded-2xl shadow-2xl">
         <div className="flex items-center gap-3">
           <div

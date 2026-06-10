@@ -20,6 +20,7 @@ import {
   subscribeSceneListAsProject,
 } from "./services/voidspace-loader";
 import { autoSaveManager } from "./services/auto-save";
+import { loadMediaBlob, saveMediaBlob } from "./services/media-storage";
 import {
   buildLegacyVoidspaceProjectId,
   buildUserScopedVoidspaceProjectId,
@@ -261,6 +262,111 @@ function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
     newClips: newClipsCount,
     newCaptions: newTextClips.length,
   };
+}
+
+/**
+ * Re-attach blobs to media-library items after a project loads. A
+ * JSON-round-tripped project (local autosave OR the Firestore project_state
+ * blob) carries item metadata + `originalUrl` but NEVER the Blob. Library-only
+ * items (e.g. a webcam/audio RECORDING the user hasn't dropped on the timeline
+ * yet) were previously only hydrated lazily on drag — so after a reload they
+ * showed a broken thumbnail and felt "lost," and if IndexedDB had been evicted
+ * they truly were.
+ *
+ * This restores every blob-less item, in priority order:
+ *   1. IndexedDB (`loadMediaBlob` by id) — the fast local cache.
+ *   2. `originalUrl` (recordings carry the durable /api/studio/local-asset DISK
+ *      url — see Toolbar.handleRecordingComplete) fetched via the auth-stamped
+ *      fetcher, then re-cached to IndexedDB so the next reload is instant.
+ * Idempotent, best-effort, non-blocking; only fills gaps, never overwrites a
+ * live blob or a user edit.
+ */
+async function hydrateLibraryMediaBlobs(): Promise<void> {
+  try {
+    const proj = useProjectStore.getState().project;
+    const items = proj.mediaLibrary?.items ?? [];
+    const isDataUrl = (v: unknown): v is string =>
+      typeof v === "string" && v.startsWith("data:");
+    // An item needs work if its blob is gone (can't render/drag) OR — for a
+    // video/image — its thumbnail isn't a persistable data: URL (a dead blob:
+    // from the prior session or an auth-gated local-asset url shows as a broken
+    // image in Assets). We regenerate a data: thumbnail from the blob either way.
+    const needsWork = items.filter(
+      (m) =>
+        !(m.blob instanceof Blob) ||
+        (m.type !== "audio" && !isDataUrl(m.thumbnailUrl)),
+    );
+    if (needsWork.length === 0) return;
+
+    let fetchMediaBlob: ((url: string) => Promise<Blob | null>) | null = null;
+    let bridge: any = null;
+    const newBlobs = new Map<string, Blob>();
+    const freshThumbs = new Map<string, string>();
+    let blobHits = 0;
+
+    for (const item of needsWork) {
+      // 1. Ensure we have the bytes: existing blob → IndexedDB → disk originalUrl.
+      let blob: Blob | null = item.blob instanceof Blob ? item.blob : null;
+      if (!blob) {
+        try { blob = await loadMediaBlob(item.id); } catch { /* miss */ }
+      }
+      if (!blob && item.originalUrl) {
+        try {
+          if (!fetchMediaBlob) ({ fetchMediaBlob } = await import("./services/voidspace-loader"));
+          blob = await fetchMediaBlob(item.originalUrl);
+          if (blob) saveMediaBlob(proj.id, item.id, blob, item.metadata).catch(() => {});
+        } catch { /* disk unreachable */ }
+      }
+      if (!blob) continue; // truly unavailable — item still lists, just inert
+      if (!(item.blob instanceof Blob)) { newBlobs.set(item.id, blob); blobHits++; }
+
+      // 2. Regenerate a persistable data: thumbnail when the current one won't
+      //    survive (video/image only; audio renders a waveform, no frame).
+      if (item.type !== "audio" && !isDataUrl(item.thumbnailUrl)) {
+        try {
+          if (!bridge) {
+            const m = await import("./bridges");
+            bridge = m.getMediaBridge();
+            if (!bridge.isInitialized()) await m.initializeMediaBridge();
+          }
+          const thumbs = await bridge.generateThumbnailsForMedia(
+            blob,
+            item.type === "image" ? "image" : "video",
+          );
+          if (thumbs[0]?.dataUrl) freshThumbs.set(item.id, thumbs[0].dataUrl);
+        } catch { /* best-effort thumbnail */ }
+      }
+    }
+
+    if (newBlobs.size === 0 && freshThumbs.size === 0) {
+      console.log(`[Voidspace] library hydration: nothing to restore (${needsWork.length} candidates, none recoverable)`);
+      return;
+    }
+    const cur = useProjectStore.getState().project;
+    useProjectStore.setState({
+      project: {
+        ...cur,
+        mediaLibrary: {
+          ...cur.mediaLibrary,
+          items: cur.mediaLibrary.items.map((m) => {
+            const nb = newBlobs.get(m.id);
+            const nt = freshThumbs.get(m.id);
+            if (!nb && !nt) return m;
+            return {
+              ...m,
+              blob: nb && !(m.blob instanceof Blob) ? nb : m.blob,
+              thumbnailUrl: nt ?? m.thumbnailUrl,
+            };
+          }),
+        },
+      },
+    });
+    console.log(
+      `[Voidspace] library hydration: +${blobHits} blob(s), +${freshThumbs.size} data-thumbnail(s) restored from IndexedDB/disk.`,
+    );
+  } catch (e) {
+    console.warn("[Voidspace] library blob hydration failed:", e);
+  }
 }
 
 function App() {
@@ -675,6 +781,9 @@ function App() {
             navigate("editor");
             console.log(`[Voidspace] Restored local project: ${localSave.projectName}`);
             setVoidspaceLoading(false);
+            // Re-attach recording / imported-media blobs after local recovery
+            // too (autosave nulls blobs on JSON round-trip).
+            void hydrateLibraryMediaBlobs();
             // ⚠️  DO NOT return — fall through and install the live
             // Firestore subscription below in additive-only mode. The
             // chat keeps writing assets to Firestore after this iframe
@@ -750,6 +859,9 @@ function App() {
               console.log(
                 `[Voidspace] Loaded project: ${project.name} (${project.mediaLibrary.items.length} media items)`,
               );
+              // Re-attach recording / imported-media blobs (library items
+              // carry only metadata + originalUrl after a JSON round-trip).
+              void hydrateLibraryMediaBlobs();
               return;
             }
             // Subsequent live update — single path: additive merge.
@@ -766,6 +878,11 @@ function App() {
               console.log(
                 `[Voidspace tick #${tickCount}] merged: +${result.newMedia} media, ↑${result.upgraded} hydrated, +${result.newCaptions} captions, +${result.newClips} clips`,
               );
+              // New library media arrived via the live subscription (e.g. a
+              // recording whose project_state landed after the initial load)
+              // carries originalUrl but no blob. Re-attach blobs from
+              // IndexedDB/disk so it isn't a broken, contentless asset card.
+              if (result.newMedia > 0) void hydrateLibraryMediaBlobs();
             } else {
               // Quiet no-op — useful to confirm the subscription is
               // actually firing even when nothing changed.
@@ -1678,6 +1795,65 @@ function App() {
               break;
             }
             reply({ type: "voidspace:clip-removed", requestId: msg.requestId, clipId, ok: true });
+            break;
+          }
+          case "voidspace:split-clip": {
+            const { clipId, atSec } = msg as any;
+            if (!clipId || typeof atSec !== "number") {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: "clipId + atSec required" });
+              break;
+            }
+            const r = await useProjectStore.getState().splitClip(clipId, atSec);
+            if (!r.success) {
+              const e: any = r.error;
+              const errStr = e && typeof e === "object" ? `${e.code ?? "ERROR"}: ${e.message ?? "splitClip failed"}` : (typeof e === "string" ? e : "splitClip failed");
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: errStr });
+              break;
+            }
+            reply({ type: "voidspace:ack", requestId: msg.requestId, op: "split-clip", ok: true });
+            break;
+          }
+          case "voidspace:remove-range": {
+            // Cut a [startSec, endSec] TIMELINE region out of a clip and ripple
+            // the rest left: split at endSec, split the left part at startSec,
+            // then ripple-delete the middle. Clips are re-located from LIVE
+            // project state after each split, so we never depend on what
+            // splitClip returns.
+            const { clipId, startSec, endSec } = msg as any;
+            if (!clipId || typeof startSec !== "number" || typeof endSec !== "number" || endSec <= startSec) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: "clipId + startSec + endSec (endSec>startSec) required" });
+              break;
+            }
+            const trackOf = (cid: string) =>
+              useProjectStore.getState().project.timeline.tracks.find((t: any) => t.clips.some((c: any) => c.id === cid));
+            const track0 = trackOf(clipId);
+            if (!track0) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: "clip not found" });
+              break;
+            }
+            const trackId = (track0 as any).id;
+            const liveClips = () =>
+              (useProjectStore.getState().project.timeline.tracks.find((t: any) => t.id === trackId)?.clips ?? []) as any[];
+            try {
+              // 1. split at endSec (only when endSec falls strictly inside a clip)
+              const cEnd = liveClips().find((c) => c.startTime < endSec - 0.01 && c.startTime + c.duration > endSec + 0.01);
+              if (cEnd) await useProjectStore.getState().splitClip(cEnd.id, endSec);
+              // 2. split at startSec
+              const cStart = liveClips().find((c) => c.startTime < startSec - 0.01 && c.startTime + c.duration > startSec + 0.01);
+              if (cStart) await useProjectStore.getState().splitClip(cStart.id, startSec);
+              // 3. ripple-delete the middle [startSec, endSec)
+              const mid = liveClips().find(
+                (c) => Math.abs(c.startTime - startSec) < 0.1 && Math.abs(c.startTime + c.duration - endSec) < 0.15,
+              );
+              if (!mid) {
+                reply({ type: "voidspace:error", requestId: msg.requestId, error: "could not isolate the range to remove" });
+                break;
+              }
+              await useProjectStore.getState().rippleDeleteClip(mid.id);
+              reply({ type: "voidspace:ack", requestId: msg.requestId, op: "remove-range", ok: true });
+            } catch (err: any) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: err?.message ?? "remove-range failed" });
+            }
             break;
           }
           case "voidspace:move-clip": {

@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import type { PreviewQuality } from "../../stores/timeline-store";
 import { useProjectStore } from "../../stores/project-store";
+import { InlineRecordingPreview } from "./InlineRecordingPreview";
 import { useTimelineStore } from "../../stores/timeline-store";
 import { useUIStore } from "../../stores/ui-store";
 import { useThemeStore } from "../../stores/theme-store";
@@ -5079,6 +5080,11 @@ export const Preview: React.FC = () => {
               cursor: hoveredGraphicClipId && !isPlaying ? "pointer" : "default",
             }}
           />
+
+          {/* Live recording preview — webcam shown INSIDE the player window
+              (framed to the project aspect) while recording, so the user sees
+              exactly what the take will look like on the timeline. */}
+          <InlineRecordingPreview />
 
           {/* Processing Overlay */}
           <ProcessingOverlay />
