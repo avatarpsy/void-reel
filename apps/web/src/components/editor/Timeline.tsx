@@ -29,6 +29,7 @@ import {
 import { useProjectStore } from "../../stores/project-store";
 import { useTimelineStore } from "../../stores/timeline-store";
 import { useUIStore } from "../../stores/ui-store";
+import { resolveDroppedMediaId } from "../../services/library-drop";
 import { toast } from "../../stores/notification-store";
 import { useEngineStore } from "../../stores/engine-store";
 import { getPlaybackBridge } from "../../bridges/playback-bridge";
@@ -1105,13 +1106,15 @@ export const Timeline: React.FC = () => {
                 return;
               }
 
-              // Internal drag from assets panel
+              // Internal drag from the assets panel OR the Library tab. Read
+              // the payload SYNCHRONOUSLY (dataTransfer is cleared after the
+              // event), then resolve it — a native item returns its mediaId
+              // immediately; a Library item is imported here (async) first.
               try {
                 const rawData = e.dataTransfer.getData("application/json");
                 if (!rawData) return;
-                const data = JSON.parse(rawData);
-                if (!data?.mediaId) return;
-                handleDropMedia("", data.mediaId, snappedTime);
+                const mediaId = await resolveDroppedMediaId(rawData);
+                if (mediaId) handleDropMedia("", mediaId, snappedTime);
               } catch {
                 // ignore
               }

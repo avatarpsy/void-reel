@@ -15,6 +15,7 @@ import { useTimelineStore } from "../../../stores/timeline-store";
 import { useUIStore } from "../../../stores/ui-store";
 import { useProjectStore } from "../../../stores/project-store";
 import { toast } from "../../../stores/notification-store";
+import { resolveDroppedMediaId } from "../../../services/library-drop";
 
 type GraphicClipUnion = ShapeClip | SVGClip | StickerClip;
 
@@ -151,40 +152,42 @@ export const TrackLane: React.FC<TrackLaneProps> = ({
         return;
       }
 
-      // Internal drag from assets panel
+      // Internal drag from the assets panel OR the Library tab. Read the
+      // payload synchronously (dataTransfer clears after the event), compute
+      // the snapped drop time, THEN resolve the mediaId — a native item
+      // returns immediately; a Library item is imported into the project here
+      // (async) and returns its new mediaId, so it drops just like a native one.
       try {
         const rawData = e.dataTransfer.getData("application/json");
         if (!rawData) return;
-
-        const data = JSON.parse(rawData);
-        if (
-          !data ||
-          typeof data !== "object" ||
-          typeof data.mediaId !== "string" ||
-          !data.mediaId.trim()
-        ) {
-          return;
-        }
-
         const rect = laneRef.current?.getBoundingClientRect();
-        if (rect) {
-          const x = e.clientX - rect.left + scrollX;
-          const rawTime = Math.max(0, x / pixelsPerSecond);
-          const snapResult = calculateSnap(
-            rawTime,
-            "",
-            allTracks,
-            playheadPosition,
-            snapSettings,
-            pixelsPerSecond,
-          );
-          onDropMedia(track.id, data.mediaId, snapResult.time);
-        }
+        if (!rect) return;
+        const x = e.clientX - rect.left + scrollX;
+        const rawTime = Math.max(0, x / pixelsPerSecond);
+        const snapResult = calculateSnap(
+          rawTime,
+          "",
+          allTracks,
+          playheadPosition,
+          snapSettings,
+          pixelsPerSecond,
+        );
+        const mediaId = await resolveDroppedMediaId(rawData);
+        if (mediaId) onDropMedia(track.id, mediaId, snapResult.time);
       } catch {
         // Silently ignore parse errors
       }
     },
-    [track.id, track.name, pixelsPerSecond, scrollX, onDropMedia],
+    [
+      track.id,
+      track.name,
+      pixelsPerSecond,
+      scrollX,
+      onDropMedia,
+      allTracks,
+      playheadPosition,
+      snapSettings,
+    ],
   );
 
   const handleResizeStart = useCallback(

@@ -229,12 +229,33 @@ export const LibraryPanel: React.FC = () => {
                 const isImage = it.type === "image";
                 const isVideo = it.type === "video";
                 return (
-                  <button
+                  <div
                     key={it.id}
-                    onClick={() => addToProject(it)}
-                    disabled={added || addingId === it.id}
-                    title={`${it.label} — click to add to this project`}
-                    className={`group relative text-left rounded-lg overflow-hidden border transition-all ${
+                    role="button"
+                    tabIndex={0}
+                    // Native media items are draggable to the timeline; Library
+                    // cards must behave identically — including ones already in
+                    // the project (the blue-tick state). We ALWAYS carry a
+                    // `libraryItem` descriptor with the RAW url (no ?t= — the
+                    // main.tsx fetch hook stamps it on drop); the timeline drop
+                    // handler dedups by originalUrl, so an already-imported asset
+                    // resolves to its existing mediaId and places instantly
+                    // (no re-import), while a new one is imported on drop. Click
+                    // still imports it into Media (disabled once added).
+                    draggable
+                    onDragStart={(e) => {
+                      e.dataTransfer.setData(
+                        "application/json",
+                        JSON.stringify({ libraryItem: { url: it.url, kind: it.kind, type: it.type, label: it.label } }),
+                      );
+                      e.dataTransfer.effectAllowed = "copy";
+                    }}
+                    onClick={() => { if (!added && addingId !== it.id) void addToProject(it); }}
+                    onKeyDown={(e) => {
+                      if ((e.key === "Enter" || e.key === " ") && !added && addingId !== it.id) { e.preventDefault(); void addToProject(it); }
+                    }}
+                    title={added ? `${it.label} — in this project · drag to add to timeline` : `${it.label} — drag to timeline or click to add`}
+                    className={`group relative text-left rounded-lg overflow-hidden border transition-all cursor-grab active:cursor-grabbing ${
                       added ? "border-primary/60" : "border-border hover:border-primary/60"
                     } bg-background-tertiary`}
                   >
@@ -261,7 +282,7 @@ export const LibraryPanel: React.FC = () => {
                       <p className="text-[11px] text-text-primary truncate">{it.label}</p>
                       <p className="text-[10px] text-text-muted">{it.type}{it.bytes ? ` · ${fmtBytes(it.bytes)}` : ""}</p>
                     </div>
-                  </button>
+                  </div>
                 );
               })}
             </div>
