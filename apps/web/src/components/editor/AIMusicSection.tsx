@@ -46,6 +46,10 @@ function trackToMediaItem(track: UserMusicTrack): MediaItem {
     waveformData: null,
     originalUrl: track.musicUrl,
     category: "AI Music",
+    // Carry Suno lineage so the inspector's native ops (separate stems /
+    // WAV / timestamped lyrics / native extend) unlock for this track.
+    ...(track.sunoTaskId ? { sunoTaskId: track.sunoTaskId } : {}),
+    ...(track.sunoAudioId ? { sunoAudioId: track.sunoAudioId } : {}),
   };
 }
 

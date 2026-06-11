@@ -30,6 +30,10 @@ export interface UserMusicTrack {
   durationMs: number;
   status?: string;
   createdAtMs?: number;
+  /** Suno lineage — present on Suno-generated tracks; enables the editor's
+   *  native ops (separate stems / WAV / timestamped lyrics / native extend). */
+  sunoTaskId?: string;
+  sunoAudioId?: string;
 }
 
 export interface UserMusicPage {
@@ -92,6 +96,14 @@ function parseSongs(
       null;
 
     const musicId = (s.music_id as string) || "";
+    // Suno lineage — tolerate the snake/camel variants the various writers
+    // (studio finalize-song, n8n processors) might use.
+    const sunoTaskId =
+      (s.suno_task_id as string) || (s.sunoTaskId as string) ||
+      (s.task_id as string) || (s.taskId as string) || undefined;
+    const sunoAudioId =
+      (s.suno_audio_id as string) || (s.sunoAudioId as string) ||
+      (s.audio_id as string) || (s.audioId as string) || undefined;
     tracks.push({
       id: musicId || `${dateDocId}#${i}`,
       title: (s.title as string)?.trim() || "Untitled track",
@@ -101,6 +113,8 @@ function parseSongs(
       durationMs: toDurationMs(s.duration),
       status,
       createdAtMs: toMs(s.created_at),
+      sunoTaskId: sunoTaskId || undefined,
+      sunoAudioId: sunoAudioId || undefined,
     });
   }
   return tracks;

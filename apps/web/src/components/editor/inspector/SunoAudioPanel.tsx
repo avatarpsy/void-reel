@@ -199,6 +199,105 @@ const RunButton: React.FC<{
 const inputCls =
   "w-full px-2 py-1.5 text-[11px] bg-background-secondary rounded-md border border-border focus:border-primary focus:outline-none";
 
+type Weight = number | "";
+
+/** A 0–1 tuning slider that can be left UNSET (empty → param omitted). */
+const WeightSlider: React.FC<{ label: string; value: Weight; onChange: (v: Weight) => void }> = ({
+  label,
+  value,
+  onChange,
+}) => (
+  <Field label={label}>
+    <div className="flex items-center gap-1.5">
+      <input
+        type="range"
+        min={0}
+        max={1}
+        step={0.05}
+        value={value === "" ? 0.65 : value}
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        className="flex-1 accent-primary h-1"
+      />
+      <span className="text-[9px] text-text-secondary w-7 text-right tabular-nums">
+        {value === "" ? "auto" : Number(value).toFixed(2)}
+      </span>
+      <button
+        onClick={() => onChange("")}
+        title="Reset to auto"
+        className="text-text-muted hover:text-text-primary shrink-0"
+      >
+        <X size={10} />
+      </button>
+    </div>
+  </Field>
+);
+
+/** Shared "Advanced (optional)" controls — negativeTags, voice, and the three
+ *  0–1 weights. Kie accepts these on cover / extend / add-vocals /
+ *  add-instrumental; values left at "auto" are omitted from the request. */
+const AdvancedFields: React.FC<{
+  negativeTags: string;
+  setNegativeTags: (v: string) => void;
+  vocalGender: "" | "m" | "f";
+  setVocalGender: (v: "" | "m" | "f") => void;
+  styleWeight: Weight;
+  setStyleWeight: (v: Weight) => void;
+  weirdness: Weight;
+  setWeirdness: (v: Weight) => void;
+  audioWeight: Weight;
+  setAudioWeight: (v: Weight) => void;
+  negativeHint?: string;
+}> = (p) => {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="rounded-md border border-border/60 bg-background-secondary/30 overflow-hidden">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center justify-between px-2 py-1.5 text-[9px] text-text-secondary hover:text-text-primary transition-colors"
+      >
+        <span>Advanced{p.negativeTags.trim() ? " · negative tags set" : " (optional)"}</span>
+        <ChevronDown size={11} className={`transition-transform ${open ? "" : "-rotate-90"}`} />
+      </button>
+      {open && (
+        <div className="px-2 pb-2 pt-0.5 space-y-2 border-t border-border/60">
+          <Field label="Avoid (negative tags)">
+            <Input
+              value={p.negativeTags}
+              onChange={(e) => p.setNegativeTags(e.target.value)}
+              placeholder={p.negativeHint ?? "styles to exclude — e.g. heavy metal, autotune"}
+              className="h-7 text-[11px] bg-background-secondary border-border"
+            />
+          </Field>
+          <Field label="Voice">
+            <div className="flex gap-1">
+              {([
+                ["", "Any"],
+                ["f", "Female"],
+                ["m", "Male"],
+              ] as const).map(([v, label]) => (
+                <button
+                  key={label}
+                  onClick={() => p.setVocalGender(v)}
+                  className={`flex-1 py-1 rounded text-[9px] transition-colors ${
+                    p.vocalGender === v
+                      ? "bg-primary text-black font-medium"
+                      : "bg-background-secondary text-text-muted hover:text-text-primary border border-border"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </Field>
+          <WeightSlider label="Style weight" value={p.styleWeight} onChange={p.setStyleWeight} />
+          <WeightSlider label="Weirdness" value={p.weirdness} onChange={p.setWeirdness} />
+          <WeightSlider label="Audio weight" value={p.audioWeight} onChange={p.setAudioWeight} />
+        </div>
+      )}
+    </div>
+  );
+};
+
 export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
   const getClip = useProjectStore((s) => s.getClip);
   const getMediaItem = useProjectStore((s) => s.getMediaItem);
@@ -247,9 +346,51 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
 
   const [vocalPrompt, setVocalPrompt] = useState("");
   const [vocalStyle, setVocalStyle] = useState("");
+  const [vocalTitle, setVocalTitle] = useState("");
   const [vocalGender, setVocalGender] = useState<"" | "m" | "f">("");
 
   const [instTags, setInstTags] = useState("");
+  const [instTitle, setInstTitle] = useState("");
+
+  const [extendStyle, setExtendStyle] = useState("");
+  const [extendTitle, setExtendTitle] = useState("");
+
+  // Shared "Advanced" tuning — applies to whichever track op is run. Kie
+  // accepts these on cover / extend / add-vocals / add-instrumental; values
+  // left unset are omitted from the request.
+  const [negativeTags, setNegativeTags] = useState("");
+  const [styleWeight, setStyleWeight] = useState<Weight>("");
+  const [weirdness, setWeirdness] = useState<Weight>("");
+  const [audioWeight, setAudioWeight] = useState<Weight>("");
+
+  /** The advanced params to spread into a track op's request. */
+  const advancedParams = useCallback(
+    (): Record<string, unknown> => ({
+      negativeTags: negativeTags.trim() || undefined,
+      vocalGender: vocalGender || undefined,
+      styleWeight: styleWeight === "" ? undefined : Number(styleWeight),
+      weirdnessConstraint: weirdness === "" ? undefined : Number(weirdness),
+      audioWeight: audioWeight === "" ? undefined : Number(audioWeight),
+    }),
+    [negativeTags, vocalGender, styleWeight, weirdness, audioWeight],
+  );
+
+  /** Shared <AdvancedFields> bound to the panel's advanced state. */
+  const renderAdvanced = (negativeHint?: string) => (
+    <AdvancedFields
+      negativeTags={negativeTags}
+      setNegativeTags={setNegativeTags}
+      vocalGender={vocalGender}
+      setVocalGender={setVocalGender}
+      styleWeight={styleWeight}
+      setStyleWeight={setStyleWeight}
+      weirdness={weirdness}
+      setWeirdness={setWeirdness}
+      audioWeight={audioWeight}
+      setAudioWeight={setAudioWeight}
+      negativeHint={negativeHint}
+    />
+  );
 
   const toggle = useCallback(
     (op: SunoOp) => setOpenOp((cur) => (cur === op ? null : op)),
@@ -386,11 +527,12 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
           instrumental: coverInstrumental,
           style: coverStyle.trim() || undefined,
           title: coverTitle.trim() || undefined,
+          ...advancedParams(),
         },
         signal,
       );
     });
-  }, [mediaItem, coverPrompt, coverStyle, coverTitle, coverInstrumental, model, runTracksOp]);
+  }, [mediaItem, coverPrompt, coverStyle, coverTitle, coverInstrumental, model, runTracksOp, advancedParams]);
 
   const handleExtend = useCallback(() => {
     if (!mediaItem) return;
@@ -400,6 +542,9 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
         model,
         prompt: extendPrompt.trim() || undefined,
         instrumental: extendInstrumental,
+        style: extendStyle.trim() || undefined,
+        title: extendTitle.trim() || undefined,
+        ...advancedParams(),
       };
       if (mediaItem.sunoTaskId && mediaItem.sunoAudioId) {
         // Native extend gives the cleanest seam — reuse Suno's own track.
@@ -408,7 +553,7 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
       const uploadUrl = await uploadClipAudio(mediaItem, signal);
       return extendClipUpload(uploadUrl, params, signal);
     });
-  }, [mediaItem, extendAt, extendPrompt, extendInstrumental, model, runTracksOp]);
+  }, [mediaItem, extendAt, extendPrompt, extendInstrumental, extendStyle, extendTitle, model, runTracksOp, advancedParams]);
 
   const handleAddVocals = useCallback(() => {
     if (!mediaItem) return;
@@ -424,12 +569,13 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
           prompt: vocalPrompt.trim(),
           model,
           style: vocalStyle.trim() || undefined,
-          vocalGender: vocalGender || undefined,
+          title: vocalTitle.trim() || undefined,
+          ...advancedParams(),
         },
         signal,
       );
     });
-  }, [mediaItem, vocalPrompt, vocalStyle, vocalGender, model, runTracksOp]);
+  }, [mediaItem, vocalPrompt, vocalStyle, vocalTitle, model, runTracksOp, advancedParams]);
 
   const handleAddInstrumental = useCallback(() => {
     if (!mediaItem) return;
@@ -441,11 +587,16 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
       const uploadUrl = await uploadClipAudio(mediaItem, signal);
       return addInstrumentalToClip(
         uploadUrl,
-        { tags: instTags.trim(), model },
+        {
+          tags: instTags.trim(),
+          model,
+          title: instTitle.trim() || undefined,
+          ...advancedParams(),
+        },
         signal,
       );
     });
-  }, [mediaItem, instTags, model, runTracksOp]);
+  }, [mediaItem, instTags, instTitle, model, runTracksOp, advancedParams]);
 
   const handleSeparate = useCallback(async () => {
     if (!mediaItem?.sunoTaskId || !mediaItem?.sunoAudioId || busy) return;
@@ -762,6 +913,7 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
           <span className="text-[9px] text-text-secondary">Instrumental</span>
           <Switch checked={coverInstrumental} onCheckedChange={setCoverInstrumental} />
         </label>
+        {renderAdvanced()}
         <RunButton busy={busy === "cover"} cost={SUNO_OP_COST.cover} label="Generate cover" onClick={handleCover} />
       </OpRow>
 
@@ -793,10 +945,30 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
             className="h-7 text-[11px] bg-background-secondary border-border"
           />
         </Field>
+        <Field label="Style (optional)">
+          <div className="flex gap-1.5">
+            <Input
+              value={extendStyle}
+              onChange={(e) => setExtendStyle(e.target.value)}
+              placeholder="genre + mood (else keeps original)"
+              className="h-7 text-[11px] bg-background-secondary border-border flex-1"
+            />
+            <BoostBtn value={extendStyle} onApply={setExtendStyle} k="extend-style" />
+          </div>
+        </Field>
+        <Field label="Title (optional)">
+          <Input
+            value={extendTitle}
+            onChange={(e) => setExtendTitle(e.target.value)}
+            placeholder="track title"
+            className="h-7 text-[11px] bg-background-secondary border-border"
+          />
+        </Field>
         <label className="flex items-center justify-between">
           <span className="text-[9px] text-text-secondary">Instrumental</span>
           <Switch checked={extendInstrumental} onCheckedChange={setExtendInstrumental} />
         </label>
+        {renderAdvanced()}
         <p className="text-[8px] text-text-muted">
           {hasLineage ? "Uses Suno's native extend for a seamless join." : "Uploads this clip, then continues it."}
         </p>
@@ -832,27 +1004,15 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
             <BoostBtn value={vocalStyle} onApply={setVocalStyle} k="vocal-style" />
           </div>
         </Field>
-        <Field label="Voice">
-          <div className="flex gap-1">
-            {([
-              ["", "Any"],
-              ["f", "Female"],
-              ["m", "Male"],
-            ] as const).map(([v, label]) => (
-              <button
-                key={label}
-                onClick={() => setVocalGender(v)}
-                className={`flex-1 py-1 rounded text-[9px] transition-colors ${
-                  vocalGender === v
-                    ? "bg-primary text-black font-medium"
-                    : "bg-background-secondary text-text-muted hover:text-text-primary border border-border"
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
+        <Field label="Title (optional)">
+          <Input
+            value={vocalTitle}
+            onChange={(e) => setVocalTitle(e.target.value)}
+            placeholder="track title"
+            className="h-7 text-[11px] bg-background-secondary border-border"
+          />
         </Field>
+        {renderAdvanced("styles to exclude — e.g. rap, screaming")}
         <RunButton busy={busy === "add_vocals"} cost={SUNO_OP_COST.add_vocals} label="Add vocals" onClick={handleAddVocals} />
       </OpRow>
 
@@ -877,6 +1037,15 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
             <BoostBtn value={instTags} onApply={setInstTags} k="inst-tags" />
           </div>
         </Field>
+        <Field label="Title (optional)">
+          <Input
+            value={instTitle}
+            onChange={(e) => setInstTitle(e.target.value)}
+            placeholder="track title"
+            className="h-7 text-[11px] bg-background-secondary border-border"
+          />
+        </Field>
+        {renderAdvanced("styles to exclude — e.g. vocals, heavy metal")}
         <p className="text-[8px] text-text-muted">Backs this clip's vocals with a new instrumental.</p>
         <RunButton
           busy={busy === "add_instrumental"}
