@@ -97,6 +97,40 @@ function reloadSingleFlight(
  * Returns `{ dirty, newMedia, upgraded, newClips, newCaptions }` for
  * logging — every tick prints exactly what changed.
  */
+
+// ── Live-swap authority (URL-keyed) ─────────────────────────────────────
+//
+// When the chat replaces a clip's media live (replace-clip-media for
+// narration/video, add-bgm-clip for music), we mutate the in-memory project
+// store immediately and the editor's autosave commits the swap into the
+// Firestore project_state blob a beat later. BUT the live subscription
+// rebuilds the WHOLE project from Firestore on every scene-list write, and
+// until the durable source catches up the rebuilt ("fresh") clip still points
+// at the OLD media. applyAdditiveMerge's updatedClips logic — which exists to
+// propagate genuine Firestore-driven url changes — would then adopt that stale
+// clip and REVERT the swap the user just made (BGM snaps back to the previous
+// track; narration/video flip to the old take).
+//
+// CRITICAL — why this is keyed on the resolved media URL, NOT the mediaId:
+// the replace-clip-media RPC mints `media-audio-<hash(url)>` while the loader's
+// per-scene rebuild mints `media-narration-<docId>-<id>`. Those schemes can
+// NEVER be equal, so a mediaId-based guard silently fails the moment a rebuild
+// takes the per-scene path (stale/missing blob), and the narration reverts.
+// We instead record the URL the user swapped to and compare each rebuilt
+// clip's RESOLVED media originalUrl against it: while the authority is live we
+// suppress any rebuild that would point the clip at a DIFFERENT url; the
+// instant any durable source (blob OR the per-scene narration_url/video_url/
+// music_url field) resolves back to the chosen url, the authority retires so
+// genuine later changes flow through. A generous TTL (120s) outlives slow GCS
+// mirror uploads that would otherwise leave a late rebuild unguarded.
+const liveSwapAuthority = new Map<string, { url: string; at: number }>();
+const LIVE_SWAP_AUTHORITY_TTL_MS = 120_000;
+const normSwapUrl = (u: unknown): string => String(u || "").split(/[?#]/)[0];
+function recordLiveSwap(clipId: string, url: string): void {
+  if (!clipId || !url) return;
+  liveSwapAuthority.set(clipId, { url: normSwapUrl(url), at: Date.now() });
+}
+
 function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
   dirty: boolean;
   newMedia: number;
@@ -166,13 +200,39 @@ function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
   // (e.g. narration/video replaced on timeline after regen-approve). The
   // additive path only adds new clips — without this, the clip keeps pointing
   // at the old mediaId even though Firestore has a newer narration_url.
+  // Resolve each rebuilt clip's media URL so the live-swap guard can compare by
+  // URL (scheme-independent) — see liveSwapAuthority. The editor RPC and the
+  // loader mint DIFFERENT mediaId schemes for the same take, so only the
+  // resolved originalUrl is a reliable cross-rebuild identity.
+  const freshUrlByMediaId = new Map<string, string>();
+  for (const m of fresh.mediaLibrary?.items ?? []) {
+    if (m.id && m.originalUrl) freshUrlByMediaId.set(m.id, normSwapUrl(m.originalUrl));
+  }
   const updatedClips = new Map<string, import("@openreel/core").Clip>();
   for (const tr of fresh.timeline.tracks) {
     const adds = tr.clips.filter((c) => !knownClipIds.has(c.id));
     if (adds.length > 0) trackPatches.set(tr.id, adds);
     for (const freshClip of tr.clips) {
       const existing = currentClipById.get(freshClip.id);
-      if (existing && existing.mediaId !== freshClip.mediaId) {
+      if (!existing) continue;
+      const auth = liveSwapAuthority.get(freshClip.id);
+      const authLive = auth && (Date.now() - auth.at < LIVE_SWAP_AUTHORITY_TTL_MS);
+      const freshUrl = freshUrlByMediaId.get(freshClip.mediaId) || "";
+      // Retire the authority the moment ANY durable source (the autosaved blob
+      // OR the per-scene narration_url/video_url/music_url field) resolves this
+      // clip back to the chosen url — regardless of mediaId scheme — so genuine
+      // LATER changes propagate instead of being shadow-suppressed until TTL.
+      if (auth && freshUrl && freshUrl === auth.url) liveSwapAuthority.delete(freshClip.id);
+      if (existing.mediaId !== freshClip.mediaId) {
+        // Suppress the stale-rebuild revert: while the user's live swap is
+        // authoritative, never let a rebuild repoint this clip at media whose
+        // URL differs from the swapped-to URL (the actual symptom — narration
+        // flipping back to the old take). If the fresh URL already IS the chosen
+        // url, fall through: that's a benign mediaId-scheme reconciliation (same
+        // take, loader's media item) and the authority was just retired above.
+        if (authLive && freshUrl !== auth!.url) {
+          continue; // stale rebuild → would revert to a different take; keep swap
+        }
         updatedClips.set(freshClip.id, freshClip);
       }
     }
@@ -1692,6 +1752,11 @@ function App() {
                 }));
                 return { project: { ...s.project, timeline: { ...s.project.timeline, tracks }, modifiedAt: Date.now() } };
               });
+              // Record the authoritative swap (keyed on the swapped-to URL, not
+              // the mediaId, since a per-scene rebuild mints a different mediaId
+              // scheme for the same take) so a stale rebuild can't revert it
+              // before the durable source catches up — see liveSwapAuthority.
+              recordLiveSwap(clipId, url);
               reply({ type: "voidspace:clip-media-replaced", requestId: msg.requestId, ok: true, clipId, mediaId: newMediaId });
             } catch (err: any) {
               reply({ type: "voidspace:error", requestId: msg.requestId, error: err?.message ?? String(err) });
@@ -1801,7 +1866,32 @@ function App() {
               // handled defensively — every existing clip's media is
               // swapped to the new URL so a stale duplicate doesn't
               // keep auditioning the old track.
-              const trMusic = (useProjectStore.getState().project.timeline?.tracks ?? []).find((t: any) => t.id === "track-music");
+              // Ensure the music track EXISTS before we add to it. The loader
+              // only materialises track-music once it already has clips ("no
+              // empty tracks" — matching Flutter, voidspace-loader.ts), so a
+              // fresh video project — or ANY project whose autosaved blob
+              // predates its first BGM — has none. addClip("track-music")
+              // below would then fail with "Track not found" and the user's
+              // approved music would silently never reach the timeline (or the
+              // render). Create the canonical empty track first so the add —
+              // and every subsequent autosave/rebuild — lands.
+              let trMusic = (useProjectStore.getState().project.timeline?.tracks ?? []).find((t: any) => t.id === "track-music");
+              if (!trMusic) {
+                useProjectStore.setState((s: any) => ({
+                  project: {
+                    ...s.project,
+                    timeline: {
+                      ...s.project.timeline,
+                      tracks: [
+                        ...(s.project.timeline?.tracks ?? []),
+                        { id: "track-music", type: "audio", name: "Background Music", clips: [], transitions: [], locked: false, hidden: false, muted: false, solo: false },
+                      ],
+                    },
+                    modifiedAt: Date.now(),
+                  },
+                }));
+                trMusic = (useProjectStore.getState().project.timeline?.tracks ?? []).find((t: any) => t.id === "track-music");
+              }
               const existingClips: any[] = trMusic?.clips ?? [];
               const clampedVolume = typeof volume === "number"
                 ? Math.max(0, Math.min(4, volume))
@@ -1866,6 +1956,15 @@ function App() {
                 const refreshedTr = (useProjectStore.getState().project.timeline?.tracks ?? []).find((t: any) => t.id === "track-music");
                 resolvedClipId = (refreshedTr?.clips?.[0]?.id) ?? null;
               }
+
+              // Record the authoritative music swap (keyed on the music URL) so
+              // the chat's music_url patch (which fires a whole-project rebuild
+              // from the still-stale blob ~250ms later) can't revert the BGM
+              // clip back to the old track before the durable source catches up
+              // — see liveSwapAuthority. Guard ALL existing music clips in the
+              // defensive multi-clip case.
+              const guardedMusicTr = (useProjectStore.getState().project.timeline?.tracks ?? []).find((t: any) => t.id === "track-music");
+              for (const mc of (guardedMusicTr?.clips ?? []) as any[]) recordLiveSwap(mc.id, url);
 
               reply({ type: "voidspace:bgm-clip-added", requestId: msg.requestId, ok: true, clipId: resolvedClipId, mediaId: newMediaId });
             } catch (err: any) {
