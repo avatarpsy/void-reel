@@ -6,7 +6,6 @@ import { useEngineStore } from "../../stores/engine-store";
 import type { Transform, FitMode, Clip } from "@openreel/core";
 import {
   ChromaKeyEngine,
-  getTranscriptionService,
   initializeTranscriptionService,
   type WhisperTranscriptionProgress,
   type CaptionAnimationStyle,
@@ -48,7 +47,6 @@ import {
   AlignmentSection,
   SunoAudioPanel,
 } from "./inspector";
-import { OPENREEL_TTS_URL } from "../../config/api-endpoints";
 import {
   transcribeViaVoidspace,
   isVoidspaceTranscribeAvailable,
@@ -462,21 +460,21 @@ export const InspectorPanel: React.FC = () => {
     // credits actually debited on completion.
     let lastCharged: number | undefined;
     try {
-      // In the Voidspace deployment (signed-in user) route through Voidspace
-      // STT — ElevenLabs Scribe v1 via /api/studio/transcribe, which charges
-      // credits server-side, the SAME engine the studio uses elsewhere. Fall
-      // back to the standalone openreel transcribe service when signed out.
-      const transcriptionService = isVoidspaceTranscribeAvailable()
-        ? initializeTranscriptionService({
-            apiEndpoint: "", // unused — transcribeAudio overrides the HTTP path
-            transcribeAudio: async (blob, onProg) => {
-              const r = await transcribeViaVoidspace(blob, onProg);
-              lastCharged = r.charged;
-              return r;
-            },
-          })
-        : getTranscriptionService() ??
-          initializeTranscriptionService({ apiEndpoint: OPENREEL_TTS_URL });
+      // Auto-captions route ONLY through Voidspace STT — ElevenLabs Scribe v1
+      // via /api/studio/transcribe, which charges credits server-side (the SAME
+      // engine the studio uses elsewhere). No external/openreel transcription
+      // endpoint is ever called.
+      if (!isVoidspaceTranscribeAvailable()) {
+        throw new Error("Sign in to generate captions.");
+      }
+      const transcriptionService = initializeTranscriptionService({
+        apiEndpoint: "", // unused — transcribeAudio overrides the HTTP path
+        transcribeAudio: async (blob, onProg) => {
+          const r = await transcribeViaVoidspace(blob, onProg);
+          lastCharged = r.charged;
+          return r;
+        },
+      });
 
       const regularClip = getClip(selectedClip.id);
       if (!regularClip) {

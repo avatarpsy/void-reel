@@ -121,8 +121,11 @@ export async function synthesizeViaVoidspace(
   if (!data.audioUrl) throw new Error("Voice generation returned no audio.");
 
   // Pull the generated mp3 down as a Blob so it flows through the existing
-  // store → media-import → timeline path unchanged.
-  const audioRes = await fetch(data.audioUrl, { signal });
+  // store → media-import → timeline path unchanged. Route through the studio
+  // media-proxy: the Kie temp host serves no Access-Control-Allow-Origin, so a
+  // direct browser fetch would be CORS-blocked (same as the Suno client).
+  const proxied = `${base}/api/studio/media-proxy?url=${encodeURIComponent(data.audioUrl)}`;
+  const audioRes = await fetch(proxied, { signal });
   if (!audioRes.ok) throw new Error(`Failed to download generated audio (${audioRes.status}).`);
   const blob = await audioRes.blob();
 

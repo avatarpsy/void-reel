@@ -12,9 +12,6 @@ export const OPENREEL_CLOUD_URL = isDev
   ? "http://localhost:8787"
   : "https://openreel-cloud.niiyeboah1996.workers.dev";
 
-/** OpenReel transcription / TTS service */
-export const OPENREEL_TTS_URL = "https://transcribe.openreel.video";
-
 /**
  * Third-party API base URLs.
  * These are used by the api-proxy service in dev mode (direct calls)
