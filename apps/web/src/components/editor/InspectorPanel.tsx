@@ -50,6 +50,10 @@ import {
 } from "./inspector";
 import { OPENREEL_TTS_URL } from "../../config/api-endpoints";
 import {
+  transcribeViaVoidspace,
+  isVoidspaceTranscribeAvailable,
+} from "../../services/voidspace-transcribe";
+import {
   getAudioBridgeEffects,
   initializeAudioBridgeEffects,
   DEFAULT_EQ_BANDS,
@@ -454,13 +458,25 @@ export const InspectorPanel: React.FC = () => {
       message: "Preparing audio...",
     });
 
+    // Captured from the Voidspace STT response so we can show the user the
+    // credits actually debited on completion.
+    let lastCharged: number | undefined;
     try {
-      let transcriptionService = getTranscriptionService();
-      if (!transcriptionService) {
-        transcriptionService = initializeTranscriptionService({
-          apiEndpoint: OPENREEL_TTS_URL,
-        });
-      }
+      // In the Voidspace deployment (signed-in user) route through Voidspace
+      // STT — ElevenLabs Scribe v1 via /api/studio/transcribe, which charges
+      // credits server-side, the SAME engine the studio uses elsewhere. Fall
+      // back to the standalone openreel transcribe service when signed out.
+      const transcriptionService = isVoidspaceTranscribeAvailable()
+        ? initializeTranscriptionService({
+            apiEndpoint: "", // unused — transcribeAudio overrides the HTTP path
+            transcribeAudio: async (blob, onProg) => {
+              const r = await transcribeViaVoidspace(blob, onProg);
+              lastCharged = r.charged;
+              return r;
+            },
+          })
+        : getTranscriptionService() ??
+          initializeTranscriptionService({ apiEndpoint: OPENREEL_TTS_URL });
 
       const regularClip = getClip(selectedClip.id);
       if (!regularClip) {
@@ -483,7 +499,10 @@ export const InspectorPanel: React.FC = () => {
       setTranscriptionProgress({
         phase: "complete",
         progress: 100,
-        message: `Added ${subtitles.length} subtitles`,
+        message:
+          typeof lastCharged === "number" && lastCharged > 0
+            ? `Added ${subtitles.length} subtitles · ${lastCharged} credits`
+            : `Added ${subtitles.length} subtitles`,
       });
 
       setTimeout(() => {

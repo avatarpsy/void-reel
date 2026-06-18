@@ -32,6 +32,18 @@ export interface TranscriptionConfig {
   language?: string;
   maxSegmentDuration?: number;
   maxWordsPerSegment?: number;
+  /**
+   * Optional host-provided transcriber. When set, the service routes the
+   * extracted clip audio through THIS instead of POSTing to `apiEndpoint`.
+   * Lets the host app (Voidspace) plug in its own credit-charged STT
+   * (ElevenLabs Scribe via /api/studio/transcribe) while keeping this core
+   * package free of any Firebase / Voidspace / billing coupling. Must return
+   * the same shape the Cloudflare-Whisper path returns.
+   */
+  transcribeAudio?: (
+    audioBlob: Blob,
+    onProgress?: (progress: WhisperTranscriptionProgress) => void,
+  ) => Promise<CloudflareWhisperResponse>;
 }
 
 const DEFAULT_SUBTITLE_STYLE: SubtitleStyle = {
@@ -219,6 +231,13 @@ export class TranscriptionService {
     audioBlob: Blob,
     onProgress?: (progress: WhisperTranscriptionProgress) => void,
   ): Promise<CloudflareWhisperResponse> {
+    // Host-provided transcriber (e.g. Voidspace STT — ElevenLabs Scribe with a
+    // server-side credit charge) takes precedence. It owns its own progress
+    // reporting (upload + transcribe). Keeps this core STT-provider-agnostic.
+    if (this.config.transcribeAudio) {
+      return this.config.transcribeAudio(audioBlob, onProgress);
+    }
+
     const formData = new FormData();
     formData.append("audio", audioBlob, "audio.wav");
 
