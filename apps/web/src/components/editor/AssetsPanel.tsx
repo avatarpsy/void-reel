@@ -66,6 +66,71 @@ const formatDuration = (seconds: number): string => {
 };
 
 /**
+ * Capture a poster frame from a video Blob — the SAME source the timeline
+ * plays. Scene-video thumbnails point at the model's first-frame URL
+ * (Seedance `tempfile.aiquickdraw.com` / GCS `storage.googleapis.com`), which
+ * a plain <img> can't load once the temp link expires or when the host omits
+ * CORS — so the tile fell back to a placeholder even though the video itself
+ * decodes fine. Drawing a frame straight off the blob gives a reliable
+ * thumbnail from the correct source. Returns a JPEG data URL, or null if the
+ * video can't be decoded in time. Best-effort: all failure paths resolve null
+ * so the caller just keeps the placeholder.
+ */
+function posterFromVideoBlob(blob: Blob): Promise<string | null> {
+  return new Promise((resolve) => {
+    let url: string | null = null;
+    let settled = false;
+    const video = document.createElement("video");
+    const finish = (result: string | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      video.onloadeddata = null;
+      video.onseeked = null;
+      video.onerror = null;
+      video.removeAttribute("src");
+      try { video.load(); } catch { /* noop */ }
+      if (url) URL.revokeObjectURL(url);
+      resolve(result);
+    };
+    const timer = setTimeout(() => finish(null), 6000);
+    try {
+      url = URL.createObjectURL(blob);
+    } catch {
+      finish(null);
+      return;
+    }
+    video.muted = true;
+    video.preload = "auto";
+    video.playsInline = true;
+    video.onloadeddata = () => {
+      const dur = video.duration && isFinite(video.duration) ? video.duration : 1;
+      // Seek a touch past 0 so we don't grab a black leading frame.
+      try { video.currentTime = Math.min(0.1, dur / 2); } catch { finish(null); }
+    };
+    video.onseeked = () => {
+      const w = video.videoWidth;
+      const h = video.videoHeight;
+      if (!w || !h) { finish(null); return; }
+      const scale = Math.min(1, 320 / w);
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(w * scale));
+      canvas.height = Math.max(1, Math.round(h * scale));
+      const ctx = canvas.getContext("2d");
+      if (!ctx) { finish(null); return; }
+      try {
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        finish(canvas.toDataURL("image/jpeg", 0.72));
+      } catch {
+        finish(null); // tainted canvas / draw failure
+      }
+    };
+    video.onerror = () => finish(null);
+    video.src = url;
+  });
+}
+
+/**
  * Media Item Thumbnail Component
  * Shows thumbnail with metadata below (not overlaid)
  */
@@ -99,6 +164,52 @@ const MediaThumbnail: React.FC<{
   onRelinkAll,
 }) => {
   const [isHovered, setIsHovered] = useState(false);
+  // Thumbnail load failure → fall back to the placeholder icon instead of the
+  // browser's broken-image glyph. Scene-video thumbnails point at the scene's
+  // first-frame URL, which can be an expired temp URL or a CORS-blocked host
+  // for a plain <img> (the blob path is proxied, the <img> is not). Reset when
+  // the URL changes so a later-healed/mirrored URL gets another chance.
+  const [thumbFailed, setThumbFailed] = useState(false);
+  React.useEffect(() => { setThumbFailed(false); }, [item.thumbnailUrl]);
+
+  // Poster frame drawn from the video blob — the SAME source that plays in the
+  // timeline. We prefer a reliable LOCAL thumbnail (blob:/data: URL, already
+  // drawn from real media) when present; otherwise, for a video that carries a
+  // blob, we draw the poster off that blob rather than trust the remote
+  // first-frame URL (Seedance temp links expire and GCS blocks <img> CORS, so
+  // those tiles showed a placeholder even though the clip decodes fine — the
+  // "thumbnail missing" bug). Non-videos / blob-less items keep the old
+  // remote-URL-then-placeholder behaviour.
+  const localThumb =
+    item.thumbnailUrl && /^(blob:|data:)/.test(item.thumbnailUrl)
+      ? item.thumbnailUrl
+      : null;
+  const canBlobPoster = item.type === "video" && !!item.blob;
+  const [blobPoster, setBlobPoster] = useState<string | null>(null);
+  // Reset the generated poster when the item or its blob identity changes.
+  React.useEffect(() => { setBlobPoster(null); }, [item.id, item.blob]);
+  // We need a blob poster when we CAN make one and have nothing reliable to
+  // show — either no local thumbnail, or the one we tried errored.
+  const needBlobPoster = canBlobPoster && (!localThumb || thumbFailed);
+  React.useEffect(() => {
+    if (!needBlobPoster || blobPoster) return;
+    let cancelled = false;
+    void posterFromVideoBlob(item.blob as Blob).then((u) => {
+      if (!cancelled && u) setBlobPoster(u);
+    });
+    return () => { cancelled = true; };
+  }, [needBlobPoster, blobPoster, item.blob]);
+
+  // Final source priority: unfailed local thumbnail → blob poster → unfailed
+  // remote thumbnail (only when we can't poster from a blob) → placeholder. A
+  // video with a blob never shows the flaky remote URL; it uses the poster
+  // drawn from the clip itself.
+  const remoteThumb = item.thumbnailUrl && !localThumb ? item.thumbnailUrl : null;
+  let effectiveThumb: string | null = null;
+  if (localThumb && !thumbFailed) effectiveThumb = localThumb;
+  else if (blobPoster) effectiveThumb = blobPoster;
+  else if (!canBlobPoster && remoteThumb && !thumbFailed) effectiveThumb = remoteThumb;
+  const showThumb = !!effectiveThumb;
 
   // Stable waveform heights derived from item.id. Math.random() in JSX
   // re-rolled every render, producing visible jitter during playback.
@@ -235,8 +346,8 @@ const MediaThumbnail: React.FC<{
       >
         {/* Small thumbnail */}
         <div className="w-12 h-8 rounded bg-background-tertiary relative overflow-hidden flex-shrink-0">
-          {item.thumbnailUrl ? (
-            <img src={item.thumbnailUrl} alt={item.name} className="w-full h-full object-cover" />
+          {showThumb ? (
+            <img src={effectiveThumb as string} alt={item.name} className="w-full h-full object-cover" onError={() => setThumbFailed(true)} />
           ) : (
             <div className="w-full h-full flex items-center justify-center">
               <Icon size={14} className={iconColor} />
@@ -396,11 +507,12 @@ const MediaThumbnail: React.FC<{
         className={`aspect-video bg-background-tertiary rounded-lg border-2 relative group cursor-pointer transition-all overflow-hidden shadow-sm ${borderClass}`}
       >
         {/* Thumbnail or placeholder */}
-        {item.thumbnailUrl ? (
+        {showThumb ? (
           <img
-            src={item.thumbnailUrl}
+            src={effectiveThumb as string}
             alt={item.name}
             className="w-full h-full object-cover"
+            onError={() => setThumbFailed(true)}
           />
         ) : (
           <div className="absolute inset-0 flex items-center justify-center bg-background-tertiary">

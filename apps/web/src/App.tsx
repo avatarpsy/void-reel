@@ -1677,7 +1677,7 @@ function App() {
             // ActionExecutor (so it's undoable). Autosave commits the
             // updated project_state blob. Old media item stays in the
             // library — cheap, and lets undo restore the prior version.
-            const { clipId, url, name } = msg as any;
+            const { clipId, url, name, posterUrl, durationSec } = msg as any;
             if (!clipId || !url) {
               reply({ type: "voidspace:error", requestId: msg.requestId, error: "clipId + url required" });
               break;
@@ -1703,22 +1703,47 @@ function App() {
                 for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
                 return Math.abs(h).toString(36);
               };
+              // Probe a blob's real playable length (so the swap reconciles the
+              // clip's trim against the NEW media instead of keeping the old
+              // outPoint — which left a black tail / decode-past-EOF when the
+              // regen was shorter). Caller may also pass durationSec (the chat
+              // already knows it) to skip the probe.
+              const probeDuration = (blob: Blob | null): Promise<number> => new Promise((resolve) => {
+                if (!blob) return resolve(0);
+                let settled = false;
+                const el = document.createElement(mediaType === "video" ? "video" : "audio");
+                const obj = URL.createObjectURL(blob);
+                const done = (d: number) => { if (settled) return; settled = true; try { URL.revokeObjectURL(obj); } catch {} resolve(Number.isFinite(d) && d > 0 ? d : 0); };
+                el.preload = "metadata";
+                el.onloadedmetadata = () => done(el.duration);
+                el.onerror = () => done(0);
+                setTimeout(() => done(0), 5000);
+                el.src = obj;
+              });
               const newMediaId = `media-${trackKind || "asset"}-${stableHashFn(url)}`;
               let item = proj.mediaLibrary?.items?.find((m: any) => m.id === newMediaId);
+              // Real length of the swapped-in media (passed value wins, else probe,
+              // else fall back to the old clip's duration so nothing breaks).
+              let newMediaDuration = (typeof durationSec === "number" && durationSec > 0) ? durationSec : 0;
               if (!item) {
                 let blob: Blob | null = null;
                 try {
                   const r = await fetch(url);
                   if (r.ok) blob = await r.blob();
                 } catch { /* hydrate later */ }
+                if (!newMediaDuration) newMediaDuration = await probeDuration(blob);
+                const resolvedDur = newMediaDuration || foundClip.duration || 0;
                 const newItem: any = {
                   id: newMediaId,
                   name: typeof name === "string" && name ? name : `Replaced ${trackKind || "asset"}`,
                   type: mediaType,
                   fileHandle: null,
                   blob,
-                  metadata: { duration: foundClip.duration ?? 0, fileSize: blob?.size ?? 0, sampleRate: 44100, channels: 2 },
-                  thumbnailUrl: null,
+                  metadata: { duration: resolvedDur, fileSize: blob?.size ?? 0, sampleRate: 44100, channels: 2 },
+                  // Carry the scene's poster (first frame) so the Assets panel
+                  // shows a real thumbnail for the regen instead of a blank
+                  // placeholder. Falls back to null → placeholder icon.
+                  thumbnailUrl: (typeof posterUrl === "string" && posterUrl) ? posterUrl : null,
                   waveformData: null,
                   originalUrl: url,
                   category: trackKind === "video" ? "Scene Videos" : trackKind === "narration" ? "Narration" : "Audio",
@@ -1732,6 +1757,8 @@ function App() {
                   },
                 }));
                 item = newItem;
+              } else if (!newMediaDuration) {
+                newMediaDuration = Number(item.metadata?.duration) || 0;
               }
               // KNOWN LIMITATION: this swap bypasses ActionExecutor /
               // ActionHistory because the openreel core doesn't ship a
@@ -1748,7 +1775,26 @@ function App() {
               useProjectStore.setState((s: any) => {
                 const tracks = (s.project.timeline?.tracks ?? []).map((tr: any) => ({
                   ...tr,
-                  clips: (tr.clips ?? []).map((c: any) => c.id === clipId ? { ...c, mediaId: newMediaId } : c),
+                  clips: (tr.clips ?? []).map((c: any) => {
+                    if (c.id !== clipId) return c;
+                    // CLEAN SWAP: spread `c` so every prior edit is kept —
+                    // effects, audioEffects, transform, volume, fades,
+                    // keyframes, startTime — only the media + the trim window
+                    // change. Reconcile the trim to the NEW media's real length
+                    // so a shorter regen can't leave the clip reading past EOF
+                    // (the black-tail bug); a same-length regen is a no-op clamp.
+                    const md = newMediaDuration > 0 ? newMediaDuration : (c.outPoint ?? c.duration ?? 0);
+                    let inPoint = c.inPoint ?? 0;
+                    let outPoint = c.outPoint ?? md;
+                    let duration = c.duration;
+                    if (md > 0) {
+                      inPoint = Math.max(0, Math.min(inPoint, Math.max(0, md - 0.05)));
+                      outPoint = Math.min(outPoint, md);
+                      if (outPoint <= inPoint) outPoint = md;
+                      duration = Math.max(0.05, outPoint - inPoint);
+                    }
+                    return { ...c, mediaId: newMediaId, inPoint, outPoint, duration };
+                  }),
                 }));
                 return { project: { ...s.project, timeline: { ...s.project.timeline, tracks }, modifiedAt: Date.now() } };
               });
