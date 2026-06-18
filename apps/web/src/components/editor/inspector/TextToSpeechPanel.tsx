@@ -1,49 +1,28 @@
-import React, { useState, useCallback } from "react";
-import {
-  Mic,
-  Loader2,
-  Volume2,
-  Settings,
-  Sparkles,
-  AlertTriangle,
-} from "lucide-react";
-import { Slider, Switch } from "@openreel/ui";
-import { toast } from "../../../stores/notification-store";
-import { useSettingsStore, type TtsProvider } from "../../../stores/settings-store";
+import React, { useState } from "react";
+import { Mic, Loader2, Volume2, Sparkles, AlertTriangle } from "lucide-react";
+import { Switch } from "@openreel/ui";
+import { useSettingsStore } from "../../../stores/settings-store";
 import { useElevenLabsApi } from "./hooks/useElevenLabsApi";
 import { useTtsActions } from "./hooks/useTtsActions";
 import { VoiceBrowser } from "./VoiceBrowser";
 import { ModelSelector } from "./ModelSelector";
 import { EnhancedTextPreview } from "./EnhancedTextPreview";
 import { AudioResult } from "./AudioResult";
-import { TTS_PROVIDERS } from "./tts-constants";
+import { VOIDSPACE_TTS_VOICES } from "../../../services/voidspace-tts";
 
+/**
+ * Text-to-Speech panel — fully Voidspace-backed. Generation routes through
+ * /api/studio/gen-voiceover (ElevenLabs, charges credits) and "Enhance for
+ * TTS" through /api/studio/enhance-text (agent LLM). No BYOK keys, no provider
+ * toggle, no openreel Piper service — those were removed.
+ */
 export const TextToSpeechPanel: React.FC = () => {
-  const {
-    defaultTtsProvider,
-    defaultLlmProvider,
-    openSettings,
-    settingsOpen,
-    configuredServices,
-    elevenLabsModel,
-    favoriteVoices,
-  } = useSettingsStore();
+  const { elevenLabsModel, favoriteVoices } = useSettingsStore();
 
-  const hasElevenLabsKey = configuredServices.includes("elevenlabs");
-
-  const defaultProvider: TtsProvider =
-    defaultTtsProvider === "elevenlabs" && hasElevenLabsKey
-      ? "elevenlabs"
-      : "piper";
-
-  const [provider, setProvider] = useState<TtsProvider>(defaultProvider);
   const [text, setText] = useState("");
   const [selectedVoice, setSelectedVoice] = useState<string>(
-    defaultProvider === "elevenlabs" && favoriteVoices.length > 0
-      ? favoriteVoices[0].voiceId
-      : "amy",
+    VOIDSPACE_TTS_VOICES[0]?.voice_id ?? "",
   );
-  const [speed, setSpeed] = useState(1.0);
   const [error, setError] = useState<string | null>(null);
   const [enhanceText, setEnhanceText] = useState(false);
   const [enhancedPreview, setEnhancedPreview] = useState<string | null>(null);
@@ -56,13 +35,7 @@ export const TextToSpeechPanel: React.FC = () => {
     generateWithElevenLabs,
     generateWithPiper,
     enhanceViaLlm,
-  } = useElevenLabsApi({
-    provider,
-    hasElevenLabsKey,
-    settingsOpen,
-    elevenLabsModel,
-    defaultLlmProvider,
-  });
+  } = useElevenLabsApi({ elevenLabsModel });
 
   const {
     isGenerating,
@@ -80,12 +53,13 @@ export const TextToSpeechPanel: React.FC = () => {
     saveToMedia,
     addToTimeline,
     downloadAudio,
-    setGeneratedAudio,
   } = useTtsActions({
-    provider,
+    // Single Voidspace provider now; pass the (legacy) "elevenlabs" value so
+    // the shared hooks/components take their full-featured branch.
+    provider: "elevenlabs",
     selectedVoice,
     text,
-    speed,
+    speed: 1,
     enhanceText,
     enhancedPreview,
     allVoices,
@@ -100,27 +74,8 @@ export const TextToSpeechPanel: React.FC = () => {
 
   const getSelectedModelName = (): string => {
     const model = allModels.find((m) => m.model_id === elevenLabsModel);
-    if (model) return model.name;
-    return elevenLabsModel;
+    return model ? model.name : elevenLabsModel || "TTS";
   };
-
-  const warnUnsavedAudio = useCallback(() => {
-    if (hasUnsavedAudio) {
-      toast.warning("Unsaved audio discarded", "Save to media or download next time to keep it.");
-    }
-  }, [hasUnsavedAudio]);
-
-  const handleProviderSwitch = useCallback((newProvider: TtsProvider) => {
-    if (newProvider === provider) return;
-    warnUnsavedAudio();
-    setProvider(newProvider);
-    setSelectedVoice(
-      newProvider === "elevenlabs"
-        ? (favoriteVoices.length > 0 ? favoriteVoices[0].voiceId : "")
-        : "amy",
-    );
-    setGeneratedAudio(null);
-  }, [provider, warnUnsavedAudio, favoriteVoices, setGeneratedAudio]);
 
   const charCount = text.length;
   const maxChars = 5000;
@@ -129,66 +84,18 @@ export const TextToSpeechPanel: React.FC = () => {
     <div className="space-y-3 w-full min-w-0 max-w-full">
       <audio ref={audioRef as React.RefObject<HTMLAudioElement>} onEnded={handleAudioEnded} className="hidden" />
 
-      <div className="flex items-center justify-between p-2 bg-primary/10 rounded-lg border border-primary/30">
-        <div className="flex items-center gap-2">
-          <Mic size={16} className="text-primary" />
-          <div>
-            <span className="text-[11px] font-medium text-text-primary">
-              Text to Speech
-            </span>
-            <p className="text-[9px] text-text-muted">AI voice generation</p>
-          </div>
-        </div>
-        <button
-          onClick={() => openSettings("api-keys")}
-          className="p-1.5 rounded-md hover:bg-background-tertiary text-text-muted hover:text-text-primary transition-colors"
-          title="API Key Settings"
-        >
-          <Settings size={14} />
-        </button>
-      </div>
-
-      <div className="space-y-2">
-        <label className="text-[10px] font-medium text-text-secondary">
-          Provider
-        </label>
-        <div className="flex gap-1.5">
-          {TTS_PROVIDERS.map((p) => {
-            const isDisabled = p.id === "elevenlabs" && !hasElevenLabsKey;
-            return (
-              <button
-                key={p.id}
-                onClick={() => {
-                  if (isDisabled) {
-                    openSettings("api-keys");
-                    return;
-                  }
-                  handleProviderSwitch(p.id);
-                }}
-                className={`flex-1 px-2 py-1.5 rounded-lg text-[10px] transition-colors ${
-                  provider === p.id
-                    ? "bg-primary text-white font-medium"
-                    : isDisabled
-                      ? "bg-background-tertiary text-text-muted border border-border opacity-60 cursor-default"
-                      : "bg-background-tertiary text-text-secondary hover:text-text-primary border border-border"
-                }`}
-                title={isDisabled ? "Add ElevenLabs API key in Settings" : p.description}
-              >
-                {p.label}
-              </button>
-            );
-          })}
+      <div className="flex items-center gap-2 p-2 bg-primary/10 rounded-lg border border-primary/30">
+        <Mic size={16} className="text-primary" />
+        <div>
+          <span className="text-[11px] font-medium text-text-primary">Text to Speech</span>
+          <p className="text-[9px] text-text-muted">AI voice generation · Voidspace</p>
         </div>
       </div>
 
-      {provider === "elevenlabs" && hasElevenLabsKey && (
-        <ModelSelector allModels={allModels} isLoadingModels={isLoadingModels} />
-      )}
+      <ModelSelector allModels={allModels} isLoadingModels={isLoadingModels} />
 
       <div className="space-y-2">
-        <label className="text-[10px] font-medium text-text-secondary">
-          Text
-        </label>
+        <label className="text-[10px] font-medium text-text-secondary">Text</label>
         <textarea
           value={text}
           onChange={(e) => { setText(e.target.value); setEnhancedPreview(null); }}
@@ -197,21 +104,17 @@ export const TextToSpeechPanel: React.FC = () => {
           maxLength={maxChars}
         />
         <div className="flex items-center justify-between">
-          {provider === "elevenlabs" ? (
-            <div className="flex items-center gap-1.5">
-              <Switch
-                checked={enhanceText}
-                onCheckedChange={setEnhanceText}
-                className="scale-75 origin-left"
-              />
-              <label className="text-[9px] text-text-muted flex items-center gap-1 cursor-pointer" onClick={() => setEnhanceText(!enhanceText)}>
-                <Sparkles size={10} className={enhanceText ? "text-amber-400" : ""} />
-                Enhance for TTS
-              </label>
-            </div>
-          ) : (
-            <div />
-          )}
+          <div className="flex items-center gap-1.5">
+            <Switch
+              checked={enhanceText}
+              onCheckedChange={setEnhanceText}
+              className="scale-75 origin-left"
+            />
+            <label className="text-[9px] text-text-muted flex items-center gap-1 cursor-pointer" onClick={() => setEnhanceText(!enhanceText)}>
+              <Sparkles size={10} className={enhanceText ? "text-amber-400" : ""} />
+              Enhance for TTS
+            </label>
+          </div>
           <span className={`text-[9px] ${charCount > maxChars * 0.9 ? "text-red-400" : "text-text-muted"}`}>
             {charCount}/{maxChars}
           </span>
@@ -227,39 +130,16 @@ export const TextToSpeechPanel: React.FC = () => {
       </div>
 
       <VoiceBrowser
-        provider={provider}
+        provider="elevenlabs"
         selectedVoice={selectedVoice}
         onSelectVoice={setSelectedVoice}
         allVoices={allVoices}
         isLoadingVoices={isLoadingVoices}
       />
 
-      {provider === "piper" && (
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <label className="text-[10px] font-medium text-text-secondary">Speed</label>
-            <span className="text-[10px] text-text-muted">{speed.toFixed(1)}x</span>
-          </div>
-          <Slider min={0.5} max={2.0} step={0.1} value={[speed]} onValueChange={(value) => setSpeed(value[0])} />
-          <div className="flex justify-between text-[8px] text-text-muted">
-            <span>0.5x</span>
-            <span>1.0x</span>
-            <span>2.0x</span>
-          </div>
-        </div>
-      )}
-
       {error && (
-        <div className="p-2 bg-red-500/10 border border-red-500/30 rounded-lg flex items-center justify-between gap-2">
+        <div className="p-2 bg-red-500/10 border border-red-500/30 rounded-lg">
           <p className="text-[10px] text-red-400">{error}</p>
-          {(error.includes("API key") || error.includes("Session locked") || error.includes("Unlock")) && (
-            <button
-              onClick={() => openSettings("api-keys")}
-              className="shrink-0 px-2 py-1 rounded text-[9px] font-medium bg-red-500/20 text-red-300 hover:bg-red-500/30 transition-colors"
-            >
-              Open Settings
-            </button>
-          )}
         </div>
       )}
 
@@ -269,7 +149,7 @@ export const TextToSpeechPanel: React.FC = () => {
         </div>
       )}
 
-      {enhanceText && provider === "elevenlabs" && !enhancedPreview && (
+      {enhanceText && !enhancedPreview && (
         <button
           onClick={handleEnhance}
           disabled={isEnhancing || !text.trim()}
@@ -285,7 +165,7 @@ export const TextToSpeechPanel: React.FC = () => {
 
       <button
         onClick={generateSpeech}
-        disabled={isGenerating || !text.trim() || (provider === "elevenlabs" && !selectedVoice) || (enhanceText && provider === "elevenlabs" && !enhancedPreview)}
+        disabled={isGenerating || !text.trim() || !selectedVoice || (enhanceText && !enhancedPreview)}
         className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-primary text-white rounded-lg text-[11px] font-medium transition-all hover:bg-primary-hover disabled:opacity-50 disabled:cursor-not-allowed"
       >
         {isGenerating ? (
@@ -318,8 +198,7 @@ export const TextToSpeechPanel: React.FC = () => {
       )}
 
       <p className="text-[9px] text-text-muted text-center">
-        Powered by {provider === "elevenlabs" ? "ElevenLabs" : "Piper TTS"}
-        {provider === "elevenlabs" && ` · ${getSelectedModelName()}`}
+        Powered by Voidspace · {getSelectedModelName()}
       </p>
     </div>
   );
