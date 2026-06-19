@@ -131,6 +131,39 @@ function recordLiveSwap(clipId: string, url: string): void {
   liveSwapAuthority.set(clipId, { url: normSwapUrl(url), at: Date.now() });
 }
 
+const isCaptionTextClip = (tc: import("@openreel/core").TextClip): boolean =>
+  tc.trackId === "track-captions" || tc.id.startsWith("caption-");
+
+/**
+ * Pick which fresh (Firestore-rebuilt) text clips to ADD on a live merge.
+ *
+ * Excludes clips already in the engine (by id) AND — crucially — fresh CAPTION
+ * clips that overlap a caption already in the engine. The avatar pipeline
+ * regenerates caption-* clips from wordTimestamps on EVERY tick; once the user
+ * has captions for a region (auto-loaded, inspector-"Generate Captions", or
+ * edited), re-adding the pipeline caption stacks it on top → the overlapping
+ * caption clips. A fresh caption in a region with NO existing caption (a newly
+ * generated scene) still passes through, so streaming generation still works.
+ */
+export function pickNewTextClips(
+  existingTextClips: readonly import("@openreel/core").TextClip[],
+  freshTextClips: readonly import("@openreel/core").TextClip[],
+): import("@openreel/core").TextClip[] {
+  const knownIds = new Set(existingTextClips.map((t) => t.id));
+  const existingCaptions = existingTextClips.filter(isCaptionTextClip);
+  return freshTextClips.filter((t) => {
+    if (knownIds.has(t.id)) return false;
+    if (isCaptionTextClip(t)) {
+      const tEnd = t.startTime + t.duration;
+      const overlapsExisting = existingCaptions.some(
+        (x) => t.startTime < x.startTime + x.duration && tEnd > x.startTime,
+      );
+      if (overlapsExisting) return false;
+    }
+    return true;
+  });
+}
+
 function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
   dirty: boolean;
   newMedia: number;
@@ -192,9 +225,9 @@ function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
   // explicit length check, mirroring the get-state read elsewhere in this file.
   const existingTextClips =
     engineTextClips.length > 0 ? engineTextClips : current.textClips ?? [];
-  const knownTextClipIds = new Set(existingTextClips.map((t) => t.id));
-  const newTextClips = (fresh.textClips ?? []).filter(
-    (t) => !knownTextClipIds.has(t.id),
+  const newTextClips = pickNewTextClips(
+    existingTextClips,
+    fresh.textClips ?? [],
   );
 
   const knownClipIds = new Set<string>();
