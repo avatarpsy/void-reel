@@ -509,7 +509,15 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
         </>
       )}
 
-      {isAudio && clip.duration > 0 && (
+      {/* Volume rubber-band line — audio AND video clips. A video clip's
+          embedded audio carries the SAME native openreel `clip.volume` +
+          `clip.keyframes(property:"volume")` model as an audio clip, so the
+          identical overlay (flat-drag → audio/setVolume, click → add volume
+          keyframe, drag points → curve) drives video volume consistently:
+          it shows in the Inspector's Volume keyframes, round-trips on save,
+          and flat volume applies in both preview and export. Images have no
+          audio, so they stay excluded. */}
+      {(isAudio || isVideo) && clip.duration > 0 && (
         <VolumeAutomationOverlay
           clip={clip}
           isSelected={isSelected}

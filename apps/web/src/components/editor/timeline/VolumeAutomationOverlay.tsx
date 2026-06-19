@@ -17,6 +17,11 @@ interface Props {
 const MAX_GAIN = 2;
 /** Movement (px) before a press counts as a drag rather than a click. */
 const DRAG_THRESHOLD = 4;
+/** Vertical headroom (% of clip height) reserved above max-gain and below
+ *  silence so the envelope line + its 14px grab-band never sit on the clip's
+ *  clipped top/bottom edge. Keeps a muted clip's line visible & grabbable;
+ *  unity (1.0) stays centred at 50%. See valToPct / yToValue. */
+const EDGE_PAD_PCT = 15;
 
 // Shared engine instance — same class the Inspector's KeyframesSection uses,
 // so add/move/remove math is identical across both surfaces.
@@ -158,8 +163,14 @@ export const VolumeAutomationOverlay: React.FC<Props> = ({ clip, isSelected, int
   const yToValue = (clientY: number): number => {
     const rect = boxRef.current?.getBoundingClientRect();
     if (!rect || rect.height === 0) return baseVolume;
-    const frac = 1 - Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
-    return clampGain(frac * MAX_GAIN);
+    const rawFrac = 1 - Math.max(0, Math.min(1, (clientY - rect.top) / rect.height)); // 1=top … 0=bottom
+    // Undo the EDGE_PAD inset (see valToPct): the silence line sits at
+    // EDGE_PAD from the bottom and the max-gain line at EDGE_PAD from the
+    // top, so map that inset band back to the full 0…MAX_GAIN range.
+    const lo = EDGE_PAD_PCT / 100;
+    const hi = 1 - EDGE_PAD_PCT / 100;
+    const f = (rawFrac - lo) / (hi - lo);
+    return clampGain(Math.max(0, Math.min(1, f)) * MAX_GAIN);
   };
   const xToTime = (clientX: number): number => {
     const rect = boxRef.current?.getBoundingClientRect();
@@ -167,7 +178,17 @@ export const VolumeAutomationOverlay: React.FC<Props> = ({ clip, isSelected, int
     const frac = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
     return frac * clip.duration;
   };
-  const valToPct = (v: number) => Math.max(0, Math.min(100, (1 - v / MAX_GAIN) * 100));
+  // Map gain → vertical % WITH edge headroom: silence (0) sits EDGE_PAD_PCT
+  // above the bottom and max gain (MAX_GAIN) EDGE_PAD_PCT below the top, so
+  // the envelope line AND its 14px grab-band stay fully inside the clip even
+  // at the extremes. Without this, a muted clip (volume 0 — e.g. a narrator
+  // video whose native audio is ducked) pinned the line to the clipped
+  // bottom edge: invisible and impossible to grab (no resize cursor). Unity
+  // (1.0) still lands at the exact 50% centre, matching the dotted ref line.
+  const valToPct = (v: number) => {
+    const f = 1 - clampGain(v) / MAX_GAIN; // 0 at max gain … 1 at silence
+    return EDGE_PAD_PCT + f * (100 - 2 * EDGE_PAD_PCT);
+  };
   const timeToPct = (t: number) =>
     clip.duration > 0 ? Math.max(0, Math.min(100, (t / clip.duration) * 100)) : 0;
 
