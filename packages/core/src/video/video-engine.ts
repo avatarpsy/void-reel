@@ -4,7 +4,6 @@ import type {
   Clip,
   Effect,
   Transform,
-  Subtitle,
 } from "../types/timeline";
 import type { MediaItem, Project } from "../types/project";
 import type { TextClip } from "../text/types";
@@ -45,7 +44,6 @@ import {
   isAnimatedGif,
 } from "../media/gif-decoder";
 import { getParticleEngine } from "../effects/particle-engine";
-import { renderSubtitleToCanvasCtx as sharedRenderSubtitle } from "../text/subtitle-canvas-renderer";
 
 const DEFAULT_CACHE_CONFIG: FrameCacheConfig = {
   maxFrames: 100,
@@ -389,7 +387,7 @@ export class VideoEngine {
 
   /**
    * Renders a single video frame at a specific time with all overlays.
-   * Combines video tracks, text clips, shape graphics, and subtitles.
+   * Combines video tracks, text clips (incl. captions), and shape graphics.
    * Uses GPU acceleration if available, otherwise falls back to CPU rendering.
    * Renders tracks using painter's algorithm: higher index tracks render first (appear behind),
    * lower index tracks render last (appear on top).
@@ -419,8 +417,6 @@ export class VideoEngine {
     const activeShapeClips = this.getActiveShapeClips(timeline, time);
     const activeSVGClips = this.getActiveSVGClips(timeline, time);
     const activeStickerClips = this.getActiveStickerClips(timeline, time);
-    const activeSubtitles = this.getActiveSubtitles(timeline, time);
-
 
     // Render order is determined by descending originalIndex (so a
     // track at array position 0 paints LAST = on top). On top of that
@@ -431,7 +427,7 @@ export class VideoEngine {
     // captions track that landed at the tail of the array (e.g.
     // because the chat's additive Firestore merge appended it after
     // the existing video/audio tracks) would be drawn FIRST, putting
-    // subtitles BENEATH the video frame — which is exactly the
+    // captions BENEATH the video frame — which is exactly the
     // "captions visible in preview but not in export" symptom we hit.
     const trackTypeRank = (t: string) =>
       t === "text" || t === "graphics" ? 1 : 0; // overlay layers sort AFTER pixel layers
@@ -695,10 +691,6 @@ export class VideoEngine {
 
     this.renderParticlesToContext(ctx, time, width, height);
 
-    for (const subtitle of activeSubtitles) {
-      this.renderSubtitleToCanvasCtx(ctx, subtitle, width, height, time);
-    }
-
     const imageBitmap = await createImageBitmap(canvas);
 
     return {
@@ -919,13 +911,6 @@ export class VideoEngine {
     }
   }
 
-  private getActiveSubtitles(timeline: Timeline, time: number): Subtitle[] {
-    const subtitles = timeline.subtitles || [];
-    return subtitles.filter((sub) => {
-      return time >= sub.startTime && time < sub.endTime;
-    });
-  }
-
   private renderParticlesToContext(
     ctx: OffscreenCanvasRenderingContext2D,
     time: number,
@@ -973,16 +958,6 @@ export class VideoEngine {
     this.lastExportTime = -1;
     const particleEngine = getParticleEngine();
     particleEngine.reset();
-  }
-
-  private renderSubtitleToCanvasCtx(
-    ctx: OffscreenCanvasRenderingContext2D,
-    subtitle: Subtitle,
-    canvasWidth: number,
-    canvasHeight: number,
-    currentTime: number,
-  ): void {
-    sharedRenderSubtitle(ctx, subtitle, canvasWidth, canvasHeight, currentTime);
   }
 
   private getClipsAtTime(track: Track, time: number): Clip[] {

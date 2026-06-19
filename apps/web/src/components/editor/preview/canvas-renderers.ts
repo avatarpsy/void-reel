@@ -4,12 +4,10 @@ import {
   type ShapeClip,
   type SVGClip,
   type StickerClip,
-  type Subtitle,
   getBackgroundRemovalEngine,
   AnimationEngine,
   type Keyframe,
   type EmphasisAnimation,
-  renderSubtitleToCanvasCtx,
   renderCaptionWordHighlight,
 } from "@openreel/core";
 import * as THREE from "three";
@@ -1523,25 +1521,6 @@ export const renderShapeClipToCanvas = (
       canvasHeight,
     );
   }
-};
-
-export const getActiveSubtitles = (
-  subtitles: Subtitle[],
-  currentTime: number,
-): Subtitle[] => {
-  return subtitles.filter((sub) => {
-    return currentTime >= sub.startTime && currentTime < sub.endTime;
-  });
-};
-
-export const renderSubtitleToCanvas = (
-  ctx: CanvasRenderingContext2D,
-  subtitle: Subtitle,
-  canvasWidth: number,
-  canvasHeight: number,
-  currentTime?: number,
-): void => {
-  renderSubtitleToCanvasCtx(ctx, subtitle, canvasWidth, canvasHeight, currentTime);
 };
 
 export const drawFrameWithTransform = (

@@ -55,8 +55,6 @@ import {
   getActiveTextClips,
   getActiveShapeClips,
   renderShapeClipToCanvas,
-  getActiveSubtitles,
-  renderSubtitleToCanvas,
   drawFrameWithTransform,
   applyEffectsToFrame,
   setImageLoadCallback,
@@ -557,12 +555,6 @@ export const Preview: React.FC = () => {
   useEffect(() => {
     allShapeClipsRef.current = allShapeClips;
   }, [allShapeClips]);
-
-  // Keep a ref to allSubtitles for use in playback effect
-  const allSubtitlesRef = useRef(allSubtitles);
-  useEffect(() => {
-    allSubtitlesRef.current = allSubtitles;
-  }, [allSubtitles]);
 
   // Keep a ref to isScrubbing for use in playback loop
   const isScrubbingRef = useRef(false);
@@ -1631,30 +1623,10 @@ export const Preview: React.FC = () => {
         }
       }
 
-      const activeSubtitles = getActiveSubtitles(allSubtitles, time);
-      if (activeSubtitles.length > 0 && ctx) {
-        for (const subtitle of activeSubtitles) {
-          renderSubtitleToCanvas(
-            ctx,
-            subtitle,
-            canvas.width,
-            canvas.height,
-            time,
-          );
-        }
-        // A subtitle-only frame must still blit to the visible canvas when
-        // paused (the blit below is gated on hasRenderedFrame). Without this,
-        // legacy timeline.subtitles captions showed during playback (drawn
-        // straight to the visible canvas) but vanished when paused.
-        hasRenderedFrame = true;
-      }
-
-      // Blit whenever ANY layer (incl. caption/subtitle/text-only) was drawn, so
-      // a caption with no decodable video at the playhead still appears paused.
+      // Blit whenever ANY overlay layer (caption/text/shape) was drawn, so a
+      // caption with no decodable video at the playhead still appears paused.
       const drewOverlays =
-        activeTextClips.length > 0 ||
-        activeShapeClips.length > 0 ||
-        activeSubtitles.length > 0;
+        activeTextClips.length > 0 || activeShapeClips.length > 0;
       if ((hasRenderedFrame || drewOverlays) && offscreenCanvasRef.current) {
         mainCtx.clearRect(0, 0, canvas.width, canvas.height);
         mainCtx.drawImage(offscreenCanvasRef.current, 0, 0);
@@ -1670,7 +1642,6 @@ export const Preview: React.FC = () => {
       settings.height,
       allTextClips,
       allShapeClips,
-      allSubtitles,
       renderOverlayClipsInTrackOrder,
       isDark,
     ],
@@ -1829,17 +1800,6 @@ export const Preview: React.FC = () => {
         }
       }
 
-      const activeSubtitles = getActiveSubtitles(allSubtitles, time);
-      for (const subtitle of activeSubtitles) {
-        renderSubtitleToCanvas(
-          ctx,
-          subtitle,
-          canvas.width,
-          canvas.height,
-          time,
-        );
-      }
-
       const audioTracks = timelineTracks.filter(
         (t) => t.type === "audio" && !t.hidden,
       );
@@ -1873,7 +1833,6 @@ export const Preview: React.FC = () => {
       settings.height,
       allTextClips,
       allShapeClips,
-      allSubtitles,
       isDark,
     ],
   );
@@ -2220,20 +2179,6 @@ export const Preview: React.FC = () => {
             );
           }
 
-          const activeSubtitlesNoVideo = getActiveSubtitles(
-            allSubtitlesRef.current,
-            currentPlayhead,
-          );
-          for (const subtitle of activeSubtitlesNoVideo) {
-            renderSubtitleToCanvas(
-              ctx,
-              subtitle,
-              canvas.width,
-              canvas.height,
-              currentPlayhead,
-            );
-          }
-
           const nowNoClip = performance.now();
           if (nowNoClip - lastPlayheadUpdateRef.current >= PLAYHEAD_UPDATE_THROTTLE_MS) {
             lastPlayheadUpdateRef.current = nowNoClip;
@@ -2368,20 +2313,6 @@ export const Preview: React.FC = () => {
             canvas.width,
             canvas.height,
             "all",
-          );
-        }
-
-        const activeSubtitles = getActiveSubtitles(
-          allSubtitlesRef.current,
-          currentPlayhead,
-        );
-        for (const subtitle of activeSubtitles) {
-          renderSubtitleToCanvas(
-            ctx,
-            subtitle,
-            canvas.width,
-            canvas.height,
-            currentPlayhead,
           );
         }
 
@@ -3635,20 +3566,6 @@ export const Preview: React.FC = () => {
               }
             }
 
-            const activeSubtitles = getActiveSubtitles(
-              allSubtitlesRef.current,
-              currentPlayhead,
-            );
-            for (const subtitle of activeSubtitles) {
-              renderSubtitleToCanvas(
-                ctx,
-                subtitle,
-                canvas.width,
-                canvas.height,
-                currentPlayhead,
-              );
-            }
-
             mainCtx.drawImage(offscreenCanvasRef.current!, 0, 0);
 
             try {
@@ -3672,20 +3589,6 @@ export const Preview: React.FC = () => {
               canvas.width,
               canvas.height,
             );
-
-            const activeSubtitles = getActiveSubtitles(
-              allSubtitlesRef.current,
-              currentPlayhead,
-            );
-            for (const subtitle of activeSubtitles) {
-              renderSubtitleToCanvas(
-                ctx,
-                subtitle,
-                canvas.width,
-                canvas.height,
-                currentPlayhead,
-              );
-            }
 
             mainCtx.drawImage(offscreenCanvasRef.current!, 0, 0);
           }
