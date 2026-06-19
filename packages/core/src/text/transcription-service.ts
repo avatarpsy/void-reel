@@ -61,7 +61,10 @@ export class TranscriptionService {
   constructor(config: TranscriptionConfig) {
     this.config = {
       maxSegmentDuration: 5,
-      maxWordsPerSegment: 10,
+      // Short, viral-style cuts by default (~4 words). Matches the avatar
+      // pipeline's WORDS_PER_CHUNK so both caption entry points are consistent.
+      // Callers can override per-call via transcribeClip({ maxWordsPerCut }).
+      maxWordsPerSegment: 4,
       ...config,
     };
   }
@@ -70,6 +73,7 @@ export class TranscriptionService {
     clip: Clip,
     mediaItem: MediaItem,
     onProgress?: (progress: WhisperTranscriptionProgress) => void,
+    opts?: { maxWordsPerCut?: number },
   ): Promise<Subtitle[]> {
     try {
       onProgress?.({
@@ -94,7 +98,11 @@ export class TranscriptionService {
         message: "Processing transcription...",
       });
 
-      const subtitles = this.convertToSubtitles(whisperResponse, clip);
+      const subtitles = this.convertToSubtitles(
+        whisperResponse,
+        clip,
+        opts?.maxWordsPerCut,
+      );
 
       onProgress?.({
         phase: "complete",
@@ -270,6 +278,7 @@ export class TranscriptionService {
   private convertToSubtitles(
     response: CloudflareWhisperResponse,
     clip: Clip,
+    maxWordsPerCut?: number,
   ): Subtitle[] {
     if (!response.words || response.words.length === 0) {
       if (!response.text) return [];
@@ -287,15 +296,20 @@ export class TranscriptionService {
       ];
     }
 
-    return this.groupWordsIntoSubtitles(response.words, clip.startTime);
+    return this.groupWordsIntoSubtitles(
+      response.words,
+      clip.startTime,
+      maxWordsPerCut,
+    );
   }
 
   private groupWordsIntoSubtitles(
     words: CloudflareWhisperWord[],
     clipStartTime: number,
+    maxWordsPerCut?: number,
   ): Subtitle[] {
     const subtitles: Subtitle[] = [];
-    const maxWords = this.config.maxWordsPerSegment || 10;
+    const maxWords = maxWordsPerCut ?? this.config.maxWordsPerSegment ?? 4;
     const maxDuration = this.config.maxSegmentDuration || 5;
 
     let currentWords: CloudflareWhisperWord[] = [];
@@ -322,7 +336,7 @@ export class TranscriptionService {
       } else {
         currentWords.push(word);
 
-        if (isPunctuation && currentWords.length >= 3) {
+        if (isPunctuation && currentWords.length >= Math.min(3, maxWords)) {
           subtitles.push(
             this.createSubtitleFromWords(currentWords, clipStartTime),
           );

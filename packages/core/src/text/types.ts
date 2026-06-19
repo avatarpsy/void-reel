@@ -1,4 +1,9 @@
-import type { Transform, Keyframe, EasingType } from "../types/timeline";
+import type {
+  Transform,
+  Keyframe,
+  EasingType,
+  CaptionAnimationStyle,
+} from "../types/timeline";
 import type { EmphasisAnimation } from "../graphics/types";
 
 export interface TextClip {
@@ -14,6 +19,28 @@ export interface TextClip {
   readonly blendMode?: import("../video/types").BlendMode;
   readonly blendOpacity?: number;
   readonly emphasisAnimation?: EmphasisAnimation;
+  /**
+   * Kinetic-caption word timing (seconds, RELATIVE to this clip's start). When
+   * present (and `captionHighlight !== false`) the renderer draws the phrase
+   * word-by-word with the spoken word highlighted + scaled, in sync with audio.
+   * Only set on caption clips. Renders identically in preview and export
+   * because both pass clip-local time.
+   */
+  readonly captionWords?: readonly CaptionWord[];
+  /** Toggle the kinetic word highlight on a caption (default true when words exist). */
+  readonly captionHighlight?: boolean;
+  /** Active-word colour for the kinetic highlight (default "#FFE600"). */
+  readonly captionHighlightColor?: string;
+  /** Which kinetic animation to draw (default "word-highlight"). */
+  readonly captionAnimation?: CaptionAnimationStyle;
+}
+
+export interface CaptionWord {
+  readonly text: string;
+  /** seconds, relative to the clip's start */
+  readonly start: number;
+  /** seconds, relative to the clip's start */
+  readonly end: number;
 }
 
 export interface TextStyle {

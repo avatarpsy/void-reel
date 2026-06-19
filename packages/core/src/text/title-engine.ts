@@ -1,4 +1,8 @@
-import type { Transform, Keyframe } from "../types/timeline";
+import type {
+  Transform,
+  Keyframe,
+  CaptionAnimationStyle,
+} from "../types/timeline";
 import type {
   TextClip,
   TextStyle,
@@ -6,9 +10,11 @@ import type {
   TextRenderResult,
   TextMetrics,
   TextLineMetrics,
+  CaptionWord,
 } from "./types";
 import { DEFAULT_TEXT_STYLE, DEFAULT_TEXT_TRANSFORM } from "./types";
 import { textAnimationEngine } from "./text-animation";
+import { renderCaptionWordHighlight } from "./caption-word-renderer";
 
 export interface CreateTextClipOptions {
   id?: string;
@@ -32,6 +38,10 @@ export interface UpdateTextClipOptions {
   blendMode?: import("../video/types").BlendMode;
   blendOpacity?: number;
   emphasisAnimation?: import("../graphics/types").EmphasisAnimation;
+  captionWords?: readonly CaptionWord[];
+  captionHighlight?: boolean;
+  captionHighlightColor?: string;
+  captionAnimation?: CaptionAnimationStyle;
 }
 
 export class TitleEngine {
@@ -124,6 +134,11 @@ export class TitleEngine {
       blendOpacity: updates.blendOpacity ?? existing.blendOpacity,
       emphasisAnimation:
         updates.emphasisAnimation ?? existing.emphasisAnimation,
+      captionWords: updates.captionWords ?? existing.captionWords,
+      captionHighlight: updates.captionHighlight ?? existing.captionHighlight,
+      captionHighlightColor:
+        updates.captionHighlightColor ?? existing.captionHighlightColor,
+      captionAnimation: updates.captionAnimation ?? existing.captionAnimation,
     };
 
     this.textClips.set(id, updatedClip);
@@ -274,7 +289,14 @@ export class TitleEngine {
       startY = -totalHeight;
     }
 
-    if (style.backgroundColor) {
+    // Kinetic captions draw their own (layout-tight) background inside the
+    // shared word renderer; skip the block-background fill here so they don't
+    // get a double box on export (preview has no pre-fill — parity).
+    const isKineticCaption =
+      !!clip.captionWords &&
+      clip.captionWords.length > 0 &&
+      clip.captionHighlight !== false;
+    if (style.backgroundColor && !isKineticCaption) {
       const bgWidth = metrics.width + 20;
       const bgHeight = totalHeight;
       ctx.fillStyle = style.backgroundColor;
@@ -325,6 +347,24 @@ export class TitleEngine {
         }
         charIdx++;
       }
+    } else if (
+      clip.captionWords &&
+      clip.captionWords.length > 0 &&
+      clip.captionHighlight !== false
+    ) {
+      // Kinetic caption: draw the phrase word-by-word, active word highlighted
+      // + scaled in sync with speech. Shared with the live preview renderer.
+      renderCaptionWordHighlight(ctx, clip.captionWords, time, {
+        color: style.color,
+        highlightColor: clip.captionHighlightColor || "#FFE600",
+        strokeColor: style.strokeColor,
+        strokeWidth: style.strokeWidth,
+        fontSize: style.fontSize,
+        centerY: startY,
+        canvasWidth: width,
+        backgroundColor: style.backgroundColor,
+        animationStyle: clip.captionAnimation,
+      });
     } else {
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i];

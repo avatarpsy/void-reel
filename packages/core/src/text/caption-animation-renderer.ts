@@ -77,7 +77,7 @@ function renderWordHighlight(
       text: word.text,
       style: isActive ? "highlighted" : isPast ? "normal" : "normal",
       opacity: 1,
-      scale: 1,
+      scale: isActive ? 1.1 : 1, // active word "pops" (canvas renderer applies scale)
       offsetY: 0,
       color,
     };
