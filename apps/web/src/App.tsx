@@ -177,9 +177,22 @@ function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
     }
   }
 
-  const knownTextClipIds = new Set(
-    (current.textClips ?? []).map((t) => t.id),
-  );
+  // Seed the text-clip merge from the LIVE title engine, not the possibly-stale
+  // project.textClips snapshot. Caption/title edits made via the inspector or
+  // canvas land in the engine map but don't write back to project.textClips, so
+  // seeding from the snapshot here would clobber them on the next generation
+  // tick (e.g. while remaining scenes stream in). The save path already reads
+  // the engine via getAllTextClips, so this keeps live + saved in agreement.
+  const liveTitleEngine = useEngineStore.getState().getTitleEngine();
+  const engineTextClips = liveTitleEngine?.getAllTextClips() ?? [];
+  // Prefer the live engine (it holds in-session caption/title edits that never
+  // write back to project.textClips). Fall back to the project snapshot ONLY
+  // when the engine is initialized-but-EMPTY (Firestore loaded but
+  // loadTextClips hasn't fired yet) — `[]` is non-nullish, so this needs an
+  // explicit length check, mirroring the get-state read elsewhere in this file.
+  const existingTextClips =
+    engineTextClips.length > 0 ? engineTextClips : current.textClips ?? [];
+  const knownTextClipIds = new Set(existingTextClips.map((t) => t.id));
   const newTextClips = (fresh.textClips ?? []).filter(
     (t) => !knownTextClipIds.has(t.id),
   );
@@ -288,7 +301,7 @@ function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
         : current.settings,
       mediaLibrary: { items: [...mergedMediaItems, ...newMedia] },
       timeline: { ...current.timeline, tracks: mergedTracks },
-      textClips: [...(current.textClips ?? []), ...newTextClips],
+      textClips: [...existingTextClips, ...newTextClips],
       modifiedAt: fresh.modifiedAt,
     },
   });
@@ -307,12 +320,8 @@ function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
     playbackController?.invalidateAudioForMedia(toInvalidate[Symbol.iterator]());
   }
 
-  const liveTitleEngine = useEngineStore.getState().getTitleEngine();
   if (liveTitleEngine) {
-    liveTitleEngine.loadTextClips([
-      ...(current.textClips ?? []),
-      ...newTextClips,
-    ]);
+    liveTitleEngine.loadTextClips([...existingTextClips, ...newTextClips]);
   }
 
   return {

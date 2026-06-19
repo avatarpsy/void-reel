@@ -46,6 +46,7 @@ import {
   AudioTextSyncPanel,
   AlignmentSection,
   SunoAudioPanel,
+  CaptionStylePanel,
 } from "./inspector";
 import {
   transcribeViaVoidspace,
@@ -182,8 +183,16 @@ const ParticleEffectsSectionWrapper: React.FC<{
 
 export const InspectorPanel: React.FC = () => {
   // Stores
-  const { getClip, getMediaItem, addSubtitle, updateSubtitle, getSubtitle } =
-    useProjectStore();
+  const {
+    getClip,
+    getMediaItem,
+    addSubtitle,
+    updateSubtitle,
+    getSubtitle,
+    getTextClip,
+    getAllTextClips,
+    deleteTextClip,
+  } = useProjectStore();
   const project = useProjectStore((state) => state.project);
   // User-resizable panel width (persisted via panels.inspector.width; the
   // drag handle lives in EditorInterface as a flex sibling).
@@ -200,6 +209,8 @@ export const InspectorPanel: React.FC = () => {
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [defaultAnimationStyle, setDefaultAnimationStyle] =
     useState<CaptionAnimationStyle>("word-highlight");
+  // Max words per caption cut (viral-style short captions). Default 4.
+  const [maxWordsPerCut, setMaxWordsPerCut] = useState(4);
 
   // Check if a subtitle is selected
   const selectedSubtitleId = useMemo(() => {
@@ -320,6 +331,48 @@ export const InspectorPanel: React.FC = () => {
 
   // Get current values from engines - recalculate when updateCounter changes
   const clipId = selectedClip?.id || "";
+
+  // ── Captions ──────────────────────────────────────────────────────────
+  // Captions are native text clips on the `track-captions` track. ONE panel
+  // (CaptionStylePanel) edits a single selected caption OR many (marquee /
+  // shift multi-select) — this is what fixes the "inspector is empty when I
+  // select multiple caption boxes" case.
+  // A clip is a caption if it's on the avatar-pipeline captions track
+  // ('track-captions'), has a caption-* id, or lives on the inspector-generated
+  // "Captions" text track (the AI Auto-Captions path).
+  const captionTrackIds = useMemo(() => {
+    const ids = new Set<string>(["track-captions"]);
+    for (const t of project.timeline.tracks) {
+      if (t.type === "text" && t.name === "Captions") ids.add(t.id);
+    }
+    return ids;
+  }, [project.timeline.tracks]);
+  const isCaptionClipId = useCallback(
+    (id: string) => {
+      const tc = getTextClip(id);
+      return (
+        !!tc && (captionTrackIds.has(tc.trackId) || tc.id.startsWith("caption-"))
+      );
+    },
+    [getTextClip, captionTrackIds],
+  );
+  const allCaptionIds = useMemo(
+    () =>
+      getAllTextClips()
+        .filter(
+          (tc) =>
+            captionTrackIds.has(tc.trackId) || tc.id.startsWith("caption-"),
+        )
+        .map((tc) => tc.id),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [getAllTextClips, captionTrackIds, project.modifiedAt],
+  );
+  const selectedCaptionIds = useMemo(
+    () => selectedClipIds.filter((id) => isCaptionClipId(id)),
+    [selectedClipIds, isCaptionClipId],
+  );
+  const selectedIsCaption =
+    !!selectedClip && isCaptionClipId(selectedClip.id);
 
   const chromaKeySettings = useMemo(() => {
     return clipId ? chromaKeyEngine.getSettings(clipId) : null;
@@ -485,7 +538,33 @@ export const InspectorPanel: React.FC = () => {
         regularClip,
         mediaItem,
         setTranscriptionProgress,
+        { maxWordsPerCut },
       );
+
+      // Replace, don't append: clear existing caption clips overlapping THIS
+      // clip's span so re-generating (e.g. trying different styles) doesn't
+      // stack duplicate/overlapping captions — which rendered as glitchy
+      // fragments on the timeline.
+      const clipStart = regularClip.startTime;
+      const clipEnd = regularClip.startTime + regularClip.duration;
+      const captionTrackIds = new Set(
+        project.timeline.tracks
+          .filter(
+            (t) =>
+              t.type === "text" &&
+              (t.id === "track-captions" || t.name === "Captions"),
+          )
+          .map((t) => t.id),
+      );
+      for (const tc of getAllTextClips()) {
+        if (
+          captionTrackIds.has(tc.trackId) &&
+          tc.startTime < clipEnd &&
+          tc.startTime + tc.duration > clipStart
+        ) {
+          deleteTextClip(tc.id);
+        }
+      }
 
       for (const subtitle of subtitles) {
         addSubtitle({
@@ -527,6 +606,10 @@ export const InspectorPanel: React.FC = () => {
     getClip,
     addSubtitle,
     defaultAnimationStyle,
+    maxWordsPerCut,
+    project.timeline.tracks,
+    getAllTextClips,
+    deleteTextClip,
   ]);
 
   // Default transform
@@ -632,8 +715,34 @@ export const InspectorPanel: React.FC = () => {
           Inspector
         </h3>
 
-        {selectedClip ? (
+        {selectedClipIds.length > 1 && selectedCaptionIds.length >= 1 ? (
+          /* Multiple boxes selected (marquee / shift-select) with at least one
+             caption — the same editor as a single caption, applied to the
+             selected caption(s). Fixes the previously-empty multi-select
+             inspector (incl. mixed caption + non-caption selections). The
+             `key` resets the apply-to-all toggle when the selection changes. */
+          <CaptionStylePanel
+            key={selectedCaptionIds.join(",")}
+            clipIds={selectedCaptionIds}
+            allCaptionIds={allCaptionIds}
+          />
+        ) : selectedClip ? (
           <>
+            {/* Caption quick-style — captions get the dedicated panel on top
+               while keeping the full text editor below for fine control. */}
+            {selectedIsCaption && (
+              <Section
+                title="Caption Style"
+                sectionId="caption-style"
+                defaultOpen={true}
+              >
+                <CaptionStylePanel
+                  key={selectedClip.id}
+                  clipIds={[selectedClip.id]}
+                  allCaptionIds={allCaptionIds}
+                />
+              </Section>
+            )}
             {/* Clip Info */}
             <div className="mb-4 p-3 bg-background-tertiary rounded-lg border border-border">
               <p className="text-xs text-text-primary font-medium truncate">
@@ -667,6 +776,24 @@ export const InspectorPanel: React.FC = () => {
                         ))}
                       </SelectContent>
                     </Select>
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] text-text-secondary block mb-1">
+                      Words per caption: {maxWordsPerCut}
+                    </label>
+                    <input
+                      type="range"
+                      min={2}
+                      max={8}
+                      step={1}
+                      value={maxWordsPerCut}
+                      onChange={(e) =>
+                        setMaxWordsPerCut(Number(e.target.value))
+                      }
+                      disabled={isTranscribing}
+                      className="w-full accent-primary cursor-pointer"
+                    />
                   </div>
 
                   {transcriptionProgress ? (

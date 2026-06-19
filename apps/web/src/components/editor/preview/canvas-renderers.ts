@@ -10,6 +10,7 @@ import {
   type Keyframe,
   type EmphasisAnimation,
   renderSubtitleToCanvasCtx,
+  renderCaptionWordHighlight,
 } from "@openreel/core";
 import * as THREE from "three";
 
@@ -733,6 +734,24 @@ export const renderTextClipToCanvas = (
       }
       charIdx++;
     }
+  } else if (
+    textClip.captionWords &&
+    textClip.captionWords.length > 0 &&
+    textClip.captionHighlight !== false
+  ) {
+    // Kinetic caption: phrase drawn word-by-word, active word highlighted +
+    // scaled in sync with speech. Shared renderer keeps preview == export.
+    renderCaptionWordHighlight(ctx, textClip.captionWords, clipLocalTime, {
+      color: style.color,
+      highlightColor: textClip.captionHighlightColor || "#FFE600",
+      strokeColor: style.strokeColor,
+      strokeWidth: style.strokeWidth,
+      fontSize: style.fontSize,
+      centerY: startY,
+      canvasWidth,
+      backgroundColor: style.backgroundColor,
+      animationStyle: textClip.captionAnimation,
+    });
   } else {
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];

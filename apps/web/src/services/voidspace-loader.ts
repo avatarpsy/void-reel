@@ -1197,12 +1197,28 @@ export async function loadSceneListAsProject(
   // rendering on top of the TextClips.
   const subtitles: Subtitle[] = [];
   const captionTextClips: TextClip[] = [];
+  // Caption sizing is proportional to the composition HEIGHT so captions are
+  // viral-sized (~7.2%) and stay consistent across aspect ratios / resolutions.
+  // The old fixed 72px looked tiny on a 1080x1920 vertical comp. Outline +
+  // shadow scale with the font so legibility holds at any size. This ratio
+  // matches the "Kinetic" preset in CaptionStylePanel.
+  const captionFontSize = Math.round(dim.height * 0.072);
+  const captionStyle = {
+    ...CAPTION_TEXT_STYLE,
+    fontSize: captionFontSize,
+    strokeWidth: Math.max(4, Math.round(captionFontSize * 0.09)),
+    shadowColor: "rgba(0,0,0,0.9)",
+    shadowBlur: Math.round(captionFontSize * 0.18),
+    shadowOffsetX: 0,
+    shadowOffsetY: Math.round(captionFontSize * 0.06),
+  };
   const pushCaption = (
     text: string,
     startTime: number,
     endTime: number,
     sceneDocId: string,
     chunkIdx: number,
+    words?: { text: string; start: number; end: number }[],
   ) => {
     const duration = Math.max(0.1, endTime - startTime);
     captionTextClips.push({
@@ -1211,9 +1227,20 @@ export async function loadSceneListAsProject(
       startTime,
       duration,
       text,
-      style: { ...CAPTION_TEXT_STYLE },
+      style: { ...captionStyle },
       transform: { ...CAPTION_DEFAULT_TRANSFORM },
       keyframes: [],
+      // Kinetic word-pop: per-word timing (clip-relative) so the spoken word
+      // is highlighted in sync. Present for dialogue/narration captions; lyrics
+      // segments (no per-word data) stay static.
+      ...(words && words.length > 0
+        ? {
+            captionWords: words,
+            captionHighlight: true,
+            captionHighlightColor: "#FFE600",
+            captionAnimation: "word-highlight" as const,
+          }
+        : {}),
     });
   };
 
@@ -1723,7 +1750,13 @@ export async function loadSceneListAsProject(
         const text = chunk.map((w) => w.text).join(" ");
         const startSec = chunk[0].startTime;
         const endSec = chunk[chunk.length - 1].endTime;
-        pushCaption(text, startSec, endSec, scene._docId, chunkIdx++);
+        // Word timing relative to the caption clip's own start, for word-pop.
+        const clipWords = chunk.map((w) => ({
+          text: w.text,
+          start: Math.max(0, w.startTime - startSec),
+          end: Math.max(0, w.endTime - startSec),
+        }));
+        pushCaption(text, startSec, endSec, scene._docId, chunkIdx++, clipWords);
       }
     } else {
       // Lyrics segments need rebasing relative to music_start_ms (Flutter parity).

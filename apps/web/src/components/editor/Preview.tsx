@@ -1642,14 +1642,25 @@ export const Preview: React.FC = () => {
             time,
           );
         }
+        // A subtitle-only frame must still blit to the visible canvas when
+        // paused (the blit below is gated on hasRenderedFrame). Without this,
+        // legacy timeline.subtitles captions showed during playback (drawn
+        // straight to the visible canvas) but vanished when paused.
+        hasRenderedFrame = true;
       }
 
-      if (hasRenderedFrame && offscreenCanvasRef.current) {
+      // Blit whenever ANY layer (incl. caption/subtitle/text-only) was drawn, so
+      // a caption with no decodable video at the playhead still appears paused.
+      const drewOverlays =
+        activeTextClips.length > 0 ||
+        activeShapeClips.length > 0 ||
+        activeSubtitles.length > 0;
+      if ((hasRenderedFrame || drewOverlays) && offscreenCanvasRef.current) {
         mainCtx.clearRect(0, 0, canvas.width, canvas.height);
         mainCtx.drawImage(offscreenCanvasRef.current, 0, 0);
       }
 
-      return hasRenderedFrame;
+      return hasRenderedFrame || drewOverlays;
     },
     [
       timelineTracks,

@@ -20,6 +20,8 @@ export function useKeyboardShortcuts() {
     pasteClips,
     duplicateClip,
     getClip,
+    getTextClip,
+    deleteTextClip,
     project,
     addMarker,
   } = useProjectStore();
@@ -159,15 +161,38 @@ export function useKeyboardShortcuts() {
 
   const handleDelete = useCallback(() => {
     const selectedIds = getSelectedClipIds();
-    selectedIds.forEach((id) => removeClip(id));
+    selectedIds.forEach((id) => {
+      // Captions are text clips that live in the title engine, NOT in
+      // timeline.tracks[].clips — removeClip is a silent no-op for them, which
+      // is why pressing Delete on a caption did nothing.
+      if (getTextClip(id)) {
+        deleteTextClip(id);
+      } else {
+        removeClip(id);
+      }
+    });
     clearSelection();
-  }, [getSelectedClipIds, removeClip, clearSelection]);
+  }, [getSelectedClipIds, removeClip, getTextClip, deleteTextClip, clearSelection]);
 
   const handleRippleDelete = useCallback(() => {
     const selectedIds = getSelectedClipIds();
-    selectedIds.forEach((id) => rippleDeleteClip(id));
+    selectedIds.forEach((id) => {
+      // Text/caption clips have no ripple semantics on a text track — just
+      // delete them (mirrors handleDelete) instead of a no-op rippleDeleteClip.
+      if (getTextClip(id)) {
+        deleteTextClip(id);
+      } else {
+        rippleDeleteClip(id);
+      }
+    });
     clearSelection();
-  }, [getSelectedClipIds, rippleDeleteClip, clearSelection]);
+  }, [
+    getSelectedClipIds,
+    rippleDeleteClip,
+    getTextClip,
+    deleteTextClip,
+    clearSelection,
+  ]);
 
   const handleSplit = useCallback(() => {
     const selectedIds = getSelectedClipIds();

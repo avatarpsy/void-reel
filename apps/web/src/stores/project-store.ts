@@ -11,6 +11,7 @@ import type {
   TextClip,
   TextStyle,
   TextAnimation,
+  CaptionAnimationStyle,
   TextAnimationPreset,
   TextAnimationParams,
   ShapeClip,
@@ -235,6 +236,14 @@ export interface ProjectState {
   updateTextTransform: (
     clipId: string,
     transform: Partial<Transform>,
+  ) => TextClip | null;
+  updateCaptionFields: (
+    clipId: string,
+    fields: {
+      captionHighlight?: boolean;
+      captionHighlightColor?: string;
+      captionAnimation?: CaptionAnimationStyle;
+    },
   ) => TextClip | null;
   getTextClip: (clipId: string) => TextClip | undefined;
   getAllTextClips: () => TextClip[];
@@ -3025,6 +3034,29 @@ export const useProjectStore = create<ProjectState>()(
       },
 
       /**
+       * Update kinetic-caption fields (word highlight on/off + active colour).
+       */
+      updateCaptionFields: (
+        clipId: string,
+        fields: {
+          captionHighlight?: boolean;
+          captionHighlightColor?: string;
+          captionAnimation?: CaptionAnimationStyle;
+        },
+      ) => {
+        const titleEngine = useEngineStore.getState().getTitleEngine();
+        if (!titleEngine) {
+          console.error("TitleEngine not initialized");
+          return null;
+        }
+        const updatedClip = titleEngine.updateTextClip(clipId, fields);
+        if (updatedClip) {
+          set({ project: { ...get().project, modifiedAt: Date.now() } });
+        }
+        return updatedClip || null;
+      },
+
+      /**
        * Update text clip transform (position, scale, rotation)
        * Text Overlay System
        */
@@ -3129,55 +3161,96 @@ export const useProjectStore = create<ProjectState>()(
        * Add a subtitle as a text clip on a Captions track
        */
       addSubtitle: async (subtitle) => {
-        const { project, addTrack, createTextClip } = get();
+        const { createTextClip } = get();
 
-        let captionsTrack = project.timeline.tracks.find(
-          (t) => t.type === "text" && t.name === "Captions"
-        );
+        // Find-or-create the SINGLE canonical captions track. Reuse the avatar
+        // pipeline's "track-captions" id so BOTH caption entry points share ONE
+        // track (consistent), and create it SYNCHRONOUSLY (no async addTrack +
+        // rename) so a burst of phrases can't race into duplicate "Captions" /
+        // "Text N" tracks — the rename used to be reverted by the live merge.
+        let captionsTrack =
+          get().project.timeline.tracks.find((t) => t.id === "track-captions") ??
+          get().project.timeline.tracks.find(
+            (t) => t.type === "text" && t.name === "Captions",
+          );
 
         if (!captionsTrack) {
-          const result = await addTrack("text");
-          if (!result?.success) return;
-
-          const updatedProject = get().project;
-          const newTracks = updatedProject.timeline.tracks.filter(
-            (t) => t.type === "text" && !project.timeline.tracks.some((old) => old.id === t.id)
-          );
-          captionsTrack = newTracks[0];
-
-          if (captionsTrack) {
-            set((state) => ({
-              project: {
-                ...state.project,
-                timeline: {
-                  ...state.project.timeline,
-                  tracks: state.project.timeline.tracks.map((t) =>
-                    t.id === captionsTrack!.id ? { ...t, name: "Captions" } : t
-                  ),
-                },
+          const newTrack: Track = {
+            id: "track-captions",
+            type: "text",
+            name: "Captions",
+            clips: [],
+            transitions: [],
+            locked: false,
+            hidden: false,
+            muted: false,
+            solo: false,
+          };
+          captionsTrack = newTrack;
+          set((state) => ({
+            project: {
+              ...state.project,
+              timeline: {
+                ...state.project.timeline,
+                tracks: [newTrack, ...state.project.timeline.tracks],
               },
-            }));
-            captionsTrack = { ...captionsTrack, name: "Captions" };
-          }
+            },
+          }));
         }
 
-        if (!captionsTrack) return;
-
         const duration = subtitle.endTime - subtitle.startTime;
-        const style = subtitle.style;
 
-        createTextClip(
+        // Produce the SAME viral caption look the avatar pipeline
+        // (voidspace-loader) makes: large (proportional to comp height), bold
+        // Anton, outlined + shadowed, with kinetic word-pop.
+        const compHeight = get().project.settings?.height || 1080;
+        const fontSize = Math.round(compHeight * 0.072);
+        const viralStyle: Partial<TextStyle> = {
+          fontFamily: "Anton",
+          fontSize,
+          fontWeight: "bold",
+          color: "#FFFFFF",
+          textAlign: "center",
+          strokeColor: "#000000",
+          strokeWidth: Math.max(4, Math.round(fontSize * 0.09)),
+          shadowColor: "rgba(0,0,0,0.9)",
+          shadowBlur: Math.round(fontSize * 0.18),
+          shadowOffsetX: 0,
+          shadowOffsetY: Math.round(fontSize * 0.06),
+        };
+
+        const created = createTextClip(
           captionsTrack.id,
           subtitle.startTime,
           subtitle.text,
           duration,
-          style ? {
-            fontFamily: style.fontFamily,
-            fontSize: style.fontSize,
-            color: style.color,
-            backgroundColor: style.backgroundColor || undefined,
-          } : undefined
+          viralStyle,
         );
+
+        if (created) {
+          // Per-word timing (clip-relative) drives the kinetic word highlight;
+          // bottom-centre placement matches the pipeline captions.
+          const clipWords = (subtitle.words ?? [])
+            .filter((w) => w && typeof w.text === "string")
+            .map((w) => ({
+              text: w.text,
+              start: Math.max(0, w.startTime - subtitle.startTime),
+              end: Math.max(0, w.endTime - subtitle.startTime),
+            }));
+          const titleEngine = useEngineStore.getState().getTitleEngine();
+          titleEngine?.updateTextClip(created.id, {
+            transform: { position: { x: 0.5, y: 0.85 } },
+            ...(clipWords.length > 0
+              ? {
+                  captionWords: clipWords,
+                  captionHighlight: subtitle.animationStyle !== "none",
+                  captionHighlightColor: "#FFE600",
+                  captionAnimation: subtitle.animationStyle ?? "word-highlight",
+                }
+              : {}),
+          });
+          set({ project: { ...get().project, modifiedAt: Date.now() } });
+        }
       },
 
       /**

@@ -33,6 +33,7 @@ export { TextSection } from "./TextSection";
 export { TextAnimationSection } from "./TextAnimationSection";
 export { AutoCaptionPanel } from "./AutoCaptionPanel";
 export { AudioTextSyncPanel } from "./AudioTextSyncPanel";
+export { CaptionStylePanel } from "./CaptionStylePanel";
 
 // Graphics & Shapes
 export { ShapeSection } from "./ShapeSection";
