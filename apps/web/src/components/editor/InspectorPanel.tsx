@@ -192,6 +192,7 @@ export const InspectorPanel: React.FC = () => {
     getTextClip,
     getAllTextClips,
     deleteTextClip,
+    updateCaptionFields,
   } = useProjectStore();
   const project = useProjectStore((state) => state.project);
   // User-resizable panel width (persisted via panels.inspector.width; the
@@ -764,7 +765,19 @@ export const InspectorPanel: React.FC = () => {
                     </label>
                     <Select
                       value={defaultAnimationStyle}
-                      onValueChange={(v) => setDefaultAnimationStyle(v as CaptionAnimationStyle)}
+                      onValueChange={(v) => {
+                        const style = v as CaptionAnimationStyle;
+                        setDefaultAnimationStyle(style);
+                        // Re-style EXISTING captions right away so changing the
+                        // style has an immediate, visible effect — no need to
+                        // pay for a re-transcription just to switch animations.
+                        for (const id of allCaptionIds) {
+                          updateCaptionFields(id, {
+                            captionAnimation: style,
+                            captionHighlight: style !== "none",
+                          });
+                        }
+                      }}
                       disabled={isTranscribing}
                     >
                       <SelectTrigger className="w-full bg-background-secondary border-border text-text-primary text-[11px]">
