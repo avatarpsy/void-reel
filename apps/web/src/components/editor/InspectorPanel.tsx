@@ -557,8 +557,10 @@ export const InspectorPanel: React.FC = () => {
           .map((t) => t.id),
       );
       for (const tc of getAllTextClips()) {
+        const isCaption =
+          captionTrackIds.has(tc.trackId) || tc.id.startsWith("caption-");
         if (
-          captionTrackIds.has(tc.trackId) &&
+          isCaption &&
           tc.startTime < clipEnd &&
           tc.startTime + tc.duration > clipStart
         ) {

@@ -164,6 +164,83 @@ export function pickNewTextClips(
   });
 }
 
+export interface CaptionConsolidation {
+  clips: import("@openreel/core").TextClip[];
+  /** Every text track that held a caption — empty ones can then be dropped. */
+  captionSourceTrackIds: Set<string>;
+}
+
+/**
+ * One-time cleanup for projects mangled by OLDER builds that re-ran "Generate
+ * Captions" without clearing — leaving the canonical `track-captions` plus a
+ * pile of DUPLICATE / ORPHANED text tracks all carrying the same stale captions.
+ *
+ * Rule: `track-captions` (and any caption-* clip) is the single source of truth.
+ * A text clip on ANOTHER track is stale caption junk when it BOTH (a) overlaps a
+ * canonical caption's time span and (b) is part of a duplicate group (the same
+ * text+start appears 2+ times) — that combination is unmistakably a leftover
+ * regenerate, never a deliberate title (which is unique and rarely overlaps a
+ * caption). Such clips are dropped and their source tracks reported so the empty
+ * ones can be removed; everything else is left untouched. Anchor captions are
+ * collapsed onto `track-captions`. Returns null when already clean (idempotent).
+ */
+export function consolidateCaptionTextClips(
+  clips: readonly import("@openreel/core").TextClip[],
+  namedCaptionTrackIds: ReadonlySet<string>,
+): CaptionConsolidation | null {
+  const norm = (t: string | undefined) => (t || "").trim().toUpperCase();
+  const dupKey = (c: import("@openreel/core").TextClip) =>
+    `${norm(c.text)}|${Math.round(c.startTime * 10)}`;
+  const isAnchor = (c: import("@openreel/core").TextClip) =>
+    namedCaptionTrackIds.has(c.trackId) || c.id.startsWith("caption-");
+
+  // Canonical caption time spans + how often each (text,start) repeats.
+  const anchorSpans = clips
+    .filter(isAnchor)
+    .map((c) => ({ start: c.startTime, end: c.startTime + c.duration }));
+  const counts = new Map<string, number>();
+  for (const c of clips) counts.set(dupKey(c), (counts.get(dupKey(c)) ?? 0) + 1);
+  const isDuplicated = (c: import("@openreel/core").TextClip) =>
+    (counts.get(dupKey(c)) ?? 0) >= 2;
+
+  const out: import("@openreel/core").TextClip[] = [];
+  const captionSourceTrackIds = new Set<string>();
+  const keptSpans: Array<{ start: number; end: number }> = [];
+  let changed = false;
+  for (const c of clips) {
+    const end = c.startTime + c.duration;
+    if (isAnchor(c)) {
+      captionSourceTrackIds.add(c.trackId);
+      // collapse onto track-captions; drop an anchor overlapping a kept one
+      const overlapsKept = keptSpans.some(
+        (s) => c.startTime < s.end - 0.05 && end > s.start + 0.05,
+      );
+      if (overlapsKept) {
+        changed = true;
+        continue;
+      }
+      keptSpans.push({ start: c.startTime, end });
+      if (c.trackId !== "track-captions") {
+        out.push({ ...c, trackId: "track-captions" });
+        changed = true;
+      } else {
+        out.push(c);
+      }
+      continue;
+    }
+    const overlapsAnchor = anchorSpans.some(
+      (a) => c.startTime < a.end - 0.05 && end > a.start + 0.05,
+    );
+    if (overlapsAnchor && isDuplicated(c)) {
+      captionSourceTrackIds.add(c.trackId); // stale duplicate caption -> drop
+      changed = true;
+      continue;
+    }
+    out.push(c); // genuine non-caption text (unique title) survives untouched
+  }
+  return changed ? { clips: out, captionSourceTrackIds } : null;
+}
+
 function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
   dirty: boolean;
   newMedia: number;
@@ -479,6 +556,56 @@ function App() {
   const importMedia = useProjectStore((state) => state.importMedia);
   const addClipToNewTrack = useProjectStore((state) => state.addClipToNewTrack);
   const forceSave = useProjectStore((state) => state.forceSave);
+
+  // Auto-clean projects saved by OLDER builds that left DUPLICATE caption tracks
+  // ("Captions" x2 / "Text N") with stacked clips: collapse every caption onto
+  // the one canonical track-captions and drop the now-empty duplicate tracks.
+  // Idempotent — no-ops once the project is clean — so it's safe to run on each
+  // project change (load + live ticks).
+  const projectModifiedAt = useProjectStore((s) => s.project.modifiedAt);
+  useEffect(() => {
+    const titleEngine = useEngineStore.getState().getTitleEngine();
+    if (!titleEngine) return;
+    const tracks = useProjectStore.getState().project.timeline.tracks;
+    const captionTrackIds = new Set(
+      tracks
+        .filter(
+          (t) =>
+            t.type === "text" && (t.id === "track-captions" || t.name === "Captions"),
+        )
+        .map((t) => t.id),
+    );
+    if (captionTrackIds.size === 0) return;
+    const consolidated = consolidateCaptionTextClips(
+      titleEngine.getAllTextClips(),
+      captionTrackIds,
+    );
+    if (!consolidated) return; // already clean
+    titleEngine.loadTextClips(consolidated.clips);
+    const usedTrackIds = new Set(consolidated.clips.map((c) => c.trackId));
+    useProjectStore.setState((s) => {
+      const cleanedTracks = s.project.timeline.tracks.filter(
+        (t) =>
+          // Drop a TEXT track that HELD a caption and is now empty (the legacy
+          // duplicate "Captions" + mis-named "Text N" tracks). Keep the
+          // canonical track-captions and any track still holding clips.
+          !(
+            t.type === "text" &&
+            t.id !== "track-captions" &&
+            consolidated.captionSourceTrackIds.has(t.id) &&
+            !usedTrackIds.has(t.id)
+          ),
+      );
+      return {
+        project: {
+          ...s.project,
+          timeline: { ...s.project.timeline, tracks: cleanedTracks },
+          modifiedAt: Date.now(),
+        },
+      };
+    });
+  }, [projectModifiedAt]);
+
   const [voidspaceLoading, setVoidspaceLoading] = useState(() => {
     const sp = new URLSearchParams(window.location.search);
     return sp.has("sceneListId") || sp.has("import");
