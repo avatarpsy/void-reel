@@ -531,19 +531,29 @@ export const Preview: React.FC = () => {
   }, [timelineTracks]);
 
   // Invalidate RAM Preview cache on real timeline structure changes
-  // (not reference identity changes from Voidspace live-reload during playback)
+  // (not reference identity changes from Voidspace live-reload during playback).
+  // Also include caption / text-clip CONTENT (style, highlight colour, font,
+  // size, position, text) — without it, editing a caption updates the paused
+  // preview (renderFrameDirectly reads live clips) but PLAYBACK keeps blitting
+  // cached frames rendered with the OLD style until a page refresh clears the
+  // cache. The signature only changes on real content edits, so live-reload
+  // ticks during generation (same content, new refs) still keep the cache.
   const prevTracksHashRef = useRef('');
   useEffect(() => {
-    const hash = timelineTracks.map(t =>
+    const tracksHash = timelineTracks.map(t =>
       `${t.id}:${t.clips.map(c => `${c.id}|${c.startTime}|${c.duration}|${(c.effects||[]).length}`).join(',')}`
     ).join('|');
+    const textHash = allTextClips.map((tc: any) =>
+      `${tc.id}|${tc.text}|${tc.style?.color || ''}|${tc.style?.fontSize || ''}|${tc.style?.fontFamily || ''}|${tc.style?.fontWeight || ''}|${tc.style?.strokeColor || ''}|${tc.style?.strokeWidth ?? ''}|${tc.captionHighlight ? 1 : 0}|${tc.captionHighlightColor || ''}|${tc.captionAnimation || ''}|${tc.transform?.position?.x ?? ''}|${tc.transform?.position?.y ?? ''}`
+    ).join('~');
+    const hash = `${tracksHash}##${textHash}`;
     if (hash === prevTracksHashRef.current) return;
     prevTracksHashRef.current = hash;
     const cache = ramCacheRef.current;
     cache.invalidate();
     setRamCacheCount(0);
     setRamCacheState([], 0);
-  }, [timelineTracks]);
+  }, [timelineTracks, allTextClips]);
 
   // Keep a ref to allTextClips for use in playback effect
   const allTextClipsRef = useRef(allTextClips);

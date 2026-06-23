@@ -1804,27 +1804,85 @@ export async function loadSceneListAsProject(
           lyricsBaseSec ??
           (lrcSegments.length > 0 ? lrcSegments[0].start : 0);
 
+        // Detect WORD-LEVEL LRC (Suno timestamped lyrics — one word per tag).
+        // When word-level, group into ~4-word phrases WITH per-word timing so
+        // the captions render as karaoke word-highlight — identical to the
+        // narration word_timestamps path (consistency) and surfacing the
+        // inspector's Active-word colour picker + animation styles. Line-level
+        // LRC (Flutter parity) stays as static captions.
+        const singleWord = lrcSegments.filter(
+          (s) => !/\s/.test(s.text.trim()),
+        ).length;
+        const wordLevel =
+          lrcSegments.length > 1 && singleWord / lrcSegments.length > 0.6;
+
         let chunkIdx = 0;
-        for (let i = 0; i < lrcSegments.length; i += 1) {
-          const segment = lrcSegments[i];
-          const rebasedStart = segment.start - offsetSec;
-          const next = lrcSegments[i + 1];
-          const rebasedNextStart = next != null ? next.start - offsetSec : null;
-          const fallbackEnd =
-            rebasedNextStart ?? Math.min(sceneDuration, rebasedStart + 2.5);
+        if (wordLevel) {
+          const WORDS_PER_CHUNK = 4;
+          for (let i = 0; i < lrcSegments.length; i += WORDS_PER_CHUNK) {
+            const chunk = lrcSegments.slice(i, i + WORDS_PER_CHUNK);
+            // Per-word absolute end = next word's start (cap +0.6s, floor +0.15s).
+            const words = chunk.map((w, j) => {
+              const nextAbs =
+                chunk[j + 1]?.start ??
+                lrcSegments[i + j + 1]?.start ??
+                w.start + 0.5;
+              const end = Math.max(w.start + 0.15, Math.min(nextAbs, w.start + 0.6));
+              return { text: w.text.trim().toUpperCase(), absStart: w.start, absEnd: end };
+            });
+            const phraseAbsStart = words[0].absStart;
+            const phraseAbsEnd = words[words.length - 1].absEnd;
+            const rebasedStart = phraseAbsStart - offsetSec;
+            const rebasedEnd = phraseAbsEnd - offsetSec;
+            if (rebasedStart < 0 || rebasedStart >= sceneDuration) continue;
+            const clampedEnd = Math.min(rebasedEnd, sceneDuration);
+            if (clampedEnd <= rebasedStart) continue;
+            // Display text: merge apostrophe / contraction fragments.
+            let display = "";
+            for (const w of words) {
+              const join =
+                display === "" ||
+                display.endsWith("'") ||
+                /^(VE|RE|LL|S|T|D|M|N'T)$/.test(w.text);
+              display += (join ? "" : " ") + w.text;
+            }
+            // captionWords: per-word timing RELATIVE to the caption clip start.
+            const capWords = words.map((w) => ({
+              text: w.text,
+              start: Math.max(0, w.absStart - phraseAbsStart),
+              end: Math.max(0.1, w.absEnd - phraseAbsStart),
+            }));
+            pushCaption(
+              display,
+              currentTime + rebasedStart,
+              currentTime + clampedEnd,
+              scene._docId,
+              chunkIdx++,
+              capWords,
+            );
+          }
+        } else {
+          for (let i = 0; i < lrcSegments.length; i += 1) {
+            const segment = lrcSegments[i];
+            const rebasedStart = segment.start - offsetSec;
+            const next = lrcSegments[i + 1];
+            const rebasedNextStart = next != null ? next.start - offsetSec : null;
+            const fallbackEnd =
+              rebasedNextStart ?? Math.min(sceneDuration, rebasedStart + 2.5);
 
-          // Skip segments outside scene bounds
-          if (rebasedStart < 0 || rebasedStart >= sceneDuration) continue;
-          if (fallbackEnd <= rebasedStart) continue;
-          const clampedEnd = Math.min(fallbackEnd, sceneDuration);
+            // Skip segments outside scene bounds
+            if (rebasedStart < 0 || rebasedStart >= sceneDuration) continue;
+            if (fallbackEnd <= rebasedStart) continue;
+            const clampedEnd = Math.min(fallbackEnd, sceneDuration);
 
-          pushCaption(
-            segment.text.toUpperCase(),
-            currentTime + rebasedStart,
-            currentTime + clampedEnd,
-            scene._docId,
-            chunkIdx++,
-          );
+            pushCaption(
+              segment.text.toUpperCase(),
+              currentTime + rebasedStart,
+              currentTime + clampedEnd,
+              scene._docId,
+              chunkIdx++,
+            );
+          }
         }
       }
     }

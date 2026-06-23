@@ -2007,7 +2007,7 @@ function App() {
             // the chat now drives the music clip into the live
             // project, and the editor's autosave commits a blob
             // that includes it.
-            const { url, volume, label, durationSec } = msg as any;
+            const { url, volume, label, durationSec, startOffsetSec, mediaDurationSec } = msg as any;
             if (!url) {
               reply({ type: "voidspace:error", requestId: msg.requestId, error: "url required" });
               break;
@@ -2038,6 +2038,23 @@ function App() {
               // instead of the 30s video fallback.
               if (typeof durationSec === "number" && durationSec > 0) totalDur = durationSec;
 
+              // ── Music-video segment offset ──────────────────────────────
+              // For a music video the chosen segment may start mid-song. We
+              // place the clip spanning the video on the timeline (startTime 0,
+              // length totalDur) but offset its SOURCE window so it plays the
+              // song from `offset`. The media item's duration must be the SONG's
+              // real length (not the video length) so the source window can be
+              // pushed forward — otherwise trimClip rejects an in-point past the
+              // (too-short) media. offset=0 + no mediaDurationSec → unchanged
+              // behaviour for ordinary BGM.
+              const offset = typeof startOffsetSec === "number" && startOffsetSec > 0 ? startOffsetSec : 0;
+              const mediaDur = typeof mediaDurationSec === "number" && mediaDurationSec > 0
+                ? mediaDurationSec
+                : (offset > 0 ? offset + totalDur : totalDur);
+              // Source window: [offset, offset+totalDur], clamped to the song.
+              const inPt = Math.max(0, Math.min(offset, Math.max(0, mediaDur - 0.5)));
+              const outPt = Math.min(inPt + totalDur, mediaDur);
+
               const stableHashFn = (s: string) => {
                 let h = 0;
                 for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
@@ -2059,7 +2076,7 @@ function App() {
                   type: "audio",
                   fileHandle: null,
                   blob,
-                  metadata: { duration: totalDur, fileSize: blob?.size ?? 0, sampleRate: 44100, channels: 2 },
+                  metadata: { duration: mediaDur, fileSize: blob?.size ?? 0, sampleRate: 44100, channels: 2 },
                   thumbnailUrl: null,
                   waveformData: null,
                   originalUrl: url,
@@ -2133,7 +2150,9 @@ function App() {
                 if (newClip) {
                   resolvedClipId = newClip.id;
                   if (totalDur > 0) {
-                    await useProjectStore.getState().trimClip(newClip.id, 0, totalDur);
+                    // [inPt, outPt] = source window; offset for mid-song segments,
+                    // [0, totalDur] for ordinary BGM.
+                    await useProjectStore.getState().trimClip(newClip.id, inPt, outPt);
                   }
                   if (clampedVolume !== null) {
                     const volStore = useProjectStore.getState() as any;
@@ -2170,6 +2189,11 @@ function App() {
                 });
                 const refreshedTr = (useProjectStore.getState().project.timeline?.tracks ?? []).find((t: any) => t.id === "track-music");
                 resolvedClipId = (refreshedTr?.clips?.[0]?.id) ?? null;
+                // Re-apply the source window so a swapped track honours the
+                // (possibly mid-song) segment offset too.
+                if (resolvedClipId && totalDur > 0 && (offset > 0 || typeof mediaDurationSec === "number")) {
+                  try { await useProjectStore.getState().trimClip(resolvedClipId, inPt, outPt); } catch { /* trim is best-effort on swap */ }
+                }
               }
 
               // Record the authoritative music swap (keyed on the music URL) so

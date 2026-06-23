@@ -2991,7 +2991,14 @@ export const useProjectStore = create<ProjectState>()(
 
         const updatedClip = titleEngine.updateText(clipId, text);
         if (updatedClip) {
-          set({ project: { ...get().project, modifiedAt: Date.now() } });
+          // Mirror the engine's clips back into project.textClips — the
+          // title engine is the live source of truth, but autosave +
+          // project_state serialization + reload all read project.textClips.
+          // Without this, the edit lives only in the engine and is lost on
+          // refresh (stale snapshot serialized) and reset on any rebuild that
+          // re-hydrates the engine from the snapshot. (Fixes caption edits
+          // not persisting.)
+          set({ project: { ...get().project, textClips: titleEngine.getAllTextClips(), modifiedAt: Date.now() } });
         }
         return updatedClip || null;
       },
@@ -3009,7 +3016,9 @@ export const useProjectStore = create<ProjectState>()(
 
         const updatedClip = titleEngine.updateStyle(clipId, style);
         if (updatedClip) {
-          set({ project: { ...get().project, modifiedAt: Date.now() } });
+          // Sync engine → project.textClips so style edits (font, size,
+          // colour) persist across autosave / reload. See updateTextContent.
+          set({ project: { ...get().project, textClips: titleEngine.getAllTextClips(), modifiedAt: Date.now() } });
         }
         return updatedClip || null;
       },
@@ -3027,8 +3036,8 @@ export const useProjectStore = create<ProjectState>()(
 
         const updatedClip = titleEngine.updateTextClip(clipId, { animation });
         if (updatedClip) {
-          // Trigger re-render by updating project state
-          set({ project: { ...get().project } });
+          // Sync engine → project.textClips so the change persists. See updateTextContent.
+          set({ project: { ...get().project, textClips: titleEngine.getAllTextClips(), modifiedAt: Date.now() } });
         }
         return updatedClip || null;
       },
@@ -3051,7 +3060,9 @@ export const useProjectStore = create<ProjectState>()(
         }
         const updatedClip = titleEngine.updateTextClip(clipId, fields);
         if (updatedClip) {
-          set({ project: { ...get().project, modifiedAt: Date.now() } });
+          // Sync engine → project.textClips so the highlight colour / word-
+          // highlight toggle persists across autosave / reload. See updateTextContent.
+          set({ project: { ...get().project, textClips: titleEngine.getAllTextClips(), modifiedAt: Date.now() } });
         }
         return updatedClip || null;
       },
@@ -3069,7 +3080,9 @@ export const useProjectStore = create<ProjectState>()(
 
         const updatedClip = titleEngine.updateTextClip(clipId, { transform });
         if (updatedClip) {
-          set({ project: { ...get().project, modifiedAt: Date.now() } });
+          // Sync engine → project.textClips so dragging/scaling a caption
+          // persists across autosave / reload. See updateTextContent.
+          set({ project: { ...get().project, textClips: titleEngine.getAllTextClips(), modifiedAt: Date.now() } });
         }
         return updatedClip || null;
       },
