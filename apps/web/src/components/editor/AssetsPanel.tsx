@@ -1061,6 +1061,31 @@ export const AssetsPanel: React.FC = () => {
       );
       e.dataTransfer.effectAllowed = "copy";
       startDrag("media", { mediaId: item.id, mediaType: item.type });
+
+      // Cross-iframe drag bridge: announce the asset to the host (Voidspace
+      // chat) so it can be dropped onto a scene's "Add reference" strip.
+      // dataTransfer doesn't cross the iframe boundary reliably, so the payload
+      // travels via postMessage; the drop itself lands in the parent document
+      // (where the strip lives), which IS deliverable. Durable cloud URL only —
+      // a local blob: URL is useless to the remote video model.
+      try {
+        const anyItem = item as any;
+        const url: string = anyItem.originalUrl || anyItem.url || anyItem.src || "";
+        const kind: string = String(item.type || "image").toLowerCase();
+        if (url && window.parent && window.parent !== window) {
+          window.parent.postMessage(
+            { type: "voidspace:ref-drag-start", media: { url, kind, name: item.name || "" } },
+            "*",
+          );
+          // One-shot dragend → tell the host the drag is over (clears its
+          // drop-target highlight). Fires after any drop has been processed.
+          const onEnd = () => {
+            try { window.parent?.postMessage({ type: "voidspace:ref-drag-end" }, "*"); } catch { /* ignore */ }
+            document.removeEventListener("dragend", onEnd);
+          };
+          document.addEventListener("dragend", onEnd);
+        }
+      } catch { /* best-effort — timeline drag still works */ }
     },
     [startDrag],
   );
