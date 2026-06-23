@@ -1476,6 +1476,10 @@ function App() {
               name: m.name ?? null,
               kind: m.type ?? m.kind ?? null,
               url: m.url ?? m.src ?? null,
+              // Durable cloud URL for imported/generated assets — `url`/`src`
+              // is a local blob: URL that's useless to remote models (Kie),
+              // so callers that need a fetchable reference use this instead.
+              originalUrl: m.originalUrl ?? null,
               duration: m.duration ?? null,
               width: m.width ?? null,
               height: m.height ?? null,
@@ -2509,7 +2513,7 @@ function App() {
             // We mirror the toolbar's `createMemoryWritable` shim so
             // the engine writes into a growable buffer and we hand
             // back the assembled Blob.
-            const proj = useProjectStore.getState().project;
+            let proj = useProjectStore.getState().project;
             if (!proj) {
               reply({ type: "voidspace:error", requestId: msg.requestId, error: "no project loaded" });
               break;
@@ -2519,31 +2523,89 @@ function App() {
               const engine = core.getExportEngine();
               await engine.initialize();
 
-              // Pre-flight: audio decode needs an actual Blob (the Web Audio
-              // API decodes from an ArrayBuffer). Video rendering can pull
-              // frames from an <video> element via URL, but audio CANNOT.
-              // The voidspace loader fetches blobs at project-load time, but
-              // a slow network or partial failure can leave items with
-              // .blob === null — the audio engine then silently drops them
-              // and the rendered video has no sound. Re-fetch any missing
-              // blobs from `originalUrl` before kicking off the encoder.
-              try {
-                const { fetchMediaBlob } = await import("./services/voidspace-loader");
-                const missing = (proj.mediaLibrary?.items ?? []).filter(
-                  (m: any) => !m.blob && (m.originalUrl || (m as any).url),
+              const { fetchMediaBlob } = await import("./services/voidspace-loader");
+              const postPhase = (phase: string) =>
+                (e.source as Window | null)?.postMessage(
+                  { type: "voidspace:export-progress", requestId: msg.requestId, fraction: 0, phase },
+                  "*",
                 );
+
+              // ── Render-readiness gate ────────────────────────────────────
+              // The FIRST render used to drop every clip after the first. Root
+              // cause: the voidspace loader's live Firestore subscription
+              // rebuilds the project across several async ticks (the
+              // project_state blob loads first, then a per-scene rebuild swaps
+              // in the freshly-generated clips + their blobs). A render fired
+              // right after open therefore operated on a half-built timeline —
+              // the later clips had no media yet and painted black. By the time
+              // the user hit "Re-render" the rebuild had settled, which is
+              // exactly why the second render "just worked".
+              //
+              // Fix: before exporting, wait for the project to STOP changing
+              // (track / clip / media counts stable across consecutive reads),
+              // then re-read it — so the first render exports the same complete
+              // timeline a re-render would.
+              const sigOf = (p: any) => {
+                if (!p) return "none";
+                const tracks = p.timeline?.tracks ?? [];
+                let clips = 0;
+                for (const t of tracks) clips += t.clips?.length ?? 0;
+                return `${tracks.length}/${clips}/${p.mediaLibrary?.items?.length ?? 0}`;
+              };
+              {
+                let prev = sigOf(proj);
+                let stable = 0;
+                for (let i = 0; i < 40 && stable < 3; i++) {
+                  await new Promise((r) => setTimeout(r, 200));
+                  const sig = sigOf(useProjectStore.getState().project);
+                  if (sig === prev) {
+                    stable++;
+                  } else {
+                    stable = 0;
+                    prev = sig;
+                    postPhase("Finishing loading the timeline…");
+                  }
+                }
+                proj = useProjectStore.getState().project || proj;
+                console.warn(`[voidspace:export] timeline settled at ${sigOf(proj)}`);
+              }
+
+              // Pre-flight: hydrate EVERY blob the timeline references. Video
+              // frames decode through a <video>/mediabunny decoder and audio
+              // decode needs a real Blob (Web Audio decodes an ArrayBuffer);
+              // the project_state blob path loads media URL-only, so without
+              // this a clip whose blob hasn't been lazily fetched yet renders
+              // black (video) or silent (audio). Cover every timeline-
+              // referenced clip from any URL field, with retries — not just
+              // items that happen to carry `originalUrl`.
+              try {
+                const neededIds = new Set<string>();
+                for (const t of (proj.timeline?.tracks ?? [])) {
+                  for (const c of (t.clips ?? [])) {
+                    if ((c as any).mediaId) neededIds.add((c as any).mediaId);
+                  }
+                }
+                const urlOf = (m: any) => m?.originalUrl || m?.url || null;
+                const items = (proj.mediaLibrary?.items ?? []) as any[];
+                let missing = items.filter((m) => neededIds.has(m.id) && !m.blob && urlOf(m));
                 if (missing.length > 0) {
-                  (e.source as Window | null)?.postMessage({
-                    type: "voidspace:export-progress",
-                    requestId: msg.requestId,
-                    fraction: 0,
-                    phase: `Loading ${missing.length} media file${missing.length === 1 ? "" : "s"}…`,
-                  }, "*");
-                  await Promise.all(missing.map(async (m: any) => {
-                    const url = m.originalUrl || m.url;
-                    const blob = await fetchMediaBlob(url);
-                    if (blob) m.blob = blob;
-                  }));
+                  postPhase(`Loading ${missing.length} media file${missing.length === 1 ? "" : "s"}…`);
+                  for (let attempt = 0; attempt < 3 && missing.length > 0; attempt++) {
+                    await Promise.all(
+                      missing.map(async (m) => {
+                        const blob = await fetchMediaBlob(urlOf(m));
+                        if (blob) m.blob = blob;
+                      }),
+                    );
+                    missing = items.filter((m) => neededIds.has(m.id) && !m.blob && urlOf(m));
+                  }
+                }
+                const unrenderable = items.filter((m) => neededIds.has(m.id) && !m.blob);
+                if (unrenderable.length) {
+                  console.warn(
+                    `[voidspace:export] ${unrenderable.length} timeline media still have no blob:`,
+                    unrenderable.map((m) => m.id),
+                  );
                 }
               } catch (preflightErr) {
                 console.warn("[voidspace:export] blob preflight failed:", preflightErr);
