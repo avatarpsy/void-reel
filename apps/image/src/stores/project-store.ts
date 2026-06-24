@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { subscribeWithSelector } from 'zustand/middleware';
 import { immer } from 'zustand/middleware/immer';
+import { renderLayersToDataURL } from '../services/export-service';
 import {
   createProjectDocument,
   deserializeProject,
@@ -124,6 +125,8 @@ interface ProjectActions {
 
   groupLayers: (layerIds: string[]) => string | null;
   ungroupLayers: (groupId: string) => void;
+  mergeDown: (layerId: string) => Promise<void>;
+  flattenImage: () => Promise<void>;
 
   addAsset: (asset: MediaAsset) => void;
   removeAsset: (assetId: string) => void;
@@ -140,6 +143,42 @@ function execCmd(
   command: Parameters<ReturnType<typeof useHistoryStore['getState']>['execute']>[0],
 ): Project {
   return useHistoryStore.getState().execute(command, project);
+}
+
+/** A fresh image layer (all defaults) at the artboard origin — used by
+ *  merge/flatten. Mirrors the layer object built by addImageLayer. */
+function buildMergedImageLayer(name: string, sourceId: string, width: number, height: number): ImageLayer {
+  return {
+    id: generateId(),
+    name,
+    type: 'image',
+    visible: true,
+    locked: false,
+    transform: { ...DEFAULT_TRANSFORM, width, height, x: 0, y: 0 },
+    blendMode: DEFAULT_BLEND_MODE,
+    shadow: DEFAULT_SHADOW,
+    innerShadow: DEFAULT_INNER_SHADOW,
+    stroke: DEFAULT_STROKE,
+    glow: DEFAULT_GLOW,
+    filters: DEFAULT_FILTER,
+    parentId: null,
+    sourceId,
+    cropRect: null,
+    flipHorizontal: false,
+    flipVertical: false,
+    mask: null,
+    clippingMask: false,
+    levels: { ...DEFAULT_LEVELS },
+    curves: { ...DEFAULT_CURVES },
+    colorBalance: { ...DEFAULT_COLOR_BALANCE },
+    selectiveColor: { ...DEFAULT_SELECTIVE_COLOR },
+    blackWhite: { ...DEFAULT_BLACK_WHITE },
+    photoFilter: { ...DEFAULT_PHOTO_FILTER },
+    channelMixer: { ...DEFAULT_CHANNEL_MIXER },
+    gradientMap: { ...DEFAULT_GRADIENT_MAP },
+    posterize: { ...DEFAULT_POSTERIZE },
+    threshold: { ...DEFAULT_THRESHOLD },
+  };
 }
 
 export const useProjectStore = create<ProjectState & ProjectActions>()(
@@ -877,6 +916,73 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
         );
         const newProject = execCmd(project, cmd);
         set({ project: newProject, selectedLayerIds: group.childIds, isDirty: true });
+      },
+
+      mergeDown: async (layerId) => {
+        const { project, selectedArtboardId } = get();
+        if (!project) return;
+        const artboard = project.artboards.find((a) => a.id === selectedArtboardId);
+        if (!artboard) return;
+        const idx = artboard.layerIds.indexOf(layerId);
+        if (idx < 0 || idx >= artboard.layerIds.length - 1) return; // nothing below
+        const belowId = artboard.layerIds[idx + 1];
+        const target = project.layers[layerId];
+        const below = project.layers[belowId];
+        if (!target || !below) return;
+        const W = artboard.size.width, H = artboard.size.height;
+        // Composite below (bottom) then target (top) using the export render path.
+        const dataUrl = await renderLayersToDataURL(project, [belowId, layerId], W, H);
+
+        const cur = get().project; // re-read after the async render
+        if (!cur) return;
+        const ab = cur.artboards.find((a) => a.id === artboard.id);
+        if (!ab) return;
+        const assetId = generateId();
+        const mergedAsset: MediaAsset = {
+          id: assetId, name: target.name, type: 'image', mimeType: 'image/png',
+          size: dataUrl.length, width: Math.round(W), height: Math.round(H),
+          thumbnailUrl: dataUrl, dataUrl,
+        };
+        const merged = buildMergedImageLayer(target.name, assetId, W, H);
+        // Register the asset, insert the merged layer where `below` was, drop both sources.
+        let p: Project = { ...cur, assets: { ...cur.assets, [assetId]: mergedAsset } };
+        p = execCmd(p, new AddLayerCommand(artboard.id, merged, Math.max(ab.layerIds.indexOf(belowId), 0)));
+        let t = p.artboards.find((a) => a.id === artboard.id)!;
+        p = execCmd(p, new RemoveLayerCommand(layerId, artboard.id, target, t.layerIds.indexOf(layerId)));
+        t = p.artboards.find((a) => a.id === artboard.id)!;
+        p = execCmd(p, new RemoveLayerCommand(belowId, artboard.id, below, t.layerIds.indexOf(belowId)));
+        set({ project: p, selectedLayerIds: [merged.id], isDirty: true });
+      },
+
+      flattenImage: async () => {
+        const { project, selectedArtboardId } = get();
+        if (!project) return;
+        const artboard = project.artboards.find((a) => a.id === selectedArtboardId);
+        if (!artboard || artboard.layerIds.length === 0) return;
+        const W = artboard.size.width, H = artboard.size.height;
+        const bottomToTop = [...artboard.layerIds].reverse();
+        const dataUrl = await renderLayersToDataURL(project, bottomToTop, W, H);
+
+        const cur = get().project;
+        if (!cur) return;
+        const ab = cur.artboards.find((a) => a.id === artboard.id);
+        if (!ab) return;
+        const assetId = generateId();
+        const mergedAsset: MediaAsset = {
+          id: assetId, name: 'Flattened', type: 'image', mimeType: 'image/png',
+          size: dataUrl.length, width: Math.round(W), height: Math.round(H),
+          thumbnailUrl: dataUrl, dataUrl,
+        };
+        const merged = buildMergedImageLayer('Flattened', assetId, W, H);
+        let p: Project = { ...cur, assets: { ...cur.assets, [assetId]: mergedAsset } };
+        p = execCmd(p, new AddLayerCommand(artboard.id, merged, ab.layerIds.length));
+        for (const id of [...ab.layerIds]) {
+          const lyr = p.layers[id];
+          if (!lyr) continue;
+          const t = p.artboards.find((a) => a.id === artboard.id)!;
+          p = execCmd(p, new RemoveLayerCommand(id, artboard.id, lyr, t.layerIds.indexOf(id)));
+        }
+        set({ project: p, selectedLayerIds: [merged.id], isDirty: true });
       },
 
       // ── Assets (no undo needed for asset registration) ───────────────────

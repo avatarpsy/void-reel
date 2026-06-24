@@ -1,7 +1,7 @@
 import { useProjectStore } from '../../../stores/project-store';
 import { useSelectionStore } from '../../../stores/selection-store';
 import type { Layer } from '../../../types/project';
-import { createMaskFromSelection } from '../../../types/mask';
+import { buildMaskData } from '../../../utils/mask-builder';
 import {
   Circle,
   Eye,
@@ -70,31 +70,8 @@ export function MaskSection({ layer }: Props) {
   const hasMask = mask !== null;
   const hasSelection = selection !== null;
 
-  // Build the mask bitmap (a data URL whose alpha reveals/hides the layer).
-  // With an active selection -> opaque inside the selection; otherwise a solid
-  // reveal-all (white) / hide-all (transparent) mask to paint on later.
-  const buildMaskData = async (reveal: boolean): Promise<string> => {
-    const t = layer.transform;
-    const w = Math.max(1, Math.round(t.width));
-    const h = Math.max(1, Math.round(t.height));
-    if (selection && selection.path.length > 2) {
-      // selection.path is in artboard coords; mask space is layer-local.
-      const localPath = selection.path.map((p) => ({ x: p.x - t.x, y: p.y - t.y }));
-      return createMaskFromSelection(localPath, w, h, selection.feather);
-    }
-    const canvas = new OffscreenCanvas(w, h);
-    const ctx = canvas.getContext('2d')!;
-    if (reveal) { ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, w, h); } // hide-all = leave transparent
-    const blob = await canvas.convertToBlob();
-    return new Promise<string>((resolve) => {
-      const r = new FileReader();
-      r.onload = () => resolve(r.result as string);
-      r.readAsDataURL(blob);
-    });
-  };
-
   const handleAddMask = async (reveal: boolean) => {
-    const data = await buildMaskData(reveal);
+    const data = await buildMaskData(layer, selection, reveal);
     updateLayer(layer.id, {
       mask: {
         id: `mask-${Date.now()}`,
@@ -114,7 +91,7 @@ export function MaskSection({ layer }: Props) {
 
   const handleLoadSelection = async () => {
     if (!mask || !selection) return;
-    const data = await buildMaskData(true);
+    const data = await buildMaskData(layer, selection, true);
     updateLayer(layer.id, { mask: { ...mask, data, invert: false } });
     clearSelection();
   };

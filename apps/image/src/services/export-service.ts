@@ -114,6 +114,29 @@ export async function exportArtboard(
   });
 }
 
+/**
+ * Composite the given layers (in bottom-to-top order) onto a transparent
+ * canvas and return a PNG data URL. Reuses the export render path so a merged
+ * layer matches what export/preview produce. Used by Merge / Flatten.
+ */
+export async function renderLayersToDataURL(
+  project: Project,
+  layerIds: string[],
+  width: number,
+  height: number
+): Promise<string> {
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(width));
+  canvas.height = Math.max(1, Math.round(height));
+  const ctx = canvas.getContext('2d')!;
+  for (const id of layerIds) {
+    const layer = project.layers[id];
+    if (!layer || !layer.visible) continue;
+    await renderLayerToContext(ctx, layer, project);
+  }
+  return canvas.toDataURL('image/png');
+}
+
 async function renderLayerToContext(
   ctx: CanvasRenderingContext2D,
   layer: Layer,

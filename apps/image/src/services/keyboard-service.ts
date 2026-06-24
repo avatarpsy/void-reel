@@ -53,7 +53,7 @@ export function useKeyboardShortcuts() {
     selectedLayerIds, removeLayer, copyLayers, cutLayers, pasteLayers,
     duplicateLayer, selectAllLayers, deselectAllLayers,
     moveLayerUp, moveLayerDown, moveLayerToTop, moveLayerToBottom,
-    groupLayers, ungroupLayers, project, undo, redo, canUndo, canRedo,
+    groupLayers, ungroupLayers, mergeDown, project, undo, redo, canUndo, canRedo,
   } = useProjectStore();
 
   // Spacebar-pan: hold Space to temporarily switch to the Hand tool, restoring
@@ -134,6 +134,10 @@ export function useKeyboardShortcuts() {
             if (e.shiftKey) { if (canRedo()) redo(); } else { if (canUndo()) undo(); }
             break;
           case 'y': e.preventDefault(); if (canRedo()) redo(); break; // PS/Windows redo
+          case 'e': // PS: Cmd/Ctrl+E = Merge Down
+            e.preventDefault();
+            if (selectedLayerIds.length === 1) void mergeDown(selectedLayerIds[0]);
+            break;
           case 'j': // PS "Layer via Copy" — duplicate the selected layer(s)
             e.preventDefault();
             if (selectedLayerIds.length > 0) selectedLayerIds.forEach((id) => duplicateLayer(id));
@@ -219,7 +223,7 @@ export function useKeyboardShortcuts() {
   }, [
     activeTool, selectedLayerIds, setActiveTool, removeLayer, copyLayers, cutLayers,
     pasteLayers, duplicateLayer, selectAllLayers, deselectAllLayers, moveLayerUp,
-    moveLayerDown, moveLayerToTop, moveLayerToBottom, groupLayers, ungroupLayers,
+    moveLayerDown, moveLayerToTop, moveLayerToBottom, groupLayers, ungroupLayers, mergeDown,
     zoomIn, zoomOut, zoomToFit, setZoom, toggleGrid, toggleGuides, toggleShortcutsPanel,
     openSettingsDialog, undo, redo, canUndo, canRedo, project, brushSettings, setBrushSettings,
     togglePanelCollapsed, toggleInspectorCollapsed,

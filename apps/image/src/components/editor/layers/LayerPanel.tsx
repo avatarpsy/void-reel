@@ -1,7 +1,9 @@
 import { useState, useRef, useEffect } from 'react';
-import { Eye, EyeOff, Lock, Unlock, Trash2, Copy, ChevronUp, ChevronDown, ArrowUp, ArrowDown, ArrowUpToLine, ArrowDownToLine, Clipboard, ClipboardCopy, Scissors, Paintbrush, Search, X, Image, Type, Hexagon, Folder, FolderPlus, FolderOpen } from 'lucide-react';
+import { Eye, EyeOff, Lock, Unlock, Trash2, Copy, ChevronUp, ChevronDown, ArrowUp, ArrowDown, ArrowUpToLine, ArrowDownToLine, Clipboard, ClipboardCopy, Scissors, Paintbrush, Search, X, Image, Type, Hexagon, Folder, FolderPlus, FolderOpen, ChevronsDown, SquareStack } from 'lucide-react';
 import { useProjectStore } from '../../../stores/project-store';
-import type { Layer, LayerType } from '../../../types/project';
+import { useSelectionStore } from '../../../stores/selection-store';
+import { buildMaskData } from '../../../utils/mask-builder';
+import type { Layer, LayerType, ImageLayer } from '../../../types/project';
 import {
   ContextMenu,
   ContextMenuTrigger,
@@ -46,7 +48,10 @@ export function LayerPanel() {
     pasteLayerStyle,
     groupLayers,
     ungroupLayers,
+    mergeDown,
   } = useProjectStore();
+  const activeSelection = useSelectionStore((s) => s.active);
+  const clearSelection = useSelectionStore((s) => s.clearSelection);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState<FilterType>('all');
@@ -119,19 +124,41 @@ export function LayerPanel() {
     duplicateLayer(layerId);
   };
 
-  const getLayerIcon = (type: Layer['type']) => {
-    switch (type) {
-      case 'image':
-        return '🖼️';
-      case 'text':
-        return 'T';
-      case 'shape':
-        return '◆';
-      case 'group':
-        return '📁';
-      default:
-        return '•';
-    }
+  // Photoshop-style layer-mask actions (the mask UI lives on each layer row).
+  const handleAddMask = async (layer: Layer, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (layer.mask?.data) return;
+    const data = await buildMaskData(layer, activeSelection, true);
+    updateLayer(layer.id, {
+      mask: {
+        id: `mask-${Date.now()}`, type: 'pixel', enabled: true, linked: true,
+        density: 100, feather: 0, invert: false, data,
+        vectorPath: activeSelection ? [...activeSelection.path] : null,
+      },
+    });
+    if (activeSelection) clearSelection();
+  };
+
+  const handleToggleMask = (layer: Layer, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!layer.mask) return;
+    updateLayer(layer.id, { mask: { ...layer.mask, enabled: !layer.mask.enabled } });
+  };
+
+  const handleMergeDown = (layerId: string, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    void mergeDown(layerId);
+  };
+
+  const imageThumb = (layer: Layer): string | null => {
+    if (layer.type !== 'image') return null;
+    const asset = project?.assets[(layer as ImageLayer).sourceId];
+    return asset?.thumbnailUrl ?? asset?.dataUrl ?? null;
+  };
+
+  const canMergeDown = (layerId: string): boolean => {
+    const i = allLayers.findIndex((l) => l.id === layerId);
+    return i >= 0 && i < allLayers.length - 1;
   };
 
   return (
@@ -213,13 +240,25 @@ export function LayerPanel() {
                           : 'hover:bg-accent border-l-2 border-transparent'
                       }`}
                     >
-                      <span
-                        className={`w-5 h-5 flex items-center justify-center text-xs rounded ${
-                          layer.type === 'text' ? 'font-bold' : ''
-                        }`}
-                      >
-                        {getLayerIcon(layer.type)}
-                      </span>
+                      {/* Layer thumbnail + (optional) mask thumbnail — Photoshop style. */}
+                      <div className="flex items-center gap-1 shrink-0">
+                        <div className="w-8 h-8 rounded border border-border bg-muted overflow-hidden flex items-center justify-center text-muted-foreground">
+                          {imageThumb(layer) ? (
+                            <img src={imageThumb(layer)!} alt="" className="w-full h-full object-cover" />
+                          ) : (
+                            LAYER_TYPE_ICONS[layer.type]
+                          )}
+                        </div>
+                        {layer.mask?.data && (
+                          <button
+                            onClick={(e) => handleToggleMask(layer, e)}
+                            className="w-8 h-8 rounded border-2 border-white/70 overflow-hidden shrink-0"
+                            title={layer.mask.enabled ? 'Layer mask (click to disable)' : 'Layer mask (disabled — click to enable)'}
+                          >
+                            <img src={layer.mask.data} alt="" className={`w-full h-full object-cover ${layer.mask.enabled ? '' : 'opacity-30'}`} />
+                          </button>
+                        )}
+                      </div>
 
                       {editingLayerId === layer.id ? (
                         <input
@@ -319,6 +358,20 @@ export function LayerPanel() {
                       </ContextMenuItem>
                     )}
                     {(selectedLayerIds.length > 1 || layer.type === 'group') && <ContextMenuSeparator />}
+                    {layer.type === 'image' && !layer.mask?.data && (
+                      <ContextMenuItem onClick={(e) => handleAddMask(layer, e as unknown as React.MouseEvent)}>
+                        <SquareStack size={14} className="mr-2" />
+                        Add Layer Mask
+                      </ContextMenuItem>
+                    )}
+                    {canMergeDown(layer.id) && (
+                      <ContextMenuItem onClick={() => handleMergeDown(layer.id)}>
+                        <ChevronsDown size={14} className="mr-2" />
+                        Merge Down
+                        <ContextMenuShortcut>⌘E</ContextMenuShortcut>
+                      </ContextMenuItem>
+                    )}
+                    <ContextMenuSeparator />
                     <ContextMenuItem onClick={() => { selectLayer(layer.id); copyLayerStyle(); }}>
                       <Paintbrush size={14} className="mr-2" />
                       Copy Style
@@ -435,6 +488,50 @@ export function LayerPanel() {
           </div>
         </div>
       )}
+
+      {/* Photoshop-style bottom toolbar (acts on the active layer). */}
+      <div className="flex items-center justify-center gap-2 px-2 py-2 border-t border-border">
+        <button
+          onClick={(e) => { const l = project?.layers[selectedLayerIds[0]]; if (l) void handleAddMask(l, e); }}
+          disabled={!selectedLayerIds.length || project?.layers[selectedLayerIds[0]]?.type !== 'image' || !!project?.layers[selectedLayerIds[0]]?.mask?.data}
+          className="p-1.5 rounded hover:bg-accent disabled:opacity-30 disabled:hover:bg-transparent"
+          title="Add layer mask"
+        >
+          <span className="block w-4 h-4 rounded-sm bg-gradient-to-br from-white to-black border border-border" />
+        </button>
+        <button
+          onClick={() => { if (selectedLayerIds.length > 0) groupLayers(selectedLayerIds); }}
+          disabled={selectedLayerIds.length === 0}
+          className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent"
+          title="Group selection (Cmd+G)"
+        >
+          <FolderPlus size={15} />
+        </button>
+        <button
+          onClick={() => selectedLayerIds[0] && handleMergeDown(selectedLayerIds[0])}
+          disabled={!selectedLayerIds.length || !canMergeDown(selectedLayerIds[0])}
+          className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent"
+          title="Merge down (Cmd+E)"
+        >
+          <ChevronsDown size={15} />
+        </button>
+        <button
+          onClick={() => selectedLayerIds[0] && duplicateLayer(selectedLayerIds[0])}
+          disabled={!selectedLayerIds.length}
+          className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent"
+          title="Duplicate layer"
+        >
+          <Copy size={15} />
+        </button>
+        <button
+          onClick={() => selectedLayerIds.forEach((id) => removeLayer(id))}
+          disabled={!selectedLayerIds.length}
+          className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive disabled:opacity-30 disabled:hover:bg-transparent"
+          title="Delete layer"
+        >
+          <Trash2 size={15} />
+        </button>
+      </div>
     </div>
   );
 }
