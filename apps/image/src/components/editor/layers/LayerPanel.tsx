@@ -233,6 +233,20 @@ export function LayerPanel() {
         </div>
       </div>
 
+      {/* Mask-edit hint — Photoshop shows you're painting the mask, not pixels. */}
+      {maskEditLayerId && (
+        <div className="flex items-center justify-between gap-2 px-3 py-1.5 text-[10px] bg-primary/10 border-b border-primary/30 text-foreground">
+          <span>Painting the <b>mask</b> — black hides, white reveals.</span>
+          <button
+            onClick={() => setMaskEditLayerId(null)}
+            className="shrink-0 px-1.5 py-0.5 rounded bg-secondary hover:bg-accent text-secondary-foreground"
+            title="Switch back to editing the layer's pixels"
+          >
+            Edit pixels
+          </button>
+        </div>
+      )}
+
       <div className="flex-1 overflow-y-auto">
         {layers.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center p-4">
@@ -520,8 +534,10 @@ export function LayerPanel() {
         <button
           onClick={(e) => { const l = project?.layers[selectedLayerIds[0]]; if (l) void handleAddMask(l, e); }}
           disabled={!selectedLayerIds.length || project?.layers[selectedLayerIds[0]]?.type !== 'image' || !!project?.layers[selectedLayerIds[0]]?.mask?.data}
-          className="p-1.5 rounded hover:bg-accent disabled:opacity-30 disabled:hover:bg-transparent"
-          title="Add layer mask"
+          className={`p-1.5 rounded hover:bg-accent disabled:opacity-30 disabled:hover:bg-transparent ${
+            activeSelection && !project?.layers[selectedLayerIds[0]]?.mask?.data ? 'ring-2 ring-primary animate-pulse' : ''
+          }`}
+          title={activeSelection ? 'Add mask from selection' : 'Add layer mask (reveal all)'}
         >
           <span className="block w-4 h-4 rounded-sm bg-gradient-to-br from-white to-black border border-border" />
         </button>
