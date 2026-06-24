@@ -3,6 +3,7 @@ import { Toolbar } from './toolbar/Toolbar';
 import { LeftPanel } from './panels/LeftPanel';
 import { Canvas } from './canvas/Canvas';
 import { Inspector } from './inspector/Inspector';
+import { GenerativeFillPanel } from './inspector/GenerativeFillPanel';
 import { HistoryPanel } from './panels/HistoryPanel';
 import { GuidePanel } from './panels/GuidePanel';
 import { PagesBar } from './pages/PagesBar';
@@ -99,6 +100,7 @@ export function EditorInterface() {
 
         {!isInspectorCollapsed && (
           <div className="w-72 border-l border-border flex flex-col bg-card">
+            <GenerativeFillPanel />
             <div className="flex-1 overflow-y-auto">
               <Inspector />
             </div>

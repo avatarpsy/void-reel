@@ -37,6 +37,7 @@ import {
   AlignEndVertical,
   Paintbrush,
   MousePointer,
+  Sparkles,
 } from 'lucide-react';
 
 export interface ContextMenuPosition {
@@ -99,6 +100,9 @@ interface ContextMenuProps {
   hasClipboard: boolean;
   hasStyleClipboard: boolean;
   selectedCount: number;
+  /** A pixel selection is active → offer Generative Fill at the top. */
+  hasSelection: boolean;
+  onGenerativeFill: () => void;
 }
 
 export function ContextMenu({
@@ -144,6 +148,8 @@ export function ContextMenu({
   hasClipboard,
   hasStyleClipboard,
   selectedCount,
+  hasSelection,
+  onGenerativeFill,
 }: ContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -348,7 +354,14 @@ export function ContextMenu({
     );
   };
 
-  const menuItems = getMenuItems();
+  // When a selection is active, Generative Fill leads the menu (Photoshop).
+  const genFill: MenuItem[] = hasSelection
+    ? [
+        { label: 'Generative Fill', icon: <Sparkles size={14} />, action: onGenerativeFill },
+        { label: '', action: () => {}, divider: true },
+      ]
+    : [];
+  const menuItems = [...genFill, ...getMenuItems()];
 
   return (
     <div

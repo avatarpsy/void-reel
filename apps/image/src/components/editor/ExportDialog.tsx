@@ -161,6 +161,10 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
   const [isSaving, setIsSaving] = useState(false);
   const [progress, setProgress] = useState(0);
   const [progressMessage, setProgressMessage] = useState('');
+  const [saveName, setSaveName] = useState('');
+  // Whether a re-save overwrites the same Library entry or adds a new copy.
+  const [saveMode, setSaveMode] = useState<'copy' | 'overwrite'>('copy');
+  const [hasSavedOnce, setHasSavedOnce] = useState(false);
 
   const currentFormat = FORMATS.find((f) => f.id === format)!;
   const artboard = project?.artboards.find((a) => a.id === selectedArtboardId);
@@ -321,8 +325,10 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
       const blob = await exportArtboard(project, artboard, options);
       // SVG/PDF fall back to PNG bytes in the exporter; store as a raster type.
       const rasterFormat = format === 'jpg' || format === 'webp' ? format : 'png';
-      await saveImageToVoidspaceLibrary(blob, `${project.name} — ${artboard.name}`, rasterFormat);
-      showNotification('success', 'Saved to your Voidspace Library');
+      const name = (saveName.trim() || `${project.name} — ${artboard.name}`).slice(0, 80);
+      await saveImageToVoidspaceLibrary(blob, name, rasterFormat, { overwrite: saveMode === 'overwrite' });
+      setHasSavedOnce(true);
+      showNotification('success', saveMode === 'overwrite' ? 'Updated in your Voidspace Library' : 'Saved to your Voidspace Library');
       onClose();
     } catch (error) {
       if (error instanceof NotSignedInError) {
@@ -625,6 +631,40 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
             </div>
           </div>
         )}
+      </div>
+
+      {/* Save-to-Library controls: name it, and choose new copy vs overwrite. */}
+      <div className="px-1 pt-2 pb-1 space-y-2 border-t border-border">
+        <div className="flex items-center gap-2">
+          <label className="text-[11px] text-muted-foreground w-14 shrink-0">Save name</label>
+          <input
+            type="text"
+            value={saveName}
+            onChange={(e) => setSaveName(e.target.value)}
+            placeholder={artboard ? `${project.name} — ${artboard.name}` : 'Image name'}
+            className="flex-1 px-2 py-1.5 text-xs bg-background border border-input rounded-md focus:outline-none focus:ring-1 focus:ring-primary"
+          />
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] text-muted-foreground w-14 shrink-0">On save</span>
+          <div className="inline-flex rounded-md border border-input overflow-hidden text-[11px]">
+            <button
+              onClick={() => setSaveMode('copy')}
+              className={`px-2.5 py-1 transition-colors ${saveMode === 'copy' ? 'bg-primary text-primary-foreground' : 'bg-background text-muted-foreground hover:bg-accent'}`}
+            >
+              New copy
+            </button>
+            <button
+              onClick={() => setSaveMode('overwrite')}
+              className={`px-2.5 py-1 transition-colors ${saveMode === 'overwrite' ? 'bg-primary text-primary-foreground' : 'bg-background text-muted-foreground hover:bg-accent'}`}
+            >
+              Overwrite
+            </button>
+          </div>
+          {hasSavedOnce && saveMode === 'copy' && (
+            <span className="text-[10px] text-muted-foreground">a new Library entry each save</span>
+          )}
+        </div>
       </div>
 
       <DialogFooter>

@@ -211,52 +211,43 @@ export interface SavedLibraryImage {
 }
 
 /**
- * Flatten-and-save a PNG/JPEG blob into the shared Studio Library. Throws
- * NotSignedInError if there's no Voidspace session on this origin.
+ * Save a PNG/JPEG/WebP blob LOSSLESSLY into the shared Studio Library, the same
+ * way finished video renders are saved (POST /api/studio/save-render): the raw
+ * bytes stream straight to the user's `frames/` folder + manifest — NO
+ * upload-temp recompression (which downscales to 1920px JPEG and drops PNG
+ * transparency) and NO 3-day Kie temp URL. Throws NotSignedInError if there's
+ * no Voidspace session on this origin.
+ *
+ * `overwrite: true` reuses a stable filename keyed on the name, so re-saving
+ * updates the SAME Library entry. Otherwise each save is a new copy.
  */
 export async function saveImageToVoidspaceLibrary(
   blob: Blob,
   name: string,
   format: 'png' | 'jpg' | 'webp' = 'png',
+  opts: { overwrite?: boolean } = {},
 ): Promise<SavedLibraryImage> {
   const token = await getVoidspaceIdToken();
   if (!token) throw new NotSignedInError();
-  const auth = { Authorization: `Bearer ${token}` };
 
-  // 1) Upload the bytes to get a fetchable public URL (mirror-asset can't take
-  //    a raw blob — it downloads a url).
   const ext = format === 'jpg' ? 'jpg' : format;
-  const safeName = (name || 'image').replace(/[^\w.-]+/g, '-').slice(0, 60);
-  const file = new File([blob], `${safeName}.${ext}`, { type: blob.type || `image/${ext}` });
-  const form = new FormData();
-  form.append('file', file);
-
-  const upRes = await fetch('/api/studio/upload-temp', { method: 'POST', headers: auth, body: form });
-  if (!upRes.ok) throw new Error(`upload-temp failed (${upRes.status})`);
-  const up = await upRes.json();
-  const url: string = up.url || up.fileUrl;
-  if (!url) throw new Error('upload-temp returned no url');
-
-  // 2) Mirror into the Library (disk frames/ + manifest), same as a video frame.
-  const assetId = `imgedit-${safeName}-${blob.size}-${(globalThis.crypto?.randomUUID?.() ?? String(Math.floor(performance.now())))}`;
-  const mirrorRes = await fetch('/api/studio/mirror-asset', {
-    method: 'POST',
-    headers: { ...auth, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      projectId: LIBRARY_PROJECT_ID,
-      kind: 'image',
-      url,
-      role: 'image_export',
-      assetId,
-      label: name || 'Image export',
-      skipCloud: true,
-    }),
+  const safeName = (name || 'image').replace(/[^\w.-]+/g, '-').slice(0, 60) || 'image';
+  const qs = new URLSearchParams({
+    kind: 'image',
+    ext,
+    projectId: LIBRARY_PROJECT_ID,
+    title: name || 'Image',
   });
-  if (!mirrorRes.ok) throw new Error(`mirror-asset failed (${mirrorRes.status})`);
-  const mirror = await mirrorRes.json();
+  // Stable filename => the server overwrites the same file on re-save.
+  if (opts.overwrite) qs.set('filename', `imgedit-${safeName}`);
 
-  return {
-    url: mirror.localServeUrl || mirror.permanentUrl || url,
-    permanentUrl: mirror.permanentUrl || url,
-  };
+  const res = await fetch(`/api/studio/save-render?${qs.toString()}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/octet-stream' },
+    body: blob,
+  });
+  if (!res.ok) throw new Error(`save failed (${res.status})`);
+  const j = await res.json();
+  if (!j.localServeUrl) throw new Error('save returned no url');
+  return { url: j.localServeUrl, permanentUrl: j.localServeUrl };
 }

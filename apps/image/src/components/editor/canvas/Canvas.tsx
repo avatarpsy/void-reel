@@ -378,7 +378,7 @@ export function Canvas() {
     groupLayers,
     ungroupLayers,
   } = useProjectStore();
-  const { zoom, panX, panY, setPan, setZoom, activeTool, showGrid, showRulers, toggleGrid, toggleRulers, gridSize, crop, snapToObjects, snapToGuides, snapToGrid, penSettings, brushSettings, eraserSettings, drawing, startDrawing, addDrawingPoint, finishDrawing, startCrop, updateCropRect, setBrushSettings, gradientSettings, paintBucketSettings, smudgeSettings, blurSharpenSettings, dodgeBurnSettings, spongeSettings, cloneStampSettings, healingBrushSettings, spotHealingSettings, maskEditLayerId, setMaskEditLayerId } = useUIStore();
+  const { zoom, panX, panY, setPan, setZoom, activeTool, showGrid, showRulers, toggleGrid, toggleRulers, gridSize, crop, snapToObjects, snapToGuides, snapToGrid, penSettings, brushSettings, eraserSettings, drawing, startDrawing, addDrawingPoint, finishDrawing, startCrop, updateCropRect, setBrushSettings, gradientSettings, paintBucketSettings, smudgeSettings, blurSharpenSettings, dodgeBurnSettings, spongeSettings, cloneStampSettings, healingBrushSettings, spotHealingSettings, maskEditLayerId, setMaskEditLayerId, setGenerativeFillOpen } = useUIStore();
   const { setCanvasRef, setContainerRef, startDrag, updateDrag, endDrag, isDragging, dragMode, dragStartX, dragStartY, dragCurrentX, dragCurrentY, guides, smartGuides, setSmartGuides, clearSmartGuides, isMarqueeSelecting, marqueeRect, startMarqueeSelect, updateMarqueeSelect, endMarqueeSelect, activeResizeHandle, setActiveResizeHandle } = useCanvasStore();
   const [cursorStyle, setCursorStyle] = useState('default');
   const initialTransformRef = useRef<{ x: number; y: number; width: number; height: number; rotation: number } | null>(null);
@@ -2745,6 +2745,8 @@ export function Canvas() {
           hasClipboard={copiedLayers.length > 0}
           hasStyleClipboard={copiedStyle !== null}
           selectedCount={selectedLayerIds.length}
+          hasSelection={!!activeSelection}
+          onGenerativeFill={() => setGenerativeFillOpen(true)}
         />
       )}
     </div>
