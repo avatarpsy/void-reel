@@ -1,7 +1,7 @@
 import { useProjectStore } from '../../../stores/project-store';
 import { useSelectionStore } from '../../../stores/selection-store';
 import type { Layer } from '../../../types/project';
-import type { LayerMask } from '../../../types/mask';
+import { createMaskFromSelection } from '../../../types/mask';
 import {
   Circle,
   Eye,
@@ -70,24 +70,53 @@ export function MaskSection({ layer }: Props) {
   const hasMask = mask !== null;
   const hasSelection = selection !== null;
 
-  const handleAddMask = (reveal: boolean) => {
-    const baseMask: LayerMask = {
-      id: `mask-${Date.now()}`,
-      type: 'pixel',
-      enabled: true,
-      linked: true,
-      density: 100,
-      feather: 0,
-      invert: !reveal,
-      data: null,
-      vectorPath: selection ? [...selection.path] : null,
-    };
-
-    updateLayer(layer.id, { mask: baseMask });
-
-    if (selection) {
-      clearSelection();
+  // Build the mask bitmap (a data URL whose alpha reveals/hides the layer).
+  // With an active selection -> opaque inside the selection; otherwise a solid
+  // reveal-all (white) / hide-all (transparent) mask to paint on later.
+  const buildMaskData = async (reveal: boolean): Promise<string> => {
+    const t = layer.transform;
+    const w = Math.max(1, Math.round(t.width));
+    const h = Math.max(1, Math.round(t.height));
+    if (selection && selection.path.length > 2) {
+      // selection.path is in artboard coords; mask space is layer-local.
+      const localPath = selection.path.map((p) => ({ x: p.x - t.x, y: p.y - t.y }));
+      return createMaskFromSelection(localPath, w, h, selection.feather);
     }
+    const canvas = new OffscreenCanvas(w, h);
+    const ctx = canvas.getContext('2d')!;
+    if (reveal) { ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, w, h); } // hide-all = leave transparent
+    const blob = await canvas.convertToBlob();
+    return new Promise<string>((resolve) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result as string);
+      r.readAsDataURL(blob);
+    });
+  };
+
+  const handleAddMask = async (reveal: boolean) => {
+    const data = await buildMaskData(reveal);
+    updateLayer(layer.id, {
+      mask: {
+        id: `mask-${Date.now()}`,
+        type: 'pixel',
+        enabled: true,
+        linked: true,
+        density: 100,
+        feather: 0,
+        // With a selection: reveal => show inside, hide => show outside (invert).
+        invert: selection ? !reveal : false,
+        data,
+        vectorPath: selection ? [...selection.path] : null,
+      },
+    });
+    if (selection) clearSelection();
+  };
+
+  const handleLoadSelection = async () => {
+    if (!mask || !selection) return;
+    const data = await buildMaskData(true);
+    updateLayer(layer.id, { mask: { ...mask, data, invert: false } });
+    clearSelection();
   };
 
   const handleDeleteMask = () => {
@@ -277,16 +306,18 @@ export function MaskSection({ layer }: Props) {
           </button>
         </div>
 
-        <div className="flex gap-1.5">
-          <button
-            onClick={() => {}}
-            className="flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 text-[10px] rounded bg-secondary hover:bg-secondary/80 transition-colors"
-            title="Load mask from selection"
-          >
-            <Download size={10} />
-            Load Selection
-          </button>
-        </div>
+        {hasMask && hasSelection && (
+          <div className="flex gap-1.5">
+            <button
+              onClick={handleLoadSelection}
+              className="flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 text-[10px] rounded bg-secondary hover:bg-secondary/80 transition-colors"
+              title="Replace this mask with the current selection"
+            >
+              <Download size={10} />
+              Mask from Selection
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

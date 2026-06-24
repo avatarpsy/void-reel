@@ -2660,6 +2660,30 @@ function renderLayer(
   ctx.globalAlpha = transform.opacity;
   ctx.globalCompositeOperation = BLEND_MODE_MAP[blendMode] ?? 'source-over';
 
+  // Phase 4: layer mask — composite the image through its mask (the mask's
+  // alpha reveals/hides; `invert` flips it). Isolated on a temp canvas so
+  // layers below are untouched. Works for painted (buffer) and plain images.
+  if (layer.type === 'image' && layer.mask?.enabled && layer.mask.data) {
+    const maskImg = getCachedImage(layer.mask.data);
+    const asset = project.assets[(layer as ImageLayer).sourceId];
+    const content = rasterBuffers.get(layer.id) ?? getCachedImage(asset?.dataUrl ?? asset?.blobUrl ?? '');
+    if (maskImg && maskImg.complete && maskImg.naturalWidth > 0 && content) {
+      const w = Math.max(1, Math.ceil(transform.width));
+      const h = Math.max(1, Math.ceil(transform.height));
+      const temp = new OffscreenCanvas(w, h);
+      const tctx = temp.getContext('2d');
+      if (tctx) {
+        tctx.drawImage(content, 0, 0, w, h);
+        tctx.globalCompositeOperation = layer.mask.invert ? 'destination-out' : 'destination-in';
+        tctx.drawImage(maskImg, 0, 0, w, h);
+        tctx.globalCompositeOperation = 'source-over';
+        ctx.drawImage(temp, 0, 0, transform.width, transform.height);
+        ctx.restore();
+        return;
+      }
+    }
+  }
+
   // Phase 2: a painted image layer is rendered straight from its persistent
   // raster buffer (instant, no asset decode/reload, no per-stroke asset).
   const raster = layer.type === 'image' ? rasterBuffers.get(layer.id) : undefined;
