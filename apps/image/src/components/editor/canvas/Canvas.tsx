@@ -111,17 +111,19 @@ function colorToGrayHex(color: string): string {
 }
 
 // Convert a mask image to an alpha mask from its LUMINANCE (Photoshop masks are
-// grayscale: white reveals, black hides). `invert` flips it. This lets the user
-// paint black/white onto the mask and have it behave like Photoshop.
-function maskToAlphaCanvas(maskImg: CanvasImageSource, w: number, h: number, invert: boolean): OffscreenCanvas {
+// grayscale: white reveals, black hides). `invert` flips it; `density` (0-100,
+// Photoshop's mask Density) scales how strongly the mask hides — at 0 the mask
+// has no effect. This lets the user paint black/white onto the mask AND fade it.
+function maskToAlphaCanvas(maskImg: CanvasImageSource, w: number, h: number, invert: boolean, density = 100): OffscreenCanvas {
   const c = new OffscreenCanvas(w, h);
   const cx = c.getContext('2d', { willReadFrequently: true })!;
   cx.drawImage(maskImg, 0, 0, w, h);
   const d = cx.getImageData(0, 0, w, h);
   const p = d.data;
+  const k = Math.max(0, Math.min(100, density)) / 100;
   for (let i = 0; i < p.length; i += 4) {
-    const lum = p[i]; // red channel — grayscale luminance
-    p[i + 3] = invert ? 255 - lum : lum;
+    const lum = invert ? 255 - p[i] : p[i]; // red channel — grayscale luminance
+    p[i + 3] = 255 - (255 - lum) * k; // density fades the hidden areas back in
   }
   cx.putImageData(d, 0, 0);
   return c;
@@ -2857,7 +2859,7 @@ function renderLayer(
       if (tctx) {
         tctx.drawImage(content, 0, 0, w, h);
         tctx.globalCompositeOperation = 'destination-in';
-        tctx.drawImage(maskToAlphaCanvas(maskSrc, w, h, !!layer.mask.invert), 0, 0);
+        tctx.drawImage(maskToAlphaCanvas(maskSrc, w, h, !!layer.mask.invert, layer.mask.density ?? 100), 0, 0);
         tctx.globalCompositeOperation = 'source-over';
         ctx.drawImage(temp, 0, 0, transform.width, transform.height);
         ctx.restore();

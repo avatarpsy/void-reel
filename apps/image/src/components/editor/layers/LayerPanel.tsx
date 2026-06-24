@@ -1,10 +1,10 @@
 import { useState, useRef, useEffect } from 'react';
-import { Eye, EyeOff, Lock, Unlock, Trash2, Copy, ChevronUp, ChevronDown, ArrowUp, ArrowDown, ArrowUpToLine, ArrowDownToLine, Clipboard, ClipboardCopy, Scissors, Paintbrush, Search, X, Image, Type, Hexagon, Folder, FolderPlus, FolderOpen, ChevronsDown, SquareStack } from 'lucide-react';
+import { Eye, EyeOff, Lock, Unlock, Trash2, Copy, ChevronUp, ChevronDown, ChevronRight, ArrowUp, ArrowDown, ArrowUpToLine, ArrowDownToLine, Clipboard, ClipboardCopy, Scissors, Paintbrush, Search, X, Image, Type, Hexagon, Folder, FolderPlus, FolderOpen, ChevronsDown, SquareStack } from 'lucide-react';
 import { useProjectStore } from '../../../stores/project-store';
 import { useSelectionStore } from '../../../stores/selection-store';
 import { useUIStore } from '../../../stores/ui-store';
 import { buildMaskData } from '../../../utils/mask-builder';
-import type { Layer, LayerType, ImageLayer } from '../../../types/project';
+import type { Layer, LayerType, ImageLayer, GroupLayer } from '../../../types/project';
 import {
   ContextMenu,
   ContextMenuTrigger,
@@ -70,6 +70,25 @@ export function LayerPanel() {
     const matchesType = filterType === 'all' || layer.type === filterType;
     return matchesSearch && matchesType;
   });
+
+  // Flatten the layer tree into depth-tagged rows so groups render NESTED
+  // (children indented under their group, respecting `expanded`). When a search
+  // or type filter is active we fall back to the flat filtered list.
+  const filterActive = searchQuery.trim() !== '' || filterType !== 'all';
+  const buildTree = (ids: string[], depth: number, out: { layer: Layer; depth: number }[]) => {
+    for (const id of ids) {
+      const l = project?.layers[id];
+      if (!l) continue;
+      out.push({ layer: l, depth });
+      if (l.type === 'group' && (l as GroupLayer).expanded) {
+        buildTree((l as GroupLayer).childIds, depth + 1, out);
+      }
+    }
+    return out;
+  };
+  const entries = filterActive
+    ? layers.map((l) => ({ layer: l, depth: 0 }))
+    : buildTree(artboard?.layerIds ?? [], 0, []);
 
   const handleSelectAllByType = (type: LayerType) => {
     const layerIds = allLayers.filter((l) => l.type === type).map((l) => l.id);
@@ -233,22 +252,41 @@ export function LayerPanel() {
         </div>
       </div>
 
-      {/* Mask-edit hint — Photoshop shows you're painting the mask, not pixels. */}
-      {maskEditLayerId && (
-        <div className="flex items-center justify-between gap-2 px-3 py-1.5 text-[10px] bg-primary/10 border-b border-primary/30 text-foreground">
-          <span>Painting the <b>mask</b> — black hides, white reveals.</span>
-          <button
-            onClick={() => setMaskEditLayerId(null)}
-            className="shrink-0 px-1.5 py-0.5 rounded bg-secondary hover:bg-accent text-secondary-foreground"
-            title="Switch back to editing the layer's pixels"
-          >
-            Edit pixels
-          </button>
-        </div>
-      )}
+      {/* Mask-edit hint + mask-only actions (disable / delete) — these act on the
+          MASK, not the layer, so the layer's own opacity/delete stay separate. */}
+      {maskEditLayerId && project?.layers[maskEditLayerId]?.mask && (() => {
+        const maskLayer = project.layers[maskEditLayerId];
+        const mask = maskLayer.mask!;
+        return (
+          <div className="flex items-center gap-1.5 px-3 py-1.5 text-[10px] bg-primary/10 border-b border-primary/30 text-foreground">
+            <span className="flex-1 min-w-0 truncate">Editing <b>mask</b> — black hides, white reveals.</span>
+            <button
+              onClick={() => updateLayer(maskEditLayerId, { mask: { ...mask, enabled: !mask.enabled } })}
+              className="shrink-0 px-1.5 py-0.5 rounded bg-secondary hover:bg-accent text-secondary-foreground"
+              title={mask.enabled ? 'Disable this mask (keep it)' : 'Enable this mask'}
+            >
+              {mask.enabled ? 'Disable' : 'Enable'}
+            </button>
+            <button
+              onClick={() => { updateLayer(maskEditLayerId, { mask: null }); setMaskEditLayerId(null); }}
+              className="shrink-0 px-1.5 py-0.5 rounded bg-secondary hover:bg-destructive/20 hover:text-destructive text-secondary-foreground"
+              title="Delete this mask only (keeps the layer)"
+            >
+              Delete
+            </button>
+            <button
+              onClick={() => setMaskEditLayerId(null)}
+              className="shrink-0 px-1.5 py-0.5 rounded bg-secondary hover:bg-accent text-secondary-foreground"
+              title="Switch back to editing the layer's pixels"
+            >
+              Edit pixels
+            </button>
+          </div>
+        );
+      })()}
 
       <div className="flex-1 overflow-y-auto">
-        {layers.length === 0 ? (
+        {entries.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center p-4">
             <p className="text-xs text-muted-foreground">No layers yet</p>
             <p className="text-[10px] text-muted-foreground mt-1">
@@ -257,20 +295,35 @@ export function LayerPanel() {
           </div>
         ) : (
           <div className="py-1">
-            {layers.map((layer) => {
+            {entries.map(({ layer, depth }) => {
               const isSelected = selectedLayerIds.includes(layer.id);
+              const isGroup = layer.type === 'group';
 
               return (
                 <ContextMenu key={layer.id}>
                   <ContextMenuTrigger asChild>
                     <div
                       onClick={() => { selectLayer(layer.id); setMaskEditLayerId(null); }}
-                      className={`group flex items-center gap-2 px-3 py-2 cursor-pointer transition-colors ${
+                      style={{ paddingLeft: 12 + depth * 14 }}
+                      className={`group flex items-center gap-2 pr-3 py-2 cursor-pointer transition-colors ${
                         isSelected
                           ? 'bg-primary/20 border-l-2 border-primary'
                           : 'hover:bg-accent border-l-2 border-transparent'
                       }`}
                     >
+                      {/* Expand/collapse chevron for groups (nested rendering). */}
+                      {isGroup ? (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); updateLayer(layer.id, { expanded: !(layer as GroupLayer).expanded }); }}
+                          className="shrink-0 text-muted-foreground hover:text-foreground"
+                          title={(layer as GroupLayer).expanded ? 'Collapse group' : 'Expand group'}
+                        >
+                          {(layer as GroupLayer).expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                        </button>
+                      ) : (
+                        <span className="shrink-0 w-[13px]" />
+                      )}
+
                       {/* Layer thumbnail + (optional) mask thumbnail — Photoshop style.
                           The active edit target (pixels vs mask) gets a primary ring. */}
                       <div className="flex items-center gap-1 shrink-0">

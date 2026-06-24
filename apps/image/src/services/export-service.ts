@@ -1,8 +1,9 @@
 import type { Project, Artboard, Layer, ImageLayer, TextLayer, ShapeLayer, Filter } from '../types/project';
 import { hasActiveAdjustments, applyAllAdjustments, type LayerAdjustments } from '../utils/apply-adjustments';
 
-/** Mask image -> alpha mask from its LUMINANCE (white reveals, black hides). */
-function maskToAlphaCanvasEl(maskImg: CanvasImageSource, w: number, h: number, invert: boolean): HTMLCanvasElement {
+/** Mask image -> alpha mask from its LUMINANCE (white reveals, black hides).
+ *  `density` (0-100) fades the mask's hiding strength, matching the editor. */
+function maskToAlphaCanvasEl(maskImg: CanvasImageSource, w: number, h: number, invert: boolean, density = 100): HTMLCanvasElement {
   const c = document.createElement('canvas');
   c.width = w;
   c.height = h;
@@ -10,9 +11,10 @@ function maskToAlphaCanvasEl(maskImg: CanvasImageSource, w: number, h: number, i
   cx.drawImage(maskImg, 0, 0, w, h);
   const d = cx.getImageData(0, 0, w, h);
   const p = d.data;
+  const k = Math.max(0, Math.min(100, density)) / 100;
   for (let i = 0; i < p.length; i += 4) {
-    const lum = p[i];
-    p[i + 3] = invert ? 255 - lum : lum;
+    const lum = invert ? 255 - p[i] : p[i];
+    p[i + 3] = 255 - (255 - lum) * k;
   }
   cx.putImageData(d, 0, 0);
   return c;
@@ -458,7 +460,7 @@ async function renderImageLayerToContext(
     const maskImg = await loadImageEl(layer.mask.data);
     if (maskImg) {
       tctx.globalCompositeOperation = 'destination-in';
-      tctx.drawImage(maskToAlphaCanvasEl(maskImg, W, H, !!layer.mask.invert), 0, 0);
+      tctx.drawImage(maskToAlphaCanvasEl(maskImg, W, H, !!layer.mask.invert, layer.mask.density ?? 100), 0, 0);
       tctx.globalCompositeOperation = 'source-over';
     }
   }

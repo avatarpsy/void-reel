@@ -1,5 +1,6 @@
 import { FlipHorizontal2, FlipVertical2, RotateCw, RotateCcw } from 'lucide-react';
 import { useProjectStore } from '../../../stores/project-store';
+import { useUIStore } from '../../../stores/ui-store';
 import type { Layer } from '../../../types/project';
 
 interface Props {
@@ -8,8 +9,20 @@ interface Props {
 
 export function TransformSection({ layer }: Props) {
   const { updateLayer, updateLayerTransform } = useProjectStore();
+  const maskEditLayerId = useUIStore((s) => s.maskEditLayerId);
 
   const { x, y, width, height, rotation, skewX, skewY, opacity } = layer.transform;
+  // When the layer's MASK is the active edit target, the opacity field controls
+  // the MASK's density (so it fades the mask, not the whole layer).
+  const maskTargeted = maskEditLayerId === layer.id && !!layer.mask;
+  const opacityValue = maskTargeted ? (layer.mask!.density ?? 100) : Math.round(opacity * 100);
+  const handleOpacityChange = (pct: number) => {
+    if (maskTargeted) {
+      updateLayer(layer.id, { mask: { ...layer.mask!, density: Math.max(0, Math.min(100, pct)) } });
+    } else {
+      updateLayerTransform(layer.id, { opacity: pct / 100 });
+    }
+  };
   const flipH = layer.flipHorizontal ?? false;
   const flipV = layer.flipVertical ?? false;
 
@@ -95,12 +108,14 @@ export function TransformSection({ layer }: Props) {
           </div>
         </div>
         <div>
-          <label className="block text-[10px] text-muted-foreground mb-1">Opacity</label>
+          <label className="block text-[10px] text-muted-foreground mb-1">
+            {maskTargeted ? 'Mask Opacity' : 'Opacity'}
+          </label>
           <div className="flex items-center gap-1">
             <input
               type="number"
-              value={Math.round(opacity * 100)}
-              onChange={(e) => handleChange('opacity', Number(e.target.value) / 100)}
+              value={opacityValue}
+              onChange={(e) => handleOpacityChange(Number(e.target.value))}
               className="flex-1 px-2 py-1.5 text-xs bg-background border border-input rounded-md focus:outline-none focus:ring-1 focus:ring-primary"
               min={0}
               max={100}
