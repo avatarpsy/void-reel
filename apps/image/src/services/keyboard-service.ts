@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { useUIStore } from '../stores/ui-store';
 import { useProjectStore } from '../stores/project-store';
+import { useSelectionStore } from '../stores/selection-store';
 import type { Tool } from '../stores/ui-store';
 
 // Photoshop-style single-key tool shortcuts. Where Photoshop groups several
@@ -141,8 +142,13 @@ export function useKeyboardShortcuts() {
           case 'x': e.preventDefault(); cutLayers(); break;
           case 'v': e.preventDefault(); pasteLayers(); break;
           case 'd':
+            // PS: Cmd/Ctrl+D = Deselect (duplicate layer is Cmd/Ctrl+J).
             e.preventDefault();
-            if (selectedLayerIds.length > 0) selectedLayerIds.forEach((id) => duplicateLayer(id));
+            useSelectionStore.getState().clearSelection();
+            break;
+          case 'i':
+            // PS: Cmd/Ctrl+Shift+I = Invert selection.
+            if (e.shiftKey) { e.preventDefault(); useSelectionStore.getState().invertSelection({ x: 0, y: 0, width: 0, height: 0 }); }
             break;
           case 'a': e.preventDefault(); selectAllLayers(); break;
           case 'g':
@@ -192,7 +198,7 @@ export function useKeyboardShortcuts() {
         return;
       }
 
-      if (e.key === 'Escape') { deselectAllLayers(); return; }
+      if (e.key === 'Escape') { useSelectionStore.getState().clearSelection(); deselectAllLayers(); return; }
       if (e.key === '?' || (e.shiftKey && e.key === '/')) { e.preventDefault(); toggleShortcutsPanel(); }
     };
 

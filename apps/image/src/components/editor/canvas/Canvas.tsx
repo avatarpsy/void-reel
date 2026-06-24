@@ -2,6 +2,8 @@ import { useEffect, useRef, useCallback, useState } from 'react';
 import { useProjectStore } from '../../../stores/project-store';
 import { useUIStore } from '../../../stores/ui-store';
 import { useCanvasStore, type ResizeHandle } from '../../../stores/canvas-store';
+import { useSelectionStore } from '../../../stores/selection-store';
+import { selectionToPath2D, boundsFromPath, combineSelections, type Selection } from '../../../types/selection';
 import { calculateSnap } from '../../../utils/snapping';
 import type { Layer, ImageLayer, TextLayer, ShapeLayer, GroupLayer } from '../../../types/project';
 import { Rulers } from './Rulers';
@@ -319,6 +321,13 @@ export function Canvas() {
   const paintCanvasRef = useRef<OffscreenCanvas | null>(null);
   const paintLayerIdRef = useRef<string | null>(null);
 
+  // Pixel selections (marquee / lasso / wand). `lassoDraftRef` holds the
+  // in-progress freehand path (artboard coords); the committed selection lives
+  // in useSelectionStore.active. `marchingOffsetRef` animates the marching ants.
+  const lassoDraftRef = useRef<{ x: number; y: number }[] | null>(null);
+  const marchingOffsetRef = useRef(0);
+  const activeSelection = useSelectionStore((s) => s.active);
+
   const artboard = project?.artboards.find((a) => a.id === selectedArtboardId);
 
   useEffect(() => {
@@ -343,10 +352,11 @@ export function Canvas() {
 
     const marqueeHash = marqueeRect ? `${marqueeRect.x}-${marqueeRect.y}-${marqueeRect.width}-${marqueeRect.height}` : 'none';
     const gradientHash = gradientDrag ? `${gradientDrag.startX}-${gradientDrag.startY}-${gradientDrag.endX}-${gradientDrag.endY}` : 'none';
-    const renderHash = `${zoom}-${panX}-${panY}-${selectedLayerIds.join(',')}-${project.updatedAt}-${showGrid}-${drawing.isDrawing}-${drawing.currentPath?.length ?? 0}-${isMarqueeSelecting}-${marqueeHash}-${gradientHash}`;
+    const selHash = `${activeSelection?.id ?? 'none'}-${marchingOffsetRef.current}-${lassoDraftRef.current?.length ?? 0}`;
+    const renderHash = `${zoom}-${panX}-${panY}-${selectedLayerIds.join(',')}-${project.updatedAt}-${showGrid}-${drawing.isDrawing}-${drawing.currentPath?.length ?? 0}-${isMarqueeSelecting}-${marqueeHash}-${gradientHash}-${selHash}`;
     // While a paint/retouch stroke is active, the buffer changes every move but
     // none of the hash inputs do — so bypass the dedupe to draw the live stroke.
-    const livePainting = !!(paintCanvasRef.current && paintLayerIdRef.current);
+    const livePainting = !!(paintCanvasRef.current && paintLayerIdRef.current) || !!lassoDraftRef.current;
     if (renderHash === lastRenderHashRef.current && !forceRenderRef.current && !livePainting) {
       return;
     }
@@ -605,6 +615,37 @@ export function Canvas() {
       ctx.restore();
     }
 
+    // Active pixel selection (marching ants) + in-progress lasso path. Drawn in
+    // artboard space; dashes/line-width divided by zoom to stay screen-constant.
+    if (activeSelection || lassoDraftRef.current) {
+      ctx.save();
+      ctx.translate(artboardX, artboardY);
+      ctx.scale(zoom, zoom);
+      ctx.lineWidth = 1 / zoom;
+      if (activeSelection) {
+        const p = selectionToPath2D(activeSelection);
+        const off = marchingOffsetRef.current / zoom;
+        ctx.setLineDash([4 / zoom, 4 / zoom]);
+        ctx.lineDashOffset = -off;
+        ctx.strokeStyle = 'rgba(0,0,0,0.9)';
+        ctx.stroke(p);
+        ctx.lineDashOffset = -off + 4 / zoom;
+        ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+        ctx.stroke(p);
+      }
+      if (lassoDraftRef.current && lassoDraftRef.current.length > 1) {
+        const pts = lassoDraftRef.current;
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+        ctx.setLineDash([4 / zoom, 4 / zoom]);
+        ctx.lineDashOffset = 0;
+        ctx.strokeStyle = '#22c55e';
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
     if (crop.isActive && crop.layerId && crop.cropRect) {
       const cropLayer = project.layers[crop.layerId];
       if (cropLayer) {
@@ -686,7 +727,7 @@ export function Canvas() {
     }
 
     ctx.restore();
-  }, [artboard, project, zoom, panX, panY, selectedLayerIds, showGrid, gridSize, crop, smartGuides, drawing, penSettings, brushSettings, activeTool, isMarqueeSelecting, marqueeRect]);
+  }, [artboard, project, zoom, panX, panY, selectedLayerIds, showGrid, gridSize, crop, smartGuides, drawing, penSettings, brushSettings, activeTool, isMarqueeSelecting, marqueeRect, activeSelection]);
 
   const scheduleRender = useCallback(() => {
     if (renderScheduledRef.current) return;
@@ -778,6 +819,118 @@ export function Canvas() {
       return null;
     },
     [artboard, project]
+  );
+
+  // ── Pixel-selection helpers (marquee / lasso / magic wand) ────────────────
+  // All selections live in ARTBOARD coordinates so marching-ants rendering and
+  // edit-gating share one space. Committed selection = useSelectionStore.active.
+  const commitSelectionShape = useCallback(
+    (sel: Selection) => {
+      const store = useSelectionStore.getState();
+      const final = store.active && store.mode !== 'new'
+        ? combineSelections(store.active, sel, store.mode)
+        : sel;
+      store.setActiveSelection(final);
+      scheduleRender();
+    },
+    [scheduleRender]
+  );
+
+  const commitMarqueeSelection = useCallback(
+    (rect: { x: number; y: number; width: number; height: number }, ellipse: boolean) => {
+      if (rect.width < 1 || rect.height < 1) return;
+      commitSelectionShape({
+        id: `sel-${Date.now()}`,
+        type: ellipse ? 'elliptical' : 'rectangular',
+        bounds: rect,
+        path: [
+          { x: rect.x, y: rect.y },
+          { x: rect.x + rect.width, y: rect.y },
+          { x: rect.x + rect.width, y: rect.y + rect.height },
+          { x: rect.x, y: rect.y + rect.height },
+        ],
+        feather: 0,
+        antiAlias: true,
+        opacity: 1,
+      });
+    },
+    [commitSelectionShape]
+  );
+
+  const commitLassoSelection = useCallback(
+    (points: { x: number; y: number }[]) => {
+      if (points.length < 3) return;
+      commitSelectionShape({
+        id: `sel-${Date.now()}`,
+        type: 'lasso',
+        bounds: boundsFromPath(points),
+        path: points,
+        feather: 0,
+        antiAlias: true,
+        opacity: 1,
+      });
+    },
+    [commitSelectionShape]
+  );
+
+  // Rasterize an image layer to ImageData (prefers its live raster buffer).
+  const layerToImageData = useCallback(
+    (layer: ImageLayer): { data: ImageData; w: number; h: number } | null => {
+      const buf = rasterBuffers.get(layer.id);
+      if (buf) {
+        const c = (buf as OffscreenCanvas).getContext('2d', { willReadFrequently: true }) as
+          | OffscreenCanvasRenderingContext2D | null;
+        if (c) return { data: c.getImageData(0, 0, buf.width, buf.height), w: buf.width, h: buf.height };
+      }
+      const asset = project?.assets[layer.sourceId];
+      const img = getCachedImage(asset?.dataUrl ?? asset?.blobUrl ?? '');
+      if (!img || !img.complete || img.naturalWidth === 0) return null;
+      const oc = new OffscreenCanvas(img.naturalWidth, img.naturalHeight);
+      const c = oc.getContext('2d', { willReadFrequently: true });
+      if (!c) return null;
+      c.drawImage(img, 0, 0);
+      return { data: c.getImageData(0, 0, oc.width, oc.height), w: oc.width, h: oc.height };
+    },
+    [project]
+  );
+
+  const magicWandSelect = useCallback(
+    (x: number, y: number) => {
+      if (!project) return;
+      const layerId = findLayerAtPoint(x, y);
+      if (!layerId) return;
+      const layer = project.layers[layerId];
+      if (layer?.type !== 'image') return;
+      const il = layer as ImageLayer;
+      const t = il.transform;
+      const res = layerToImageData(il);
+      if (!res) return;
+      const px = Math.floor(((x - t.x) / t.width) * res.w);
+      const py = Math.floor(((y - t.y) / t.height) * res.h);
+      if (px < 0 || py < 0 || px >= res.w || py >= res.h) return;
+      const store = useSelectionStore.getState();
+      const prevActive = store.active;
+      const prevMode = store.mode;
+      // selectByColor works in image-pixel coords; run it un-combined, then map
+      // the result to artboard coords and combine with the existing selection.
+      store.setSelectionMode('new');
+      store.selectByColor(res.data, px, py, store.magicWandOptions);
+      const wand = useSelectionStore.getState().active;
+      store.setSelectionMode(prevMode);
+      if (!wand || wand.path.length < 3) { store.setActiveSelection(prevActive); return; }
+      const toArt = (p: { x: number; y: number }) => ({
+        x: t.x + (p.x / res.w) * t.width,
+        y: t.y + (p.y / res.h) * t.height,
+      });
+      const artPath = wand.path.map(toArt);
+      const artSel: Selection = { ...wand, path: artPath, bounds: boundsFromPath(artPath) };
+      const final = prevActive && prevMode !== 'new'
+        ? combineSelections(prevActive, artSel, prevMode)
+        : artSel;
+      store.setActiveSelection(final);
+      scheduleRender();
+    },
+    [project, findLayerAtPoint, layerToImageData, scheduleRender]
   );
 
   const getHandleAtPoint = useCallback(
@@ -883,13 +1036,17 @@ export function Canvas() {
         return;
       }
 
-      if (activeTool === 'lasso' || activeTool === 'lasso-polygon' || activeTool === 'magic-wand') {
-        const layerId = findLayerAtPoint(x, y);
-        if (layerId) {
-          selectLayer(layerId);
-        } else {
-          deselectAllLayers();
-        }
+      if (activeTool === 'lasso' || activeTool === 'lasso-polygon') {
+        // Freehand lasso: collect the path while the button is held; commit on
+        // mouse-up. (Polygon falls back to freehand for now.)
+        deselectAllLayers();
+        lassoDraftRef.current = [{ x, y }];
+        return;
+      }
+
+      if (activeTool === 'magic-wand') {
+        deselectAllLayers();
+        magicWandSelect(x, y);
         return;
       }
 
@@ -1393,12 +1550,20 @@ export function Canvas() {
         }
       }
     },
-    [activeTool, screenToCanvas, findLayerAtPoint, selectLayer, deselectAllLayers, startDrag, selectedLayerIds, startDrawing, startMarqueeSelect, getHandleAtPoint, project, setActiveResizeHandle, zoom, setZoom, startCrop, setBrushSettings, eraserSettings]
+    [activeTool, screenToCanvas, findLayerAtPoint, selectLayer, deselectAllLayers, startDrag, selectedLayerIds, startDrawing, startMarqueeSelect, getHandleAtPoint, project, setActiveResizeHandle, zoom, setZoom, startCrop, setBrushSettings, eraserSettings, magicWandSelect]
   );
 
   const handleMouseMove = useCallback(
     (e: React.MouseEvent) => {
       const canvas = canvasRef.current;
+
+      // Freehand lasso in progress — accumulate the path.
+      if (lassoDraftRef.current) {
+        const { x, y } = screenToCanvas(e.clientX, e.clientY);
+        lassoDraftRef.current.push({ x, y });
+        scheduleRender();
+        return;
+      }
 
       if (drawing.isDrawing) {
         const { x, y } = screenToCanvas(e.clientX, e.clientY);
@@ -1837,6 +2002,15 @@ export function Canvas() {
   );
 
   const handleMouseUp = useCallback(() => {
+    // Commit a freehand lasso selection.
+    if (lassoDraftRef.current) {
+      const pts = lassoDraftRef.current;
+      lassoDraftRef.current = null;
+      commitLassoSelection(pts);
+      scheduleRender();
+      return;
+    }
+
     if (drawing.isDrawing) {
       const path = finishDrawing();
       if (path && path.length > 1) {
@@ -2020,9 +2194,10 @@ export function Canvas() {
 
     if (dragMode === 'marquee') {
       const rect = endMarqueeSelect();
-      if (rect && rect.width > 5 && rect.height > 5) {
+      if (rect && rect.width > 2 && rect.height > 2) {
         if (activeTool === 'marquee-rect' || activeTool === 'marquee-ellipse') {
-          // Keep selection visible for marquee tools - don't select layers
+          // Turn the dragged rect into a real pixel selection (marching ants).
+          commitMarqueeSelection(rect, activeTool === 'marquee-ellipse');
         } else {
           const layerIds = findLayersInRect(rect);
           if (layerIds.length > 0) {
@@ -2046,7 +2221,7 @@ export function Canvas() {
     setActiveResizeHandle(null);
     endDrag();
     clearSmartGuides();
-  }, [endDrag, clearSmartGuides, drawing.isDrawing, finishDrawing, addPathLayer, penSettings, brushSettings, scheduleRender, dragMode, endMarqueeSelect, findLayersInRect, selectLayers, setActiveResizeHandle, activeTool, gradientDrag, gradientSettings, artboard, addShapeLayer, updateLayer, project, selectedLayerIds]);
+  }, [endDrag, clearSmartGuides, drawing.isDrawing, finishDrawing, addPathLayer, penSettings, brushSettings, scheduleRender, dragMode, endMarqueeSelect, findLayersInRect, selectLayers, setActiveResizeHandle, activeTool, gradientDrag, gradientSettings, artboard, addShapeLayer, updateLayer, project, selectedLayerIds, commitLassoSelection, commitMarqueeSelection]);
 
   const handleContextMenu = useCallback(
     (e: React.MouseEvent) => {
@@ -2254,6 +2429,19 @@ export function Canvas() {
     canvas.addEventListener('wheel', handleWheel, { passive: false });
     return () => canvas.removeEventListener('wheel', handleWheel);
   }, [handleWheel]);
+
+  // Animate the marching-ants while a selection exists.
+  useEffect(() => {
+    if (!activeSelection) return;
+    let raf = 0;
+    const tick = () => {
+      marchingOffsetRef.current = (marchingOffsetRef.current + 0.4) % 8;
+      scheduleRender();
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [activeSelection, scheduleRender]);
 
   const effectiveCursor = (() => {
     if ((activeTool === 'select' || activeTool === 'free-transform') && cursorStyle !== 'default') {

@@ -8,7 +8,7 @@ import { useKeyboardShortcuts } from './services/keyboard-service';
 import { useAutoSave } from './hooks/useAutoSave';
 
 export default function App() {
-  const { currentView, setCurrentView, showShortcutsPanel, toggleShortcutsPanel, showSettingsDialog, closeSettingsDialog } = useUIStore();
+  const { currentView, showShortcutsPanel, toggleShortcutsPanel, showSettingsDialog, closeSettingsDialog } = useUIStore();
 
   useKeyboardShortcuts();
   useAutoSave();
@@ -17,15 +17,8 @@ export default function App() {
     document.documentElement.classList.add('dark');
   }, []);
 
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && currentView === 'editor') {
-        setCurrentView('welcome');
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [currentView, setCurrentView]);
+  // Note: Escape no longer exits the editor — it deselects/cancels (handled in
+  // keyboard-service), matching Photoshop. Use the Home button to leave.
 
   return (
     <div className="h-full w-full bg-background">
