@@ -378,7 +378,7 @@ export function Canvas() {
     groupLayers,
     ungroupLayers,
   } = useProjectStore();
-  const { zoom, panX, panY, setPan, setZoom, activeTool, showGrid, showRulers, toggleGrid, toggleRulers, gridSize, crop, snapToObjects, snapToGuides, snapToGrid, penSettings, brushSettings, eraserSettings, drawing, startDrawing, addDrawingPoint, finishDrawing, startCrop, updateCropRect, setBrushSettings, gradientSettings, paintBucketSettings, smudgeSettings, blurSharpenSettings, dodgeBurnSettings, spongeSettings, cloneStampSettings, healingBrushSettings, spotHealingSettings, maskEditLayerId } = useUIStore();
+  const { zoom, panX, panY, setPan, setZoom, activeTool, showGrid, showRulers, toggleGrid, toggleRulers, gridSize, crop, snapToObjects, snapToGuides, snapToGrid, penSettings, brushSettings, eraserSettings, drawing, startDrawing, addDrawingPoint, finishDrawing, startCrop, updateCropRect, setBrushSettings, gradientSettings, paintBucketSettings, smudgeSettings, blurSharpenSettings, dodgeBurnSettings, spongeSettings, cloneStampSettings, healingBrushSettings, spotHealingSettings, maskEditLayerId, setMaskEditLayerId } = useUIStore();
   const { setCanvasRef, setContainerRef, startDrag, updateDrag, endDrag, isDragging, dragMode, dragStartX, dragStartY, dragCurrentX, dragCurrentY, guides, smartGuides, setSmartGuides, clearSmartGuides, isMarqueeSelecting, marqueeRect, startMarqueeSelect, updateMarqueeSelect, endMarqueeSelect, activeResizeHandle, setActiveResizeHandle } = useCanvasStore();
   const [cursorStyle, setCursorStyle] = useState('default');
   const initialTransformRef = useRef<{ x: number; y: number; width: number; height: number; rotation: number } | null>(null);
@@ -526,13 +526,51 @@ export function Canvas() {
       liveMaskPaint = null;
     }
 
-    const sortedLayerIds = [...artboard.layerIds].reverse();
-    sortedLayerIds.forEach((layerId) => {
-      const layer = project.layers[layerId];
-      if (!layer || !layer.visible) return;
-      if (!isLayerInViewport(layer, viewport)) return;
-      renderLayerWithChildren(ctx, layer, project);
-    });
+    // Bottom-to-top. A layer with `clippingMask` clips to the layer below it
+    // (its "base"): it shows only where the base has pixels (Photoshop). We draw
+    // the base normally, then draw each clipped layer through the base's shape.
+    const sortedLayers = [...artboard.layerIds].reverse().map((id) => project.layers[id]);
+    const AW = Math.max(1, Math.ceil(artboard.size.width));
+    const AH = Math.max(1, Math.ceil(artboard.size.height));
+    for (let i = 0; i < sortedLayers.length; i++) {
+      const layer = sortedLayers[i];
+      if (!layer || !layer.visible) continue;
+
+      // Gather the clipped layers stacked directly above this base.
+      const clipped: Layer[] = [];
+      let j = i + 1;
+      while (j < sortedLayers.length && sortedLayers[j]?.clippingMask) {
+        if (sortedLayers[j].visible) clipped.push(sortedLayers[j]);
+        j++;
+      }
+
+      if (isLayerInViewport(layer, viewport)) {
+        renderLayerWithChildren(ctx, layer, project);
+      }
+
+      if (clipped.length > 0) {
+        // The base's rendered shape becomes the clip region for the layers above.
+        const baseShape = document.createElement('canvas');
+        baseShape.width = AW;
+        baseShape.height = AH;
+        const bctx = baseShape.getContext('2d');
+        if (bctx) {
+          renderLayerWithChildren(bctx, layer, project);
+          for (const clip of clipped) {
+            const clipOff = document.createElement('canvas');
+            clipOff.width = AW;
+            clipOff.height = AH;
+            const cctx = clipOff.getContext('2d');
+            if (!cctx) continue;
+            renderLayerWithChildren(cctx, clip, project);
+            cctx.globalCompositeOperation = 'destination-in';
+            cctx.drawImage(baseShape, 0, 0);
+            ctx.drawImage(clipOff, 0, 0);
+          }
+        }
+        i = j - 1; // skip the clipped layers we just drew
+      }
+    }
 
     ctx.restore();
 
@@ -1182,11 +1220,19 @@ export function Canvas() {
         return;
       }
 
+      // If the mask is targeted but the user clicks a DIFFERENT layer, they want
+      // to paint that layer's pixels — leave mask mode (prevents painting one
+      // layer's mask while clicking another).
+      if ((activeTool === 'brush' || activeTool === 'eraser') && maskEditLayerId) {
+        const hit = findLayerAtPoint(x, y);
+        if (hit && hit !== maskEditLayerId) setMaskEditLayerId(null);
+      }
+
       // Paint-on-mask: when a layer's MASK is the active edit target (its mask
       // thumbnail was clicked), the brush paints onto the mask — grayscale, so
       // black hides and white reveals (Photoshop). The stroke is stamped by the
       // normal paint-move handler and saved to mask.data on mouse-up.
-      if (activeTool === 'brush' && maskEditLayerId && project) {
+      if (activeTool === 'brush' && maskEditLayerId && project && findLayerAtPoint(x, y) === maskEditLayerId) {
         const layer = project.layers[maskEditLayerId];
         if (layer?.type === 'image' && layer.mask?.data) {
           const W = Math.max(1, Math.round(layer.transform.width));
@@ -1691,7 +1737,7 @@ export function Canvas() {
         }
       }
     },
-    [activeTool, screenToCanvas, findLayerAtPoint, selectLayer, deselectAllLayers, startDrag, selectedLayerIds, startDrawing, startMarqueeSelect, getHandleAtPoint, project, setActiveResizeHandle, zoom, setZoom, startCrop, setBrushSettings, brushSettings, eraserSettings, magicWandSelect, maskEditLayerId]
+    [activeTool, screenToCanvas, findLayerAtPoint, selectLayer, deselectAllLayers, startDrag, selectedLayerIds, startDrawing, startMarqueeSelect, getHandleAtPoint, project, setActiveResizeHandle, zoom, setZoom, startCrop, setBrushSettings, brushSettings, eraserSettings, magicWandSelect, maskEditLayerId, setMaskEditLayerId]
   );
 
   const handleMouseMove = useCallback(
@@ -2734,22 +2780,43 @@ function renderLayerWithChildren(
     if (!group.visible) return;
 
     const { transform } = group;
-    ctx.save();
+    const w = Math.max(1, Math.ceil(transform.width));
+    const h = Math.max(1, Math.ceil(transform.height));
 
-    ctx.translate(transform.x, transform.y);
-    ctx.rotate((transform.rotation * Math.PI) / 180);
-    ctx.scale(transform.scaleX, transform.scaleY);
-    ctx.globalAlpha *= transform.opacity;
+    // Render the group's children into its OWN local space on an offscreen so we
+    // can treat the group as a unit — apply its mask, blend mode and opacity to
+    // the MERGED result (Photoshop group semantics). Children recurse through
+    // renderLayerWithChildren so nested groups render too.
+    const off = document.createElement('canvas');
+    off.width = w;
+    off.height = h;
+    const octx = off.getContext('2d');
+    if (octx) {
+      const sortedChildIds = [...group.childIds].reverse();
+      sortedChildIds.forEach((childId) => {
+        const child = project.layers[childId];
+        if (child && child.visible) renderLayerWithChildren(octx, child, project);
+      });
 
-    const sortedChildIds = [...group.childIds].reverse();
-    sortedChildIds.forEach((childId) => {
-      const child = project.layers[childId];
-      if (child && child.visible) {
-        renderLayer(ctx, child, project);
+      // Group mask — luminance reveals/hides, density fades (same as image masks).
+      if (group.mask?.enabled && group.mask.data) {
+        const maskImg = getCachedImage(group.mask.data);
+        if (maskImg && maskImg.complete && maskImg.naturalWidth > 0) {
+          octx.globalCompositeOperation = 'destination-in';
+          octx.drawImage(maskToAlphaCanvas(maskImg, w, h, !!group.mask.invert, group.mask.density ?? 100), 0, 0);
+          octx.globalCompositeOperation = 'source-over';
+        }
       }
-    });
 
-    ctx.restore();
+      ctx.save();
+      ctx.translate(transform.x, transform.y);
+      ctx.rotate((transform.rotation * Math.PI) / 180);
+      ctx.scale(transform.scaleX, transform.scaleY);
+      ctx.globalAlpha *= transform.opacity;
+      ctx.globalCompositeOperation = BLEND_MODE_MAP[group.blendMode?.mode] ?? 'source-over';
+      ctx.drawImage(off, 0, 0);
+      ctx.restore();
+    }
   } else {
     renderLayer(ctx, layer, project);
   }

@@ -54,6 +54,7 @@ export function useKeyboardShortcuts() {
     duplicateLayer, selectAllLayers, deselectAllLayers,
     moveLayerUp, moveLayerDown, moveLayerToTop, moveLayerToBottom,
     groupLayers, ungroupLayers, mergeDown, project, undo, redo, canUndo, canRedo,
+    updateLayer,
   } = useProjectStore();
 
   // Spacebar-pan: hold Space to temporarily switch to the Hand tool, restoring
@@ -157,7 +158,13 @@ export function useKeyboardShortcuts() {
           case 'a': e.preventDefault(); selectAllLayers(); break;
           case 'g':
             e.preventDefault();
-            if (e.shiftKey) {
+            if (e.altKey) {
+              // PS: Cmd/Ctrl+Alt+G = toggle clipping mask on the selected layer.
+              if (selectedLayerIds.length === 1) {
+                const layer = project?.layers[selectedLayerIds[0]];
+                if (layer) updateLayer(selectedLayerIds[0], { clippingMask: !layer.clippingMask });
+              }
+            } else if (e.shiftKey) {
               if (selectedLayerIds.length === 1) {
                 const layer = project?.layers[selectedLayerIds[0]];
                 if (layer?.type === 'group') ungroupLayers(selectedLayerIds[0]);
@@ -223,7 +230,7 @@ export function useKeyboardShortcuts() {
   }, [
     activeTool, selectedLayerIds, setActiveTool, removeLayer, copyLayers, cutLayers,
     pasteLayers, duplicateLayer, selectAllLayers, deselectAllLayers, moveLayerUp,
-    moveLayerDown, moveLayerToTop, moveLayerToBottom, groupLayers, ungroupLayers, mergeDown,
+    moveLayerDown, moveLayerToTop, moveLayerToBottom, groupLayers, ungroupLayers, mergeDown, updateLayer,
     zoomIn, zoomOut, zoomToFit, setZoom, toggleGrid, toggleGuides, toggleShortcutsPanel,
     openSettingsDialog, undo, redo, canUndo, canRedo, project, brushSettings, setBrushSettings,
     togglePanelCollapsed, toggleInspectorCollapsed,

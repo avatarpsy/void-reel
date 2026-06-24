@@ -1,4 +1,4 @@
-import type { Project, Artboard, Layer, ImageLayer, TextLayer, ShapeLayer, Filter } from '../types/project';
+import type { Project, Artboard, Layer, ImageLayer, TextLayer, ShapeLayer, GroupLayer, Filter } from '../types/project';
 import { hasActiveAdjustments, applyAllAdjustments, type LayerAdjustments } from '../utils/apply-adjustments';
 
 /** Mask image -> alpha mask from its LUMINANCE (white reveals, black hides).
@@ -131,11 +131,45 @@ export async function exportArtboard(
     }
   }
 
-  const sortedLayerIds = [...artboard.layerIds].reverse();
-  for (const layerId of sortedLayerIds) {
-    const layer = project.layers[layerId];
+  // Bottom-to-top, with clipping-mask support (a clipped layer shows only where
+  // the layer below it has pixels) — mirrors the on-canvas renderer.
+  const sortedLayers = [...artboard.layerIds].reverse().map((id) => project.layers[id]);
+  const AW = Math.max(1, Math.ceil(artboard.size.width));
+  const AH = Math.max(1, Math.ceil(artboard.size.height));
+  for (let i = 0; i < sortedLayers.length; i++) {
+    const layer = sortedLayers[i];
     if (!layer || !layer.visible) continue;
+
+    const clipped: Layer[] = [];
+    let j = i + 1;
+    while (j < sortedLayers.length && sortedLayers[j]?.clippingMask) {
+      if (sortedLayers[j].visible) clipped.push(sortedLayers[j]);
+      j++;
+    }
+
     await renderLayerToContext(ctx, layer, project);
+
+    if (clipped.length > 0) {
+      const baseShape = document.createElement('canvas');
+      baseShape.width = AW;
+      baseShape.height = AH;
+      const bctx = baseShape.getContext('2d');
+      if (bctx) {
+        await renderLayerToContext(bctx, layer, project);
+        for (const clip of clipped) {
+          const clipOff = document.createElement('canvas');
+          clipOff.width = AW;
+          clipOff.height = AH;
+          const cctx = clipOff.getContext('2d');
+          if (!cctx) continue;
+          await renderLayerToContext(cctx, clip, project);
+          cctx.globalCompositeOperation = 'destination-in';
+          cctx.drawImage(baseShape, 0, 0);
+          ctx.drawImage(clipOff, 0, 0);
+        }
+      }
+      i = j - 1;
+    }
   }
 
   const mimeType = format === 'jpg' ? 'image/jpeg' : format === 'webp' ? 'image/webp' : 'image/png';
@@ -173,11 +207,57 @@ export async function renderLayersToDataURL(
   return canvas.toDataURL('image/png');
 }
 
+// Render a group as a unit so its mask, blend mode and opacity apply to the
+// merged children (mirrors the canvas renderer for WYSIWYG export).
+async function renderGroupToContext(
+  ctx: CanvasRenderingContext2D,
+  group: GroupLayer,
+  project: Project
+): Promise<void> {
+  if (!group.visible) return;
+  const { transform } = group;
+  const w = Math.max(1, Math.ceil(transform.width));
+  const h = Math.max(1, Math.ceil(transform.height));
+  const off = document.createElement('canvas');
+  off.width = w;
+  off.height = h;
+  const octx = off.getContext('2d');
+  if (!octx) return;
+
+  const ordered = [...group.childIds].reverse();
+  for (const cid of ordered) {
+    const child = project.layers[cid];
+    if (child && child.visible) await renderLayerToContext(octx, child, project);
+  }
+
+  if (group.mask?.enabled && group.mask.data) {
+    const maskImg = await loadImageEl(group.mask.data);
+    if (maskImg) {
+      octx.globalCompositeOperation = 'destination-in';
+      octx.drawImage(maskToAlphaCanvasEl(maskImg, w, h, !!group.mask.invert, group.mask.density ?? 100), 0, 0);
+      octx.globalCompositeOperation = 'source-over';
+    }
+  }
+
+  ctx.save();
+  ctx.translate(transform.x, transform.y);
+  ctx.rotate((transform.rotation * Math.PI) / 180);
+  ctx.scale(transform.scaleX, transform.scaleY);
+  ctx.globalAlpha = transform.opacity;
+  ctx.globalCompositeOperation = BLEND_MODE_MAP[group.blendMode?.mode ?? 'normal'] ?? 'source-over';
+  ctx.drawImage(off, 0, 0);
+  ctx.restore();
+}
+
 async function renderLayerToContext(
   ctx: CanvasRenderingContext2D,
   layer: Layer,
   project: Project
 ): Promise<void> {
+  if (layer.type === 'group') {
+    await renderGroupToContext(ctx, layer as GroupLayer, project);
+    return;
+  }
   const { transform } = layer;
   const shadow = layer.shadow ?? { enabled: false, color: 'rgba(0, 0, 0, 0.5)', blur: 10, offsetX: 0, offsetY: 4 };
   const innerShadow = layer.innerShadow ?? { enabled: false, color: 'rgba(0, 0, 0, 0.5)', blur: 10, offsetX: 2, offsetY: 2 };

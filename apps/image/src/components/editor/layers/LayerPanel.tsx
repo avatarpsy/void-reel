@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Eye, EyeOff, Lock, Unlock, Trash2, Copy, ChevronUp, ChevronDown, ChevronRight, ArrowUp, ArrowDown, ArrowUpToLine, ArrowDownToLine, Clipboard, ClipboardCopy, Scissors, Paintbrush, Search, X, Image, Type, Hexagon, Folder, FolderPlus, FolderOpen, ChevronsDown, SquareStack } from 'lucide-react';
+import { Eye, EyeOff, Lock, Unlock, Trash2, Copy, ChevronUp, ChevronDown, ChevronRight, CornerDownRight, ArrowUp, ArrowDown, ArrowUpToLine, ArrowDownToLine, Clipboard, ClipboardCopy, Scissors, Paintbrush, Search, X, Image, Type, Hexagon, Folder, FolderPlus, FolderOpen, ChevronsDown, SquareStack } from 'lucide-react';
 import { useProjectStore } from '../../../stores/project-store';
 import { useSelectionStore } from '../../../stores/selection-store';
 import { useUIStore } from '../../../stores/ui-store';
@@ -353,6 +353,11 @@ export function LayerPanel() {
                         )}
                       </div>
 
+                      {/* Clipped-to-layer-below indicator (Photoshop shows a down arrow). */}
+                      {layer.clippingMask && (
+                        <CornerDownRight size={12} className="shrink-0 text-muted-foreground" aria-label="Clipped to layer below" />
+                      )}
+
                       {editingLayerId === layer.id ? (
                         <input
                           ref={editInputRef}
@@ -451,12 +456,24 @@ export function LayerPanel() {
                       </ContextMenuItem>
                     )}
                     {(selectedLayerIds.length > 1 || layer.type === 'group') && <ContextMenuSeparator />}
-                    {layer.type === 'image' && !layer.mask?.data && (
+                    {(layer.type === 'image' || layer.type === 'group') && !layer.mask?.data && (
                       <ContextMenuItem onClick={(e) => handleAddMask(layer, e as unknown as React.MouseEvent)}>
                         <SquareStack size={14} className="mr-2" />
                         Add Layer Mask
                       </ContextMenuItem>
                     )}
+                    {(() => {
+                      const topIdx = artboard?.layerIds.indexOf(layer.id) ?? -1;
+                      const canClip = topIdx >= 0 && topIdx < (artboard?.layerIds.length ?? 0) - 1;
+                      if (!canClip && !layer.clippingMask) return null;
+                      return (
+                        <ContextMenuItem onClick={() => updateLayer(layer.id, { clippingMask: !layer.clippingMask })}>
+                          <CornerDownRight size={14} className="mr-2" />
+                          {layer.clippingMask ? 'Release Clipping Mask' : 'Create Clipping Mask'}
+                          <ContextMenuShortcut>⌘⌥G</ContextMenuShortcut>
+                        </ContextMenuItem>
+                      );
+                    })()}
                     {canMergeDown(layer.id) && (
                       <ContextMenuItem onClick={() => handleMergeDown(layer.id)}>
                         <ChevronsDown size={14} className="mr-2" />
@@ -586,7 +603,7 @@ export function LayerPanel() {
       <div className="flex items-center justify-center gap-2 px-2 py-2 border-t border-border">
         <button
           onClick={(e) => { const l = project?.layers[selectedLayerIds[0]]; if (l) void handleAddMask(l, e); }}
-          disabled={!selectedLayerIds.length || project?.layers[selectedLayerIds[0]]?.type !== 'image' || !!project?.layers[selectedLayerIds[0]]?.mask?.data}
+          disabled={!selectedLayerIds.length || !['image', 'group'].includes(project?.layers[selectedLayerIds[0]]?.type ?? '') || !!project?.layers[selectedLayerIds[0]]?.mask?.data}
           className={`p-1.5 rounded hover:bg-accent disabled:opacity-30 disabled:hover:bg-transparent ${
             activeSelection && !project?.layers[selectedLayerIds[0]]?.mask?.data ? 'ring-2 ring-primary animate-pulse' : ''
           }`}

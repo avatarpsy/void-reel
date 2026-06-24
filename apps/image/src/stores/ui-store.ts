@@ -424,6 +424,12 @@ export const useUIStore = create<UIState & UIActions>()(
       } else if (tool === 'burn') {
         updates.dodgeBurnSettings = { ...get().dodgeBurnSettings, type: 'burn' };
       }
+      // Mask-edit is a sub-mode of the brush/eraser — leaving those tools exits
+      // it, so the brush goes back to painting pixels (prevents the "image paint
+      // silently edits the mask" trap).
+      if (tool !== 'brush' && tool !== 'eraser') {
+        updates.maskEditLayerId = null;
+      }
       set(updates);
     },
     setActivePanel: (panel) => set({ activePanel: panel }),

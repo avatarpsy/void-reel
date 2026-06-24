@@ -21,7 +21,28 @@ export function EditorInterface() {
   const { project } = useProjectStore();
   const [bottomTab, setBottomTab] = useState<BottomTab>('history');
   const [dockHeight, setDockHeight] = useState(240);
+  const [leftWidth, setLeftWidth] = useState(288); // w-72 = 18rem
   const resizingRef = useRef(false);
+  const leftResizingRef = useRef(false);
+
+  const startLeftResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    leftResizingRef.current = true;
+    const startX = e.clientX;
+    const startW = leftWidth;
+    const onMove = (ev: MouseEvent) => {
+      if (!leftResizingRef.current) return;
+      const dx = ev.clientX - startX; // drag right => wider
+      setLeftWidth(Math.max(200, Math.min(560, startW + dx)));
+    };
+    const onUp = () => {
+      leftResizingRef.current = false;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
 
   const startResize = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -56,9 +77,17 @@ export function EditorInterface() {
 
       <div className="flex-1 flex overflow-hidden">
         {!isPanelCollapsed && (
-          <div className="w-72 border-r border-border flex flex-col bg-card">
-            <LeftPanel />
-          </div>
+          <>
+            <div style={{ width: leftWidth }} className="border-r border-border flex flex-col bg-card shrink-0">
+              <LeftPanel />
+            </div>
+            {/* Drag the left panel's right edge to resize it horizontally. */}
+            <div
+              onMouseDown={startLeftResize}
+              className="w-1.5 cursor-col-resize hover:bg-primary/40 transition-colors shrink-0"
+              title="Drag to resize"
+            />
+          </>
         )}
 
         <div className="flex-1 flex flex-col overflow-hidden">
