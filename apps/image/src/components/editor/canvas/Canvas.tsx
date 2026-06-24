@@ -46,6 +46,54 @@ export function dropRasterBuffer(layerId: string) {
 // mask is being painted in this buffer — renderLayer reads it for a live preview.
 let liveMaskPaint: { layerId: string; maskCanvas: OffscreenCanvas } | null = null;
 
+/** Copy a canvas so we can keep a pre-stroke snapshot. */
+function snapshotCanvas(src: OffscreenCanvas): OffscreenCanvas {
+  const c = new OffscreenCanvas(src.width, src.height);
+  c.getContext('2d')!.drawImage(src, 0, 0);
+  return c;
+}
+
+/** Confine a paint stroke to the active selection (Photoshop clips painting to
+ *  the marquee): keep `orig` everywhere, overlay `painted` only inside the
+ *  selection polygon (mapped from artboard space to the buffer's pixel space). */
+function gateToSelection(
+  painted: OffscreenCanvas,
+  orig: OffscreenCanvas,
+  selectionPath: { x: number; y: number }[],
+  transform: { x: number; y: number; width: number; height: number },
+): OffscreenCanvas {
+  const W = painted.width;
+  const H = painted.height;
+  const sx = W / transform.width;
+  const sy = H / transform.height;
+
+  // Selection polygon in buffer-pixel space.
+  const mask = new OffscreenCanvas(W, H);
+  const mc = mask.getContext('2d')!;
+  mc.fillStyle = 'white';
+  mc.beginPath();
+  mc.moveTo((selectionPath[0].x - transform.x) * sx, (selectionPath[0].y - transform.y) * sy);
+  for (let i = 1; i < selectionPath.length; i++) {
+    mc.lineTo((selectionPath[i].x - transform.x) * sx, (selectionPath[i].y - transform.y) * sy);
+  }
+  mc.closePath();
+  mc.fill();
+
+  // painted ∩ selection
+  const clip = new OffscreenCanvas(W, H);
+  const cc = clip.getContext('2d')!;
+  cc.drawImage(painted, 0, 0);
+  cc.globalCompositeOperation = 'destination-in';
+  cc.drawImage(mask, 0, 0);
+
+  // orig everywhere, then the clipped paint on top
+  const out = new OffscreenCanvas(W, H);
+  const oc = out.getContext('2d')!;
+  oc.drawImage(orig, 0, 0);
+  oc.drawImage(clip, 0, 0);
+  return out;
+}
+
 /** Brush color -> its grayscale equivalent (masks are grayscale: white reveals,
  *  black hides). Accepts #RGB / #RRGGBB; passes other values through. */
 function colorToGrayHex(color: string): string {
@@ -359,6 +407,9 @@ export function Canvas() {
   const paintLayerIdRef = useRef<string | null>(null);
   // True while a brush/eraser stroke is editing a layer MASK (not its pixels).
   const paintingMaskRef = useRef(false);
+  // Pre-stroke snapshot of the painted buffer — used to confine brush/eraser
+  // strokes to the active selection (Photoshop clips painting to the marquee).
+  const origPaintRef = useRef<OffscreenCanvas | null>(null);
 
   // Pixel selections (marquee / lasso / wand). `lassoDraftRef` holds the
   // in-progress freehand path (artboard coords); the committed selection lives
@@ -1185,6 +1236,7 @@ export function Canvas() {
                   tempCtx.drawImage(rasterBuffers.get(layerId) ?? img, 0, 0);
                   paintCanvasRef.current = tempCanvas;
                   paintLayerIdRef.current = layerId;
+                  origPaintRef.current = snapshotCanvas(tempCanvas);
 
                   const localX = (x - layer.transform.x) * (img.naturalWidth / layer.transform.width);
                   const localY = (y - layer.transform.y) * (img.naturalHeight / layer.transform.height);
@@ -1232,6 +1284,7 @@ export function Canvas() {
                   tempCtx.drawImage(rasterBuffers.get(layerId) ?? img, 0, 0);
                   paintCanvasRef.current = tempCanvas;
                   paintLayerIdRef.current = layerId;
+                  origPaintRef.current = snapshotCanvas(tempCanvas);
 
                   const localX = (x - layer.transform.x) * (img.naturalWidth / layer.transform.width);
                   const localY = (y - layer.transform.y) * (img.naturalHeight / layer.transform.height);
@@ -2248,18 +2301,28 @@ export function Canvas() {
         const currentLayer = project?.layers[layerId] as ImageLayer | undefined;
         const oldSourceId = currentLayer?.sourceId;
 
+        // Confine brush/eraser strokes to the active selection (Photoshop clips
+        // painting to the marquee). No selection => the whole stroke commits.
+        let finalCanvas: OffscreenCanvas | HTMLCanvasElement = tempCanvas;
+        const sel = useSelectionStore.getState().active;
+        if (sel && sel.path.length > 2 && origPaintRef.current && currentLayer &&
+            (activeTool === 'brush' || activeTool === 'eraser')) {
+          finalCanvas = gateToSelection(tempCanvas as OffscreenCanvas, origPaintRef.current, sel.path, currentLayer.transform);
+        }
+        origPaintRef.current = null;
+
         const canvas = document.createElement('canvas');
-        canvas.width = tempCanvas.width;
-        canvas.height = tempCanvas.height;
+        canvas.width = finalCanvas.width;
+        canvas.height = finalCanvas.height;
         const ctx = canvas.getContext('2d');
         if (ctx && layerId) {
-          ctx.drawImage(tempCanvas, 0, 0);
+          ctx.drawImage(finalCanvas, 0, 0);
           // Phase 2: keep the painted pixels in the layer's PERSISTENT raster
           // buffer (the renderer draws it directly — instant, no reload). We do
           // NOT create a new asset; instead update the EXISTING asset in place
           // (same id, original name) so save/export/reload still work and the
           // Assets panel never fills up with "*-edited" copies.
-          rasterBuffers.set(layerId, tempCanvas);
+          rasterBuffers.set(layerId, finalCanvas);
           const existing = oldSourceId ? useProjectStore.getState().project?.assets[oldSourceId] : undefined;
           const dataUrl = canvas.toDataURL('image/png');
           if (oldSourceId) {
