@@ -15,7 +15,9 @@ import { runGenerativeFill, type FillModelId } from './generative-fill';
 import { buildMaskData } from '../utils/mask-builder';
 import type { MediaAsset } from '../types/project';
 
-const MAX_DIM = 1024; // 4o-image returns ~1024px; sending larger is wasted bytes.
+// fal bills per megapixel (rounded up); cap the canvas at ~1MP so a fill costs
+// one MP. The result is placed back over the full artboard (slight upscale).
+const MAX_PIXELS = 1_000_000;
 
 function blobToImage(blob: Blob): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -48,11 +50,13 @@ export async function applyGenerativeFill(prompt: string, model?: FillModelId): 
 
   const W = Math.max(1, Math.round(artboard.size.width));
   const H = Math.max(1, Math.round(artboard.size.height));
-  const scale = Math.min(1, MAX_DIM / Math.max(W, H));
+  // Cap at ~1MP for the fal bill; both source + mask share these dimensions so
+  // the model's mask aligns to the image.
+  const scale = Math.min(1, Math.sqrt(MAX_PIXELS / (W * H)));
   const tw = Math.max(1, Math.round(W * scale));
   const th = Math.max(1, Math.round(H * scale));
 
-  // 1) Composite (flattened visible artboard) → target-sized PNG.
+  // 1) Full composite (flattened visible artboard) at the target size.
   const compBlob = await exportArtboard(project, artboard, {
     format: 'png', quality: 'high', scale: 1, background: 'include',
   });
@@ -60,15 +64,15 @@ export async function applyGenerativeFill(prompt: string, model?: FillModelId): 
   const sc = document.createElement('canvas');
   sc.width = tw; sc.height = th;
   sc.getContext('2d')!.drawImage(compImg, 0, 0, tw, th);
-  const sourceBlob = await canvasToBlob(sc);
+  const sourceBlob = await canvasToBlob(sc, 'image/jpeg');
 
-  // 2) Mask — white = keep, BLACK = regenerate (Kie 4o-image convention).
+  // 2) Mask — BLACK = keep, WHITE = inpaint the selection (FLUX Fill convention).
   const mc = document.createElement('canvas');
   mc.width = tw; mc.height = th;
   const mx = mc.getContext('2d')!;
-  mx.fillStyle = 'white';
-  mx.fillRect(0, 0, tw, th);
   mx.fillStyle = 'black';
+  mx.fillRect(0, 0, tw, th);
+  mx.fillStyle = 'white';
   mx.beginPath();
   mx.moveTo(selection.path[0].x * scale, selection.path[0].y * scale);
   for (let i = 1; i < selection.path.length; i++) {
@@ -76,15 +80,11 @@ export async function applyGenerativeFill(prompt: string, model?: FillModelId): 
   }
   mx.closePath();
   mx.fill();
-  const maskBlob = await canvasToBlob(mc);
+  const maskBlob = await canvasToBlob(mc, 'image/png');
 
-  const ar = tw / th;
-  const size = ar > 1.2 ? '3:2' : ar < 0.83 ? '2:3' : '1:1';
+  // 3) True masked inpaint (full image + mask → only the selection regenerates).
+  const resultDataUrl = await runGenerativeFill({ imageBlob: sourceBlob, maskBlob, prompt, model });
 
-  // 3) Generate.
-  const resultDataUrl = await runGenerativeFill({ imageBlob: sourceBlob, maskBlob, prompt, model, size });
-
-  // Dimensions of the result (for the asset metadata).
   const resImg = await new Promise<HTMLImageElement>((resolve, reject) => {
     const img = new Image();
     img.onload = () => resolve(img);
@@ -92,7 +92,9 @@ export async function applyGenerativeFill(prompt: string, model?: FillModelId): 
     img.src = resultDataUrl;
   });
 
-  // 4) Place as a NEW full-artboard image layer, masked to the selection.
+  // 4) Place as a NEW full-artboard layer, masked to the selection — the result
+  //    already preserves everything outside the mask; the layer mask keeps the
+  //    original pixel-perfect and makes it non-destructive.
   const assetId = `genfill-${Date.now()}`;
   const asset: MediaAsset = {
     id: assetId,
