@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { Eye, EyeOff, Lock, Unlock, Trash2, Copy, ChevronUp, ChevronDown, ArrowUp, ArrowDown, ArrowUpToLine, ArrowDownToLine, Clipboard, ClipboardCopy, Scissors, Paintbrush, Search, X, Image, Type, Hexagon, Folder, FolderPlus, FolderOpen, ChevronsDown, SquareStack } from 'lucide-react';
 import { useProjectStore } from '../../../stores/project-store';
 import { useSelectionStore } from '../../../stores/selection-store';
+import { useUIStore } from '../../../stores/ui-store';
 import { buildMaskData } from '../../../utils/mask-builder';
 import type { Layer, LayerType, ImageLayer } from '../../../types/project';
 import {
@@ -52,6 +53,8 @@ export function LayerPanel() {
   } = useProjectStore();
   const activeSelection = useSelectionStore((s) => s.active);
   const clearSelection = useSelectionStore((s) => s.clearSelection);
+  const maskEditLayerId = useUIStore((s) => s.maskEditLayerId);
+  const setMaskEditLayerId = useUIStore((s) => s.setMaskEditLayerId);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState<FilterType>('all');
@@ -139,10 +142,24 @@ export function LayerPanel() {
     if (activeSelection) clearSelection();
   };
 
-  const handleToggleMask = (layer: Layer, e: React.MouseEvent) => {
+  // Click the mask thumbnail to TARGET it (brush/eraser then paint on the mask
+  // — black hides, white reveals). Shift-click toggles the mask on/off.
+  const handleSelectMask = (layer: Layer, e: React.MouseEvent) => {
     e.stopPropagation();
     if (!layer.mask) return;
-    updateLayer(layer.id, { mask: { ...layer.mask, enabled: !layer.mask.enabled } });
+    if (e.shiftKey) {
+      updateLayer(layer.id, { mask: { ...layer.mask, enabled: !layer.mask.enabled } });
+      return;
+    }
+    selectLayer(layer.id);
+    setMaskEditLayerId(layer.id);
+  };
+
+  // Click the layer thumbnail to edit its PIXELS (not the mask).
+  const handleSelectPixels = (layer: Layer, e: React.MouseEvent) => {
+    e.stopPropagation();
+    selectLayer(layer.id);
+    setMaskEditLayerId(null);
   };
 
   const handleMergeDown = (layerId: string, e?: React.MouseEvent) => {
@@ -233,27 +250,36 @@ export function LayerPanel() {
                 <ContextMenu key={layer.id}>
                   <ContextMenuTrigger asChild>
                     <div
-                      onClick={() => selectLayer(layer.id)}
+                      onClick={() => { selectLayer(layer.id); setMaskEditLayerId(null); }}
                       className={`group flex items-center gap-2 px-3 py-2 cursor-pointer transition-colors ${
                         isSelected
                           ? 'bg-primary/20 border-l-2 border-primary'
                           : 'hover:bg-accent border-l-2 border-transparent'
                       }`}
                     >
-                      {/* Layer thumbnail + (optional) mask thumbnail — Photoshop style. */}
+                      {/* Layer thumbnail + (optional) mask thumbnail — Photoshop style.
+                          The active edit target (pixels vs mask) gets a primary ring. */}
                       <div className="flex items-center gap-1 shrink-0">
-                        <div className="w-8 h-8 rounded border border-border bg-muted overflow-hidden flex items-center justify-center text-muted-foreground">
+                        <button
+                          onClick={(e) => handleSelectPixels(layer, e)}
+                          className={`w-8 h-8 rounded border bg-muted overflow-hidden flex items-center justify-center text-muted-foreground ${
+                            isSelected && maskEditLayerId !== layer.id ? 'ring-2 ring-primary border-primary' : 'border-border'
+                          }`}
+                          title="Edit layer pixels"
+                        >
                           {imageThumb(layer) ? (
                             <img src={imageThumb(layer)!} alt="" className="w-full h-full object-cover" />
                           ) : (
                             LAYER_TYPE_ICONS[layer.type]
                           )}
-                        </div>
+                        </button>
                         {layer.mask?.data && (
                           <button
-                            onClick={(e) => handleToggleMask(layer, e)}
-                            className="w-8 h-8 rounded border-2 border-white/70 overflow-hidden shrink-0"
-                            title={layer.mask.enabled ? 'Layer mask (click to disable)' : 'Layer mask (disabled — click to enable)'}
+                            onClick={(e) => handleSelectMask(layer, e)}
+                            className={`w-8 h-8 rounded border-2 overflow-hidden shrink-0 ${
+                              maskEditLayerId === layer.id ? 'ring-2 ring-primary border-primary' : 'border-white/70'
+                            }`}
+                            title="Layer mask — click to paint on it (black hides, white reveals). Shift-click to toggle."
                           >
                             <img src={layer.mask.data} alt="" className={`w-full h-full object-cover ${layer.mask.enabled ? '' : 'opacity-30'}`} />
                           </button>

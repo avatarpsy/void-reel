@@ -175,6 +175,9 @@ interface UIState {
   activePanel: Panel;
   isPanelCollapsed: boolean;
   isInspectorCollapsed: boolean;
+  /** When set, the brush/eraser paint on this layer's MASK instead of its
+   *  pixels (Photoshop "mask is the active edit target"). null = paint pixels. */
+  maskEditLayerId: string | null;
   zoom: number;
   panX: number;
   panY: number;
@@ -217,6 +220,7 @@ interface UIActions {
   setActivePanel: (panel: Panel) => void;
   togglePanelCollapsed: () => void;
   toggleInspectorCollapsed: () => void;
+  setMaskEditLayerId: (layerId: string | null) => void;
   setZoom: (zoom: number) => void;
   setPan: (x: number, y: number) => void;
   resetView: () => void;
@@ -276,6 +280,7 @@ export const useUIStore = create<UIState & UIActions>()(
     activePanel: 'layers',
     isPanelCollapsed: false,
     isInspectorCollapsed: false,
+    maskEditLayerId: null,
     zoom: 1,
     panX: 0,
     panY: 0,
@@ -424,6 +429,7 @@ export const useUIStore = create<UIState & UIActions>()(
     setActivePanel: (panel) => set({ activePanel: panel }),
     togglePanelCollapsed: () => set((s) => ({ isPanelCollapsed: !s.isPanelCollapsed })),
     toggleInspectorCollapsed: () => set((s) => ({ isInspectorCollapsed: !s.isInspectorCollapsed })),
+    setMaskEditLayerId: (layerId) => set({ maskEditLayerId: layerId }),
 
     setZoom: (zoom) => set({ zoom: Math.max(0.1, Math.min(8, zoom)) }),
     setPan: (x, y) => set({ panX: x, panY: y }),

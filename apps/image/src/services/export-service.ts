@@ -1,6 +1,23 @@
 import type { Project, Artboard, Layer, ImageLayer, TextLayer, ShapeLayer, Filter } from '../types/project';
 import { hasActiveAdjustments, applyAllAdjustments, type LayerAdjustments } from '../utils/apply-adjustments';
 
+/** Mask image -> alpha mask from its LUMINANCE (white reveals, black hides). */
+function maskToAlphaCanvasEl(maskImg: CanvasImageSource, w: number, h: number, invert: boolean): HTMLCanvasElement {
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  const cx = c.getContext('2d', { willReadFrequently: true })!;
+  cx.drawImage(maskImg, 0, 0, w, h);
+  const d = cx.getImageData(0, 0, w, h);
+  const p = d.data;
+  for (let i = 0; i < p.length; i += 4) {
+    const lum = p[i];
+    p[i + 3] = invert ? 255 - lum : lum;
+  }
+  cx.putImageData(d, 0, 0);
+  return c;
+}
+
 /** Load an image (data/blob URL) for compositing. Resolves null on error. */
 function loadImageEl(src: string): Promise<HTMLImageElement | null> {
   return new Promise((resolve) => {
@@ -432,12 +449,12 @@ async function renderImageLayerToContext(
     tctx.putImageData(id, 0, 0);
   }
 
-  // Bake the layer mask (alpha reveals/hides; invert flips).
+  // Bake the layer mask (luminance reveals/hides; invert flips).
   if (layer.mask?.enabled && layer.mask.data) {
     const maskImg = await loadImageEl(layer.mask.data);
     if (maskImg) {
-      tctx.globalCompositeOperation = layer.mask.invert ? 'destination-out' : 'destination-in';
-      tctx.drawImage(maskImg, 0, 0, W, H);
+      tctx.globalCompositeOperation = 'destination-in';
+      tctx.drawImage(maskToAlphaCanvasEl(maskImg, W, H, !!layer.mask.invert), 0, 0);
       tctx.globalCompositeOperation = 'source-over';
     }
   }

@@ -42,6 +42,43 @@ export function dropRasterBuffer(layerId: string) {
   rasterBuffers.delete(layerId);
 }
 
+// While a mask stroke is in progress, the layer's pixels are unchanged but its
+// mask is being painted in this buffer — renderLayer reads it for a live preview.
+let liveMaskPaint: { layerId: string; maskCanvas: OffscreenCanvas } | null = null;
+
+/** Brush color -> its grayscale equivalent (masks are grayscale: white reveals,
+ *  black hides). Accepts #RGB / #RRGGBB; passes other values through. */
+function colorToGrayHex(color: string): string {
+  const s = color.trim();
+  const m = /^#?([0-9a-f]{6})$/i.exec(s) || /^#?([0-9a-f]{3})$/i.exec(s);
+  if (!m) return s;
+  const hex = m[1];
+  const exp = hex.length === 3 ? hex.split('').map((c) => c + c).join('') : hex;
+  const r = parseInt(exp.slice(0, 2), 16);
+  const g = parseInt(exp.slice(2, 4), 16);
+  const b = parseInt(exp.slice(4, 6), 16);
+  const lum = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+  const h = lum.toString(16).padStart(2, '0');
+  return `#${h}${h}${h}`;
+}
+
+// Convert a mask image to an alpha mask from its LUMINANCE (Photoshop masks are
+// grayscale: white reveals, black hides). `invert` flips it. This lets the user
+// paint black/white onto the mask and have it behave like Photoshop.
+function maskToAlphaCanvas(maskImg: CanvasImageSource, w: number, h: number, invert: boolean): OffscreenCanvas {
+  const c = new OffscreenCanvas(w, h);
+  const cx = c.getContext('2d', { willReadFrequently: true })!;
+  cx.drawImage(maskImg, 0, 0, w, h);
+  const d = cx.getImageData(0, 0, w, h);
+  const p = d.data;
+  for (let i = 0; i < p.length; i += 4) {
+    const lum = p[i]; // red channel — grayscale luminance
+    p[i + 3] = invert ? 255 - lum : lum;
+  }
+  cx.putImageData(d, 0, 0);
+  return c;
+}
+
 const MAX_LAYER_CACHE_SIZE = 30;
 interface LayerCacheEntry {
   canvas: OffscreenCanvas;
@@ -291,7 +328,7 @@ export function Canvas() {
     groupLayers,
     ungroupLayers,
   } = useProjectStore();
-  const { zoom, panX, panY, setPan, setZoom, activeTool, showGrid, showRulers, toggleGrid, toggleRulers, gridSize, crop, snapToObjects, snapToGuides, snapToGrid, penSettings, brushSettings, eraserSettings, drawing, startDrawing, addDrawingPoint, finishDrawing, startCrop, updateCropRect, setBrushSettings, gradientSettings, paintBucketSettings, smudgeSettings, blurSharpenSettings, dodgeBurnSettings, spongeSettings, cloneStampSettings, healingBrushSettings, spotHealingSettings } = useUIStore();
+  const { zoom, panX, panY, setPan, setZoom, activeTool, showGrid, showRulers, toggleGrid, toggleRulers, gridSize, crop, snapToObjects, snapToGuides, snapToGrid, penSettings, brushSettings, eraserSettings, drawing, startDrawing, addDrawingPoint, finishDrawing, startCrop, updateCropRect, setBrushSettings, gradientSettings, paintBucketSettings, smudgeSettings, blurSharpenSettings, dodgeBurnSettings, spongeSettings, cloneStampSettings, healingBrushSettings, spotHealingSettings, maskEditLayerId } = useUIStore();
   const { setCanvasRef, setContainerRef, startDrag, updateDrag, endDrag, isDragging, dragMode, dragStartX, dragStartY, dragCurrentX, dragCurrentY, guides, smartGuides, setSmartGuides, clearSmartGuides, isMarqueeSelecting, marqueeRect, startMarqueeSelect, updateMarqueeSelect, endMarqueeSelect, activeResizeHandle, setActiveResizeHandle } = useCanvasStore();
   const [cursorStyle, setCursorStyle] = useState('default');
   const initialTransformRef = useRef<{ x: number; y: number; width: number; height: number; rotation: number } | null>(null);
@@ -320,6 +357,8 @@ export function Canvas() {
   const spotHealingToolRef = useRef<SpotHealingTool | null>(null);
   const paintCanvasRef = useRef<OffscreenCanvas | null>(null);
   const paintLayerIdRef = useRef<string | null>(null);
+  // True while a brush/eraser stroke is editing a layer MASK (not its pixels).
+  const paintingMaskRef = useRef(false);
 
   // Pixel selections (marquee / lasso / wand). `lassoDraftRef` holds the
   // in-progress freehand path (artboard coords); the committed selection lives
@@ -420,10 +459,18 @@ export function Canvas() {
       panY
     );
 
-    // Keep the active layer's raster buffer current so renderLayer draws the
-    // in-progress stroke live (the renderer reads `rasterBuffers` by layer id).
+    // Keep the active stroke's buffer current so renderLayer draws it live. A
+    // pixel stroke updates `rasterBuffers`; a MASK stroke updates `liveMaskPaint`
+    // (the layer's pixels are unchanged — only its mask is being painted).
     if (paintCanvasRef.current && paintLayerIdRef.current) {
-      rasterBuffers.set(paintLayerIdRef.current, paintCanvasRef.current);
+      if (paintingMaskRef.current) {
+        liveMaskPaint = { layerId: paintLayerIdRef.current, maskCanvas: paintCanvasRef.current };
+      } else {
+        rasterBuffers.set(paintLayerIdRef.current, paintCanvasRef.current);
+        liveMaskPaint = null;
+      }
+    } else {
+      liveMaskPaint = null;
     }
 
     const sortedLayerIds = [...artboard.layerIds].reverse();
@@ -1082,6 +1129,45 @@ export function Canvas() {
         return;
       }
 
+      // Paint-on-mask: when a layer's MASK is the active edit target (its mask
+      // thumbnail was clicked), the brush paints onto the mask — grayscale, so
+      // black hides and white reveals (Photoshop). The stroke is stamped by the
+      // normal paint-move handler and saved to mask.data on mouse-up.
+      if (activeTool === 'brush' && maskEditLayerId && project) {
+        const layer = project.layers[maskEditLayerId];
+        if (layer?.type === 'image' && layer.mask?.data) {
+          const W = Math.max(1, Math.round(layer.transform.width));
+          const H = Math.max(1, Math.round(layer.transform.height));
+          const maskImg = getCachedImage(layer.mask.data);
+          if (maskImg && maskImg.complete) {
+            const buf = new OffscreenCanvas(W, H);
+            const bctx = buf.getContext('2d', { willReadFrequently: true });
+            if (bctx) {
+              bctx.drawImage(maskImg, 0, 0, W, H);
+              paintCanvasRef.current = buf;
+              paintLayerIdRef.current = layer.id;
+              paintingMaskRef.current = true;
+              const localX = x - layer.transform.x;
+              const localY = y - layer.transform.y;
+              const tool = new BrushTool({
+                size: brushSettings.size,
+                hardness: brushSettings.hardness,
+                opacity: brushSettings.opacity,
+                flow: brushSettings.flow,
+                color: colorToGrayHex(brushSettings.color),
+                blendMode: 'normal',
+              });
+              tool.setCanvas(buf);
+              tool.startStroke(localX, localY, 1);
+              brushToolRef.current = tool;
+              if (!selectedLayerIds.includes(layer.id)) selectLayer(layer.id);
+              startDrag('paint', e.clientX, e.clientY);
+              return;
+            }
+          }
+        }
+      }
+
       if (activeTool === 'brush') {
         const layerId = findLayerAtPoint(x, y);
         if (layerId && project) {
@@ -1550,7 +1636,7 @@ export function Canvas() {
         }
       }
     },
-    [activeTool, screenToCanvas, findLayerAtPoint, selectLayer, deselectAllLayers, startDrag, selectedLayerIds, startDrawing, startMarqueeSelect, getHandleAtPoint, project, setActiveResizeHandle, zoom, setZoom, startCrop, setBrushSettings, eraserSettings, magicWandSelect]
+    [activeTool, screenToCanvas, findLayerAtPoint, selectLayer, deselectAllLayers, startDrag, selectedLayerIds, startDrawing, startMarqueeSelect, getHandleAtPoint, project, setActiveResizeHandle, zoom, setZoom, startCrop, setBrushSettings, brushSettings, eraserSettings, magicWandSelect, maskEditLayerId]
   );
 
   const handleMouseMove = useCallback(
@@ -2084,6 +2170,31 @@ export function Canvas() {
       setGradientDrag(null);
       endDrag();
       scheduleRender();
+      return;
+    }
+
+    // Paint-on-mask: save the painted mask buffer back to the layer's mask.
+    if (dragMode === 'paint' && paintingMaskRef.current && paintLayerIdRef.current && paintCanvasRef.current) {
+      brushToolRef.current?.endStroke();
+      const buf = paintCanvasRef.current;
+      const out = document.createElement('canvas');
+      out.width = buf.width;
+      out.height = buf.height;
+      out.getContext('2d')!.drawImage(buf, 0, 0);
+      const dataUrl = out.toDataURL('image/png');
+      const layerId = paintLayerIdRef.current;
+      const layer = useProjectStore.getState().project?.layers[layerId];
+      if (layer?.mask) {
+        useProjectStore.getState().updateLayer(layerId, { mask: { ...layer.mask, data: dataUrl } });
+        getCachedImage(dataUrl); // warm the cache so the saved mask renders next frame
+      }
+      brushToolRef.current = null;
+      paintCanvasRef.current = null;
+      paintLayerIdRef.current = null;
+      paintingMaskRef.current = false;
+      liveMaskPaint = null;
+      forceRender();
+      endDrag();
       return;
     }
 
@@ -2660,22 +2771,26 @@ function renderLayer(
   ctx.globalAlpha = transform.opacity;
   ctx.globalCompositeOperation = BLEND_MODE_MAP[blendMode] ?? 'source-over';
 
-  // Phase 4: layer mask — composite the image through its mask (the mask's
-  // alpha reveals/hides; `invert` flips it). Isolated on a temp canvas so
-  // layers below are untouched. Works for painted (buffer) and plain images.
-  if (layer.type === 'image' && layer.mask?.enabled && layer.mask.data) {
-    const maskImg = getCachedImage(layer.mask.data);
+  // Phase 4: layer mask — composite the image through its mask. The mask's
+  // LUMINANCE controls visibility (white reveals, black hides); `invert` flips
+  // it. Isolated on a temp canvas so layers below are untouched. Works for
+  // painted (buffer) and plain image layers.
+  if (layer.type === 'image' && layer.mask?.enabled && (layer.mask.data || liveMaskPaint?.layerId === layer.id)) {
     const asset = project.assets[(layer as ImageLayer).sourceId];
     const content = rasterBuffers.get(layer.id) ?? getCachedImage(asset?.dataUrl ?? asset?.blobUrl ?? '');
-    if (maskImg && maskImg.complete && maskImg.naturalWidth > 0 && content) {
+    // Use the in-progress mask buffer during a mask stroke; else the saved mask.
+    const liveMask = liveMaskPaint?.layerId === layer.id ? liveMaskPaint.maskCanvas : null;
+    const maskSrc: CanvasImageSource | null = liveMask ?? getCachedImage(layer.mask.data ?? '');
+    const maskReady = !!liveMask || (maskSrc instanceof HTMLImageElement && maskSrc.complete && maskSrc.naturalWidth > 0);
+    if (maskSrc && maskReady && content) {
       const w = Math.max(1, Math.ceil(transform.width));
       const h = Math.max(1, Math.ceil(transform.height));
       const temp = new OffscreenCanvas(w, h);
       const tctx = temp.getContext('2d');
       if (tctx) {
         tctx.drawImage(content, 0, 0, w, h);
-        tctx.globalCompositeOperation = layer.mask.invert ? 'destination-out' : 'destination-in';
-        tctx.drawImage(maskImg, 0, 0, w, h);
+        tctx.globalCompositeOperation = 'destination-in';
+        tctx.drawImage(maskToAlphaCanvas(maskSrc, w, h, !!layer.mask.invert), 0, 0);
         tctx.globalCompositeOperation = 'source-over';
         ctx.drawImage(temp, 0, 0, transform.width, transform.height);
         ctx.restore();
