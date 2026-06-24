@@ -1,16 +1,18 @@
 import { useState, useMemo, useEffect } from 'react';
-import { Download, FileImage, Loader2, Link2, Link2Off, Printer, Instagram, Youtube, Twitter, Linkedin, Facebook, Image } from 'lucide-react';
+import { Download, FileImage, Loader2, Link2, Link2Off, Printer, Instagram, Youtube, Twitter, Linkedin, Facebook, Image, CloudUpload } from 'lucide-react';
 import { Dialog, DialogFooter } from '../ui/Dialog';
 import { useProjectStore } from '../../stores/project-store';
 import { useUIStore } from '../../stores/ui-store';
 import {
   exportProject,
+  exportArtboard,
   downloadBlob,
   getExportFilename,
   type ExportFormat,
   type ExportQuality,
   type ExportOptions,
 } from '../../services/export-service';
+import { saveImageToVoidspaceLibrary, NotSignedInError } from '../../services/voidspace-storage';
 
 interface ExportDialogProps {
   open: boolean;
@@ -156,6 +158,7 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
   const [background, setBackground] = useState<'include' | 'transparent'>('include');
   const [exportAll, setExportAll] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [progress, setProgress] = useState(0);
   const [progressMessage, setProgressMessage] = useState('');
 
@@ -300,6 +303,35 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
     } finally {
       setIsExporting(false);
       setProgress(0);
+    }
+  };
+
+  // Save the current artboard into the shared Voidspace Library (same storage
+  // as video generations) so it's reusable across flows. Single-artboard only.
+  const handleSaveToVoidspace = async () => {
+    if (!project || !artboard) return;
+    setIsSaving(true);
+    try {
+      const options: ExportOptions = {
+        format,
+        quality,
+        scale: effectiveScale,
+        background: currentFormat.supportsTransparency ? background : 'include',
+      };
+      const blob = await exportArtboard(project, artboard, options);
+      // SVG/PDF fall back to PNG bytes in the exporter; store as a raster type.
+      const rasterFormat = format === 'jpg' || format === 'webp' ? format : 'png';
+      await saveImageToVoidspaceLibrary(blob, `${project.name} — ${artboard.name}`, rasterFormat);
+      showNotification('success', 'Saved to your Voidspace Library');
+      onClose();
+    } catch (error) {
+      if (error instanceof NotSignedInError) {
+        showNotification('error', 'Sign in on Voidspace to save to your Library');
+      } else {
+        showNotification('error', 'Could not save to Voidspace. Please try again.');
+      }
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -598,14 +630,32 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
       <DialogFooter>
         <button
           onClick={onClose}
-          disabled={isExporting}
+          disabled={isExporting || isSaving}
           className="px-4 py-2 rounded-lg text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors disabled:opacity-50"
         >
           Cancel
         </button>
         <button
+          onClick={handleSaveToVoidspace}
+          disabled={isExporting || isSaving || exportAll}
+          title="Save this artboard to your Voidspace Library (reusable in video and other flows)"
+          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-secondary text-foreground text-sm font-medium hover:bg-accent transition-colors disabled:opacity-50"
+        >
+          {isSaving ? (
+            <>
+              <Loader2 size={16} className="animate-spin" />
+              Saving...
+            </>
+          ) : (
+            <>
+              <CloudUpload size={16} />
+              Save to Voidspace
+            </>
+          )}
+        </button>
+        <button
           onClick={handleExport}
-          disabled={isExporting}
+          disabled={isExporting || isSaving}
           className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors disabled:opacity-50"
         >
           {isExporting ? (

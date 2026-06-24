@@ -58,10 +58,17 @@ import {
   Unlock,
   Trash2,
   Copy,
+  Loader2,
 } from 'lucide-react';
 import { useUIStore, Panel } from '../../../stores/ui-store';
 import { useProjectStore } from '../../../stores/project-store';
 import type { Layer, GroupLayer, Project } from '../../../types/project';
+import {
+  fetchVoidspaceLibrary,
+  libraryImageToAsset,
+  withMediaToken,
+  type VoidspaceLibraryItem,
+} from '../../../services/voidspace-storage';
 
 interface LayerItemProps {
   layer: Layer;
@@ -564,29 +571,88 @@ function LayersPanel() {
   );
 }
 
+type AssetTab = 'project' | 'library';
+
 function AssetsPanel() {
-  const { project, addImageLayer } = useProjectStore();
+  const { project, addAsset, addImageLayer } = useProjectStore();
+  const [tab, setTab] = useState<AssetTab>('project');
   const [searchQuery, setSearchQuery] = useState('');
   const assets = project ? Object.values(project.assets) : [];
 
+  // Shared Voidspace Library (same store video generations use). Loaded lazily
+  // when the Library tab is opened, so signed-out users never see an error.
+  const [libItems, setLibItems] = useState<VoidspaceLibraryItem[]>([]);
+  const [libToken, setLibToken] = useState<string | null>(null);
+  const [libLoading, setLibLoading] = useState(false);
+  const [libError, setLibError] = useState<string | null>(null);
+  const [addingId, setAddingId] = useState<string | null>(null);
+  const [debounced, setDebounced] = useState('');
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(searchQuery.trim()), 250);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
+
+  useEffect(() => {
+    if (tab !== 'library') return;
+    let cancelled = false;
+    setLibLoading(true);
+    setLibError(null);
+    fetchVoidspaceLibrary({ type: 'image', q: debounced })
+      .then((r) => {
+        if (cancelled) return;
+        setLibItems(r.items);
+        setLibToken(r.token);
+        if (!r.token) setLibError('Sign in on Voidspace to see your image library.');
+      })
+      .catch((e) => { if (!cancelled) setLibError(e?.message ?? 'Failed to load library'); })
+      .finally(() => { if (!cancelled) setLibLoading(false); });
+    return () => { cancelled = true; };
+  }, [tab, debounced]);
+
   const filteredAssets = searchQuery
-    ? assets.filter((asset) =>
-        asset.name.toLowerCase().includes(searchQuery.toLowerCase())
-      )
+    ? assets.filter((a) => a.name.toLowerCase().includes(searchQuery.toLowerCase()))
     : assets;
 
-  const handleAddToCanvas = (asset: typeof assets[0]) => {
-    addImageLayer(asset.id);
+  const handleAddProjectAsset = (assetId: string) => addImageLayer(assetId);
+
+  const handleAddLibraryImage = async (item: VoidspaceLibraryItem) => {
+    if (addingId) return;
+    setAddingId(item.id);
+    try {
+      const asset = await libraryImageToAsset(item, libToken);
+      addAsset(asset);        // also lands in project.assets for reuse
+      addImageLayer(asset.id); // place on the canvas
+    } catch (e) {
+      console.warn('[assets] add library image failed:', e);
+    } finally {
+      setAddingId(null);
+    }
   };
 
   return (
-    <div className="p-3 h-full overflow-y-auto">
+    <div className="p-3 h-full overflow-y-auto flex flex-col">
+      {/* Project / Library toggle */}
+      <div className="flex gap-1 mb-3 p-0.5 bg-secondary rounded-lg">
+        {(['project', 'library'] as AssetTab[]).map((t) => (
+          <button
+            key={t}
+            onClick={() => setTab(t)}
+            className={`flex-1 py-1.5 rounded-md text-xs font-medium transition-colors ${
+              tab === t ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            {t === 'project' ? 'This project' : 'Library'}
+          </button>
+        ))}
+      </div>
+
       <div className="mb-3">
         <div className="relative">
           <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
           <input
             type="text"
-            placeholder="Search assets..."
+            placeholder={tab === 'library' ? 'Search your images…' : 'Search assets...'}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="w-full pl-9 pr-3 py-2 text-sm bg-background border border-input rounded-lg focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary"
@@ -594,39 +660,78 @@ function AssetsPanel() {
         </div>
       </div>
 
-      {assets.length === 0 ? (
+      {tab === 'project' ? (
+        assets.length === 0 ? (
+          <div className="text-center py-8">
+            <Folder size={32} className="mx-auto text-muted-foreground mb-2" />
+            <p className="text-xs text-muted-foreground">No assets in this project</p>
+            <p className="text-xs text-muted-foreground mt-1">Upload images, or pull from your Library</p>
+          </div>
+        ) : filteredAssets.length === 0 ? (
+          <div className="text-center py-8">
+            <Search size={32} className="mx-auto text-muted-foreground mb-2" />
+            <p className="text-xs text-muted-foreground">No matching assets</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 gap-2">
+            {filteredAssets.map((asset) => (
+              <button
+                key={asset.id}
+                onClick={() => handleAddProjectAsset(asset.id)}
+                className="group relative aspect-square rounded-lg bg-muted overflow-hidden hover:ring-2 hover:ring-primary transition-all"
+                title={`Add "${asset.name}" to canvas`}
+              >
+                <img src={asset.thumbnailUrl} alt={asset.name} className="w-full h-full object-cover" />
+                <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-colors flex items-center justify-center">
+                  <Plus size={24} className="text-white opacity-0 group-hover:opacity-100 transition-opacity" />
+                </div>
+                <div className="absolute bottom-0 left-0 right-0 p-1.5 bg-gradient-to-t from-black/60 to-transparent">
+                  <p className="text-[9px] text-white truncate">{asset.name}</p>
+                </div>
+              </button>
+            ))}
+          </div>
+        )
+      ) : libLoading && libItems.length === 0 ? (
+        <div className="flex items-center justify-center py-10 text-muted-foreground gap-2 text-xs">
+          <Loader2 size={16} className="animate-spin" /> Loading your library…
+        </div>
+      ) : libError ? (
         <div className="text-center py-8">
           <Folder size={32} className="mx-auto text-muted-foreground mb-2" />
-          <p className="text-xs text-muted-foreground">No assets yet</p>
-          <p className="text-xs text-muted-foreground mt-1">Upload images to use in your design</p>
+          <p className="text-xs text-muted-foreground px-3">{libError}</p>
         </div>
-      ) : filteredAssets.length === 0 ? (
+      ) : libItems.length === 0 ? (
         <div className="text-center py-8">
-          <Search size={32} className="mx-auto text-muted-foreground mb-2" />
-          <p className="text-xs text-muted-foreground">No matching assets</p>
+          <Folder size={32} className="mx-auto text-muted-foreground mb-2" />
+          <p className="text-xs text-muted-foreground">No images in your library yet</p>
+          <p className="text-xs text-muted-foreground mt-1">Generated &amp; saved images show up here</p>
         </div>
       ) : (
         <div className="grid grid-cols-2 gap-2">
-          {filteredAssets.map((asset) => (
+          {libItems.map((item) => (
             <button
-              key={asset.id}
-              onClick={() => handleAddToCanvas(asset)}
-              className="group relative aspect-square rounded-lg bg-muted overflow-hidden hover:ring-2 hover:ring-primary transition-all"
-              title={`Add "${asset.name}" to canvas`}
+              key={item.id}
+              onClick={() => handleAddLibraryImage(item)}
+              disabled={addingId === item.id}
+              className="group relative aspect-square rounded-lg bg-muted overflow-hidden hover:ring-2 hover:ring-primary transition-all disabled:opacity-60"
+              title={`Add "${item.label}" to canvas`}
             >
               <img
-                src={asset.thumbnailUrl}
-                alt={asset.name}
+                src={withMediaToken(item.thumbnailUrl || item.url, libToken)}
+                alt={item.label}
+                loading="lazy"
                 className="w-full h-full object-cover"
               />
               <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-colors flex items-center justify-center">
-                <Plus
-                  size={24}
-                  className="text-white opacity-0 group-hover:opacity-100 transition-opacity"
-                />
+                {addingId === item.id ? (
+                  <Loader2 size={20} className="text-white animate-spin" />
+                ) : (
+                  <Plus size={24} className="text-white opacity-0 group-hover:opacity-100 transition-opacity" />
+                )}
               </div>
               <div className="absolute bottom-0 left-0 right-0 p-1.5 bg-gradient-to-t from-black/60 to-transparent">
-                <p className="text-[9px] text-white truncate">{asset.name}</p>
+                <p className="text-[9px] text-white truncate">{item.label}</p>
               </div>
             </button>
           ))}
