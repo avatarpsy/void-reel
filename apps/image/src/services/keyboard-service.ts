@@ -46,7 +46,7 @@ export function useKeyboardShortcuts() {
   const {
     setActiveTool, activeTool, zoomIn, zoomOut, zoomToFit, setZoom,
     toggleGrid, toggleGuides, toggleShortcutsPanel, openSettingsDialog,
-    brushSettings, setBrushSettings,
+    brushSettings, setBrushSettings, togglePanelCollapsed, toggleInspectorCollapsed,
   } = useUIStore();
   const {
     selectedLayerIds, removeLayer, copyLayers, cutLayers, pasteLayers,
@@ -70,13 +70,24 @@ export function useKeyboardShortcuts() {
       const isMod = e.metaKey || e.ctrlKey;
       const k = e.key.toLowerCase();
 
-      // Spacebar → temporary Hand tool (pan). Ignore auto-repeat.
-      if (e.code === 'Space' && !isMod) {
+      // Spacebar → temporary Hand tool (pan); Ctrl/Cmd+Space → temporary Zoom
+      // tool (Photoshop). Released back to the previous tool on key-up. Ignore
+      // auto-repeat.
+      if (e.code === 'Space') {
         e.preventDefault();
         if (!spacePanRef.current.active && !e.repeat) {
+          const want: Tool = isMod ? 'zoom' : 'hand';
           spacePanRef.current = { active: true, prevTool: activeTool };
-          if (activeTool !== 'hand') setActiveTool('hand');
+          if (activeTool !== want) setActiveTool(want);
         }
+        return;
+      }
+
+      // Tab toggles the side panels (Photoshop hides all panels with Tab).
+      if (e.key === 'Tab' && !isMod) {
+        e.preventDefault();
+        togglePanelCollapsed();
+        toggleInspectorCollapsed();
         return;
       }
 
@@ -120,6 +131,11 @@ export function useKeyboardShortcuts() {
           case 'z':
             e.preventDefault();
             if (e.shiftKey) { if (canRedo()) redo(); } else { if (canUndo()) undo(); }
+            break;
+          case 'y': e.preventDefault(); if (canRedo()) redo(); break; // PS/Windows redo
+          case 'j': // PS "Layer via Copy" — duplicate the selected layer(s)
+            e.preventDefault();
+            if (selectedLayerIds.length > 0) selectedLayerIds.forEach((id) => duplicateLayer(id));
             break;
           case 'c': e.preventDefault(); copyLayers(); break;
           case 'x': e.preventDefault(); cutLayers(); break;
@@ -200,5 +216,6 @@ export function useKeyboardShortcuts() {
     moveLayerDown, moveLayerToTop, moveLayerToBottom, groupLayers, ungroupLayers,
     zoomIn, zoomOut, zoomToFit, setZoom, toggleGrid, toggleGuides, toggleShortcutsPanel,
     openSettingsDialog, undo, redo, canUndo, canRedo, project, brushSettings, setBrushSettings,
+    togglePanelCollapsed, toggleInspectorCollapsed,
   ]);
 }

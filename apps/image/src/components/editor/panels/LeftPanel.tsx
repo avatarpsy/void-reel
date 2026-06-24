@@ -610,9 +610,13 @@ function AssetsPanel() {
     return () => { cancelled = true; };
   }, [tab, debounced]);
 
+  // Hide legacy per-stroke intermediates ("*-edited", "filled-*") that the old
+  // flatten path used to spawn — Phase 2 edits in place, so these are just junk.
+  const isJunkAsset = (name: string) => /-edited$/i.test(name) || /^filled-/i.test(name);
+  const visibleAssets = assets.filter((a) => !isJunkAsset(a.name));
   const filteredAssets = searchQuery
-    ? assets.filter((a) => a.name.toLowerCase().includes(searchQuery.toLowerCase()))
-    : assets;
+    ? visibleAssets.filter((a) => a.name.toLowerCase().includes(searchQuery.toLowerCase()))
+    : visibleAssets;
 
   const handleAddProjectAsset = (assetId: string) => addImageLayer(assetId);
 
@@ -661,7 +665,7 @@ function AssetsPanel() {
       </div>
 
       {tab === 'project' ? (
-        assets.length === 0 ? (
+        visibleAssets.length === 0 ? (
           <div className="text-center py-8">
             <Folder size={32} className="mx-auto text-muted-foreground mb-2" />
             <p className="text-xs text-muted-foreground">No assets in this project</p>

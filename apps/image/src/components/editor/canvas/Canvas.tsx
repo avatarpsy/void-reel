@@ -29,6 +29,17 @@ const imageCache = new Map<string, HTMLImageElement>();
 const imageCacheOrder: string[] = [];
 let renderCallback: (() => void) | null = null;
 
+// Phase 2 — persistent raster buffers. A painted image layer keeps a live
+// OffscreenCanvas (its editable pixels) keyed by layer id. The renderer draws
+// it DIRECTLY, so strokes are instant and never spawn a new asset or flash a
+// "Loading" placeholder. The layer's asset.dataUrl is updated in place (same
+// id) only for save/export/reload — never creating extra Assets-panel entries.
+const rasterBuffers = new Map<string, OffscreenCanvas | HTMLCanvasElement>();
+/** Drop a layer's raster buffer (call when the layer is deleted). */
+export function dropRasterBuffer(layerId: string) {
+  rasterBuffers.delete(layerId);
+}
+
 const MAX_LAYER_CACHE_SIZE = 30;
 interface LayerCacheEntry {
   canvas: OffscreenCanvas;
@@ -399,19 +410,18 @@ export function Canvas() {
       panY
     );
 
-    // If a paint/retouch stroke is mid-flight, hand its live buffer to the
-    // renderer so the active layer shows the in-progress strokes immediately.
-    const livePaint: LivePaint =
-      paintCanvasRef.current && paintLayerIdRef.current
-        ? { layerId: paintLayerIdRef.current, canvas: paintCanvasRef.current }
-        : null;
+    // Keep the active layer's raster buffer current so renderLayer draws the
+    // in-progress stroke live (the renderer reads `rasterBuffers` by layer id).
+    if (paintCanvasRef.current && paintLayerIdRef.current) {
+      rasterBuffers.set(paintLayerIdRef.current, paintCanvasRef.current);
+    }
 
     const sortedLayerIds = [...artboard.layerIds].reverse();
     sortedLayerIds.forEach((layerId) => {
       const layer = project.layers[layerId];
       if (!layer || !layer.visible) return;
       if (!isLayerInViewport(layer, viewport)) return;
-      renderLayerWithChildren(ctx, layer, project, livePaint);
+      renderLayerWithChildren(ctx, layer, project);
     });
 
     ctx.restore();
@@ -929,7 +939,7 @@ export function Canvas() {
                 const tempCanvas = new OffscreenCanvas(img.naturalWidth, img.naturalHeight);
                 const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
                 if (tempCtx) {
-                  tempCtx.drawImage(img, 0, 0);
+                  tempCtx.drawImage(rasterBuffers.get(layerId) ?? img, 0, 0);
                   paintCanvasRef.current = tempCanvas;
                   paintLayerIdRef.current = layerId;
 
@@ -976,7 +986,7 @@ export function Canvas() {
                 const tempCanvas = new OffscreenCanvas(img.naturalWidth, img.naturalHeight);
                 const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
                 if (tempCtx) {
-                  tempCtx.drawImage(img, 0, 0);
+                  tempCtx.drawImage(rasterBuffers.get(layerId) ?? img, 0, 0);
                   paintCanvasRef.current = tempCanvas;
                   paintLayerIdRef.current = layerId;
 
@@ -1044,7 +1054,7 @@ export function Canvas() {
                 tempCanvas.height = img.naturalHeight;
                 const tempCtx = tempCanvas.getContext('2d');
                 if (tempCtx) {
-                  tempCtx.drawImage(img, 0, 0);
+                  tempCtx.drawImage(rasterBuffers.get(layerId) ?? img, 0, 0);
                   const imageData = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
 
                   const fillOptions: FloodFillOptions = {
@@ -1057,29 +1067,28 @@ export function Canvas() {
                   const filledData = floodFill(imageData, imgX, imgY, paintBucketSettings.color, fillOptions);
                   tempCtx.putImageData(filledData, 0, 0);
 
-                  const oldBlobUrl = asset?.blobUrl;
-                  tempCanvas.toBlob((blob) => {
-                    if (blob) {
-                      if (oldBlobUrl?.startsWith('blob:')) {
-                        URL.revokeObjectURL(oldBlobUrl);
-                      }
-                      const newBlobUrl = URL.createObjectURL(blob);
-                      const newAssetId = `asset-${Date.now()}`;
-                      useProjectStore.getState().addAsset({
-                        id: newAssetId,
-                        name: `filled-${imageLayer.name || 'image'}`,
-                        type: 'image',
-                        mimeType: 'image/png',
-                        size: blob.size,
-                        width: tempCanvas.width,
-                        height: tempCanvas.height,
-                        thumbnailUrl: newBlobUrl,
-                        blobUrl: newBlobUrl,
-                      });
-                      useProjectStore.getState().updateLayer(layerId, { sourceId: newAssetId });
-                      forceRender();
-                    }
-                  }, 'image/png');
+                  // Phase 2: persist the fill into the layer's raster buffer and
+                  // update its existing asset in place (no new "filled-*" asset).
+                  rasterBuffers.set(layerId, tempCanvas);
+                  const sourceId = imageLayer.sourceId;
+                  const dataUrl = tempCanvas.toDataURL('image/png');
+                  if (asset?.blobUrl?.startsWith('blob:')) {
+                    URL.revokeObjectURL(asset.blobUrl);
+                  }
+                  useProjectStore.getState().addAsset({
+                    id: sourceId,
+                    name: asset && 'name' in asset ? (asset as { name?: string }).name ?? (imageLayer.name || 'Image') : (imageLayer.name || 'Image'),
+                    type: 'image',
+                    mimeType: 'image/png',
+                    size: dataUrl.length,
+                    width: tempCanvas.width,
+                    height: tempCanvas.height,
+                    thumbnailUrl: dataUrl,
+                    dataUrl,
+                  });
+                  useProjectStore.getState().updateLayer(layerId, {});
+                  getCachedImage(dataUrl); // warm cache for the next edit's guard
+                  forceRender();
                 }
               }
             }
@@ -1110,7 +1119,7 @@ export function Canvas() {
                 const tempCanvas = new OffscreenCanvas(img.naturalWidth, img.naturalHeight);
                 const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
                 if (tempCtx) {
-                  tempCtx.drawImage(img, 0, 0);
+                  tempCtx.drawImage(rasterBuffers.get(layerId) ?? img, 0, 0);
                   paintCanvasRef.current = tempCanvas;
                   paintLayerIdRef.current = layerId;
 
@@ -1170,7 +1179,7 @@ export function Canvas() {
                 const tempCanvas = new OffscreenCanvas(img.naturalWidth, img.naturalHeight);
                 const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
                 if (tempCtx) {
-                  tempCtx.drawImage(img, 0, 0);
+                  tempCtx.drawImage(rasterBuffers.get(layerId) ?? img, 0, 0);
                   paintCanvasRef.current = tempCanvas;
                   paintLayerIdRef.current = layerId;
 
@@ -1235,7 +1244,7 @@ export function Canvas() {
                 const tempCanvas = new OffscreenCanvas(img.naturalWidth, img.naturalHeight);
                 const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
                 if (tempCtx) {
-                  tempCtx.drawImage(img, 0, 0);
+                  tempCtx.drawImage(rasterBuffers.get(layerId) ?? img, 0, 0);
                   paintCanvasRef.current = tempCanvas;
                   paintLayerIdRef.current = layerId;
 
@@ -1953,48 +1962,44 @@ export function Canvas() {
 
         const currentLayer = project?.layers[layerId] as ImageLayer | undefined;
         const oldSourceId = currentLayer?.sourceId;
-        const oldAsset = oldSourceId ? project?.assets[oldSourceId] : undefined;
-        const oldBlobUrl = oldAsset?.blobUrl;
 
         const canvas = document.createElement('canvas');
         canvas.width = tempCanvas.width;
         canvas.height = tempCanvas.height;
         const ctx = canvas.getContext('2d');
-        if (ctx) {
+        if (ctx && layerId) {
           ctx.drawImage(tempCanvas, 0, 0);
-          // Flatten SYNCHRONOUSLY via a data URL. The old async toBlob/blob:
-          // path could leave the layer stuck on a "Loading" placeholder if its
-          // image's onload re-render was missed; a data URL is immediately
-          // available and decodes reliably. (Phase 2 replaces this flatten with
-          // a persistent raster buffer entirely.)
+          // Phase 2: keep the painted pixels in the layer's PERSISTENT raster
+          // buffer (the renderer draws it directly — instant, no reload). We do
+          // NOT create a new asset; instead update the EXISTING asset in place
+          // (same id, original name) so save/export/reload still work and the
+          // Assets panel never fills up with "*-edited" copies.
+          rasterBuffers.set(layerId, tempCanvas);
+          const existing = oldSourceId ? useProjectStore.getState().project?.assets[oldSourceId] : undefined;
           const dataUrl = canvas.toDataURL('image/png');
-          if (oldBlobUrl?.startsWith('blob:')) {
-            URL.revokeObjectURL(oldBlobUrl);
+          if (oldSourceId) {
+            useProjectStore.getState().addAsset({
+              id: oldSourceId,
+              name: existing?.name ?? 'Image',
+              type: 'image',
+              mimeType: 'image/png',
+              size: dataUrl.length,
+              width: canvas.width,
+              height: canvas.height,
+              thumbnailUrl: dataUrl,
+              dataUrl,
+            });
+            // Touch the layer so the project is marked dirty (autosave/history)
+            // without changing sourceId.
+            useProjectStore.getState().updateLayer(layerId, {});
+            // Warm the image cache for the updated asset so the NEXT stroke's
+            // "is the source image loaded?" guard passes (the renderer itself
+            // draws the raster buffer, so it never loads this dataURL).
+            getCachedImage(dataUrl);
           }
-          const newAssetId = `asset-${Date.now()}`;
-          useProjectStore.getState().addAsset({
-            id: newAssetId,
-            name: `${activeTool}-edited`,
-            type: 'image',
-            mimeType: 'image/png',
-            size: dataUrl.length,
-            width: canvas.width,
-            height: canvas.height,
-            thumbnailUrl: dataUrl,
-            dataUrl,
-          });
-          useProjectStore.getState().updateLayer(layerId, { sourceId: newAssetId });
-          // Hold the live buffer on screen until the new asset image has
-          // decoded, then release it and repaint — no "Loading" flash.
-          const probe = new window.Image();
-          const handoff = () => {
-            paintCanvasRef.current = null;
-            paintLayerIdRef.current = null;
-            forceRender();
-          };
-          probe.onload = handoff;
-          probe.onerror = handoff;
-          probe.src = dataUrl;
+          paintCanvasRef.current = null;
+          paintLayerIdRef.current = null;
+          forceRender();
         } else {
           paintCanvasRef.current = null;
           paintLayerIdRef.current = null;
@@ -2213,7 +2218,7 @@ export function Canvas() {
   const selectedLayer = selectedLayerIds.length === 1 ? project?.layers[selectedLayerIds[0]] : null;
 
   const handleWheel = useCallback(
-    (e: React.WheelEvent) => {
+    (e: WheelEvent) => {
       const canvas = canvasRef.current;
       // Ctrl/Cmd OR Alt + wheel = zoom anchored to the cursor (Photoshop). The
       // point of the artboard under the pointer stays put while zooming.
@@ -2240,6 +2245,16 @@ export function Canvas() {
     [zoom, panX, panY, setPan, screenToCanvas, artboard]
   );
 
+  // Attach wheel as a NON-passive native listener so preventDefault() works
+  // (React's onWheel is passive, which throws when we preventDefault to stop the
+  // browser's own Ctrl+wheel page zoom).
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    canvas.addEventListener('wheel', handleWheel, { passive: false });
+    return () => canvas.removeEventListener('wheel', handleWheel);
+  }, [handleWheel]);
+
   const effectiveCursor = (() => {
     if ((activeTool === 'select' || activeTool === 'free-transform') && cursorStyle !== 'default') {
       return cursorStyle;
@@ -2265,7 +2280,6 @@ export function Canvas() {
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseUp}
-        onWheel={handleWheel}
         onContextMenu={handleContextMenu}
         className="absolute"
         style={{
@@ -2342,17 +2356,10 @@ const BLEND_MODE_MAP: Record<string, GlobalCompositeOperation> = {
   'exclusion': 'exclusion',
 };
 
-// While a paint/retouch stroke is in progress, the active layer's pixels live
-// in an offscreen buffer that hasn't been flattened to its asset yet. We pass
-// it down so the active layer renders LIVE (else the stroke is invisible until
-// mouse-up). null when no stroke is active.
-type LivePaint = { layerId: string; canvas: OffscreenCanvas } | null;
-
 function renderLayerWithChildren(
   ctx: CanvasRenderingContext2D,
   layer: Layer,
-  project: { layers: Record<string, Layer>; assets: Record<string, { dataUrl?: string; blobUrl?: string }> },
-  livePaint: LivePaint = null
+  project: { layers: Record<string, Layer>; assets: Record<string, { dataUrl?: string; blobUrl?: string }> }
 ) {
   if (layer.type === 'group') {
     const group = layer as GroupLayer;
@@ -2370,13 +2377,13 @@ function renderLayerWithChildren(
     sortedChildIds.forEach((childId) => {
       const child = project.layers[childId];
       if (child && child.visible) {
-        renderLayer(ctx, child, project, livePaint);
+        renderLayer(ctx, child, project);
       }
     });
 
     ctx.restore();
   } else {
-    renderLayer(ctx, layer, project, livePaint);
+    renderLayer(ctx, layer, project);
   }
 }
 
@@ -2446,8 +2453,7 @@ function renderLayerToOffscreen(
 function renderLayer(
   ctx: CanvasRenderingContext2D,
   layer: Layer,
-  project: { layers?: Record<string, Layer>; assets: Record<string, { dataUrl?: string; blobUrl?: string }> },
-  livePaint: LivePaint = null
+  project: { layers?: Record<string, Layer>; assets: Record<string, { dataUrl?: string; blobUrl?: string }> }
 ) {
   const { transform } = layer;
   const blendMode = layer.blendMode?.mode ?? 'normal';
@@ -2466,11 +2472,11 @@ function renderLayer(
   ctx.globalAlpha = transform.opacity;
   ctx.globalCompositeOperation = BLEND_MODE_MAP[blendMode] ?? 'source-over';
 
-  // LIVE paint preview: the active stroke's buffer already holds this layer's
-  // full pixels (base + in-progress dabs), so draw it instead of the cached
-  // asset. Bypasses the layer cache (whose hash hasn't changed mid-stroke).
-  if (livePaint && layer.id === livePaint.layerId) {
-    ctx.drawImage(livePaint.canvas, 0, 0, transform.width, transform.height);
+  // Phase 2: a painted image layer is rendered straight from its persistent
+  // raster buffer (instant, no asset decode/reload, no per-stroke asset).
+  const raster = layer.type === 'image' ? rasterBuffers.get(layer.id) : undefined;
+  if (raster) {
+    ctx.drawImage(raster, 0, 0, transform.width, transform.height);
     ctx.restore();
     return;
   }
