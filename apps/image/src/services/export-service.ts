@@ -1,4 +1,17 @@
 import type { Project, Artboard, Layer, ImageLayer, TextLayer, ShapeLayer, Filter } from '../types/project';
+import { hasActiveAdjustments, applyAllAdjustments, type LayerAdjustments } from '../utils/apply-adjustments';
+
+/** Load an image (data/blob URL) for compositing. Resolves null on error. */
+function loadImageEl(src: string): Promise<HTMLImageElement | null> {
+  return new Promise((resolve) => {
+    if (!src) { resolve(null); return; }
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => resolve(img);
+    img.onerror = () => resolve(null);
+    img.src = src;
+  });
+}
 
 export type ExportFormat = 'png' | 'jpg' | 'webp' | 'svg' | 'pdf';
 export type ExportQuality = 'low' | 'medium' | 'high' | 'max';
@@ -366,45 +379,70 @@ async function renderImageLayerToContext(
   const asset = project.assets[layer.sourceId];
   if (!asset) return;
 
+  const img = await loadImageEl(asset.dataUrl ?? asset.blobUrl ?? '');
+  if (!img) return;
+
+  const w = layer.transform.width;
+  const h = layer.transform.height;
+  const W = Math.max(1, Math.round(w));
+  const H = Math.max(1, Math.round(h));
   const flipH = layer.flipHorizontal ?? false;
   const flipV = layer.flipVertical ?? false;
 
+  // Render the layer's pixels onto an ISOLATED canvas so adjustments + mask can
+  // be baked without affecting other layers, then composite the result.
+  const tmp = document.createElement('canvas');
+  tmp.width = W;
+  tmp.height = H;
+  const tctx = tmp.getContext('2d')!;
+
+  tctx.save();
   if (flipH || flipV) {
-    ctx.save();
-    ctx.translate(
-      flipH ? layer.transform.width : 0,
-      flipV ? layer.transform.height : 0
-    );
-    ctx.scale(flipH ? -1 : 1, flipV ? -1 : 1);
+    tctx.translate(flipH ? W : 0, flipV ? H : 0);
+    tctx.scale(flipH ? -1 : 1, flipV ? -1 : 1);
+  }
+  const { filters } = layer;
+  applyFilters(tctx, filters);
+  if (filters.blur > 0 && filters.blurType === 'motion') {
+    applyMotionBlur(tctx, img, W, H, filters.blur, filters.blurAngle);
+  } else if (filters.blur > 0 && filters.blurType === 'radial') {
+    applyRadialBlur(tctx, img, W, H, filters.blur);
+  } else {
+    tctx.drawImage(img, 0, 0, W, H);
+  }
+  tctx.filter = 'none';
+  tctx.restore();
+
+  // Bake the 10 non-destructive adjustments (levels/curves/etc.) — matches the
+  // editor's live preview so export is WYSIWYG.
+  const adjustments: LayerAdjustments = {
+    levels: layer.levels,
+    curves: layer.curves,
+    colorBalance: layer.colorBalance,
+    selectiveColor: layer.selectiveColor,
+    blackWhite: layer.blackWhite,
+    photoFilter: layer.photoFilter,
+    channelMixer: layer.channelMixer,
+    gradientMap: layer.gradientMap,
+    posterize: layer.posterize,
+    threshold: layer.threshold,
+  };
+  if (hasActiveAdjustments(adjustments)) {
+    const id = applyAllAdjustments(tctx.getImageData(0, 0, W, H), adjustments);
+    tctx.putImageData(id, 0, 0);
   }
 
-  const img = new Image();
-  img.crossOrigin = 'anonymous';
-
-  await new Promise<void>((resolve) => {
-    img.onload = () => {
-      const { filters } = layer;
-
-      applyFilters(ctx, filters);
-
-      if (filters.blur > 0 && filters.blurType === 'motion') {
-        applyMotionBlur(ctx, img, layer.transform.width, layer.transform.height, filters.blur, filters.blurAngle);
-      } else if (filters.blur > 0 && filters.blurType === 'radial') {
-        applyRadialBlur(ctx, img, layer.transform.width, layer.transform.height, filters.blur);
-      } else {
-        ctx.drawImage(img, 0, 0, layer.transform.width, layer.transform.height);
-      }
-
-      ctx.filter = 'none';
-      resolve();
-    };
-    img.onerror = () => resolve();
-    img.src = asset.dataUrl ?? asset.blobUrl ?? '';
-  });
-
-  if (flipH || flipV) {
-    ctx.restore();
+  // Bake the layer mask (alpha reveals/hides; invert flips).
+  if (layer.mask?.enabled && layer.mask.data) {
+    const maskImg = await loadImageEl(layer.mask.data);
+    if (maskImg) {
+      tctx.globalCompositeOperation = layer.mask.invert ? 'destination-out' : 'destination-in';
+      tctx.drawImage(maskImg, 0, 0, W, H);
+      tctx.globalCompositeOperation = 'source-over';
+    }
   }
+
+  ctx.drawImage(tmp, 0, 0, w, h);
 }
 
 function renderTextLayerToContext(ctx: CanvasRenderingContext2D, layer: TextLayer): void {

@@ -1,24 +1,46 @@
-import { useState, lazy, Suspense } from 'react';
+import { useState, useRef, lazy, Suspense } from 'react';
 import { Toolbar } from './toolbar/Toolbar';
 import { LeftPanel } from './panels/LeftPanel';
 import { Canvas } from './canvas/Canvas';
 import { Inspector } from './inspector/Inspector';
-import { LayerPanel } from './layers/LayerPanel';
 import { HistoryPanel } from './panels/HistoryPanel';
 import { GuidePanel } from './panels/GuidePanel';
 import { PagesBar } from './pages/PagesBar';
 import { useUIStore } from '../../stores/ui-store';
 import { useProjectStore } from '../../stores/project-store';
-import { Layers, History, Ruler } from 'lucide-react';
+import { History, Ruler } from 'lucide-react';
 
 const ExportDialog = lazy(() => import('./ExportDialog').then(m => ({ default: m.ExportDialog })));
 
-type BottomTab = 'layers' | 'history' | 'guides';
+// Layers now live in the LEFT panel (full height — Figma-style). The right side
+// is the selected-layer Inspector plus a resizable Guides/History dock.
+type BottomTab = 'history' | 'guides';
 
 export function EditorInterface() {
   const { isPanelCollapsed, isInspectorCollapsed, isExportDialogOpen, closeExportDialog } = useUIStore();
   const { project } = useProjectStore();
-  const [bottomTab, setBottomTab] = useState<BottomTab>('layers');
+  const [bottomTab, setBottomTab] = useState<BottomTab>('history');
+  const [dockHeight, setDockHeight] = useState(240);
+  const resizingRef = useRef(false);
+
+  const startResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    resizingRef.current = true;
+    const startY = e.clientY;
+    const startH = dockHeight;
+    const onMove = (ev: MouseEvent) => {
+      if (!resizingRef.current) return;
+      const dy = startY - ev.clientY; // drag up => taller
+      setDockHeight(Math.max(120, Math.min(window.innerHeight - 220, startH + dy)));
+    };
+    const onUp = () => {
+      resizingRef.current = false;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
 
   if (!project) {
     return (
@@ -51,19 +73,15 @@ export function EditorInterface() {
             <div className="flex-1 overflow-y-auto">
               <Inspector />
             </div>
-            <div className="h-64 border-t border-border flex flex-col">
+
+            {/* Resizable Guides / History dock — drag the top edge to resize. */}
+            <div
+              onMouseDown={startResize}
+              className="h-1.5 cursor-row-resize border-t border-border hover:bg-primary/40 transition-colors shrink-0"
+              title="Drag to resize"
+            />
+            <div style={{ height: dockHeight }} className="flex flex-col shrink-0">
               <div className="flex border-b border-border">
-                <button
-                  onClick={() => setBottomTab('layers')}
-                  className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors ${
-                    bottomTab === 'layers'
-                      ? 'text-foreground bg-background border-b-2 border-primary -mb-px'
-                      : 'text-muted-foreground hover:text-foreground hover:bg-accent'
-                  }`}
-                >
-                  <Layers size={14} />
-                  Layers
-                </button>
                 <button
                   onClick={() => setBottomTab('guides')}
                   className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors ${
@@ -88,7 +106,6 @@ export function EditorInterface() {
                 </button>
               </div>
               <div className="flex-1 overflow-hidden">
-                {bottomTab === 'layers' && <LayerPanel />}
                 {bottomTab === 'guides' && <GuidePanel />}
                 {bottomTab === 'history' && <HistoryPanel />}
               </div>

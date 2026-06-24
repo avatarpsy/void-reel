@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, memo, useMemo } from 'react';
+import { useState, useEffect, memo } from 'react';
 import {
   Layers,
   Image,
@@ -9,8 +9,6 @@ import {
   Search,
   Plus,
   Folder,
-  FolderPlus,
-  FolderOpen,
   Sparkles,
   Star,
   Heart,
@@ -26,11 +24,6 @@ import {
   ArrowUp,
   ArrowDown,
   ArrowLeft,
-  ArrowUpToLine,
-  ArrowDownToLine,
-  ChevronUp,
-  ChevronDown,
-  ChevronRight,
   Check,
   X,
   AlertCircle,
@@ -52,214 +45,17 @@ import {
   Award,
   Gift,
   Coffee,
-  Eye,
-  EyeOff,
-  Lock,
-  Unlock,
-  Trash2,
-  Copy,
   Loader2,
 } from 'lucide-react';
 import { useUIStore, Panel } from '../../../stores/ui-store';
 import { useProjectStore } from '../../../stores/project-store';
-import type { Layer, GroupLayer, Project } from '../../../types/project';
+import { LayerPanel } from '../layers/LayerPanel';
 import {
   fetchVoidspaceLibrary,
   libraryImageToAsset,
   withMediaToken,
   type VoidspaceLibraryItem,
 } from '../../../services/voidspace-storage';
-
-interface LayerItemProps {
-  layer: Layer;
-  depth: number;
-  project: Project | null;
-  selectedLayerIds: string[];
-  editingLayerId: string | null;
-  editingName: string;
-  isDragSelecting: boolean;
-  onLayerClick: (layerId: string, e: React.MouseEvent) => void;
-  onLayerMouseDown: (layerId: string, e: React.MouseEvent) => void;
-  onLayerMouseEnter: (layerId: string) => void;
-  onStartRename: (layer: { id: string; name: string }) => void;
-  onFinishRename: () => void;
-  onEditingNameChange: (name: string) => void;
-  onCancelRename: () => void;
-  updateLayer: (id: string, updates: Partial<Layer>) => void;
-  removeLayer: (id: string) => void;
-  getLayerIcon: (type: string) => React.ReactNode;
-}
-
-const LayerItem = memo(function LayerItem({
-  layer,
-  depth,
-  project,
-  selectedLayerIds,
-  editingLayerId,
-  editingName,
-  isDragSelecting,
-  onLayerClick,
-  onLayerMouseDown,
-  onLayerMouseEnter,
-  onStartRename,
-  onFinishRename,
-  onEditingNameChange,
-  onCancelRename,
-  updateLayer,
-  removeLayer,
-  getLayerIcon,
-}: LayerItemProps) {
-  const isSelected = selectedLayerIds.includes(layer.id);
-  const isEditing = editingLayerId === layer.id;
-  const isGroup = layer.type === 'group';
-  const group = isGroup ? (layer as GroupLayer) : null;
-  const isExpanded = group?.expanded ?? false;
-
-  const toggleExpanded = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (group) {
-      updateLayer(layer.id, { expanded: !isExpanded } as Partial<Layer>);
-    }
-  };
-
-  const toggleVisibility = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    updateLayer(layer.id, { visible: !layer.visible });
-  };
-
-  const toggleLock = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    updateLayer(layer.id, { locked: !layer.locked });
-  };
-
-  const handleDelete = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    removeLayer(layer.id);
-  };
-
-  const handleDoubleClick = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    onStartRename(layer);
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') {
-      onFinishRename();
-    } else if (e.key === 'Escape') {
-      onCancelRename();
-    }
-  };
-
-  return (
-    <>
-      <div
-        onClick={(e) => onLayerClick(layer.id, e)}
-        onMouseDown={(e) => onLayerMouseDown(layer.id, e)}
-        onMouseEnter={() => isDragSelecting && onLayerMouseEnter(layer.id)}
-        onDoubleClick={handleDoubleClick}
-        className={`group flex items-center gap-1.5 px-2 py-1.5 mx-1 rounded-md cursor-pointer transition-colors select-none ${
-          isSelected
-            ? 'bg-primary/20 text-foreground'
-            : 'text-muted-foreground hover:bg-accent hover:text-foreground'
-        } ${layer.locked ? 'opacity-60' : ''}`}
-        style={{ paddingLeft: `${8 + depth * 16}px` }}
-      >
-        {isGroup && (
-          <button
-            onClick={toggleExpanded}
-            className="p-0.5 rounded hover:bg-accent/50 transition-colors"
-          >
-            {isExpanded ? (
-              <ChevronDown size={12} />
-            ) : (
-              <ChevronRight size={12} />
-            )}
-          </button>
-        )}
-
-        <span className={`flex-shrink-0 ${isSelected ? 'text-primary' : ''}`}>
-          {isGroup ? (
-            isExpanded ? <FolderOpen size={14} /> : <Folder size={14} />
-          ) : (
-            getLayerIcon(layer.type)
-          )}
-        </span>
-
-        {isEditing ? (
-          <input
-            type="text"
-            value={editingName}
-            onChange={(e) => onEditingNameChange(e.target.value)}
-            onBlur={onFinishRename}
-            onKeyDown={handleKeyDown}
-            autoFocus
-            className="flex-1 min-w-0 px-1 py-0.5 text-xs bg-background border border-input rounded focus:outline-none focus:ring-1 focus:ring-primary"
-            onClick={(e) => e.stopPropagation()}
-          />
-        ) : (
-          <span className="flex-1 min-w-0 text-xs truncate">
-            {layer.name}
-          </span>
-        )}
-
-        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-          <button
-            onClick={toggleVisibility}
-            className="p-1 rounded hover:bg-accent/50 transition-colors"
-            title={layer.visible ? 'Hide' : 'Show'}
-          >
-            {layer.visible ? <Eye size={12} /> : <EyeOff size={12} />}
-          </button>
-          <button
-            onClick={toggleLock}
-            className="p-1 rounded hover:bg-accent/50 transition-colors"
-            title={layer.locked ? 'Unlock' : 'Lock'}
-          >
-            {layer.locked ? <Lock size={12} /> : <Unlock size={12} />}
-          </button>
-          <button
-            onClick={handleDelete}
-            className="p-1 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
-            title="Delete"
-          >
-            <Trash2 size={12} />
-          </button>
-        </div>
-      </div>
-
-      {isGroup && isExpanded && group && project && (
-        <div>
-          {group.childIds.map((childId) => {
-            const childLayer = project.layers[childId];
-            if (!childLayer) return null;
-            return (
-              <LayerItem
-                key={childId}
-                layer={childLayer}
-                depth={depth + 1}
-                project={project}
-                selectedLayerIds={selectedLayerIds}
-                editingLayerId={editingLayerId}
-                editingName={editingName}
-                isDragSelecting={isDragSelecting}
-                onLayerClick={onLayerClick}
-                onLayerMouseDown={onLayerMouseDown}
-                onLayerMouseEnter={onLayerMouseEnter}
-                onStartRename={onStartRename}
-                onFinishRename={onFinishRename}
-                onEditingNameChange={onEditingNameChange}
-                onCancelRename={onCancelRename}
-                updateLayer={updateLayer}
-                removeLayer={removeLayer}
-                getLayerIcon={getLayerIcon}
-              />
-            );
-          })}
-        </div>
-      )}
-    </>
-  );
-});
 
 import {
   TEMPLATE_CATEGORIES,
@@ -306,7 +102,7 @@ export const LeftPanel = memo(function LeftPanel() {
       </div>
 
       <div className="flex-1 overflow-hidden">
-        {activePanel === 'layers' && <LayersPanel />}
+        {activePanel === 'layers' && <LayerPanel />}
         {activePanel === 'elements' && <ElementsPanel />}
         {activePanel === 'assets' && <AssetsPanel />}
         {activePanel === 'templates' && <TemplatesPanel />}
@@ -318,258 +114,6 @@ export const LeftPanel = memo(function LeftPanel() {
   );
 });
 
-function LayersPanel() {
-  const {
-    project,
-    selectedLayerIds,
-    selectedArtboardId,
-    selectLayer,
-    selectLayers,
-    updateLayer,
-    removeLayer,
-    duplicateLayer,
-    moveLayerUp,
-    moveLayerDown,
-    moveLayerToTop,
-    moveLayerToBottom,
-    groupLayers,
-    ungroupLayers,
-  } = useProjectStore();
-
-  const [searchQuery, setSearchQuery] = useState('');
-  const [editingLayerId, setEditingLayerId] = useState<string | null>(null);
-  const [editingName, setEditingName] = useState('');
-  const [isDragSelecting, setIsDragSelecting] = useState(false);
-  const dragSelectIds = useRef<Set<string>>(new Set());
-
-  const artboard = project?.artboards.find((a) => a.id === selectedArtboardId);
-
-  const layers = useMemo(() => {
-    if (!artboard || !project) return [];
-    return artboard.layerIds.map((id) => project.layers[id]).filter(Boolean);
-  }, [artboard, project]);
-
-  const filteredLayers = useMemo(() => {
-    if (!searchQuery) return layers;
-    const query = searchQuery.toLowerCase();
-    return layers.filter((layer) => layer && layer.name.toLowerCase().includes(query));
-  }, [layers, searchQuery]);
-
-  const handleStartRename = (layer: { id: string; name: string }) => {
-    setEditingLayerId(layer.id);
-    setEditingName(layer.name);
-  };
-
-  const handleFinishRename = () => {
-    if (editingLayerId && editingName.trim()) {
-      updateLayer(editingLayerId, { name: editingName.trim() });
-    }
-    setEditingLayerId(null);
-    setEditingName('');
-  };
-
-  useEffect(() => {
-    const handleMouseUp = () => {
-      if (isDragSelecting) {
-        setIsDragSelecting(false);
-        if (dragSelectIds.current.size > 0) {
-          selectLayers(Array.from(dragSelectIds.current));
-        }
-        dragSelectIds.current.clear();
-      }
-    };
-
-    document.addEventListener('mouseup', handleMouseUp);
-    return () => document.removeEventListener('mouseup', handleMouseUp);
-  }, [isDragSelecting, selectLayers]);
-
-  const handleLayerMouseDown = (layerId: string, e: React.MouseEvent) => {
-    if (e.button !== 0) return;
-    if (e.shiftKey || e.metaKey || e.ctrlKey) return;
-
-    setIsDragSelecting(true);
-    dragSelectIds.current.clear();
-    dragSelectIds.current.add(layerId);
-    selectLayers([layerId]);
-  };
-
-  const handleLayerMouseEnter = (layerId: string) => {
-    if (isDragSelecting) {
-      dragSelectIds.current.add(layerId);
-      selectLayers(Array.from(dragSelectIds.current));
-    }
-  };
-
-  const handleLayerClick = (layerId: string, e: React.MouseEvent) => {
-    if (isDragSelecting) return;
-
-    if (e.shiftKey && selectedLayerIds.length > 0) {
-      const layerIds = layers.map(l => l?.id).filter(Boolean) as string[];
-      const lastSelectedIndex = layerIds.indexOf(selectedLayerIds[selectedLayerIds.length - 1]);
-      const clickedIndex = layerIds.indexOf(layerId);
-      const start = Math.min(lastSelectedIndex, clickedIndex);
-      const end = Math.max(lastSelectedIndex, clickedIndex);
-      const rangeIds = layerIds.slice(start, end + 1);
-      selectLayers([...new Set([...selectedLayerIds, ...rangeIds])]);
-    } else if (e.metaKey || e.ctrlKey) {
-      if (selectedLayerIds.includes(layerId)) {
-        selectLayers(selectedLayerIds.filter(id => id !== layerId));
-      } else {
-        selectLayers([...selectedLayerIds, layerId]);
-      }
-    } else {
-      selectLayer(layerId);
-    }
-  };
-
-  const getLayerIcon = (type: string) => {
-    switch (type) {
-      case 'image': return <Image size={14} />;
-      case 'text': return <Type size={14} />;
-      case 'shape': return <Shapes size={14} />;
-      case 'group': return <Folder size={14} />;
-      default: return <Layers size={14} />;
-    }
-  };
-
-  const selectedLayer = selectedLayerIds.length === 1 ? project?.layers[selectedLayerIds[0]] : null;
-
-  return (
-    <div className="h-full flex flex-col">
-      <div className="p-3 border-b border-border">
-        <div className="relative">
-          <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
-          <input
-            type="text"
-            placeholder="Search layers..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full pl-8 pr-3 py-2 text-xs bg-background border border-input rounded-lg focus:outline-none focus:ring-2 focus:ring-primary/20"
-          />
-        </div>
-      </div>
-
-      <div className="flex-1 overflow-y-auto">
-        {filteredLayers.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full text-center p-4">
-            <Layers size={32} className="text-muted-foreground/50 mb-2" />
-            <p className="text-xs text-muted-foreground">No layers yet</p>
-            <p className="text-[10px] text-muted-foreground mt-1">
-              Add text, shapes, or images
-            </p>
-          </div>
-        ) : (
-          <div className="py-1">
-            {filteredLayers.map((layer) => {
-              if (!layer) return null;
-              return (
-                <LayerItem
-                  key={layer.id}
-                  layer={layer}
-                  depth={0}
-                  project={project}
-                  selectedLayerIds={selectedLayerIds}
-                  editingLayerId={editingLayerId}
-                  editingName={editingName}
-                  isDragSelecting={isDragSelecting}
-                  onLayerClick={handleLayerClick}
-                  onLayerMouseDown={handleLayerMouseDown}
-                  onLayerMouseEnter={handleLayerMouseEnter}
-                  onStartRename={handleStartRename}
-                  onFinishRename={handleFinishRename}
-                  onEditingNameChange={setEditingName}
-                  onCancelRename={() => { setEditingLayerId(null); setEditingName(''); }}
-                  updateLayer={updateLayer}
-                  removeLayer={removeLayer}
-                  getLayerIcon={getLayerIcon}
-                />
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      {selectedLayerIds.length > 0 && (
-        <div className="p-2 border-t border-border space-y-2">
-          {selectedLayerIds.length > 1 && (
-            <button
-              onClick={() => groupLayers(selectedLayerIds)}
-              className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:bg-primary/90"
-            >
-              <FolderPlus size={14} />
-              Group {selectedLayerIds.length} Layers
-            </button>
-          )}
-
-          {selectedLayerIds.length === 1 && selectedLayer?.type === 'group' && (
-            <button
-              onClick={() => ungroupLayers(selectedLayerIds[0])}
-              className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md bg-secondary text-secondary-foreground text-xs font-medium hover:bg-secondary/80"
-            >
-              <FolderOpen size={14} />
-              Ungroup
-            </button>
-          )}
-
-          {selectedLayerIds.length === 1 && (
-            <>
-              <div className="flex items-center justify-between gap-1">
-                <span className="text-[10px] text-muted-foreground">Order</span>
-                <div className="flex items-center gap-0.5">
-                  <button
-                    onClick={() => moveLayerToTop(selectedLayerIds[0])}
-                    className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground"
-                    title="Bring to Front"
-                  >
-                    <ArrowUpToLine size={14} />
-                  </button>
-                  <button
-                    onClick={() => moveLayerUp(selectedLayerIds[0])}
-                    className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground"
-                    title="Bring Forward"
-                  >
-                    <ChevronUp size={14} />
-                  </button>
-                  <button
-                    onClick={() => moveLayerDown(selectedLayerIds[0])}
-                    className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground"
-                    title="Send Backward"
-                  >
-                    <ChevronDown size={14} />
-                  </button>
-                  <button
-                    onClick={() => moveLayerToBottom(selectedLayerIds[0])}
-                    className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground"
-                    title="Send to Back"
-                  >
-                    <ArrowDownToLine size={14} />
-                  </button>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-1">
-                <button
-                  onClick={() => duplicateLayer(selectedLayerIds[0])}
-                  className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 rounded-md bg-secondary text-secondary-foreground text-[10px] font-medium hover:bg-secondary/80"
-                >
-                  <Copy size={12} />
-                  Duplicate
-                </button>
-                <button
-                  onClick={() => removeLayer(selectedLayerIds[0])}
-                  className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 rounded-md bg-destructive/10 text-destructive text-[10px] font-medium hover:bg-destructive/20"
-                >
-                  <Trash2 size={12} />
-                  Delete
-                </button>
-              </div>
-            </>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
 
 type AssetTab = 'project' | 'library';
 
