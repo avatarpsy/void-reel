@@ -333,7 +333,10 @@ export function Canvas() {
     const marqueeHash = marqueeRect ? `${marqueeRect.x}-${marqueeRect.y}-${marqueeRect.width}-${marqueeRect.height}` : 'none';
     const gradientHash = gradientDrag ? `${gradientDrag.startX}-${gradientDrag.startY}-${gradientDrag.endX}-${gradientDrag.endY}` : 'none';
     const renderHash = `${zoom}-${panX}-${panY}-${selectedLayerIds.join(',')}-${project.updatedAt}-${showGrid}-${drawing.isDrawing}-${drawing.currentPath?.length ?? 0}-${isMarqueeSelecting}-${marqueeHash}-${gradientHash}`;
-    if (renderHash === lastRenderHashRef.current && !forceRenderRef.current) {
+    // While a paint/retouch stroke is active, the buffer changes every move but
+    // none of the hash inputs do — so bypass the dedupe to draw the live stroke.
+    const livePainting = !!(paintCanvasRef.current && paintLayerIdRef.current);
+    if (renderHash === lastRenderHashRef.current && !forceRenderRef.current && !livePainting) {
       return;
     }
     lastRenderHashRef.current = renderHash;
@@ -396,12 +399,19 @@ export function Canvas() {
       panY
     );
 
+    // If a paint/retouch stroke is mid-flight, hand its live buffer to the
+    // renderer so the active layer shows the in-progress strokes immediately.
+    const livePaint: LivePaint =
+      paintCanvasRef.current && paintLayerIdRef.current
+        ? { layerId: paintLayerIdRef.current, canvas: paintCanvasRef.current }
+        : null;
+
     const sortedLayerIds = [...artboard.layerIds].reverse();
     sortedLayerIds.forEach((layerId) => {
       const layer = project.layers[layerId];
       if (!layer || !layer.visible) return;
       if (!isLayerInViewport(layer, viewport)) return;
-      renderLayerWithChildren(ctx, layer, project);
+      renderLayerWithChildren(ctx, layer, project, livePaint);
     });
 
     ctx.restore();
@@ -1952,28 +1962,42 @@ export function Canvas() {
         const ctx = canvas.getContext('2d');
         if (ctx) {
           ctx.drawImage(tempCanvas, 0, 0);
-          canvas.toBlob((blob) => {
-            if (blob) {
-              if (oldBlobUrl?.startsWith('blob:')) {
-                URL.revokeObjectURL(oldBlobUrl);
-              }
-              const newBlobUrl = URL.createObjectURL(blob);
-              const newAssetId = `asset-${Date.now()}`;
-              useProjectStore.getState().addAsset({
-                id: newAssetId,
-                name: `${activeTool}-edited`,
-                type: 'image',
-                mimeType: 'image/png',
-                size: blob.size,
-                width: canvas.width,
-                height: canvas.height,
-                thumbnailUrl: newBlobUrl,
-                blobUrl: newBlobUrl,
-              });
-              useProjectStore.getState().updateLayer(layerId, { sourceId: newAssetId });
-              forceRender();
-            }
-          }, 'image/png');
+          // Flatten SYNCHRONOUSLY via a data URL. The old async toBlob/blob:
+          // path could leave the layer stuck on a "Loading" placeholder if its
+          // image's onload re-render was missed; a data URL is immediately
+          // available and decodes reliably. (Phase 2 replaces this flatten with
+          // a persistent raster buffer entirely.)
+          const dataUrl = canvas.toDataURL('image/png');
+          if (oldBlobUrl?.startsWith('blob:')) {
+            URL.revokeObjectURL(oldBlobUrl);
+          }
+          const newAssetId = `asset-${Date.now()}`;
+          useProjectStore.getState().addAsset({
+            id: newAssetId,
+            name: `${activeTool}-edited`,
+            type: 'image',
+            mimeType: 'image/png',
+            size: dataUrl.length,
+            width: canvas.width,
+            height: canvas.height,
+            thumbnailUrl: dataUrl,
+            dataUrl,
+          });
+          useProjectStore.getState().updateLayer(layerId, { sourceId: newAssetId });
+          // Hold the live buffer on screen until the new asset image has
+          // decoded, then release it and repaint — no "Loading" flash.
+          const probe = new window.Image();
+          const handoff = () => {
+            paintCanvasRef.current = null;
+            paintLayerIdRef.current = null;
+            forceRender();
+          };
+          probe.onload = handoff;
+          probe.onerror = handoff;
+          probe.src = dataUrl;
+        } else {
+          paintCanvasRef.current = null;
+          paintLayerIdRef.current = null;
         }
 
         smudgeToolRef.current = null;
@@ -1983,8 +2007,6 @@ export function Canvas() {
         spotHealingToolRef.current = null;
         eraserToolRef.current = null;
         brushToolRef.current = null;
-        paintCanvasRef.current = null;
-        paintLayerIdRef.current = null;
       }
 
       endDrag();
@@ -2192,15 +2214,30 @@ export function Canvas() {
 
   const handleWheel = useCallback(
     (e: React.WheelEvent) => {
-      if (e.ctrlKey || e.metaKey) {
+      const canvas = canvasRef.current;
+      // Ctrl/Cmd OR Alt + wheel = zoom anchored to the cursor (Photoshop). The
+      // point of the artboard under the pointer stays put while zooming.
+      if ((e.ctrlKey || e.metaKey || e.altKey) && canvas && artboard) {
         e.preventDefault();
+        const rect = canvas.getBoundingClientRect();
+        const cx = e.clientX - rect.left;
+        const cy = e.clientY - rect.top;
+        const before = screenToCanvas(e.clientX, e.clientY); // artboard pt pre-zoom
         const delta = e.deltaY > 0 ? 0.9 : 1.1;
         useUIStore.getState().setZoom(zoom * delta);
+        const z1 = useUIStore.getState().zoom; // read back the clamped value
+        // Solve pan so `before` maps back under the cursor at the new zoom.
+        const panX1 = cx - canvas.width / 2 + (artboard.size.width * z1) / 2 - before.x * z1;
+        const panY1 = cy - canvas.height / 2 + (artboard.size.height * z1) / 2 - before.y * z1;
+        setPan(panX1, panY1);
       } else {
-        setPan(panX - e.deltaX, panY - e.deltaY);
+        // Plain wheel = pan; Shift makes a vertical wheel scroll horizontally.
+        const dx = e.shiftKey && e.deltaX === 0 ? e.deltaY : e.deltaX;
+        const dy = e.shiftKey && e.deltaX === 0 ? 0 : e.deltaY;
+        setPan(panX - dx, panY - dy);
       }
     },
-    [zoom, panX, panY, setPan]
+    [zoom, panX, panY, setPan, screenToCanvas, artboard]
   );
 
   const effectiveCursor = (() => {
@@ -2305,10 +2342,17 @@ const BLEND_MODE_MAP: Record<string, GlobalCompositeOperation> = {
   'exclusion': 'exclusion',
 };
 
+// While a paint/retouch stroke is in progress, the active layer's pixels live
+// in an offscreen buffer that hasn't been flattened to its asset yet. We pass
+// it down so the active layer renders LIVE (else the stroke is invisible until
+// mouse-up). null when no stroke is active.
+type LivePaint = { layerId: string; canvas: OffscreenCanvas } | null;
+
 function renderLayerWithChildren(
   ctx: CanvasRenderingContext2D,
   layer: Layer,
-  project: { layers: Record<string, Layer>; assets: Record<string, { dataUrl?: string; blobUrl?: string }> }
+  project: { layers: Record<string, Layer>; assets: Record<string, { dataUrl?: string; blobUrl?: string }> },
+  livePaint: LivePaint = null
 ) {
   if (layer.type === 'group') {
     const group = layer as GroupLayer;
@@ -2326,13 +2370,13 @@ function renderLayerWithChildren(
     sortedChildIds.forEach((childId) => {
       const child = project.layers[childId];
       if (child && child.visible) {
-        renderLayer(ctx, child, project);
+        renderLayer(ctx, child, project, livePaint);
       }
     });
 
     ctx.restore();
   } else {
-    renderLayer(ctx, layer, project);
+    renderLayer(ctx, layer, project, livePaint);
   }
 }
 
@@ -2402,7 +2446,8 @@ function renderLayerToOffscreen(
 function renderLayer(
   ctx: CanvasRenderingContext2D,
   layer: Layer,
-  project: { layers?: Record<string, Layer>; assets: Record<string, { dataUrl?: string; blobUrl?: string }> }
+  project: { layers?: Record<string, Layer>; assets: Record<string, { dataUrl?: string; blobUrl?: string }> },
+  livePaint: LivePaint = null
 ) {
   const { transform } = layer;
   const blendMode = layer.blendMode?.mode ?? 'normal';
@@ -2420,6 +2465,15 @@ function renderLayer(
 
   ctx.globalAlpha = transform.opacity;
   ctx.globalCompositeOperation = BLEND_MODE_MAP[blendMode] ?? 'source-over';
+
+  // LIVE paint preview: the active stroke's buffer already holds this layer's
+  // full pixels (base + in-progress dabs), so draw it instead of the cached
+  // asset. Bypasses the layer cache (whose hash hasn't changed mid-stroke).
+  if (livePaint && layer.id === livePaint.layerId) {
+    ctx.drawImage(livePaint.canvas, 0, 0, transform.width, transform.height);
+    ctx.restore();
+    return;
+  }
 
   const cachedCanvas = getCachedLayerCanvas(layer, project);
   if (cachedCanvas) {

@@ -1,178 +1,165 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { useUIStore } from '../stores/ui-store';
 import { useProjectStore } from '../stores/project-store';
+import type { Tool } from '../stores/ui-store';
+
+// Photoshop-style single-key tool shortcuts. Where Photoshop groups several
+// tools under one letter (M = marquees, L = lassos, …), Shift+<letter> cycles
+// within the group — see SHIFT_CYCLES below.
+const TOOL_KEYS: Record<string, Tool> = {
+  v: 'select',
+  m: 'marquee-rect',
+  l: 'lasso',
+  w: 'magic-wand',
+  c: 'crop',
+  b: 'brush',
+  e: 'eraser',
+  g: 'gradient',
+  s: 'clone-stamp',   // PS-correct (shape moves to U)
+  j: 'spot-healing',
+  o: 'dodge',
+  u: 'shape',
+  t: 'text',
+  p: 'pen',
+  i: 'eyedropper',
+  h: 'hand',
+  z: 'zoom',
+};
+
+// Shift+<letter> cycles within a Photoshop tool group.
+const SHIFT_CYCLES: Record<string, Tool[]> = {
+  m: ['marquee-rect', 'marquee-ellipse'],
+  l: ['lasso', 'lasso-polygon'],
+  j: ['spot-healing', 'healing-brush'],
+  g: ['gradient', 'paint-bucket'],
+  o: ['dodge', 'burn', 'sponge'],
+  e: ['eraser'],
+};
+
+// Tools for which [ and ] adjust the brush size (Photoshop convention).
+const BRUSH_LIKE: Tool[] = [
+  'brush', 'eraser', 'clone-stamp', 'healing-brush', 'spot-healing',
+  'dodge', 'burn', 'sponge', 'smudge', 'blur', 'sharpen',
+];
 
 export function useKeyboardShortcuts() {
-  const { setActiveTool, zoomIn, zoomOut, zoomToFit, toggleGrid, toggleGuides, toggleShortcutsPanel, openSettingsDialog } = useUIStore();
   const {
-    selectedLayerIds,
-    removeLayer,
-    copyLayers,
-    cutLayers,
-    pasteLayers,
-    duplicateLayer,
-    selectAllLayers,
-    deselectAllLayers,
-    moveLayerUp,
-    moveLayerDown,
-    moveLayerToTop,
-    moveLayerToBottom,
-    groupLayers,
-    ungroupLayers,
-    project,
-    undo,
-    redo,
-    canUndo,
-    canRedo,
+    setActiveTool, activeTool, zoomIn, zoomOut, zoomToFit, setZoom,
+    toggleGrid, toggleGuides, toggleShortcutsPanel, openSettingsDialog,
+    brushSettings, setBrushSettings,
+  } = useUIStore();
+  const {
+    selectedLayerIds, removeLayer, copyLayers, cutLayers, pasteLayers,
+    duplicateLayer, selectAllLayers, deselectAllLayers,
+    moveLayerUp, moveLayerDown, moveLayerToTop, moveLayerToBottom,
+    groupLayers, ungroupLayers, project, undo, redo, canUndo, canRedo,
   } = useProjectStore();
 
+  // Spacebar-pan: hold Space to temporarily switch to the Hand tool, restoring
+  // the previous tool on release — exactly like Photoshop.
+  const spacePanRef = useRef<{ active: boolean; prevTool: Tool | null }>({ active: false, prevTool: null });
+
   useEffect(() => {
+    const isEditable = (t: HTMLElement) =>
+      t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable;
+
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
-      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
+      if (isEditable(target)) return;
+
+      const isMod = e.metaKey || e.ctrlKey;
+      const k = e.key.toLowerCase();
+
+      // Spacebar → temporary Hand tool (pan). Ignore auto-repeat.
+      if (e.code === 'Space' && !isMod) {
+        e.preventDefault();
+        if (!spacePanRef.current.active && !e.repeat) {
+          spacePanRef.current = { active: true, prevTool: activeTool };
+          if (activeTool !== 'hand') setActiveTool('hand');
+        }
         return;
       }
 
-      const isMod = e.metaKey || e.ctrlKey;
+      // [ and ] resize the brush for brush-like tools (no modifier).
+      if (!isMod && !e.altKey && (k === '[' || k === ']') && BRUSH_LIKE.includes(activeTool)) {
+        e.preventDefault();
+        const step = brushSettings.size < 20 ? 1 : brushSettings.size < 100 ? 5 : 20;
+        const next = k === ']'
+          ? Math.min(1000, brushSettings.size + step)
+          : Math.max(1, brushSettings.size - step);
+        setBrushSettings({ size: next });
+        return;
+      }
 
-      if (!isMod && !e.shiftKey && !e.altKey) {
-        switch (e.key.toLowerCase()) {
-          case 'v':
-            setActiveTool('select');
-            break;
-          case 'h':
-            setActiveTool('hand');
-            break;
-          case 't':
-            setActiveTool('text');
-            break;
-          case 's':
-            setActiveTool('shape');
-            break;
-          case 'p':
-            setActiveTool('pen');
-            break;
-          case 'i':
-            setActiveTool('eyedropper');
-            break;
-          case 'z':
-            setActiveTool('zoom');
-            break;
-          case 'delete':
-          case 'backspace':
-            if (selectedLayerIds.length > 0) {
-              e.preventDefault();
-              selectedLayerIds.forEach((id) => removeLayer(id));
-            }
-            break;
+      // Shift+<letter> cycles a Photoshop tool group.
+      if (!isMod && e.shiftKey && !e.altKey && SHIFT_CYCLES[k]) {
+        e.preventDefault();
+        const group = SHIFT_CYCLES[k];
+        const idx = group.indexOf(activeTool);
+        setActiveTool(group[(idx + 1) % group.length] ?? group[0]);
+        return;
+      }
+
+      // Plain single-key tool selection.
+      if (!isMod && !e.shiftKey && !e.altKey && TOOL_KEYS[k]) {
+        e.preventDefault();
+        setActiveTool(TOOL_KEYS[k]);
+        return;
+      }
+
+      if (!isMod && !e.shiftKey && !e.altKey && (k === 'delete' || k === 'backspace')) {
+        if (selectedLayerIds.length > 0) {
+          e.preventDefault();
+          selectedLayerIds.forEach((id) => removeLayer(id));
         }
+        return;
       }
 
       if (isMod) {
-        switch (e.key.toLowerCase()) {
+        switch (k) {
           case 'z':
             e.preventDefault();
-            if (e.shiftKey) {
-              if (canRedo()) redo();
-            } else {
-              if (canUndo()) undo();
-            }
+            if (e.shiftKey) { if (canRedo()) redo(); } else { if (canUndo()) undo(); }
             break;
-
-          case 'c':
-            e.preventDefault();
-            copyLayers();
-            break;
-
-          case 'x':
-            e.preventDefault();
-            cutLayers();
-            break;
-
-          case 'v':
-            e.preventDefault();
-            pasteLayers();
-            break;
-
+          case 'c': e.preventDefault(); copyLayers(); break;
+          case 'x': e.preventDefault(); cutLayers(); break;
+          case 'v': e.preventDefault(); pasteLayers(); break;
           case 'd':
             e.preventDefault();
-            if (selectedLayerIds.length > 0) {
-              selectedLayerIds.forEach((id) => duplicateLayer(id));
-            }
+            if (selectedLayerIds.length > 0) selectedLayerIds.forEach((id) => duplicateLayer(id));
             break;
-
-          case 'a':
-            e.preventDefault();
-            selectAllLayers();
-            break;
-
+          case 'a': e.preventDefault(); selectAllLayers(); break;
           case 'g':
             e.preventDefault();
             if (e.shiftKey) {
               if (selectedLayerIds.length === 1) {
                 const layer = project?.layers[selectedLayerIds[0]];
-                if (layer?.type === 'group') {
-                  ungroupLayers(selectedLayerIds[0]);
-                }
+                if (layer?.type === 'group') ungroupLayers(selectedLayerIds[0]);
               }
             } else if (selectedLayerIds.length > 1) {
               groupLayers(selectedLayerIds);
             }
             break;
-
           case ']':
             e.preventDefault();
             if (selectedLayerIds.length === 1) {
-              if (e.shiftKey) {
-                moveLayerToTop(selectedLayerIds[0]);
-              } else {
-                moveLayerUp(selectedLayerIds[0]);
-              }
+              if (e.shiftKey) moveLayerToTop(selectedLayerIds[0]); else moveLayerUp(selectedLayerIds[0]);
             }
             break;
-
           case '[':
             e.preventDefault();
             if (selectedLayerIds.length === 1) {
-              if (e.shiftKey) {
-                moveLayerToBottom(selectedLayerIds[0]);
-              } else {
-                moveLayerDown(selectedLayerIds[0]);
-              }
+              if (e.shiftKey) moveLayerToBottom(selectedLayerIds[0]); else moveLayerDown(selectedLayerIds[0]);
             }
             break;
-
           case '=':
-          case '+':
-            e.preventDefault();
-            zoomIn();
-            break;
-
-          case '-':
-            e.preventDefault();
-            zoomOut();
-            break;
-
-          case '0':
-            e.preventDefault();
-            zoomToFit();
-            break;
-
-          case "'":
-            e.preventDefault();
-            toggleGrid();
-            break;
-
-          case ';':
-            e.preventDefault();
-            toggleGuides();
-            break;
-
-          case ',':
-            e.preventDefault();
-            openSettingsDialog();
-            break;
-
+          case '+': e.preventDefault(); zoomIn(); break;
+          case '-': e.preventDefault(); zoomOut(); break;
+          case '0': e.preventDefault(); zoomToFit(); break;
+          case '1': e.preventDefault(); setZoom(1); break; // 100% (actual pixels)
+          case "'": e.preventDefault(); toggleGrid(); break;
+          case ';': e.preventDefault(); toggleGuides(); break;
+          case ',': e.preventDefault(); openSettingsDialog(); break;
           case 's':
             e.preventDefault();
             if (project) {
@@ -186,47 +173,32 @@ export function useKeyboardShortcuts() {
             }
             break;
         }
+        return;
       }
 
-      if (e.key === 'Escape') {
-        deselectAllLayers();
-      }
+      if (e.key === 'Escape') { deselectAllLayers(); return; }
+      if (e.key === '?' || (e.shiftKey && e.key === '/')) { e.preventDefault(); toggleShortcutsPanel(); }
+    };
 
-      if (e.key === '?' || (e.shiftKey && e.key === '/')) {
-        e.preventDefault();
-        toggleShortcutsPanel();
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'Space' && spacePanRef.current.active) {
+        const prev = spacePanRef.current.prevTool;
+        spacePanRef.current = { active: false, prevTool: null };
+        if (prev) setActiveTool(prev);
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
   }, [
-    selectedLayerIds,
-    setActiveTool,
-    removeLayer,
-    copyLayers,
-    cutLayers,
-    pasteLayers,
-    duplicateLayer,
-    selectAllLayers,
-    deselectAllLayers,
-    moveLayerUp,
-    moveLayerDown,
-    moveLayerToTop,
-    moveLayerToBottom,
-    groupLayers,
-    ungroupLayers,
-    zoomIn,
-    zoomOut,
-    zoomToFit,
-    toggleGrid,
-    toggleGuides,
-    toggleShortcutsPanel,
-    openSettingsDialog,
-    undo,
-    redo,
-    canUndo,
-    canRedo,
-    project,
+    activeTool, selectedLayerIds, setActiveTool, removeLayer, copyLayers, cutLayers,
+    pasteLayers, duplicateLayer, selectAllLayers, deselectAllLayers, moveLayerUp,
+    moveLayerDown, moveLayerToTop, moveLayerToBottom, groupLayers, ungroupLayers,
+    zoomIn, zoomOut, zoomToFit, setZoom, toggleGrid, toggleGuides, toggleShortcutsPanel,
+    openSettingsDialog, undo, redo, canUndo, canRedo, project, brushSettings, setBrushSettings,
   ]);
 }
