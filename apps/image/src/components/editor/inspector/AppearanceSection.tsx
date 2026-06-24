@@ -5,19 +5,15 @@ interface Props {
   layer: Layer;
 }
 
-const BLEND_MODES: BlendMode['mode'][] = [
-  'normal',
-  'multiply',
-  'screen',
-  'overlay',
-  'darken',
-  'lighten',
-  'color-dodge',
-  'color-burn',
-  'hard-light',
-  'soft-light',
-  'difference',
-  'exclusion',
+// Photoshop groups its blend modes; we list the 16 the canvas compositor
+// supports natively, grouped the same way (separators between groups).
+const BLEND_MODE_GROUPS: { label: string; modes: BlendMode['mode'][] }[] = [
+  { label: 'Normal', modes: ['normal'] },
+  { label: 'Darken', modes: ['darken', 'multiply', 'color-burn'] },
+  { label: 'Lighten', modes: ['lighten', 'screen', 'color-dodge'] },
+  { label: 'Contrast', modes: ['overlay', 'soft-light', 'hard-light'] },
+  { label: 'Comparative', modes: ['difference', 'exclusion'] },
+  { label: 'Component', modes: ['hue', 'saturation', 'color', 'luminosity'] },
 ];
 
 export function AppearanceSection({ layer }: Props) {
@@ -60,10 +56,14 @@ export function AppearanceSection({ layer }: Props) {
           onChange={(e) => handleBlendModeChange(e.target.value as BlendMode['mode'])}
           className="w-full px-2 py-1.5 text-xs bg-background border border-input rounded-md focus:outline-none focus:ring-1 focus:ring-primary capitalize"
         >
-          {BLEND_MODES.map((mode) => (
-            <option key={mode} value={mode} className="capitalize">
-              {mode.replace('-', ' ')}
-            </option>
+          {BLEND_MODE_GROUPS.map((group) => (
+            <optgroup key={group.label} label={group.label}>
+              {group.modes.map((mode) => (
+                <option key={mode} value={mode} className="capitalize">
+                  {mode.replace('-', ' ')}
+                </option>
+              ))}
+            </optgroup>
           ))}
         </select>
       </div>

@@ -2716,6 +2716,10 @@ const BLEND_MODE_MAP: Record<string, GlobalCompositeOperation> = {
   'soft-light': 'soft-light',
   'difference': 'difference',
   'exclusion': 'exclusion',
+  'hue': 'hue',
+  'saturation': 'saturation',
+  'color': 'color',
+  'luminosity': 'luminosity',
 };
 
 function renderLayerWithChildren(
