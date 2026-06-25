@@ -19,6 +19,7 @@ import {
   SetProjectNameCommand,
   UngroupLayersCommand,
   UpdateArtboardCommand,
+  UpdateAssetCommand,
   UpdateLayerStyleCommand,
   UpdateLayerTransformCommand,
   UpdateTextCommand,
@@ -129,6 +130,9 @@ interface ProjectActions {
   flattenImage: () => Promise<void>;
 
   addAsset: (asset: MediaAsset) => void;
+  /** Replace an asset's pixels via an UNDOABLE command (brush/eraser/retouch/
+   *  bucket commit). Snapshots the prior asset so Ctrl+Z restores it. */
+  commitRasterEdit: (assetId: string, newAsset: MediaAsset, description?: string) => void;
   removeAsset: (assetId: string) => void;
 
   markDirty: () => void;
@@ -995,6 +999,21 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
             state.isDirty = true;
           }
         });
+      },
+
+      commitRasterEdit: (assetId, newAsset, description) => {
+        const { project } = get();
+        if (!project) return;
+        const before = project.assets[assetId];
+        if (!before) { get().addAsset(newAsset); return; } // no prior pixels → plain add
+        const cmd = new UpdateAssetCommand(
+          assetId,
+          JSON.stringify(newAsset),
+          JSON.stringify(before),
+          description ?? 'Edit pixels',
+        );
+        const newProject = execCmd(project, cmd);
+        set({ project: newProject, isDirty: true });
       },
 
       removeAsset: (assetId) => {

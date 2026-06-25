@@ -87,6 +87,24 @@ export async function uploadReferenceImage(file: File): Promise<string> {
   return uploadTemp(file, file.name || 'reference.png', token);
 }
 
+/** Upload a reference image from a REMOTE URL (e.g. an image dragged in from the
+ *  web). The server fetches + recompresses it (upload-temp's sourceUrl branch),
+ *  so the browser never has to fetch a cross-origin/CSP-blocked image itself. */
+export async function uploadReferenceFromUrl(sourceUrl: string): Promise<string> {
+  const token = await getVoidspaceIdToken();
+  if (!token) throw new NotSignedInError();
+  const res = await fetch('/api/studio/upload-temp', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sourceUrl }),
+  });
+  if (!res.ok) throw new Error(`upload failed (${res.status})`);
+  const j = await res.json();
+  const url = j.url || j.fileUrl;
+  if (!url) throw new Error('upload returned no url');
+  return url;
+}
+
 export interface GenerativeFillOpts {
   imageBlob: Blob;   // full composite (PNG/JPEG)
   maskBlob: Blob;    // same dimensions; WHITE = inpaint, BLACK = keep

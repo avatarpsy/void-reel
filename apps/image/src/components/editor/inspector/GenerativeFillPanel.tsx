@@ -3,7 +3,7 @@ import { Sparkles, X, Loader2, Upload } from 'lucide-react';
 import { useUIStore } from '../../../stores/ui-store';
 import { useSelectionStore } from '../../../stores/selection-store';
 import { applyGenerativeFill } from '../../../services/apply-generative-fill';
-import { FILL_MODELS, type FillModelId, GenFillError, fetchCreditSituation, uploadReferenceImage } from '../../../services/generative-fill';
+import { FILL_MODELS, type FillModelId, GenFillError, fetchCreditSituation, uploadReferenceImage, uploadReferenceFromUrl } from '../../../services/generative-fill';
 import { NotSignedInError } from '../../../services/voidspace-storage';
 
 /**
@@ -27,6 +27,7 @@ export function GenerativeFillPanel() {
   const [referenceUrl, setReferenceUrl] = useState<string | null>(null);
   const [referenceName, setReferenceName] = useState<string | null>(null);
   const [uploadingRef, setUploadingRef] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
 
   // refMode: 'none' hides the upload UI; 'optional' shows it (kie editors);
   // 'required' also gates Generate (FLUX Kontext needs a reference).
@@ -36,24 +37,43 @@ export function GenerativeFillPanel() {
 
   if (!open) return null;
 
-  const onPickReference = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = ''; // allow re-picking the same file
-    if (!file) return;
+  // Shared reference-attach: run the upload (file or URL), set the preview, and
+  // surface a clean error (sign-in is the usual cause on a fresh localhost).
+  const attachReference = async (upload: () => Promise<string>, name: string) => {
     setUploadingRef(true);
     setError(null);
     try {
-      const url = await uploadReferenceImage(file);
-      setReferenceUrl(url);
-      setReferenceName(file.name);
+      setReferenceUrl(await upload());
+      setReferenceName(name);
     } catch (err) {
-      // Most common cause in practice (esp. on a fresh localhost origin) is no
-      // auth token — tell the user to sign in rather than a generic failure.
-      if (err instanceof NotSignedInError) setError('Sign in to Voidspace (on this site) to upload a reference image.');
-      else setError('Could not upload the reference image.');
+      if (err instanceof NotSignedInError) setError('Sign in to Voidspace (on this site) to add a reference image.');
+      else setError('Could not add the reference image.');
     } finally {
       setUploadingRef(false);
     }
+  };
+
+  const onPickReference = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // allow re-picking the same file
+    if (file) void attachReference(() => uploadReferenceImage(file), file.name);
+  };
+
+  // Drag-and-drop a reference: an image FILE from the system, or an image
+  // dragged from the web (a URL / <img>), like ChatGPT.
+  const onDropReference = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    if (!showRef) return;
+    const file = Array.from(e.dataTransfer.files).find((f) => f.type.startsWith('image/'));
+    if (file) { void attachReference(() => uploadReferenceImage(file), file.name); return; }
+    // Web image drag → resolve a URL from uri-list / html / plain text.
+    const uri = (e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain') || '').trim().split(/\s+/)[0];
+    const html = e.dataTransfer.getData('text/html');
+    const fromHtml = html ? (html.match(/<img[^>]+src=["']([^"']+)["']/i)?.[1] ?? '') : '';
+    const imageUrl = /^https?:\/\//i.test(uri) ? uri : fromHtml;
+    if (imageUrl) void attachReference(() => uploadReferenceFromUrl(imageUrl), 'dropped image');
+    else setError('Drop an image file or an image link.');
   };
 
   const generate = async () => {
@@ -86,7 +106,17 @@ export function GenerativeFillPanel() {
 
   return (
     <>
-    <div className="border-b border-border bg-card shrink-0">
+    <div
+      className="relative border-b border-border bg-card shrink-0"
+      onDragOver={(e) => { if (showRef) { e.preventDefault(); setDragOver(true); } }}
+      onDragLeave={(e) => { if (e.currentTarget === e.target) setDragOver(false); }}
+      onDrop={onDropReference}
+    >
+      {dragOver && showRef && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center rounded-md border-2 border-dashed border-primary bg-primary/10 pointer-events-none">
+          <span className="text-xs font-medium text-primary">Drop image to use as reference</span>
+        </div>
+      )}
       <div className="flex items-center justify-between px-3 py-2 border-b border-border">
         <span className="flex items-center gap-1.5 text-xs font-medium">
           <Sparkles size={14} className="text-primary" /> Generative Fill

@@ -1,4 +1,4 @@
-import type { Artboard, GroupLayer, Layer, Project, TextStyle, Transform } from './project';
+import type { Artboard, GroupLayer, Layer, MediaAsset, Project, TextStyle, Transform } from './project';
 import type { LayerMask } from './mask';
 import {
   addLayerToProject,
@@ -553,6 +553,38 @@ export class RasterEditCommand implements Command {
       this.afterLayerJson,
       `Undo ${this.descriptionText.toLowerCase()}`,
     );
+  }
+}
+
+/**
+ * UpdateAsset swaps an asset's serialized contents — used when a brush/eraser/
+ * retouch/bucket stroke rewrites a layer's pixels IN PLACE (same asset id, so the
+ * Assets panel never fills with per-stroke copies). before/after are JSON
+ * snapshots of the MediaAsset, so undo/redo restores the prior pixels.
+ */
+export class UpdateAssetCommand implements Command {
+  readonly type = 'UpdateAsset';
+
+  constructor(
+    private readonly assetId: string,
+    private readonly afterJson: string,
+    private readonly beforeJson: string,
+    private readonly descriptionText = 'Edit pixels',
+  ) {}
+
+  get description(): string {
+    return this.descriptionText;
+  }
+
+  apply(project: Project): Project {
+    const next = cloneProject(project);
+    next.assets[this.assetId] = JSON.parse(this.afterJson) as MediaAsset;
+    next.updatedAt = Date.now();
+    return next;
+  }
+
+  invert(): Command {
+    return new UpdateAssetCommand(this.assetId, this.beforeJson, this.afterJson, `Undo ${this.descriptionText.toLowerCase()}`);
   }
 }
 

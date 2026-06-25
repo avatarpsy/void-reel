@@ -1,6 +1,15 @@
 import { useUIStore } from '../../../stores/ui-store';
 import { Paintbrush, RotateCcw } from 'lucide-react';
 
+// Quick brush presets (Photoshop "Brush Preset" tiles) — a size + hardness combo.
+const BRUSH_PRESETS = [
+  { label: 'Fine', size: 3, hardness: 95 },
+  { label: 'Small', size: 10, hardness: 85 },
+  { label: 'Medium', size: 30, hardness: 65 },
+  { label: 'Large', size: 80, hardness: 45 },
+  { label: 'Soft', size: 160, hardness: 0 },
+];
+
 export function BrushToolPanel() {
   const { brushSettings, setBrushSettings } = useUIStore();
 
@@ -32,6 +41,34 @@ export function BrushToolPanel() {
       </div>
 
       <div className="space-y-3">
+        <div>
+          <span className="text-xs text-muted-foreground mb-1.5 block">Presets</span>
+          <div className="flex items-end gap-1.5">
+            {BRUSH_PRESETS.map((p) => {
+              const active = brushSettings.size === p.size && brushSettings.hardness === p.hardness;
+              const dot = Math.max(4, Math.min(26, p.size / 6));
+              return (
+                <button
+                  key={p.label}
+                  onClick={() => setBrushSettings({ size: p.size, hardness: p.hardness })}
+                  title={`${p.label} — ${p.size}px · ${p.hardness}% hardness`}
+                  className={`flex-1 flex flex-col items-center gap-1 py-1.5 rounded-md border transition-colors ${
+                    active ? 'border-primary bg-primary/10' : 'border-border bg-secondary/40 hover:bg-secondary'
+                  }`}
+                >
+                  <span className="flex items-center justify-center" style={{ height: 26 }}>
+                    <span
+                      className="rounded-full bg-foreground"
+                      style={{ width: dot, height: dot, opacity: 0.35 + (p.hardness / 100) * 0.65 }}
+                    />
+                  </span>
+                  <span className="text-[9px] text-muted-foreground">{p.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
         <div>
           <div className="flex items-center justify-between mb-1.5">
             <span className="text-xs text-muted-foreground">Color</span>

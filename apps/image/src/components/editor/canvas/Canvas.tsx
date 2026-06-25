@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback, useState } from 'react';
+import { useEffect, useRef, useCallback, useState, useMemo } from 'react';
 import { useProjectStore } from '../../../stores/project-store';
 import { useUIStore } from '../../../stores/ui-store';
 import { useCanvasStore, type ResizeHandle } from '../../../stores/canvas-store';
@@ -147,7 +147,7 @@ const layerCacheOrder: string[] = [];
 
 function getLayerHash(
   layer: Layer,
-  _assets: Record<string, { dataUrl?: string; blobUrl?: string }>
+  assets: Record<string, { dataUrl?: string; blobUrl?: string }>
 ): string {
   const { transform } = layer;
   const baseHash = `${layer.id}-${transform.width}-${transform.height}-${transform.opacity}-${transform.scaleX}-${transform.scaleY}-${transform.skewX ?? 0}-${transform.skewY ?? 0}-${layer.flipHorizontal ?? false}-${layer.flipVertical ?? false}-${layer.blendMode?.mode ?? 'normal'}`;
@@ -166,7 +166,12 @@ function getLayerHash(
     const imgLayer = layer as ImageLayer;
     const { filters, cropRect } = imgLayer;
     const cropHash = cropRect ? `${cropRect.x}-${cropRect.y}-${cropRect.width}-${cropRect.height}` : 'no-crop';
-    contentHash = `img-${imgLayer.sourceId}-${cropHash}-${filters.brightness}-${filters.contrast}-${filters.saturation}-${filters.hue}-${filters.blur}-${filters.blurType}-${filters.sepia}-${filters.invert}-${filters.exposure}-${filters.highlights}-${filters.shadows}-${filters.clarity}-${filters.vibrance}`;
+    // Cheap fingerprint of the asset PIXELS so in-place edits (brush/eraser/fill
+    // commits + their undo/redo, which keep the same sourceId) invalidate this
+    // cache. Length + tail of the data URL changes whenever the content does.
+    const a = assets[imgLayer.sourceId];
+    const assetSig = a?.dataUrl ? `${a.dataUrl.length}~${a.dataUrl.slice(-24)}` : (a?.blobUrl ?? 'none');
+    contentHash = `img-${imgLayer.sourceId}-${assetSig}-${cropHash}-${filters.brightness}-${filters.contrast}-${filters.saturation}-${filters.hue}-${filters.blur}-${filters.blurType}-${filters.sepia}-${filters.invert}-${filters.exposure}-${filters.highlights}-${filters.shadows}-${filters.clarity}-${filters.vibrance}`;
   } else if (layer.type === 'text') {
     const textLayer = layer as TextLayer;
     const { style, content } = textLayer;
@@ -406,6 +411,8 @@ export function Canvas() {
   const blurSharpenToolRef = useRef<BlurSharpenTool | null>(null);
   const eraserToolRef = useRef<EraserTool | null>(null);
   const brushToolRef = useRef<BrushTool | null>(null);
+  const brushCursorRef = useRef<HTMLDivElement>(null); // Photoshop brush-size circle
+
   const dodgeBurnToolRef = useRef<DodgeBurnTool | null>(null);
   const spongeToolRef = useRef<SpongeTool | null>(null);
   const cloneStampToolRef = useRef<CloneStampTool | null>(null);
@@ -892,6 +899,16 @@ export function Canvas() {
     scheduleRender();
   }, [scheduleRender]);
 
+  // Invalidate raster buffers on every COMMITTED edit (incl. undo/redo, which
+  // bump updatedAt) so the canvas always reflects the current asset pixels — an
+  // undone brush stroke can't linger in a stale buffer. Live strokes don't bump
+  // updatedAt, so the in-progress buffer survives the stroke; this fires once on
+  // commit, after which the layer re-derives from its (now-current) asset.
+  useEffect(() => {
+    rasterBuffers.clear();
+    renderCallback?.(); // redraw from the now-current assets
+  }, [project?.updatedAt]);
+
   useEffect(() => {
     renderCallback = forceRender;
     return () => {
@@ -1203,6 +1220,16 @@ export function Canvas() {
         return;
       }
 
+      // Painting/drawing only happens ON the artboard — clicking in the gray
+      // pasteboard around it does nothing (Photoshop). Pan/zoom/select still work
+      // everywhere; this only blocks STARTING a paint/draw stroke off-canvas.
+      const onCanvas = !!artboard && x >= 0 && y >= 0 && x <= artboard.size.width && y <= artboard.size.height;
+      const CANVAS_BOUND_TOOLS = [
+        'brush', 'eraser', 'clone-stamp', 'healing-brush', 'spot-healing',
+        'dodge', 'burn', 'sponge', 'smudge', 'blur', 'sharpen', 'paint-bucket', 'gradient', 'pen',
+      ];
+      if (!onCanvas && CANVAS_BOUND_TOOLS.includes(activeTool as string)) return;
+
       if (activeTool === 'pen') {
         startDrawing({ x, y });
         return;
@@ -1460,7 +1487,7 @@ export function Canvas() {
                   if (asset?.blobUrl?.startsWith('blob:')) {
                     URL.revokeObjectURL(asset.blobUrl);
                   }
-                  useProjectStore.getState().addAsset({
+                  useProjectStore.getState().commitRasterEdit(sourceId, {
                     id: sourceId,
                     name: asset && 'name' in asset ? (asset as { name?: string }).name ?? (imageLayer.name || 'Image') : (imageLayer.name || 'Image'),
                     type: 'image',
@@ -1470,8 +1497,7 @@ export function Canvas() {
                     height: tempCanvas.height,
                     thumbnailUrl: dataUrl,
                     dataUrl,
-                  });
-                  useProjectStore.getState().updateLayer(layerId, {});
+                  }, 'Fill');
                   getCachedImage(dataUrl); // warm cache for the next edit's guard
                   forceRender();
                 }
@@ -1770,45 +1796,33 @@ export function Canvas() {
           }
         }
 
-        // A group is only selectable from the Layers panel (canvas clicks pick
-        // the leaf). But if a group IS selected and you click inside it, move
-        // the group rather than re-picking the leaf underneath — else groups
-        // could never be dragged on the canvas.
-        if (!e.shiftKey && selectedLayerIds.some((id) => project?.layers[id]?.type === 'group')) {
-          const absBounds = (id: string) => {
-            const l = project?.layers[id];
-            if (!l) return null;
-            let ox = 0, oy = 0, pid = l.parentId;
-            for (let g = 0; pid && g < 100; g++) {
-              const p = project?.layers[pid];
-              if (!p) break;
-              ox += p.transform.x; oy += p.transform.y; pid = p.parentId ?? null;
-            }
-            return { x: ox + l.transform.x, y: oy + l.transform.y, w: l.transform.width, h: l.transform.height };
-          };
-          const insideSel = selectedLayerIds.some((id) => {
-            const b = absBounds(id);
-            return b && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
-          });
-          if (insideSel) {
+        // Photoshop "Auto-Select: OFF" (the default). A PLAIN click never
+        // switches the selected layer — that caused accidental selection swaps
+        // when clicking near a layer's edge. Change the selection from the Layers
+        // panel, by double-clicking the canvas (see onDoubleClick), or with
+        // Ctrl/Cmd+click (the PS auto-select modifier).
+        if (e.metaKey || e.ctrlKey) {
+          const layerId = findLayerAtPoint(x, y);
+          if (layerId) {
+            selectLayer(layerId, e.shiftKey); // shift → add to the selection
             startDrag('move', e.clientX, e.clientY);
-            return;
+          } else if (!e.shiftKey) {
+            deselectAllLayers();
           }
+          return;
         }
 
-        const layerId = findLayerAtPoint(x, y);
-        if (layerId) {
-          if (e.shiftKey) {
-            selectLayer(layerId, true);
-          } else if (!selectedLayerIds.includes(layerId)) {
-            selectLayer(layerId);
-          }
+        // Something selected → a plain click+drag MOVES it (the layer under the
+        // cursor stays put), so a near-miss click never re-selects.
+        if (selectedLayerIds.length > 0) {
           startDrag('move', e.clientX, e.clientY);
-        } else {
-          deselectAllLayers();
-          startMarqueeSelect(x, y);
-          startDrag('marquee', e.clientX, e.clientY);
+          return;
         }
+
+        // Nothing selected → rubber-band; on release it selects the layer(s) the
+        // box covers (a real drag only — a tiny click selects nothing).
+        startMarqueeSelect(x, y);
+        startDrag('marquee', e.clientX, e.clientY);
       }
     },
     [activeTool, screenToCanvas, findLayerAtPoint, selectLayer, deselectAllLayers, startDrag, selectedLayerIds, startDrawing, startMarqueeSelect, getHandleAtPoint, project, setActiveResizeHandle, zoom, setZoom, startCrop, setBrushSettings, brushSettings, eraserSettings, magicWandSelect, maskEditLayerId, setMaskEditLayerId]
@@ -2448,7 +2462,9 @@ export function Canvas() {
           const existing = oldSourceId ? useProjectStore.getState().project?.assets[oldSourceId] : undefined;
           const dataUrl = canvas.toDataURL('image/png');
           if (oldSourceId) {
-            useProjectStore.getState().addAsset({
+            // Commit the stroke as an UNDOABLE asset edit (in place — same id, so
+            // no per-stroke Assets-panel copies). Ctrl+Z restores the prior pixels.
+            useProjectStore.getState().commitRasterEdit(oldSourceId, {
               id: oldSourceId,
               name: existing?.name ?? 'Image',
               type: 'image',
@@ -2458,10 +2474,7 @@ export function Canvas() {
               height: canvas.height,
               thumbnailUrl: dataUrl,
               dataUrl,
-            });
-            // Touch the layer so the project is marked dirty (autosave/history)
-            // without changing sourceId.
-            useProjectStore.getState().updateLayer(layerId, {});
+            }, 'Brush stroke');
             // Warm the image cache for the updated asset so the NEXT stroke's
             // "is the source image loaded?" guard passes (the renderer itself
             // draws the raster buffer, so it never loads this dataURL).
@@ -2526,6 +2539,20 @@ export function Canvas() {
     endDrag();
     clearSmartGuides();
   }, [endDrag, clearSmartGuides, drawing.isDrawing, finishDrawing, addPathLayer, penSettings, brushSettings, scheduleRender, dragMode, endMarqueeSelect, findLayersInRect, selectLayers, setActiveResizeHandle, activeTool, gradientDrag, gradientSettings, artboard, addShapeLayer, updateLayer, project, selectedLayerIds, commitLassoSelection, commitMarqueeSelection]);
+
+  // Double-click the canvas to select the layer under the cursor (Photoshop's
+  // way to reach a layer when Auto-Select is off). Single clicks never switch.
+  const handleDoubleClick = useCallback(
+    (e: React.MouseEvent) => {
+      if (e.button !== 0) return;
+      if (activeTool !== 'select' && activeTool !== 'free-transform') return;
+      const { x, y } = screenToCanvas(e.clientX, e.clientY);
+      const layerId = findLayerAtPoint(x, y);
+      if (layerId) selectLayer(layerId);
+      else deselectAllLayers();
+    },
+    [activeTool, screenToCanvas, findLayerAtPoint, selectLayer, deselectAllLayers]
+  );
 
   const handleContextMenu = useCallback(
     (e: React.MouseEvent) => {
@@ -2747,7 +2774,40 @@ export function Canvas() {
     return () => cancelAnimationFrame(raf);
   }, [activeSelection, scheduleRender]);
 
+  // Photoshop-style brush-size cursor: a circle outline the diameter of the
+  // brush, following the pointer (updated imperatively so it never re-renders the
+  // whole canvas). Shown for the round brush-like tools; the OS cursor is hidden
+  // for them so only the circle + a centre dot show.
+  const BRUSH_CIRCLE_TOOLS = useMemo(
+    () => ['brush', 'eraser', 'clone-stamp', 'healing-brush', 'spot-healing', 'dodge', 'burn', 'sponge', 'smudge', 'blur', 'sharpen'],
+    [],
+  );
+  const showsBrushCircle = BRUSH_CIRCLE_TOOLS.includes(activeTool as string);
+  useEffect(() => {
+    const container = containerRef.current;
+    const el = brushCursorRef.current;
+    if (!container || !el) return;
+    if (!showsBrushCircle) { el.style.display = 'none'; return; }
+    const diameter = () => Math.max(2, (activeTool === 'eraser' ? eraserSettings.size : brushSettings.size) * zoom);
+    const onMove = (e: MouseEvent) => {
+      const r = container.getBoundingClientRect();
+      const d = diameter();
+      el.style.display = 'block';
+      el.style.width = `${d}px`;
+      el.style.height = `${d}px`;
+      el.style.transform = `translate(${e.clientX - r.left - d / 2}px, ${e.clientY - r.top - d / 2}px)`;
+    };
+    const onLeave = () => { el.style.display = 'none'; };
+    container.addEventListener('mousemove', onMove);
+    container.addEventListener('mouseleave', onLeave);
+    return () => {
+      container.removeEventListener('mousemove', onMove);
+      container.removeEventListener('mouseleave', onLeave);
+    };
+  }, [showsBrushCircle, activeTool, brushSettings.size, eraserSettings.size, zoom]);
+
   const effectiveCursor = (() => {
+    if (showsBrushCircle) return 'none'; // the circle overlay IS the cursor
     if ((activeTool === 'select' || activeTool === 'free-transform') && cursorStyle !== 'default') {
       return cursorStyle;
     }
@@ -2772,6 +2832,7 @@ export function Canvas() {
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseUp}
+        onDoubleClick={handleDoubleClick}
         onContextMenu={handleContextMenu}
         className="absolute"
         style={{
@@ -2780,6 +2841,16 @@ export function Canvas() {
           width: showRulers ? `calc(100% - ${RULER_SIZE}px)` : '100%',
           height: showRulers ? `calc(100% - ${RULER_SIZE}px)` : '100%',
           cursor: effectiveCursor,
+        }}
+      />
+      {/* Brush-size circle cursor (positioned imperatively in the effect above). */}
+      <div
+        ref={brushCursorRef}
+        className="pointer-events-none absolute top-0 left-0 rounded-full border border-white"
+        style={{
+          display: 'none',
+          boxShadow: '0 0 0 1px rgba(0,0,0,0.55)',
+          mixBlendMode: 'difference',
         }}
       />
 
@@ -3020,7 +3091,9 @@ function renderLayer(
   }
 
   // Phase 2: a painted image layer is rendered straight from its persistent
-  // raster buffer (instant, no asset decode/reload, no per-stroke asset).
+  // raster buffer (instant, no asset decode/reload, no per-stroke asset). The
+  // buffer is invalidated on every committed edit (incl. undo/redo) by the
+  // effect watching project.updatedAt, so it can never out-live the asset.
   const raster = layer.type === 'image' ? rasterBuffers.get(layer.id) : undefined;
   if (raster) {
     ctx.drawImage(raster, 0, 0, transform.width, transform.height);
