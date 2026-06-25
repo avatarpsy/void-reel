@@ -39,7 +39,7 @@ function canvasToBlob(canvas: HTMLCanvasElement, type = 'image/png'): Promise<Bl
  * Run generative fill for the active selection. Returns the new layer id.
  * Throws on no-selection or generation failure (caller shows the error).
  */
-export async function applyGenerativeFill(prompt: string, model?: FillModelId): Promise<string> {
+export async function applyGenerativeFill(prompt: string, model?: FillModelId, referenceUrl?: string): Promise<string> {
   const projStore = useProjectStore.getState();
   const { project, selectedArtboardId } = projStore;
   const selection = useSelectionStore.getState().active;
@@ -83,7 +83,7 @@ export async function applyGenerativeFill(prompt: string, model?: FillModelId): 
   const maskBlob = await canvasToBlob(mc, 'image/png');
 
   // 3) True masked inpaint (full image + mask → only the selection regenerates).
-  const resultDataUrl = await runGenerativeFill({ imageBlob: sourceBlob, maskBlob, prompt, model });
+  const resultDataUrl = await runGenerativeFill({ imageBlob: sourceBlob, maskBlob, prompt, model, referenceUrl });
 
   const resImg = await new Promise<HTMLImageElement>((resolve, reject) => {
     const img = new Image();

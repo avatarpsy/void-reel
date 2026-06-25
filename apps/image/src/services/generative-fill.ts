@@ -42,10 +42,12 @@ export async function fetchCreditSituation(): Promise<{ isSubscribed: boolean }>
   }
 }
 
-/** Inpaint models the user can pick, with their credit cost (per ~1MP fill). */
+/** Inpaint models the user can pick, with their credit cost (per ~1MP fill).
+ *  `ref: true` models fill the selection using an uploaded REFERENCE image. */
 export const FILL_MODELS = [
-  { id: 'flux-dev-inpaint', label: 'FLUX.1 Fill (dev)', credits: 4 },
-  { id: 'flux-pro-fill', label: 'FLUX.1 Fill (pro)', credits: 6 },
+  { id: 'flux-dev-inpaint', label: 'FLUX.1 Fill (dev)', credits: 4, ref: false },
+  { id: 'flux-pro-fill', label: 'FLUX.1 Fill (pro)', credits: 6, ref: false },
+  { id: 'flux-kontext-ref', label: 'FLUX Kontext (reference)', credits: 4, ref: true },
 ] as const;
 
 export type FillModelId = typeof FILL_MODELS[number]['id'];
@@ -66,11 +68,21 @@ async function uploadTemp(blob: Blob, name: string, token: string): Promise<stri
   return url;
 }
 
+/** Upload a user-picked reference image to Kie temp; returns its public URL
+ *  (passed to reference-guided inpaint models as reference_image_url). */
+export async function uploadReferenceImage(file: File): Promise<string> {
+  const token = await getVoidspaceIdToken();
+  if (!token) throw new NotSignedInError();
+  return uploadTemp(file, file.name || 'reference.png', token);
+}
+
 export interface GenerativeFillOpts {
   imageBlob: Blob;   // full composite (PNG/JPEG)
   maskBlob: Blob;    // same dimensions; WHITE = inpaint, BLACK = keep
   prompt: string;
   model?: FillModelId;
+  /** Public URL of an already-uploaded reference image (for ref models). */
+  referenceUrl?: string;
 }
 
 /** Run masked inpainting. Returns the result image as a data URL. */
@@ -86,7 +98,7 @@ export async function runGenerativeFill(opts: GenerativeFillOpts): Promise<strin
   const res = await fetch('/api/studio/gen-fill', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ imageUrl, maskUrl, prompt: opts.prompt, model: opts.model }),
+    body: JSON.stringify({ imageUrl, maskUrl, prompt: opts.prompt, model: opts.model, referenceUrl: opts.referenceUrl }),
   });
   if (!res.ok) {
     // Classify by status ONLY — never surface server/provider text to the user.

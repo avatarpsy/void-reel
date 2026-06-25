@@ -1,9 +1,9 @@
 import { useState } from 'react';
-import { Sparkles, X, Loader2 } from 'lucide-react';
+import { Sparkles, X, Loader2, Upload } from 'lucide-react';
 import { useUIStore } from '../../../stores/ui-store';
 import { useSelectionStore } from '../../../stores/selection-store';
 import { applyGenerativeFill } from '../../../services/apply-generative-fill';
-import { FILL_MODELS, type FillModelId, GenFillError, fetchCreditSituation } from '../../../services/generative-fill';
+import { FILL_MODELS, type FillModelId, GenFillError, fetchCreditSituation, uploadReferenceImage } from '../../../services/generative-fill';
 import { NotSignedInError } from '../../../services/voidspace-storage';
 
 /**
@@ -23,15 +23,39 @@ export function GenerativeFillPanel() {
   const [error, setError] = useState<string | null>(null);
   // Out-of-credits popup (null = closed). `subscribed` tailors the call-to-action.
   const [credits, setCredits] = useState<{ available?: number; required?: number; subscribed: boolean } | null>(null);
+  // Reference image (for ref-capable models like FLUX Kontext).
+  const [referenceUrl, setReferenceUrl] = useState<string | null>(null);
+  const [referenceName, setReferenceName] = useState<string | null>(null);
+  const [uploadingRef, setUploadingRef] = useState(false);
+
+  const needsRef = FILL_MODELS.find((m) => m.id === model)?.ref === true;
 
   if (!open) return null;
 
+  const onPickReference = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // allow re-picking the same file
+    if (!file) return;
+    setUploadingRef(true);
+    setError(null);
+    try {
+      const url = await uploadReferenceImage(file);
+      setReferenceUrl(url);
+      setReferenceName(file.name);
+    } catch {
+      setError('Could not upload the reference image.');
+    } finally {
+      setUploadingRef(false);
+    }
+  };
+
   const generate = async () => {
     if (!prompt.trim() || busy) return;
+    if (needsRef && !referenceUrl) { setError('Upload a reference image for this model.'); return; }
     setBusy(true);
     setError(null);
     try {
-      await applyGenerativeFill(prompt.trim(), model);
+      await applyGenerativeFill(prompt.trim(), model, referenceUrl ?? undefined);
       showNotification('success', 'Generative fill added on a new layer');
       setOpen(false);
       setPrompt('');
@@ -89,10 +113,33 @@ export function GenerativeFillPanel() {
             ))}
           </select>
         </div>
+
+        {/* Reference image — used by reference-guided models (e.g. FLUX Kontext)
+            to fill the selection with the uploaded object/style. */}
+        {needsRef && (
+          <div className="space-y-1">
+            <label className="text-[10px] text-muted-foreground">Reference image</label>
+            {referenceUrl ? (
+              <div className="flex items-center gap-2">
+                <img src={referenceUrl} alt="" className="w-8 h-8 rounded object-cover border border-border" />
+                <span className="flex-1 text-[10px] truncate">{referenceName}</span>
+                <button onClick={() => { setReferenceUrl(null); setReferenceName(null); }} className="text-muted-foreground hover:text-destructive" title="Remove">
+                  <X size={12} />
+                </button>
+              </div>
+            ) : (
+              <label className="flex items-center justify-center gap-1.5 px-2 py-2 text-[11px] rounded-md border border-dashed border-input cursor-pointer hover:bg-accent transition-colors">
+                {uploadingRef ? <><Loader2 size={12} className="animate-spin" /> Uploading…</> : <><Upload size={12} /> Upload reference</>}
+                <input type="file" accept="image/*" className="hidden" onChange={onPickReference} disabled={uploadingRef} />
+              </label>
+            )}
+          </div>
+        )}
+
         {error && <p className="text-[10px] text-destructive">{error}</p>}
         <button
           onClick={generate}
-          disabled={busy || !prompt.trim() || !hasSelection}
+          disabled={busy || uploadingRef || !prompt.trim() || !hasSelection || (needsRef && !referenceUrl)}
           className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs rounded-md bg-primary text-primary-foreground font-medium hover:bg-primary/90 transition-colors disabled:opacity-50"
         >
           {busy ? (
