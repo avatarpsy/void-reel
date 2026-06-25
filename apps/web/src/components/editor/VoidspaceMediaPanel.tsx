@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { ScrollArea } from "@openreel/ui";
 import { v4 as uuidv4 } from "uuid";
+import { MediaPreviewOverlay, type PreviewKind } from "./MediaPreviewOverlay";
 import {
   waitForAuth,
   fetchSceneLists,
@@ -545,7 +546,7 @@ interface AssetSectionProps {
   title: string;
   icon: React.ElementType;
   assets: VoidspaceAsset[];
-  onAddToMedia: (asset: VoidspaceAsset) => void;
+  onPreview: (asset: VoidspaceAsset) => void;
   onDragStart: (e: React.DragEvent, asset: VoidspaceAsset) => void;
   defaultOpen?: boolean;
 }
@@ -554,7 +555,7 @@ function AssetSection({
   title,
   icon: Icon,
   assets,
-  onAddToMedia,
+  onPreview,
   onDragStart,
   defaultOpen = true,
 }: AssetSectionProps) {
@@ -581,9 +582,9 @@ function AssetSection({
               key={asset.id}
               draggable
               onDragStart={(e) => onDragStart(e, asset)}
-              onClick={() => onAddToMedia(asset)}
+              onClick={() => onPreview(asset)}
               className="group relative bg-background-tertiary rounded-lg border border-border hover:border-primary/50 cursor-pointer transition-all overflow-hidden"
-              title={`${asset.name}\n${asset.sceneListName || ""}\nClick to add to media library`}
+              title={`${asset.name}\n${asset.sceneListName || ""}\nClick to preview · drag onto the timeline to use`}
             >
               {/* Thumbnail / icon */}
               <div className="aspect-video flex items-center justify-center bg-background-secondary relative">
@@ -634,6 +635,8 @@ function AssetSection({
 export function VoidspaceMediaPanel() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Clicking a tile previews it fullscreen (never auto-adds); drag adds to timeline.
+  const [previewAsset, setPreviewAsset] = useState<VoidspaceAsset | null>(null);
   const [assets, setAssets] = useState<Record<AssetCategory, VoidspaceAsset[]>>(
     {
       videos: [],
@@ -836,6 +839,7 @@ export function VoidspaceMediaPanel() {
 
   // ─── Populated state ──
   return (
+    <>
     <ScrollArea className="flex-1">
       <div className="px-5 pb-5">
         {/* Header with count + refresh */}
@@ -856,21 +860,21 @@ export function VoidspaceMediaPanel() {
           title="Videos"
           icon={Video}
           assets={assets.videos}
-          onAddToMedia={addToMediaLibrary}
+          onPreview={setPreviewAsset}
           onDragStart={handleDragStart}
         />
         <AssetSection
           title="Images"
           icon={ImageIcon}
           assets={assets.images}
-          onAddToMedia={addToMediaLibrary}
+          onPreview={setPreviewAsset}
           onDragStart={handleDragStart}
         />
         <AssetSection
           title="Music"
           icon={Music}
           assets={assets.music}
-          onAddToMedia={addToMediaLibrary}
+          onPreview={setPreviewAsset}
           onDragStart={handleDragStart}
           defaultOpen={false}
         />
@@ -878,11 +882,20 @@ export function VoidspaceMediaPanel() {
           title="Narrations"
           icon={Mic}
           assets={assets.narrations}
-          onAddToMedia={addToMediaLibrary}
+          onPreview={setPreviewAsset}
           onDragStart={handleDragStart}
           defaultOpen={false}
         />
       </div>
     </ScrollArea>
+    {previewAsset && (
+      <MediaPreviewOverlay
+        url={previewAsset.url}
+        kind={previewAsset.type as PreviewKind}
+        name={previewAsset.name}
+        onClose={() => setPreviewAsset(null)}
+      />
+    )}
+    </>
   );
 }

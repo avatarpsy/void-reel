@@ -3,6 +3,7 @@ import { Search, Loader2, Plus, Check, Film, Music2, Image as ImageIcon, AudioLi
 import { useVoidspaceStore } from "../../stores/voidspace-store";
 import { useProjectStore } from "../../stores/project-store";
 import { saveMediaBlob } from "../../services/media-storage";
+import { MediaPreviewOverlay, type PreviewKind } from "./MediaPreviewOverlay";
 
 /**
  * Library tab — the user's CROSS-PROJECT, local-first asset library. Aggregates
@@ -76,6 +77,9 @@ export const LibraryPanel: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [addingId, setAddingId] = useState<string | null>(null);
+  // Clicking a card previews it fullscreen; drag adds to the timeline, the +
+  // affordance imports it into Media. (Click no longer auto-imports.)
+  const [previewItem, setPreviewItem] = useState<LibItem | null>(null);
   // Firebase ID token, appended as ?t= to <img>/<video> src. local-asset is
   // auth-gated and an element src can't carry an Authorization header (only
   // fetch() is stamped by the main.tsx hook), so without this every thumbnail
@@ -250,11 +254,11 @@ export const LibraryPanel: React.FC = () => {
                       );
                       e.dataTransfer.effectAllowed = "copy";
                     }}
-                    onClick={() => { if (!added && addingId !== it.id) void addToProject(it); }}
+                    onClick={() => setPreviewItem(it)}
                     onKeyDown={(e) => {
-                      if ((e.key === "Enter" || e.key === " ") && !added && addingId !== it.id) { e.preventDefault(); void addToProject(it); }
+                      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setPreviewItem(it); }
                     }}
-                    title={added ? `${it.label} — in this project · drag to add to timeline` : `${it.label} — drag to timeline or click to add`}
+                    title={`${it.label} — click to preview · drag onto the timeline to use${added ? " · already in this project" : ""}`}
                     className={`group relative text-left rounded-lg overflow-hidden border transition-all cursor-grab active:cursor-grabbing ${
                       added ? "border-primary/60" : "border-border hover:border-primary/60"
                     } bg-background-tertiary`}
@@ -271,12 +275,18 @@ export const LibraryPanel: React.FC = () => {
                       ) : (
                         <AudioLines size={22} className="text-primary/60" />
                       )}
-                      {/* add / added affordance */}
-                      <div className={`absolute top-1.5 right-1.5 w-6 h-6 rounded-full flex items-center justify-center shadow ${
-                        added ? "bg-primary text-white" : "bg-black/55 text-white opacity-0 group-hover:opacity-100"
-                      } transition-opacity`}>
+                      {/* add-to-Media affordance — explicit (click previews instead) */}
+                      <button
+                        type="button"
+                        disabled={added || addingId === it.id}
+                        onClick={(e) => { e.stopPropagation(); if (!added && addingId !== it.id) void addToProject(it); }}
+                        title={added ? "In this project's Media" : "Add to Media"}
+                        className={`absolute top-1.5 right-1.5 w-6 h-6 rounded-full flex items-center justify-center shadow ${
+                          added ? "bg-primary text-white" : "bg-black/55 text-white opacity-0 group-hover:opacity-100 hover:bg-black/80"
+                        } transition-opacity`}
+                      >
                         {addingId === it.id ? <Loader2 size={13} className="animate-spin" /> : added ? <Check size={13} /> : <Plus size={13} />}
-                      </div>
+                      </button>
                     </div>
                     <div className="px-2 py-1.5">
                       <p className="text-[11px] text-text-primary truncate">{it.label}</p>
@@ -292,6 +302,14 @@ export const LibraryPanel: React.FC = () => {
           </>
         )}
       </div>
+      {previewItem && (
+        <MediaPreviewOverlay
+          url={srcWithToken(previewItem.url)}
+          kind={(previewItem.type === "image" ? "image" : previewItem.type === "video" ? "video" : "audio") as PreviewKind}
+          name={previewItem.label}
+          onClose={() => setPreviewItem(null)}
+        />
+      )}
     </div>
   );
 };
