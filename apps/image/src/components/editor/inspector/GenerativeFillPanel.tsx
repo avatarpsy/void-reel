@@ -28,7 +28,11 @@ export function GenerativeFillPanel() {
   const [referenceName, setReferenceName] = useState<string | null>(null);
   const [uploadingRef, setUploadingRef] = useState(false);
 
-  const needsRef = FILL_MODELS.find((m) => m.id === model)?.ref === true;
+  // refMode: 'none' hides the upload UI; 'optional' shows it (kie editors);
+  // 'required' also gates Generate (FLUX Kontext needs a reference).
+  const refMode = FILL_MODELS.find((m) => m.id === model)?.refMode ?? 'none';
+  const showRef = refMode !== 'none';
+  const refRequired = refMode === 'required';
 
   if (!open) return null;
 
@@ -51,7 +55,7 @@ export function GenerativeFillPanel() {
 
   const generate = async () => {
     if (!prompt.trim() || busy) return;
-    if (needsRef && !referenceUrl) { setError('Upload a reference image for this model.'); return; }
+    if (refRequired && !referenceUrl) { setError('Upload a reference image for this model.'); return; }
     setBusy(true);
     setError(null);
     try {
@@ -114,9 +118,9 @@ export function GenerativeFillPanel() {
           </select>
         </div>
 
-        {/* Reference image — used by reference-guided models (e.g. FLUX Kontext)
-            to fill the selection with the uploaded object/style. */}
-        {needsRef && (
+        {/* Reference image — used by reference-guided models (FLUX Kontext, and
+            optionally nano-banana / gpt-image) to fill with the uploaded object/style. */}
+        {showRef && (
           <div className="space-y-1">
             <label className="text-[10px] text-muted-foreground">Reference image</label>
             {referenceUrl ? (
@@ -139,7 +143,7 @@ export function GenerativeFillPanel() {
         {error && <p className="text-[10px] text-destructive">{error}</p>}
         <button
           onClick={generate}
-          disabled={busy || uploadingRef || !prompt.trim() || !hasSelection || (needsRef && !referenceUrl)}
+          disabled={busy || uploadingRef || !prompt.trim() || !hasSelection || (refRequired && !referenceUrl)}
           className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs rounded-md bg-primary text-primary-foreground font-medium hover:bg-primary/90 transition-colors disabled:opacity-50"
         >
           {busy ? (

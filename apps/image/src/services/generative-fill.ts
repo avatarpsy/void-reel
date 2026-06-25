@@ -42,15 +42,26 @@ export async function fetchCreditSituation(): Promise<{ isSubscribed: boolean }>
   }
 }
 
-/** Inpaint models the user can pick, with their credit cost (per ~1MP fill).
- *  `ref: true` models fill the selection using an uploaded REFERENCE image. */
+/** Fill models the user can pick, with their credit cost (per ~1MP fill).
+ *  engine 'fal' = true masked inpainting (FLUX Fill), pixel-locked by the model.
+ *  engine 'kie' = mask-free editor (nano-banana / gpt-image-2): regenerates the
+ *                 whole frame, so we outline the selection + composite only its
+ *                 region back (outside stays untouched).
+ *  refMode 'none' | 'optional' | 'required' drives the reference-image UI. */
 export const FILL_MODELS = [
-  { id: 'flux-dev-inpaint', label: 'FLUX.1 Fill (dev)', credits: 4, ref: false },
-  { id: 'flux-pro-fill', label: 'FLUX.1 Fill (pro)', credits: 6, ref: false },
-  { id: 'flux-kontext-ref', label: 'FLUX Kontext (reference)', credits: 4, ref: true },
+  { id: 'flux-dev-inpaint', label: 'FLUX.1 Fill (dev)', credits: 4, engine: 'fal', refMode: 'none' },
+  { id: 'flux-pro-fill', label: 'FLUX.1 Fill (pro)', credits: 6, engine: 'fal', refMode: 'none' },
+  { id: 'flux-kontext-ref', label: 'FLUX Kontext (reference)', credits: 4, engine: 'fal', refMode: 'required' },
+  { id: 'nano-banana-2', label: 'Nano Banana (reference edit)', credits: 5, engine: 'kie', refMode: 'optional' },
+  { id: 'gpt-image-2', label: 'GPT Image 2 (edit)', credits: 4, engine: 'kie', refMode: 'optional' },
 ] as const;
 
 export type FillModelId = typeof FILL_MODELS[number]['id'];
+
+/** The engine backing a model id (defaults to 'fal'). */
+export function fillEngine(id: FillModelId): 'fal' | 'kie' {
+  return (FILL_MODELS.find((m) => m.id === id)?.engine ?? 'fal') as 'fal' | 'kie';
+}
 
 async function uploadTemp(blob: Blob, name: string, token: string): Promise<string> {
   const file = new File([blob], name, { type: blob.type || 'image/png' });
@@ -85,7 +96,33 @@ export interface GenerativeFillOpts {
   referenceUrl?: string;
 }
 
-/** Run masked inpainting. Returns the result image as a data URL. */
+/** Classify a failed /gen-fill response by status ONLY (never surface server
+ *  text) and throw the matching GenFillError. */
+async function throwGenFillError(res: Response): Promise<never> {
+  let available: number | undefined;
+  let required: number | undefined;
+  try {
+    const j = await res.json();
+    available = j?.data?.available ?? j?.available;
+    required = j?.data?.required ?? j?.required;
+  } catch { /* ignore */ }
+  throw new GenFillError(res.status, { available, required });
+}
+
+/** Fetch a result image URL and return it as a data URL. */
+async function fetchAsDataUrl(url: string): Promise<string> {
+  const imgRes = await fetch(url);
+  if (!imgRes.ok) throw new Error(`fetch result failed (${imgRes.status})`);
+  const blob = await imgRes.blob();
+  return await new Promise<string>((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(fr.result as string);
+    fr.onerror = () => reject(fr.error);
+    fr.readAsDataURL(blob);
+  });
+}
+
+/** Run masked inpainting (fal FLUX Fill). Returns the result as a data URL. */
 export async function runGenerativeFill(opts: GenerativeFillOpts): Promise<string> {
   const token = await getVoidspaceIdToken();
   if (!token) throw new NotSignedInError();
@@ -100,28 +137,41 @@ export async function runGenerativeFill(opts: GenerativeFillOpts): Promise<strin
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ imageUrl, maskUrl, prompt: opts.prompt, model: opts.model, referenceUrl: opts.referenceUrl }),
   });
-  if (!res.ok) {
-    // Classify by status ONLY — never surface server/provider text to the user.
-    let available: number | undefined;
-    let required: number | undefined;
-    try {
-      const j = await res.json();
-      available = j?.data?.available ?? j?.available;
-      required = j?.data?.required ?? j?.required;
-    } catch { /* ignore */ }
-    throw new GenFillError(res.status, { available, required });
-  }
+  if (!res.ok) await throwGenFillError(res);
   const j = await res.json();
   const resultUrl: string = j.url;
   if (!resultUrl) throw new Error('Generative fill returned no image');
+  return fetchAsDataUrl(resultUrl);
+}
 
-  const imgRes = await fetch(resultUrl);
-  if (!imgRes.ok) throw new Error(`fetch result failed (${imgRes.status})`);
-  const blob = await imgRes.blob();
-  return await new Promise<string>((resolve, reject) => {
-    const fr = new FileReader();
-    fr.onload = () => resolve(fr.result as string);
-    fr.onerror = () => reject(fr.error);
-    fr.readAsDataURL(blob);
+/** Run a mask-free Kie edit (nano-banana / gpt-image-2). Uploads the outlined
+ *  composite + sends any reference URLs; returns the FULL result as a data URL
+ *  (the caller composites only the selection region back). */
+export async function runKieEditFill(opts: {
+  markedBlob: Blob;
+  referenceUrls: string[];
+  prompt: string;
+  model: FillModelId;
+  aspectRatio?: string;
+  inverted?: boolean;
+}): Promise<string> {
+  const token = await getVoidspaceIdToken();
+  if (!token) throw new NotSignedInError();
+
+  const imageUrl = await uploadTemp(opts.markedBlob, 'fill-marked.png', token);
+
+  const res = await fetch('/api/studio/gen-fill', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      engine: 'kie', model: opts.model, imageUrl,
+      referenceUrls: opts.referenceUrls, prompt: opts.prompt,
+      aspectRatio: opts.aspectRatio, inverted: opts.inverted === true,
+    }),
   });
+  if (!res.ok) await throwGenFillError(res);
+  const j = await res.json();
+  const resultUrl: string = j.url;
+  if (!resultUrl) throw new Error('Generative fill returned no image');
+  return fetchAsDataUrl(resultUrl);
 }
