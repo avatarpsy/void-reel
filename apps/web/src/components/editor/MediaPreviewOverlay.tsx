@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { X, Music } from "lucide-react";
+import { X, Music, Pencil } from "lucide-react";
 
 export type PreviewKind = "image" | "video" | "audio";
 
@@ -7,6 +7,9 @@ interface MediaPreviewOverlayProps {
   url: string;
   kind: PreviewKind;
   name?: string;
+  /** Raw (un-tokenised) URL to open in the image editor; enables the Edit
+   *  button for images. Falls back to `url` when omitted. */
+  editUrl?: string;
   onClose: () => void;
 }
 
@@ -15,7 +18,7 @@ interface MediaPreviewOverlayProps {
  * opens this (it does NOT add the item to the project); items only land on the
  * timeline when dragged there. Backdrop click / Close button / Escape dismiss.
  */
-export function MediaPreviewOverlay({ url, kind, name, onClose }: MediaPreviewOverlayProps) {
+export function MediaPreviewOverlay({ url, kind, name, editUrl, onClose }: MediaPreviewOverlayProps) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -27,18 +30,40 @@ export function MediaPreviewOverlay({ url, kind, name, onClose }: MediaPreviewOv
     return () => window.removeEventListener("keydown", onKey, true);
   }, [onClose]);
 
+  // Open this image in the Voidspace Image editor (new top-level tab). Same
+  // handoff the chat lightbox uses; for a local-asset source the editor's
+  // "Update original" overwrites the file in place.
+  const openInEditor = () => {
+    const src = editUrl || url;
+    window.open(
+      `/image/?src=${encodeURIComponent(src)}&from=${encodeURIComponent("Editor")}`,
+      "_blank",
+    );
+  };
+
   return (
     <div
       className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 backdrop-blur-sm p-8"
       onClick={onClose}
     >
-      <button
-        type="button"
-        className="absolute top-4 right-4 inline-flex items-center gap-1.5 px-4 h-9 rounded-full bg-black/70 text-white text-sm font-medium border border-white/20 hover:bg-black/90 transition-colors"
-        onClick={onClose}
-      >
-        <X size={14} /> Close
-      </button>
+      <div className="absolute top-4 right-4 flex items-center gap-2">
+        {kind === "image" && (
+          <button
+            type="button"
+            className="inline-flex items-center gap-1.5 px-4 h-9 rounded-full bg-primary text-white text-sm font-medium border border-primary/50 hover:bg-primary/90 transition-colors"
+            onClick={(e) => { e.stopPropagation(); openInEditor(); }}
+          >
+            <Pencil size={14} /> Edit
+          </button>
+        )}
+        <button
+          type="button"
+          className="inline-flex items-center gap-1.5 px-4 h-9 rounded-full bg-black/70 text-white text-sm font-medium border border-white/20 hover:bg-black/90 transition-colors"
+          onClick={onClose}
+        >
+          <X size={14} /> Close
+        </button>
+      </div>
       <div
         className="flex items-center justify-center max-w-[90vw] max-h-[90vh]"
         onClick={(e) => e.stopPropagation()}

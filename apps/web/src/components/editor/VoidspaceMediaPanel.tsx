@@ -891,6 +891,7 @@ export function VoidspaceMediaPanel() {
     {previewAsset && (
       <MediaPreviewOverlay
         url={previewAsset.url}
+        editUrl={previewAsset.url}
         kind={previewAsset.type as PreviewKind}
         name={previewAsset.name}
         onClose={() => setPreviewAsset(null)}

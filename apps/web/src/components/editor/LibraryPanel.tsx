@@ -305,6 +305,7 @@ export const LibraryPanel: React.FC = () => {
       {previewItem && (
         <MediaPreviewOverlay
           url={srcWithToken(previewItem.url)}
+          editUrl={previewItem.url}
           kind={(previewItem.type === "image" ? "image" : previewItem.type === "video" ? "video" : "audio") as PreviewKind}
           name={previewItem.label}
           onClose={() => setPreviewItem(null)}
