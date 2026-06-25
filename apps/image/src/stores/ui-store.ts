@@ -171,6 +171,9 @@ export interface DrawingState {
 
 interface UIState {
   currentView: AppView;
+  // When the editor was opened to edit an image from another surface (chat /
+  // video / music), this holds where to send the result back to. null otherwise.
+  editReturn: { ctx: string; from: string } | null;
   activeTool: Tool;
   activePanel: Panel;
   isPanelCollapsed: boolean;
@@ -218,6 +221,7 @@ interface UIState {
 
 interface UIActions {
   setCurrentView: (view: AppView) => void;
+  setEditReturn: (v: { ctx: string; from: string } | null) => void;
   setActiveTool: (tool: Tool) => void;
   setActivePanel: (panel: Panel) => void;
   togglePanelCollapsed: () => void;
@@ -279,6 +283,7 @@ const ZOOM_LEVELS = [0.1, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4, 5, 8];
 export const useUIStore = create<UIState & UIActions>()(
   subscribeWithSelector((set, get) => ({
     currentView: 'welcome',
+    editReturn: null,
     activeTool: 'select',
     activePanel: 'layers',
     isPanelCollapsed: false,
@@ -417,6 +422,7 @@ export const useUIStore = create<UIState & UIActions>()(
     },
 
     setCurrentView: (view) => set({ currentView: view }),
+    setEditReturn: (v) => set({ editReturn: v }),
     setActiveTool: (tool) => {
       const updates: Partial<UIState> = { activeTool: tool };
       if (tool === 'blur') {
