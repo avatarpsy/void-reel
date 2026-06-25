@@ -976,6 +976,12 @@ export function Canvas() {
 
   const commitMarqueeSelection = useCallback(
     (rect: { x: number; y: number; width: number; height: number }, ellipse: boolean) => {
+      // A click with no real drag (incl. clicking empty space around the image)
+      // DESELECTS, like Photoshop — clear any active selection.
+      if (rect.width < 3 && rect.height < 3) {
+        useSelectionStore.getState().clearSelection();
+        return;
+      }
       if (rect.width < 1 || rect.height < 1) return;
       commitSelectionShape({
         id: `sel-${Date.now()}`,
@@ -997,11 +1003,20 @@ export function Canvas() {
 
   const commitLassoSelection = useCallback(
     (points: { x: number; y: number }[]) => {
-      if (points.length < 3) return;
+      // A click / tiny loop deselects (Photoshop), incl. clicking empty space.
+      if (points.length < 3) {
+        useSelectionStore.getState().clearSelection();
+        return;
+      }
+      const b = boundsFromPath(points);
+      if (b.width < 3 && b.height < 3) {
+        useSelectionStore.getState().clearSelection();
+        return;
+      }
       commitSelectionShape({
         id: `sel-${Date.now()}`,
         type: 'lasso',
-        bounds: boundsFromPath(points),
+        bounds: b,
         path: points,
         feather: 0,
         antiAlias: true,
@@ -1036,7 +1051,8 @@ export function Canvas() {
     (x: number, y: number) => {
       if (!project) return;
       const layerId = findLayerAtPoint(x, y);
-      if (!layerId) return;
+      // Clicking empty space around the image deselects (Photoshop).
+      if (!layerId) { useSelectionStore.getState().clearSelection(); return; }
       const layer = project.layers[layerId];
       if (layer?.type !== 'image') return;
       const il = layer as ImageLayer;
@@ -2421,10 +2437,14 @@ export function Canvas() {
       return;
     }
 
-    if (dragMode === 'marquee') {
+    // Read dragMode LIVE from the store: a click (mousedown+mouseup with no
+    // re-render in between) leaves the closure's `dragMode` stale at its old
+    // value, which would skip this branch and break click-to-deselect.
+    if (useCanvasStore.getState().dragMode === 'marquee') {
       const rect = endMarqueeSelect();
+      const isSelectionTool = activeTool === 'marquee-rect' || activeTool === 'marquee-ellipse';
       if (rect && rect.width > 2 && rect.height > 2) {
-        if (activeTool === 'marquee-rect' || activeTool === 'marquee-ellipse') {
+        if (isSelectionTool) {
           // Turn the dragged rect into a real pixel selection (marching ants).
           commitMarqueeSelection(rect, activeTool === 'marquee-ellipse');
         } else {
@@ -2433,6 +2453,10 @@ export function Canvas() {
             selectLayers(layerIds);
           }
         }
+      } else if (isSelectionTool) {
+        // A click with no real drag (incl. clicking empty space around the image)
+        // DESELECTS, like Photoshop.
+        useSelectionStore.getState().clearSelection();
       }
       endDrag();
       scheduleRender();

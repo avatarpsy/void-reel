@@ -67,6 +67,17 @@ export function useKeyboardShortcuts() {
 
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
+
+      // A bare Alt press/release makes Chrome focus its "Customize and control"
+      // app menu, which steals keyboard focus — so the next spacebar-pan (and
+      // other shortcuts) silently fail. Alt is a TOOL modifier here (Alt-zoom,
+      // Alt to set the clone/heal source), so suppress the browser default and
+      // keep focus on the canvas. Doesn't affect Alt+<key> shortcuts.
+      if (e.key === 'Alt' || e.code === 'AltLeft' || e.code === 'AltRight') {
+        e.preventDefault();
+        return;
+      }
+
       if (isEditable(target)) return;
 
       const isMod = e.metaKey || e.ctrlKey;
@@ -214,6 +225,10 @@ export function useKeyboardShortcuts() {
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
+      // See handleKeyDown — keep Chrome from grabbing its menu on Alt release.
+      if (e.key === 'Alt' || e.code === 'AltLeft' || e.code === 'AltRight') {
+        e.preventDefault();
+      }
       if (e.code === 'Space' && spacePanRef.current.active) {
         const prev = spacePanRef.current.prevTool;
         spacePanRef.current = { active: false, prevTool: null };
