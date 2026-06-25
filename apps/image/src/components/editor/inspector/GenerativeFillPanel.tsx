@@ -46,8 +46,11 @@ export function GenerativeFillPanel() {
       const url = await uploadReferenceImage(file);
       setReferenceUrl(url);
       setReferenceName(file.name);
-    } catch {
-      setError('Could not upload the reference image.');
+    } catch (err) {
+      // Most common cause in practice (esp. on a fresh localhost origin) is no
+      // auth token — tell the user to sign in rather than a generic failure.
+      if (err instanceof NotSignedInError) setError('Sign in to Voidspace (on this site) to upload a reference image.');
+      else setError('Could not upload the reference image.');
     } finally {
       setUploadingRef(false);
     }

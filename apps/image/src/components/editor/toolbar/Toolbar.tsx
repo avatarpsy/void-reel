@@ -14,7 +14,6 @@ import {
   Save,
   PanelLeftClose,
   PanelRightClose,
-  Home,
   ChevronDown,
   SquareDashed,
   Circle,
@@ -273,10 +272,14 @@ export function Toolbar() {
     <div className="h-12 bg-card border-b border-border flex items-center px-3 gap-2">
       <button
         onClick={() => setCurrentView('welcome')}
-        className="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+        className="p-1.5 rounded-lg hover:bg-accent transition-colors"
         title="Home"
       >
-        <Home size={18} />
+        <img
+          src={`${import.meta.env.BASE_URL}images/logo.png`}
+          alt="Voidspace"
+          className="w-6 h-6 hover:scale-110 transition-transform"
+        />
       </button>
 
       <div className="w-px h-6 bg-border mx-1" />
