@@ -167,9 +167,15 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
   const [hasSavedOnce, setHasSavedOnce] = useState(false);
 
   // Opened to edit a studio image we can overwrite in place → default to
-  // updating the original (the user's intent), not spawning a Library copy.
+  // updating the original (the user's intent), not spawning a Library copy,
+  // and match the picker to the source's format so it's not misleading (the
+  // file extension is fixed, so an overwrite always writes that format).
   useEffect(() => {
-    if (editSource) setSaveMode('overwrite');
+    if (!editSource) return;
+    setSaveMode('overwrite');
+    const srcFmt: ExportFormat = editSource.ext === 'jpg' || editSource.ext === 'jpeg'
+      ? 'jpg' : editSource.ext === 'webp' ? 'webp' : 'png';
+    setFormat(srcFmt);
   }, [editSource]);
 
   const currentFormat = FORMATS.find((f) => f.id === format)!;
