@@ -78,67 +78,6 @@ export function createMaskFromImageData(imageData: ImageData): Promise<string> {
   });
 }
 
-export function applyMaskToImageData(
-  imageData: ImageData,
-  mask: LayerMask,
-  maskImage: HTMLImageElement | null
-): ImageData {
-  if (!mask.enabled || !maskImage) {
-    return imageData;
-  }
-
-  const canvas = new OffscreenCanvas(imageData.width, imageData.height);
-  const ctx = canvas.getContext('2d')!;
-
-  ctx.drawImage(maskImage, 0, 0, imageData.width, imageData.height);
-  const maskData = ctx.getImageData(0, 0, imageData.width, imageData.height);
-
-  const result = new ImageData(imageData.width, imageData.height);
-  const density = mask.density / 100;
-
-  for (let i = 0; i < imageData.data.length; i += 4) {
-    result.data[i] = imageData.data[i];
-    result.data[i + 1] = imageData.data[i + 1];
-    result.data[i + 2] = imageData.data[i + 2];
-
-    let maskAlpha = maskData.data[i];
-    if (mask.invert) {
-      maskAlpha = 255 - maskAlpha;
-    }
-    maskAlpha = Math.round(maskAlpha * density);
-
-    result.data[i + 3] = Math.round((imageData.data[i + 3] * maskAlpha) / 255);
-  }
-
-  return result;
-}
-
-export function invertMask(maskDataUrl: string, width: number, height: number): Promise<string> {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      const canvas = new OffscreenCanvas(width, height);
-      const ctx = canvas.getContext('2d')!;
-      ctx.drawImage(img, 0, 0);
-
-      const imageData = ctx.getImageData(0, 0, width, height);
-      for (let i = 0; i < imageData.data.length; i += 4) {
-        imageData.data[i] = 255 - imageData.data[i];
-        imageData.data[i + 1] = 255 - imageData.data[i + 1];
-        imageData.data[i + 2] = 255 - imageData.data[i + 2];
-      }
-      ctx.putImageData(imageData, 0, 0);
-
-      canvas.convertToBlob().then((blob) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result as string);
-        reader.readAsDataURL(blob);
-      });
-    };
-    img.src = maskDataUrl;
-  });
-}
-
 export function featherMask(
   maskDataUrl: string,
   width: number,

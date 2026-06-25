@@ -335,6 +335,35 @@ export function LayerPanel() {
         </div>
       </div>
 
+      {/* Photoshop-style blend mode + opacity for the active layer (reuses the
+          same updateLayer/updateLayerTransform the inspector uses). */}
+      {selectedLayerIds.length === 1 && project?.layers[selectedLayerIds[0]] && !maskEditLayerId && (() => {
+        const sl = project.layers[selectedLayerIds[0]];
+        const opacityPct = Math.round((sl.transform.opacity ?? 1) * 100);
+        const BLEND_MODES = ['normal', 'darken', 'multiply', 'color-burn', 'lighten', 'screen', 'color-dodge', 'overlay', 'soft-light', 'hard-light', 'difference', 'exclusion', 'hue', 'saturation', 'color', 'luminosity'];
+        return (
+          <div className="px-2 py-2 border-b border-border space-y-2">
+            <select
+              value={sl.blendMode?.mode ?? 'normal'}
+              onChange={(e) => updateLayer(sl.id, { blendMode: { mode: e.target.value as Layer['blendMode']['mode'] } })}
+              className="w-full px-2 py-1 text-[11px] bg-background border border-input rounded-md focus:outline-none focus:ring-1 focus:ring-primary capitalize"
+              title="Blend mode"
+            >
+              {BLEND_MODES.map((m) => <option key={m} value={m}>{m.replace(/-/g, ' ')}</option>)}
+            </select>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-muted-foreground w-12 shrink-0">Opacity</span>
+              <input
+                type="range" min={0} max={100} value={opacityPct}
+                onChange={(e) => updateLayerTransform(sl.id, { opacity: Number(e.target.value) / 100 })}
+                className="flex-1 h-1.5 appearance-none bg-secondary rounded-full cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-primary"
+              />
+              <span className="text-[10px] font-mono text-muted-foreground w-8 text-right">{opacityPct}%</span>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* Mask-edit hint + mask-only actions (disable / delete) — these act on the
           MASK, not the layer, so the layer's own opacity/delete stay separate. */}
       {maskEditLayerId && project?.layers[maskEditLayerId]?.mask && (() => {
