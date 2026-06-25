@@ -57,6 +57,12 @@ function buildFalMask(selection: Selection, tw: number, th: number, scale: numbe
   const mx = mc.getContext('2d')!;
   mx.fillStyle = selection.inverted ? 'white' : 'black';
   mx.fillRect(0, 0, tw, th);
+  // Softly blur the mask edge so FLUX inpaints with a feathered boundary and
+  // blends into the surroundings rather than along a hard line (ComfyUI grows +
+  // blurs the inpaint mask for the same reason). Modest — the soft composite in
+  // placeFillResult does the heavier blend.
+  const featherPx = Math.max(2, Math.round(Math.min(tw, th) * 0.01));
+  mx.filter = `blur(${featherPx}px)`;
   mx.fillStyle = selection.inverted ? 'black' : 'white';
   mx.beginPath();
   mx.moveTo(selection.path[0].x * scale, selection.path[0].y * scale);
@@ -65,6 +71,7 @@ function buildFalMask(selection: Selection, tw: number, th: number, scale: numbe
   }
   mx.closePath();
   mx.fill();
+  mx.filter = 'none';
   return mc;
 }
 
@@ -97,7 +104,14 @@ async function placeFillResult(resImg: HTMLImageElement, selection: Selection, W
   const projStore = useProjectStore.getState();
 
   const region = selection.inverted && selection.canvasBounds ? selection.canvasBounds : selection.bounds;
-  const fpad = Math.ceil(selection.feather || 0) + 2;
+  // Blend feather — soften the mask edge so the fill fades into the original
+  // instead of leaving a hard rectangular seam (the same idea as ComfyUI's
+  // "Crop & Stitch" blend_pixels / a feathered inpaint mask). Scales with the
+  // selection, honours a larger user feather. Critical for the mask-free Kie
+  // models, which regenerate the whole frame so their region edge won't match.
+  const minDim = Math.min(region.width, region.height);
+  const blendFeather = Math.max(selection.feather || 0, Math.min(32, Math.max(8, Math.round(minDim * 0.06))));
+  const fpad = Math.ceil(blendFeather) + 2;
   const bx = Math.max(0, Math.floor(region.x - fpad));
   const by = Math.max(0, Math.floor(region.y - fpad));
   const bw = Math.max(1, Math.min(W - bx, Math.ceil(region.width + fpad * 2)));
@@ -129,12 +143,13 @@ async function placeFillResult(resImg: HTMLImageElement, selection: Selection, W
   // layer is bbox-local, so buildMaskData maps the selection into its space).
   const layer = useProjectStore.getState().project?.layers[layerId];
   if (layer) {
-    const maskData = await buildMaskData(layer, selection, true);
+    // Feathered mask = soft-edged stitch (no hard seam).
+    const maskData = await buildMaskData(layer, { ...selection, feather: blendFeather }, true);
     projStore.updateLayer(layerId, {
       name,
       mask: {
         id: `mask-${Date.now()}`, type: 'pixel', enabled: true, linked: true,
-        density: 100, feather: 0, invert: false, data: maskData,
+        density: 100, feather: blendFeather, invert: false, data: maskData,
         vectorPath: [...selection.path],
       },
     });
