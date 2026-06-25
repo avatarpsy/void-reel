@@ -38,7 +38,6 @@ import {
   SquareStack,
 } from 'lucide-react';
 import { useUIStore, Tool } from '../../../stores/ui-store';
-import { saveAndReturn } from '../../../services/image-handoff';
 import { useProjectStore } from '../../../stores/project-store';
 import { ZoomControl } from './ZoomControl';
 
@@ -246,25 +245,9 @@ export function Toolbar() {
     setCurrentView,
     openExportDialog,
     toggleShortcutsPanel,
-    editReturn,
   } = useUIStore();
 
   const { project, setProjectName, undo, redo, canUndo, canRedo } = useProjectStore();
-  const [returning, setReturning] = useState(false);
-
-  // "Save & return": save the edit to the Library, announce it to the surface
-  // that opened us (BroadcastChannel), and close this tab.
-  const handleSaveReturn = async () => {
-    if (!editReturn || returning) return;
-    setReturning(true);
-    try {
-      await saveAndReturn(editReturn.ctx);
-      window.close(); // opened via window.open → closes; if blocked, fall through
-      setTimeout(() => setReturning(false), 1500);
-    } catch {
-      setReturning(false);
-    }
-  };
 
   const handleUndo = () => {
     undo();
@@ -376,18 +359,6 @@ export function Toolbar() {
       >
         <Save size={18} />
       </button>
-
-      {editReturn && (
-        <button
-          onClick={handleSaveReturn}
-          disabled={returning}
-          className="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:bg-primary/90 active:scale-[0.98] transition-all disabled:opacity-60"
-          title={`Save and return to ${editReturn.from}`}
-        >
-          <Save size={16} />
-          {returning ? 'Saving…' : `Save & return`}
-        </button>
-      )}
 
       <button
         onClick={openExportDialog}

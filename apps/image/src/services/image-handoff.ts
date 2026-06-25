@@ -1,43 +1,36 @@
 // image-handoff.ts
 // -----------------------------------------------------------------------------
-// Cross-surface "edit this image, then come back" handoff.
+// "Edit this image" convenience: a surface (studio chat / video / music) opens
+// the image editor in a new tab with `?src=<imageUrl>&from=<label>` and we load
+// that image as a fresh project — so the user doesn't have to re-upload it.
 //
-// A source surface (AI chat, video editor, music editor) opens the image editor
-// in a NEW TAB with `?src=<imageUrl>&ctx=<contextRef>&from=<label>`. We load the
-// image as a fresh project. When the user hits "Save & return", we save the
-// edit to the shared Library (durable URL) and announce it on a same-origin
-// BroadcastChannel keyed by `ctx`; the source tab is listening and applies it.
-// The Library save is also a durable fallback if the source tab is gone.
-//
-// Protocol (shared with every surface):
-//   • open:   window.open(`/image/?src=…&ctx=…&from=…`, '_blank')
-//   • result: BroadcastChannel('voidspace-image-edit').postMessage({ ctx, url })
+// Saving is deliberately plain: the user uses Export → "Save to Voidspace"
+// (overwrite the same Library entry, or save a copy). The result lands in the
+// shared Library (the studio's assets browser), where they swap it onto a scene
+// or cover. No auto-apply / cross-tab magic — overwrite shows on refresh, a copy
+// is picked from the assets browser.
 // -----------------------------------------------------------------------------
 
 import { useProjectStore } from '../stores/project-store';
-import { exportArtboard } from './export-service';
-import { getVoidspaceIdToken, saveImageToVoidspaceLibrary } from './voidspace-storage';
-
-export const EDIT_CHANNEL = 'voidspace-image-edit';
+import { getVoidspaceIdToken } from './voidspace-storage';
 
 export interface HandoffParams {
   src: string;
-  ctx: string;
   from: string;
 }
 
-/** Read + validate the handoff params from the current URL (null if not a handoff). */
+/** Read the handoff params from the current URL (null if not a handoff). */
 export function readHandoffParams(): HandoffParams | null {
   const q = new URLSearchParams(window.location.search);
   const src = q.get('src');
   if (!src) return null;
-  return { src, ctx: q.get('ctx') || '', from: q.get('from') || 'editor' };
+  return { src, from: q.get('from') || 'image' };
 }
 
 /** Strip the handoff params so a refresh doesn't reload the source image. */
 export function clearHandoffUrl(): void {
   const url = new URL(window.location.href);
-  ['src', 'ctx', 'from'].forEach((k) => url.searchParams.delete(k));
+  ['src', 'from'].forEach((k) => url.searchParams.delete(k));
   window.history.replaceState({}, '', url.pathname + (url.search || '') + url.hash);
 }
 
@@ -80,21 +73,4 @@ export async function loadSrcAsProject(src: string, label: string): Promise<void
     size: dataUrl.length, width: w, height: h, thumbnailUrl: dataUrl, dataUrl,
   });
   P.addImageLayer(assetId, { x: 0, y: 0, width: w, height: h });
-}
-
-/** Save the current edit to the Library and announce the result to the source. */
-export async function saveAndReturn(ctx: string): Promise<string> {
-  const { project, selectedArtboardId } = useProjectStore.getState();
-  const artboard = project?.artboards.find((a) => a.id === selectedArtboardId);
-  if (!project || !artboard) throw new Error('nothing to save');
-  const blob = await exportArtboard(project, artboard, {
-    format: 'png', quality: 'high', scale: 1, background: 'include',
-  });
-  const { url } = await saveImageToVoidspaceLibrary(blob, project.name || 'Edited image', 'png');
-  try {
-    const ch = new BroadcastChannel(EDIT_CHANNEL);
-    ch.postMessage({ ctx, url });
-    ch.close();
-  } catch { /* BroadcastChannel unsupported → the Library save is the fallback */ }
-  return url;
 }

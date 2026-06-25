@@ -11,7 +11,6 @@ import { readHandoffParams, clearHandoffUrl, loadSrcAsProject } from './services
 export default function App() {
   const { currentView, showShortcutsPanel, toggleShortcutsPanel, showSettingsDialog, closeSettingsDialog } = useUIStore();
   const setCurrentView = useUIStore((s) => s.setCurrentView);
-  const setEditReturn = useUIStore((s) => s.setEditReturn);
 
   useKeyboardShortcuts();
   useAutoSave();
@@ -20,8 +19,8 @@ export default function App() {
     document.documentElement.classList.add('dark');
   }, []);
 
-  // "Edit this image" handoff: another surface opened us with ?src=…&ctx=…&from=…
-  // Load the image as a fresh project and remember where to return the result.
+  // "Edit this image" handoff: another surface opened us with ?src=…&from=…
+  // Load the image as a fresh project; the user saves it from Export when done.
   useEffect(() => {
     const h = readHandoffParams();
     if (!h) return;
@@ -29,13 +28,12 @@ export default function App() {
     (async () => {
       try {
         await loadSrcAsProject(h.src, h.from);
-        setEditReturn({ ctx: h.ctx, from: h.from });
         setCurrentView('editor');
       } catch (e) {
         console.warn('[image-handoff] could not open source image:', e);
       }
     })();
-  }, [setCurrentView, setEditReturn]);
+  }, [setCurrentView]);
 
   // Note: Escape no longer exits the editor — it deselects/cancels (handled in
   // keyboard-service), matching Photoshop. Use the Home button to leave.
