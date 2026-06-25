@@ -22,7 +22,6 @@ import {
   LayoutGrid,
   Grid2x2,
   List,
-  Sparkles,
   Link2,
 } from "lucide-react";
 import {
@@ -54,8 +53,6 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@openreel/ui";
-import { KieAIImageDialog } from "./kieai/KieAIImageDialog";
-import { loadMediaBlob } from "../../services/media-storage";
 import { useKieAIStore } from "../../stores/kieai-store";
 
 const formatDuration = (seconds: number): string => {
@@ -147,7 +144,6 @@ const MediaThumbnail: React.FC<{
   onReplace: () => void;
   onDragStart: (e: React.DragEvent) => void;
   onAddToTimeline: () => void;
-  onKieAI?: () => void;
   onRetryKieAI?: () => void;
   onRelinkItem: () => void;
   onRelinkAll?: () => void;
@@ -161,7 +157,6 @@ const MediaThumbnail: React.FC<{
   onReplace,
   onDragStart,
   onAddToTimeline,
-  onKieAI,
   onRetryKieAI,
   onRelinkItem,
   onRelinkAll,
@@ -305,15 +300,6 @@ const MediaThumbnail: React.FC<{
         </>
       ) : (
         <>
-          {item.type === "image" && onKieAI && (
-            <button
-              onClick={(e) => { e.stopPropagation(); onKieAI(); }}
-              title="Create with KieAI"
-              className="p-2 bg-purple-500/20 rounded-full hover:bg-purple-500/40 backdrop-blur-sm transition-colors"
-            >
-              <Sparkles size={14} className="text-purple-300" />
-            </button>
-          )}
           <button
             onClick={(e) => { e.stopPropagation(); onAddToTimeline(); }}
             title="Add to timeline"
@@ -423,15 +409,6 @@ const MediaThumbnail: React.FC<{
               </>
             ) : (
               <>
-                {item.type === "image" && onKieAI && (
-                  <button
-                    onClick={(e) => { e.stopPropagation(); onKieAI(); }}
-                    title="Create with KieAI"
-                    className="p-1 bg-purple-500/20 rounded hover:bg-purple-500/40 transition-colors"
-                  >
-                    <Sparkles size={12} className="text-purple-300" />
-                  </button>
-                )}
                 <button
                   onClick={(e) => { e.stopPropagation(); onAddToTimeline(); }}
                   title="Add to timeline"
@@ -457,12 +434,6 @@ const MediaThumbnail: React.FC<{
       </div>
         </ContextMenuTrigger>
         <ContextMenuContent>
-          {item.type === "image" && onKieAI && (
-            <ContextMenuItem onClick={onKieAI}>
-              <Sparkles size={13} className="mr-2 text-primary" />
-              Create with KieAI
-            </ContextMenuItem>
-          )}
           <ContextMenuItem onClick={(e) => { (e as React.MouseEvent).stopPropagation?.(); onAddToTimeline(); }}>
             <Plus size={13} className="mr-2" />
             Add to Timeline
@@ -621,12 +592,6 @@ const MediaThumbnail: React.FC<{
     </div>
       </ContextMenuTrigger>
       <ContextMenuContent>
-        {item.type === "image" && onKieAI && (
-          <ContextMenuItem onClick={onKieAI}>
-            <Sparkles size={13} className="mr-2 text-primary" />
-            Create with KieAI
-          </ContextMenuItem>
-        )}
         <ContextMenuItem onClick={() => onAddToTimeline()}>
           <Plus size={13} className="mr-2" />
           Add to Timeline
@@ -744,7 +709,6 @@ export const AssetsPanel: React.FC = () => {
   >("all");
 
   // KieAI image generation dialog
-  const [kieaiDialog, setKieaiDialog] = useState<{ file: File; previewUrl: string | null } | null>(null);
 
   // Project store
   const {
@@ -1200,21 +1164,6 @@ export const AssetsPanel: React.FC = () => {
   );
 
   // Open KieAI dialog for an image asset
-  const handleOpenKieAI = useCallback(async (item: MediaItem) => {
-    try {
-      const blob = await loadMediaBlob(item.id);
-      if (!blob) {
-        toast.error("Asset not found", "Cannot load the image data for this asset.");
-        return;
-      }
-      const mimeType = blob.type || (item.name.match(/\.png$/i) ? "image/png" : "image/jpeg");
-      const file = new File([blob], item.name, { type: mimeType as string });
-      setKieaiDialog({ file, previewUrl: item.thumbnailUrl });
-    } catch (err) {
-      console.error("[KieAI] Failed to load media blob:", err);
-      toast.error("Failed to open KieAI", err instanceof Error ? err.message : "Unknown error");
-    }
-  }, []);
 
   const handleRetryKieAI = useCallback((item: MediaItem) => {
     if (!item.kieaiTaskId) return;
@@ -1549,7 +1498,6 @@ export const AssetsPanel: React.FC = () => {
                               onReplace={() => handleReplaceAsset(item.id)}
                               onDragStart={(e) => handleItemDragStart(e, item)}
                               onAddToTimeline={() => handleAddToTimeline(item)}
-                              onKieAI={item.type === "image" && !item.isPending && !item.kieaiError ? () => handleOpenKieAI(item) : undefined}
                               onRetryKieAI={item.kieaiError && item.kieaiTaskId ? () => handleRetryKieAI(item) : undefined}
                               onRelinkItem={() => handleRelinkSingleItem(item)}
                               onRelinkAll={missingAssetsCount > 0 ? handleRelinkFromFolder : undefined}
@@ -2003,14 +1951,6 @@ export const AssetsPanel: React.FC = () => {
         />
       )}
 
-      {kieaiDialog && (
-        <KieAIImageDialog
-          open={true}
-          onClose={() => setKieaiDialog(null)}
-          sourceFile={kieaiDialog.file}
-          previewUrl={kieaiDialog.previewUrl}
-        />
-      )}
     </div>
   );
 };
