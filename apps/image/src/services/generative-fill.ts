@@ -11,9 +11,10 @@
 
 import { getVoidspaceIdToken, NotSignedInError } from './voidspace-storage';
 
-/** Single engine (fal FLUX.1 [dev] Inpainting) — shown for transparency. */
+/** Inpaint models the user can pick, with their credit cost (per ~1MP fill). */
 export const FILL_MODELS = [
-  { id: 'flux-dev-inpaint', label: 'FLUX.1 Fill (dev)' },
+  { id: 'flux-dev-inpaint', label: 'FLUX.1 Fill (dev)', credits: 4 },
+  { id: 'flux-pro-fill', label: 'FLUX.1 Fill (pro)', credits: 6 },
 ] as const;
 
 export type FillModelId = typeof FILL_MODELS[number]['id'];
@@ -54,7 +55,7 @@ export async function runGenerativeFill(opts: GenerativeFillOpts): Promise<strin
   const res = await fetch('/api/studio/gen-fill', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ imageUrl, maskUrl, prompt: opts.prompt }),
+    body: JSON.stringify({ imageUrl, maskUrl, prompt: opts.prompt, model: opts.model }),
   });
   if (!res.ok) {
     let msg = `Generative fill failed (${res.status})`;

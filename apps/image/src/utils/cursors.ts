@@ -53,10 +53,6 @@ const shapeSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"
 
 const zoomInSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><filter id="s"><feDropShadow dx="0" dy="0" stdDeviation="0.5" flood-color="white" flood-opacity="1"/></filter><g filter="url(#s)"><circle cx="11" cy="11" r="8"/><line x1="21" x2="16.65" y1="21" y2="16.65"/><line x1="11" x2="11" y1="8" y2="14"/><line x1="8" x2="14" y1="11" y2="11"/></g></svg>`;
 
-const marqueeSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><filter id="s"><feDropShadow dx="0" dy="0" stdDeviation="0.5" flood-color="white" flood-opacity="1"/></filter><g filter="url(#s)"><rect x="3" y="3" width="18" height="18" rx="2" stroke-dasharray="4 2"/></g></svg>`;
-
-const ellipseMarqueeSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><filter id="s"><feDropShadow dx="0" dy="0" stdDeviation="0.5" flood-color="white" flood-opacity="1"/></filter><g filter="url(#s)"><ellipse cx="12" cy="12" rx="9" ry="7" stroke-dasharray="4 2"/></g></svg>`;
-
 export const toolCursors: Record<string, string> = {
   'select': 'default',
   'hand': 'grab',
@@ -67,8 +63,9 @@ export const toolCursors: Record<string, string> = {
   'pen': createSvgCursor(penSvg, 2, 22),
   'shape': createSvgCursor(shapeSvg, 12, 12),
   'crop': createSvgCursor(cropSvg, 6, 6),
-  'marquee-rect': createSvgCursor(marqueeSvg, 12, 12),
-  'marquee-ellipse': createSvgCursor(ellipseMarqueeSvg, 12, 12),
+  // Photoshop shows a plain crosshair for the marquee tools (precise cursor).
+  'marquee-rect': 'crosshair',
+  'marquee-ellipse': 'crosshair',
   'lasso': createSvgCursor(lassoSvg, 5, 18),
   'lasso-polygon': createSvgCursor(lassoSvg, 5, 18),
   'magic-wand': createSvgCursor(wandSvg, 5, 5),

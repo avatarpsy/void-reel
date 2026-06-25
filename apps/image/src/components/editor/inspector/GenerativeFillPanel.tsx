@@ -72,7 +72,7 @@ export function GenerativeFillPanel() {
             className="flex-1 px-2 py-1 text-[11px] bg-background border border-input rounded-md focus:outline-none focus:ring-1 focus:ring-primary"
           >
             {FILL_MODELS.map((m) => (
-              <option key={m.id} value={m.id}>{m.label}</option>
+              <option key={m.id} value={m.id}>{m.label} — {m.credits} cr</option>
             ))}
           </select>
         </div>

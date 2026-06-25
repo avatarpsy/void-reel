@@ -50,6 +50,7 @@ export function LayerPanel() {
     groupLayers,
     ungroupLayers,
     mergeDown,
+    reorderLayers,
   } = useProjectStore();
   const activeSelection = useSelectionStore((s) => s.active);
   const clearSelection = useSelectionStore((s) => s.clearSelection);
@@ -61,6 +62,11 @@ export function LayerPanel() {
   const [editingLayerId, setEditingLayerId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState('');
   const editInputRef = useRef<HTMLInputElement>(null);
+  // Drag-to-reorder. The ref is the source of truth for handlers (state can lag
+  // between rapid drag events); the state just drives the visual feedback.
+  const [dragId, setDragId] = useState<string | null>(null);
+  const dragIdRef = useRef<string | null>(null);
+  const [dropInfo, setDropInfo] = useState<{ id: string; pos: 'before' | 'after' } | null>(null);
 
   const artboard = project?.artboards.find((a) => a.id === selectedArtboardId);
   const allLayers = artboard?.layerIds.map((id) => project?.layers[id]).filter(Boolean) as Layer[] ?? [];
@@ -179,6 +185,39 @@ export function LayerPanel() {
     e.stopPropagation();
     selectLayer(layer.id);
     setMaskEditLayerId(null);
+  };
+
+  // Drag-to-reorder: move a layer within its container — top-level siblings
+  // (reorderLayers) or siblings inside the same group (group.childIds). Moving
+  // a layer INTO/OUT OF a group via drag is a follow-up.
+  const handleReorderDrop = (targetId: string) => {
+    const sourceId = dragIdRef.current;
+    const di = dropInfo;
+    dragIdRef.current = null;
+    setDragId(null);
+    setDropInfo(null);
+    if (!sourceId || sourceId === targetId || !project || !artboard) return;
+    const groupOf = (id: string) =>
+      Object.values(project.layers).find(
+        (l): l is GroupLayer => l.type === 'group' && (l as GroupLayer).childIds.includes(id),
+      );
+    const srcInRoot = artboard.layerIds.includes(sourceId);
+    const tgtInRoot = artboard.layerIds.includes(targetId);
+    const srcGroup = groupOf(sourceId);
+    const tgtGroup = groupOf(targetId);
+    const pos = di?.pos ?? 'before';
+    const reorder = (arr: string[]) => {
+      const a = arr.filter((x) => x !== sourceId);
+      const ti = a.indexOf(targetId);
+      if (ti < 0) return arr;
+      a.splice(pos === 'before' ? ti : ti + 1, 0, sourceId);
+      return a;
+    };
+    if (srcInRoot && tgtInRoot) {
+      reorderLayers(reorder(artboard.layerIds));
+    } else if (srcGroup && tgtGroup && srcGroup.id === tgtGroup.id) {
+      updateLayer(srcGroup.id, { childIds: reorder(srcGroup.childIds) });
+    }
   };
 
   const handleMergeDown = (layerId: string, e?: React.MouseEvent) => {
@@ -304,11 +343,24 @@ export function LayerPanel() {
                   <ContextMenuTrigger asChild>
                     <div
                       onClick={() => { selectLayer(layer.id); setMaskEditLayerId(null); }}
+                      draggable={editingLayerId !== layer.id}
+                      onDragStart={(e) => { dragIdRef.current = layer.id; setDragId(layer.id); e.dataTransfer.effectAllowed = 'move'; }}
+                      onDragOver={(e) => {
+                        const src = dragIdRef.current;
+                        if (!src || src === layer.id) return;
+                        e.preventDefault();
+                        const r = e.currentTarget.getBoundingClientRect();
+                        setDropInfo({ id: layer.id, pos: e.clientY - r.top < r.height / 2 ? 'before' : 'after' });
+                      }}
+                      onDrop={(e) => { e.preventDefault(); handleReorderDrop(layer.id); }}
+                      onDragEnd={() => { dragIdRef.current = null; setDragId(null); setDropInfo(null); }}
                       style={{ paddingLeft: 12 + depth * 14 }}
                       className={`group flex items-center gap-2 pr-3 py-2 cursor-pointer transition-colors ${
                         isSelected
                           ? 'bg-primary/20 border-l-2 border-primary'
                           : 'hover:bg-accent border-l-2 border-transparent'
+                      } ${dragId === layer.id ? 'opacity-40' : ''} ${
+                        dropInfo?.id === layer.id ? (dropInfo.pos === 'before' ? 'border-t-2 border-t-primary' : 'border-b-2 border-b-primary') : ''
                       }`}
                     >
                       {/* Expand/collapse chevron for groups (nested rendering). */}

@@ -1575,7 +1575,10 @@ export function Canvas() {
       }
 
       if (activeTool === 'clone-stamp' || activeTool === 'healing-brush') {
-        const layerId = findLayerAtPoint(x, y);
+        // Photoshop clones on the ACTIVE layer — use the selected image layer if
+        // there is one, so a transparent layer on top doesn't swallow the stroke.
+        const selId = selectedLayerIds[0];
+        const layerId = (selId && project?.layers[selId]?.type === 'image') ? selId : findLayerAtPoint(x, y);
         if (layerId && project) {
           const layer = project.layers[layerId];
           if (layer?.type === 'image') {
@@ -1643,6 +1646,10 @@ export function Canvas() {
                     healingBrushToolRef.current.startHeal(localX, localY);
                     healingBrushToolRef.current.heal(tempCtx, localX, localY);
                   } else {
+                    // No source set yet — guide the user (Photoshop: Alt-click first).
+                    useUIStore.getState().showNotification('info', activeTool === 'clone-stamp'
+                      ? 'Alt-click to set the clone source, then paint.'
+                      : 'Alt-click to set the heal source, then paint.');
                     return;
                   }
 
