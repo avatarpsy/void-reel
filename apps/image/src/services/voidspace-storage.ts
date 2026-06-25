@@ -287,6 +287,11 @@ export async function overwriteLocalAsset(
     body: blob,
   });
   if (!res.ok) throw new Error(`overwrite failed (${res.status})`);
+  // Tell any same-origin surface that opened us (the studio tab) that this
+  // source file changed, so it can cache-bust the now-stale displayed image.
+  try {
+    new BroadcastChannel('voidspace-image-edit').postMessage({ type: 'image-updated', url: target.url });
+  } catch { /* BroadcastChannel unavailable — the file is still updated */ }
   // The file is replaced in place; the original URL now serves the new bytes.
   return { url: target.url };
 }
