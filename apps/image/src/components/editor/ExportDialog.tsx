@@ -12,7 +12,7 @@ import {
   type ExportQuality,
   type ExportOptions,
 } from '../../services/export-service';
-import { saveImageToVoidspaceLibrary, NotSignedInError } from '../../services/voidspace-storage';
+import { saveImageToVoidspaceLibrary, overwriteLocalAsset, NotSignedInError } from '../../services/voidspace-storage';
 
 interface ExportDialogProps {
   open: boolean;
@@ -144,7 +144,7 @@ type SizeMode = 'scale' | 'custom' | 'dpi';
 
 export function ExportDialog({ open, onClose }: ExportDialogProps) {
   const { project, selectedArtboardId } = useProjectStore();
-  const { showNotification } = useUIStore();
+  const { showNotification, editSource } = useUIStore();
 
   const [format, setFormat] = useState<ExportFormat>('png');
   const [quality, setQuality] = useState<ExportQuality>('high');
@@ -165,6 +165,12 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
   // Whether a re-save overwrites the same Library entry or adds a new copy.
   const [saveMode, setSaveMode] = useState<'copy' | 'overwrite'>('copy');
   const [hasSavedOnce, setHasSavedOnce] = useState(false);
+
+  // Opened to edit a studio image we can overwrite in place → default to
+  // updating the original (the user's intent), not spawning a Library copy.
+  useEffect(() => {
+    if (editSource) setSaveMode('overwrite');
+  }, [editSource]);
 
   const currentFormat = FORMATS.find((f) => f.id === format)!;
   const artboard = project?.artboards.find((a) => a.id === selectedArtboardId);
@@ -316,15 +322,31 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
     if (!project || !artboard) return;
     setIsSaving(true);
     try {
+      // "Update original" = overwrite the exact studio file we opened, encoded
+      // in ITS format so the in-place bytes stay valid for its extension.
+      const updateOriginal = !!editSource && saveMode === 'overwrite';
+      const fmt: ExportFormat = updateOriginal
+        ? (editSource!.ext === 'jpg' || editSource!.ext === 'jpeg' ? 'jpg' : editSource!.ext === 'webp' ? 'webp' : 'png')
+        : format;
+      const supportsAlpha = fmt !== 'jpg';
       const options: ExportOptions = {
-        format,
+        format: fmt,
         quality,
         scale: effectiveScale,
-        background: currentFormat.supportsTransparency ? background : 'include',
+        background: supportsAlpha ? background : 'include',
       };
       const blob = await exportArtboard(project, artboard, options);
+
+      if (updateOriginal) {
+        await overwriteLocalAsset(blob, editSource!);
+        setHasSavedOnce(true);
+        showNotification('success', 'Updated the original — refresh the studio to see it');
+        onClose();
+        return;
+      }
+
       // SVG/PDF fall back to PNG bytes in the exporter; store as a raster type.
-      const rasterFormat = format === 'jpg' || format === 'webp' ? format : 'png';
+      const rasterFormat = fmt === 'jpg' || fmt === 'webp' ? fmt : 'png';
       const name = (saveName.trim() || `${project.name} — ${artboard.name}`).slice(0, 80);
       await saveImageToVoidspaceLibrary(blob, name, rasterFormat, { overwrite: saveMode === 'overwrite' });
       setHasSavedOnce(true);
@@ -658,10 +680,16 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
               onClick={() => setSaveMode('overwrite')}
               className={`px-2.5 py-1 transition-colors ${saveMode === 'overwrite' ? 'bg-primary text-primary-foreground' : 'bg-background text-muted-foreground hover:bg-accent'}`}
             >
-              Overwrite
+              {editSource ? 'Update original' : 'Overwrite'}
             </button>
           </div>
-          {hasSavedOnce && saveMode === 'copy' && (
+          {editSource && saveMode === 'overwrite' && (
+            <span className="text-[10px] text-muted-foreground">replaces the studio image — shows on refresh</span>
+          )}
+          {editSource && saveMode === 'copy' && (
+            <span className="text-[10px] text-muted-foreground">new Library image — swap it in from the studio</span>
+          )}
+          {!editSource && hasSavedOnce && saveMode === 'copy' && (
             <span className="text-[10px] text-muted-foreground">a new Library entry each save</span>
           )}
         </div>

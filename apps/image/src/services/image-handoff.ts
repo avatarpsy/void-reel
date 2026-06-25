@@ -19,12 +19,43 @@ export interface HandoffParams {
   from: string;
 }
 
+/** A studio image file we can overwrite IN PLACE (a local-asset URL). */
+export interface EditSource {
+  projectId: string;
+  kind: string;       // save-render KIND_DIRS key; 'image' for frames
+  filename: string;   // on-disk name incl. extension
+  ext: string;        // png | jpg | webp …
+  url: string;        // the original src URL (unchanged after overwrite)
+}
+
 /** Read the handoff params from the current URL (null if not a handoff). */
 export function readHandoffParams(): HandoffParams | null {
   const q = new URLSearchParams(window.location.search);
   const src = q.get('src');
   if (!src) return null;
   return { src, from: q.get('from') || 'image' };
+}
+
+/**
+ * If `src` is a studio `local-asset` URL, return the file it points at so the
+ * editor can overwrite it in place (the studio's read path and save-render's
+ * write path both resolve safeSlug(projectId)/frames/safeSlug(name) — same
+ * file). Returns null for any other URL (Kie/GCS temp links), where the only
+ * option is to save a copy.
+ */
+export function parseLocalAssetSource(src: string): EditSource | null {
+  try {
+    const u = new URL(src, window.location.origin);
+    if (!u.pathname.replace(/\/+$/, '').endsWith('/api/studio/local-asset')) return null;
+    const projectId = (u.searchParams.get('projectId') || '').trim();
+    const filename = (u.searchParams.get('filename') || '').trim();
+    const kind = (u.searchParams.get('kind') || 'image').trim() || 'image';
+    if (!projectId || !filename) return null;
+    const ext = (filename.split('.').pop() || 'png').toLowerCase();
+    return { projectId, kind, filename, ext, url: src };
+  } catch {
+    return null;
+  }
 }
 
 /** Strip the handoff params so a refresh doesn't reload the source image. */

@@ -251,3 +251,42 @@ export async function saveImageToVoidspaceLibrary(
   if (!j.localServeUrl) throw new Error('save returned no url');
   return { url: j.localServeUrl, permanentUrl: j.localServeUrl };
 }
+
+/**
+ * Overwrite an EXISTING studio image file in place. Used when the editor was
+ * opened to edit a studio scene/cover image (a /api/studio/local-asset URL):
+ * we write the new bytes to the SAME projectId/kind/filename via save-render,
+ * so the source URL serves the updated image (shows on a refresh). save-render
+ * and local-asset both resolve safeSlug(projectId)/<dir>/safeSlug(stem).<ext>,
+ * and frame names are already slug-stable, so this lands on the same file.
+ *
+ * The blob MUST be encoded in the source's format (caller's responsibility) so
+ * the in-place bytes stay valid for the file's extension.
+ */
+export async function overwriteLocalAsset(
+  blob: Blob,
+  target: { projectId: string; kind: string; filename: string; ext: string; url: string },
+): Promise<{ url: string }> {
+  const token = await getVoidspaceIdToken();
+  if (!token) throw new NotSignedInError();
+
+  const stem = target.filename.replace(/\.[^.]+$/, '');
+  const ext = (target.ext || 'png').toLowerCase();
+  const qs = new URLSearchParams({
+    // save-render's stable-filename (overwrite) path is gated on kind==='image';
+    // studio frames are kind 'image', which is what we target here.
+    kind: target.kind || 'image',
+    ext,
+    projectId: target.projectId,
+    title: stem,
+    filename: stem, // stable name → save-render overwrites the same file
+  });
+  const res = await fetch(`/api/studio/save-render?${qs.toString()}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/octet-stream' },
+    body: blob,
+  });
+  if (!res.ok) throw new Error(`overwrite failed (${res.status})`);
+  // The file is replaced in place; the original URL now serves the new bytes.
+  return { url: target.url };
+}

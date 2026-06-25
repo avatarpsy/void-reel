@@ -6,11 +6,12 @@ import { KeyboardShortcutsPanel } from './components/editor/KeyboardShortcutsPan
 import { SettingsDialog } from './components/editor/SettingsDialog';
 import { useKeyboardShortcuts } from './services/keyboard-service';
 import { useAutoSave } from './hooks/useAutoSave';
-import { readHandoffParams, clearHandoffUrl, loadSrcAsProject } from './services/image-handoff';
+import { readHandoffParams, clearHandoffUrl, loadSrcAsProject, parseLocalAssetSource } from './services/image-handoff';
 
 export default function App() {
   const { currentView, showShortcutsPanel, toggleShortcutsPanel, showSettingsDialog, closeSettingsDialog } = useUIStore();
   const setCurrentView = useUIStore((s) => s.setCurrentView);
+  const setEditSource = useUIStore((s) => s.setEditSource);
 
   useKeyboardShortcuts();
   useAutoSave();
@@ -25,15 +26,17 @@ export default function App() {
     const h = readHandoffParams();
     if (!h) return;
     clearHandoffUrl();
+    const source = parseLocalAssetSource(h.src);
     (async () => {
       try {
         await loadSrcAsProject(h.src, h.from);
+        setEditSource(source); // overwrite-in-place target (null if not local)
         setCurrentView('editor');
       } catch (e) {
         console.warn('[image-handoff] could not open source image:', e);
       }
     })();
-  }, [setCurrentView]);
+  }, [setCurrentView, setEditSource]);
 
   // Note: Escape no longer exits the editor — it deselects/cancels (handled in
   // keyboard-service), matching Photoshop. Use the Home button to leave.
