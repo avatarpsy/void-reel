@@ -38,6 +38,7 @@ import { AspectRatioMatchDialog } from "./dialogs/AspectRatioMatchDialog";
 import { LibraryPanel } from "./LibraryPanel";
 // Voidspace fork: keep Voidspace media panel + add upstream's AI generation tab + Kie.ai dialog.
 import { VoidspaceMediaPanel } from "./VoidspaceMediaPanel";
+import { MediaPreviewOverlay, type PreviewKind } from "./MediaPreviewOverlay";
 import { AIGenTab } from "./AIGenTab";
 import { AIMusicSection } from "./AIMusicSection";
 import { toast } from "../../stores/notification-store";
@@ -141,6 +142,7 @@ const MediaThumbnail: React.FC<{
   isSelected: boolean;
   viewMode: MediaViewMode;
   onSelect: () => void;
+  onPreview: () => void;
   onDelete: () => void;
   onReplace: () => void;
   onDragStart: (e: React.DragEvent) => void;
@@ -154,6 +156,7 @@ const MediaThumbnail: React.FC<{
   isSelected,
   viewMode,
   onSelect,
+  onPreview,
   onDelete,
   onReplace,
   onDragStart,
@@ -338,8 +341,7 @@ const MediaThumbnail: React.FC<{
       <div
         draggable
         onDragStart={onDragStart}
-        onClick={onSelect}
-        onDoubleClick={(e) => { e.stopPropagation(); onAddToTimeline(); }}
+        onClick={() => { onSelect(); onPreview(); }}
         onMouseEnter={() => setIsHovered(true)}
         onMouseLeave={() => setIsHovered(false)}
         className={`flex items-center gap-3 px-2 py-1.5 rounded-lg border-2 cursor-pointer transition-all group ${borderClass}`}
@@ -497,7 +499,7 @@ const MediaThumbnail: React.FC<{
       <div
         draggable
         onDragStart={onDragStart}
-        onClick={onSelect}
+        onClick={() => { onSelect(); onPreview(); }}
         onDoubleClick={(e) => {
           e.stopPropagation();
           onAddToTimeline();
@@ -722,6 +724,18 @@ export const AssetsPanel: React.FC = () => {
     itemToAdd: MediaItem;
   } | null>(null);
   const [mediaViewMode, setMediaViewMode] = useState<MediaViewMode>("large");
+  // Clicking a Media tile opens a fullscreen preview (consistent with the
+  // Library/Voidspace tabs); it never auto-adds — drag onto the timeline to use.
+  const [previewMediaItem, setPreviewMediaItem] = useState<MediaItem | null>(null);
+  // Prefer the project blob (always playable) over a possibly-expired remote URL.
+  const previewMediaSrc = useMemo(() => {
+    if (!previewMediaItem) return "";
+    if (previewMediaItem.blob instanceof Blob) return URL.createObjectURL(previewMediaItem.blob);
+    return previewMediaItem.originalUrl || previewMediaItem.thumbnailUrl || "";
+  }, [previewMediaItem]);
+  React.useEffect(() => {
+    return () => { if (previewMediaSrc.startsWith("blob:")) URL.revokeObjectURL(previewMediaSrc); };
+  }, [previewMediaSrc]);
   const [generatingBackground, setGeneratingBackground] = useState<
     string | null
   >(null);
@@ -1530,6 +1544,7 @@ export const AssetsPanel: React.FC = () => {
                               isSelected={isSelected(item.id)}
                               viewMode={mediaViewMode}
                               onSelect={() => handleSelectItem(item.id)}
+                              onPreview={() => setPreviewMediaItem(item)}
                               onDelete={() => handleDeleteItem(item.id)}
                               onReplace={() => handleReplaceAsset(item.id)}
                               onDragStart={(e) => handleItemDragStart(e, item)}
@@ -1963,6 +1978,18 @@ export const AssetsPanel: React.FC = () => {
 
       {/* AI generation tab — upstream's panel (Kie.ai brief, aspect, live timeline placeholders) */}
       {activeTab === "ai-gen" && <AIGenTab />}
+
+      {/* Media-tile fullscreen preview (click a Media tile). Consistent with the
+          Library/Voidspace preview; Edit opens the image editor for images. */}
+      {previewMediaItem && previewMediaSrc && (
+        <MediaPreviewOverlay
+          url={previewMediaSrc}
+          editUrl={previewMediaItem.originalUrl || undefined}
+          kind={previewMediaItem.type as PreviewKind}
+          name={previewMediaItem.name}
+          onClose={() => setPreviewMediaItem(null)}
+        />
+      )}
 
       {aspectRatioDialogData && (
         <AspectRatioMatchDialog
