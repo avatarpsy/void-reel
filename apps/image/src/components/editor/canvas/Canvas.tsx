@@ -946,19 +946,33 @@ export function Canvas() {
     (x: number, y: number): string | null => {
       if (!artboard || !project) return null;
 
-      for (const layerId of artboard.layerIds) {
+      // Hit-test for the topmost LEAF layer at (x,y). Groups are descended into
+      // and never returned — a canvas click selects the actual layer, NOT its
+      // parent group (groups are only selectable from the Layers panel). Children
+      // are stored group-local, so accumulate each group's offset (ox/oy).
+      const hit = (layerId: string, ox: number, oy: number): string | null => {
         const layer = project.layers[layerId];
-        if (!layer || !layer.visible || layer.locked) continue;
-
-        const { transform } = layer;
-        if (
-          x >= transform.x &&
-          x <= transform.x + transform.width &&
-          y >= transform.y &&
-          y <= transform.y + transform.height
-        ) {
-          return layerId;
+        if (!layer || !layer.visible || layer.locked) return null;
+        if (layer.type === 'group') {
+          const g = layer as GroupLayer;
+          const cox = ox + g.transform.x;
+          const coy = oy + g.transform.y;
+          // childIds are top-first → return the first (topmost) descendant hit.
+          for (const childId of g.childIds) {
+            const r = hit(childId, cox, coy);
+            if (r) return r;
+          }
+          return null;
         }
+        const t = layer.transform;
+        const lx = ox + t.x, ly = oy + t.y;
+        if (x >= lx && x <= lx + t.width && y >= ly && y <= ly + t.height) return layerId;
+        return null;
+      };
+
+      for (const layerId of artboard.layerIds) {
+        const r = hit(layerId, 0, 0);
+        if (r) return r;
       }
       return null;
     },
@@ -1173,6 +1187,11 @@ export function Canvas() {
     (e: React.MouseEvent) => {
       const canvas = canvasRef.current;
       if (!canvas) return;
+
+      // Right-click is handled entirely by onContextMenu. Running the tool logic
+      // here would start a 0-size marquee whose mouse-up DESELECTS — wiping the
+      // pixel selection the user is about to right-click → Generative Fill on.
+      if (e.button === 2) return;
 
       const rect = canvas.getBoundingClientRect();
       const canvasX = e.clientX - rect.left;
@@ -1747,6 +1766,32 @@ export function Canvas() {
               setActiveResizeHandle(handleHit.handle);
               startDrag('resize', e.clientX, e.clientY);
             }
+            return;
+          }
+        }
+
+        // A group is only selectable from the Layers panel (canvas clicks pick
+        // the leaf). But if a group IS selected and you click inside it, move
+        // the group rather than re-picking the leaf underneath — else groups
+        // could never be dragged on the canvas.
+        if (!e.shiftKey && selectedLayerIds.some((id) => project?.layers[id]?.type === 'group')) {
+          const absBounds = (id: string) => {
+            const l = project?.layers[id];
+            if (!l) return null;
+            let ox = 0, oy = 0, pid = l.parentId;
+            for (let g = 0; pid && g < 100; g++) {
+              const p = project?.layers[pid];
+              if (!p) break;
+              ox += p.transform.x; oy += p.transform.y; pid = p.parentId ?? null;
+            }
+            return { x: ox + l.transform.x, y: oy + l.transform.y, w: l.transform.width, h: l.transform.height };
+          };
+          const insideSel = selectedLayerIds.some((id) => {
+            const b = absBounds(id);
+            return b && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
+          });
+          if (insideSel) {
+            startDrag('move', e.clientX, e.clientY);
             return;
           }
         }

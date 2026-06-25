@@ -187,9 +187,10 @@ export function LayerPanel() {
     setMaskEditLayerId(null);
   };
 
-  // Drag-to-reorder: move a layer within its container — top-level siblings
-  // (reorderLayers) or siblings inside the same group (group.childIds). Moving
-  // a layer INTO/OUT OF a group via drag is a follow-up.
+  // Drag-to-reorder, including moving a layer INTO or OUT OF a group. The drop
+  // lands relative to `targetId`, so the source joins whatever container the
+  // target lives in (root or a group). Children are stored group-local, so when
+  // a layer changes container we re-base its transform to keep it visually put.
   const handleReorderDrop = (targetId: string) => {
     const sourceId = dragIdRef.current;
     const di = dropInfo;
@@ -197,27 +198,70 @@ export function LayerPanel() {
     setDragId(null);
     setDropInfo(null);
     if (!sourceId || sourceId === targetId || !project || !artboard) return;
+
+    const layers = project.layers;
     const groupOf = (id: string) =>
-      Object.values(project.layers).find(
+      Object.values(layers).find(
         (l): l is GroupLayer => l.type === 'group' && (l as GroupLayer).childIds.includes(id),
       );
-    const srcInRoot = artboard.layerIds.includes(sourceId);
-    const tgtInRoot = artboard.layerIds.includes(targetId);
-    const srcGroup = groupOf(sourceId);
-    const tgtGroup = groupOf(targetId);
+    const srcContainerId = groupOf(sourceId)?.id ?? null; // null = root
+    const tgtContainerId = groupOf(targetId)?.id ?? null;
     const pos = di?.pos ?? 'before';
-    const reorder = (arr: string[]) => {
-      const a = arr.filter((x) => x !== sourceId);
-      const ti = a.indexOf(targetId);
-      if (ti < 0) return arr;
-      a.splice(pos === 'before' ? ti : ti + 1, 0, sourceId);
-      return a;
-    };
-    if (srcInRoot && tgtInRoot) {
-      reorderLayers(reorder(artboard.layerIds));
-    } else if (srcGroup && tgtGroup && srcGroup.id === tgtGroup.id) {
-      updateLayer(srcGroup.id, { childIds: reorder(srcGroup.childIds) });
+
+    // Never drop a group into itself or one of its own descendants.
+    let anc: string | null = tgtContainerId;
+    for (let guard = 0; anc && guard < 100; guard++) {
+      if (anc === sourceId) return;
+      anc = layers[anc]?.parentId ?? null;
     }
+
+    const containerArr = (cid: string | null) =>
+      cid ? [...(layers[cid] as GroupLayer).childIds] : [...artboard.layerIds];
+    const setContainer = (cid: string | null, arr: string[]) =>
+      cid ? updateLayer(cid, { childIds: arr }) : reorderLayers(arr);
+
+    // Same container → plain reorder.
+    if (srcContainerId === tgtContainerId) {
+      const a = containerArr(srcContainerId).filter((x) => x !== sourceId);
+      const ti = a.indexOf(targetId);
+      if (ti < 0) return;
+      a.splice(pos === 'before' ? ti : ti + 1, 0, sourceId);
+      setContainer(srcContainerId, a);
+      return;
+    }
+
+    // Cross container → remove from source, insert into target.
+    const newSrc = containerArr(srcContainerId).filter((x) => x !== sourceId);
+    const tgtArr = containerArr(tgtContainerId).filter((x) => x !== sourceId);
+    const ti = tgtArr.indexOf(targetId);
+    if (ti < 0) return;
+    tgtArr.splice(pos === 'before' ? ti : ti + 1, 0, sourceId);
+
+    // Absolute origin of a container (sum of group offsets up the parent chain).
+    const absOffset = (cid: string | null) => {
+      let ox = 0, oy = 0, id: string | null = cid;
+      for (let guard = 0; id && guard < 100; guard++) {
+        const g = layers[id];
+        if (!g) break;
+        ox += g.transform.x; oy += g.transform.y;
+        id = g.parentId ?? null;
+      }
+      return { x: ox, y: oy };
+    };
+    const srcOff = absOffset(srcContainerId);
+    const tgtOff = absOffset(tgtContainerId);
+    const src = layers[sourceId];
+
+    setContainer(srcContainerId, newSrc);
+    setContainer(tgtContainerId, tgtArr);
+    updateLayer(sourceId, {
+      parentId: tgtContainerId,
+      transform: {
+        ...src.transform,
+        x: src.transform.x + srcOff.x - tgtOff.x,
+        y: src.transform.y + srcOff.y - tgtOff.y,
+      },
+    });
   };
 
   const handleMergeDown = (layerId: string, e?: React.MouseEvent) => {
