@@ -6,7 +6,6 @@ import {
   Circle,
   Eye,
   EyeOff,
-  Link,
   Unlink,
   Trash2,
   RotateCcw,
@@ -63,7 +62,7 @@ function Slider({ label, value, min, max, step = 1, onChange }: SliderProps) {
 }
 
 export function MaskSection({ layer }: Props) {
-  const { updateLayer } = useProjectStore();
+  const { updateLayer, addAsset, addImageLayer } = useProjectStore();
   const { active: selection, clearSelection } = useSelectionStore();
 
   const mask = layer.mask;
@@ -107,11 +106,29 @@ export function MaskSection({ layer }: Props) {
     });
   };
 
-  const handleToggleMaskLinked = () => {
-    if (!mask) return;
-    updateLayer(layer.id, {
-      mask: { ...mask, linked: !mask.linked },
+  // "Separate mask to layer": pop the mask off this layer and drop its bitmap
+  // onto a new image layer (named "<layer> Mask") at the same position — the
+  // mask becomes an ordinary, editable layer. Reuses addAsset + addImageLayer +
+  // updateLayer; no re-link (keep it simple).
+  const handleSeparateMask = () => {
+    if (!mask?.data) return;
+    const t = layer.transform;
+    const w = Math.max(1, Math.round(t.width));
+    const h = Math.max(1, Math.round(t.height));
+    const assetId = `mask-layer-${Date.now()}`;
+    addAsset({
+      id: assetId,
+      name: `${layer.name} Mask`,
+      type: 'image',
+      mimeType: 'image/png',
+      size: mask.data.length,
+      width: w,
+      height: h,
+      thumbnailUrl: mask.data,
+      dataUrl: mask.data,
     });
+    addImageLayer(assetId, { x: t.x, y: t.y, width: t.width, height: t.height });
+    updateLayer(layer.id, { mask: null });
   };
 
   const handleToggleMaskInvert = () => {
@@ -199,15 +216,11 @@ export function MaskSection({ layer }: Props) {
                 {mask.enabled ? <Eye size={12} /> : <EyeOff size={12} />}
               </button>
               <button
-                onClick={handleToggleMaskLinked}
-                className={`flex-1 p-1.5 rounded transition-colors ${
-                  mask.linked
-                    ? 'bg-secondary text-foreground'
-                    : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'
-                }`}
-                title={mask.linked ? 'Unlink Mask' : 'Link Mask'}
+                onClick={handleSeparateMask}
+                className="flex-1 p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
+                title="Separate mask into its own layer"
               >
-                {mask.linked ? <Link size={12} /> : <Unlink size={12} />}
+                <Unlink size={12} />
               </button>
               <button
                 onClick={handleToggleMaskInvert}
@@ -245,27 +258,6 @@ export function MaskSection({ layer }: Props) {
               onChange={handleFeatherChange}
             />
 
-            {hasSelection && (
-              <div className="pt-2 border-t border-border space-y-1.5">
-                <span className="text-[10px] text-muted-foreground font-medium">
-                  Apply Selection
-                </span>
-                <div className="flex gap-1.5">
-                  <button
-                    onClick={() => {}}
-                    className="flex-1 px-2 py-1.5 text-[10px] rounded bg-secondary hover:bg-secondary/80 transition-colors"
-                  >
-                    Add to Mask
-                  </button>
-                  <button
-                    onClick={() => {}}
-                    className="flex-1 px-2 py-1.5 text-[10px] rounded bg-secondary hover:bg-secondary/80 transition-colors"
-                  >
-                    Subtract
-                  </button>
-                </div>
-              </div>
-            )}
           </div>
         )}
 
