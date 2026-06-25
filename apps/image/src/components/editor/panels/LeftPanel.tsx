@@ -2,7 +2,6 @@ import { useState, useEffect, memo } from 'react';
 import {
   Layers,
   Image,
-  LayoutTemplate,
   Type,
   Shapes,
   Upload,
@@ -57,19 +56,11 @@ import {
   type VoidspaceLibraryItem,
 } from '../../../services/voidspace-storage';
 
-import {
-  TEMPLATE_CATEGORIES,
-  getTemplatesByCategory,
-  getAllTemplates,
-  searchTemplates,
-  Template,
-} from '../../../services/templates-service';
 
 const panels: { id: Panel; icon: React.ElementType; label: string }[] = [
   { id: 'layers', icon: Layers, label: 'Layers' },
   { id: 'elements', icon: Sparkles, label: 'Elements' },
   { id: 'assets', icon: Image, label: 'Assets' },
-  { id: 'templates', icon: LayoutTemplate, label: 'Templates' },
   { id: 'text', icon: Type, label: 'Text' },
   { id: 'shapes', icon: Shapes, label: 'Shapes' },
   { id: 'uploads', icon: Upload, label: 'Uploads' },
@@ -105,7 +96,6 @@ export const LeftPanel = memo(function LeftPanel() {
         {activePanel === 'layers' && <LayerPanel />}
         {activePanel === 'elements' && <ElementsPanel />}
         {activePanel === 'assets' && <AssetsPanel />}
-        {activePanel === 'templates' && <TemplatesPanel />}
         {activePanel === 'text' && <TextPanel />}
         {activePanel === 'shapes' && <ShapesPanel />}
         {activePanel === 'uploads' && <UploadsPanel />}
@@ -283,132 +273,6 @@ function AssetsPanel() {
               </div>
             </button>
           ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function TemplatesPanel() {
-  const { createProject } = useProjectStore();
-  const { setCurrentView } = useUIStore();
-  const [searchQuery, setSearchQuery] = useState('');
-  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
-
-  const categories = TEMPLATE_CATEGORIES;
-  const filteredTemplates = searchQuery
-    ? searchTemplates(searchQuery)
-    : selectedCategory
-    ? getTemplatesByCategory(selectedCategory)
-    : getAllTemplates();
-
-  const handleApplyTemplate = (template: Template) => {
-    createProject(template.name, template.size, template.background);
-    setCurrentView('editor');
-  };
-
-  const getGradientBackground = (template: Template): string => {
-    if (template.background.type === 'gradient' && template.background.gradient) {
-      const { type, angle, stops } = template.background.gradient;
-      const stopsStr = stops.map((s) => `${s.color} ${Math.round(s.offset * 100)}%`).join(', ');
-      return type === 'linear'
-        ? `linear-gradient(${angle}deg, ${stopsStr})`
-        : `radial-gradient(circle, ${stopsStr})`;
-    }
-    if (template.background.type === 'color') {
-      return template.background.color ?? '#ffffff';
-    }
-    return 'linear-gradient(45deg, #ccc 25%, transparent 25%), linear-gradient(-45deg, #ccc 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #ccc 75%), linear-gradient(-45deg, transparent 75%, #ccc 75%)';
-  };
-
-  return (
-    <div className="p-3 h-full overflow-y-auto">
-      <div className="mb-3">
-        <div className="relative">
-          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-          <input
-            type="text"
-            placeholder="Search templates..."
-            value={searchQuery}
-            onChange={(e) => {
-              setSearchQuery(e.target.value);
-              if (e.target.value) setSelectedCategory(null);
-            }}
-            className="w-full pl-9 pr-3 py-2 text-sm bg-background border border-input rounded-lg focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary"
-          />
-        </div>
-      </div>
-
-      <div className="flex flex-wrap gap-1.5 mb-4">
-        <button
-          onClick={() => setSelectedCategory(null)}
-          className={`px-2.5 py-1 text-[10px] font-medium rounded-full transition-colors ${
-            !selectedCategory
-              ? 'bg-primary text-primary-foreground'
-              : 'bg-secondary text-secondary-foreground hover:bg-accent'
-          }`}
-        >
-          All
-        </button>
-        {categories.map((category) => (
-          <button
-            key={category.id}
-            onClick={() => {
-              setSelectedCategory(category.id);
-              setSearchQuery('');
-            }}
-            className={`px-2.5 py-1 text-[10px] font-medium rounded-full transition-colors ${
-              selectedCategory === category.id
-                ? 'bg-primary text-primary-foreground'
-                : 'bg-secondary text-secondary-foreground hover:bg-accent'
-            }`}
-          >
-            {category.name}
-          </button>
-        ))}
-      </div>
-
-      {filteredTemplates.length === 0 ? (
-        <div className="text-center py-8">
-          <LayoutTemplate size={32} className="mx-auto text-muted-foreground mb-2" />
-          <p className="text-xs text-muted-foreground">No templates found</p>
-        </div>
-      ) : (
-        <div className="grid grid-cols-2 gap-2">
-          {filteredTemplates.map((template) => {
-            const aspectRatio = template.size.width / template.size.height;
-            const thumbWidth = 100;
-            const thumbHeight = thumbWidth / aspectRatio;
-
-            return (
-              <button
-                key={template.id}
-                onClick={() => handleApplyTemplate(template)}
-                className="group text-left rounded-lg border border-border bg-background hover:border-primary hover:bg-primary/5 transition-all overflow-hidden"
-              >
-                <div className="p-2 flex items-center justify-center bg-muted/30">
-                  <div
-                    className="rounded shadow-sm"
-                    style={{
-                      width: Math.min(thumbWidth, 90),
-                      height: Math.min(thumbHeight, 70),
-                      maxHeight: 70,
-                      background: getGradientBackground(template),
-                      backgroundSize: template.background.type === 'transparent' ? '8px 8px' : undefined,
-                    }}
-                  />
-                </div>
-                <div className="p-2 border-t border-border/50">
-                  <p className="text-[11px] font-medium text-foreground truncate group-hover:text-primary transition-colors">
-                    {template.name}
-                  </p>
-                  <p className="text-[9px] text-muted-foreground">
-                    {template.size.width} × {template.size.height}
-                  </p>
-                </div>
-              </button>
-            );
-          })}
         </div>
       )}
     </div>

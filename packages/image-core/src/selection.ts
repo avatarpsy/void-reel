@@ -23,6 +23,10 @@ export interface Selection {
   feather: number;
   antiAlias: boolean;
   opacity: number;
+  /** When true the active region is the canvas MINUS this shape (Select →
+   *  Inverse, ⌘⇧I). `canvasBounds` is the outer rectangle to subtract from. */
+  inverted?: boolean;
+  canvasBounds?: SelectionBounds;
 }
 
 export interface MagicWandOptions {
@@ -75,6 +79,15 @@ export function createEmptySelection(): Selection {
 
 export function selectionToPath2D(selection: Selection): Path2D {
   const path = new Path2D();
+
+  // Inverted selection: the region is the whole canvas with the shape cut out.
+  // Add the canvas rectangle as an outer subpath; the shape below becomes a
+  // hole under the even-odd fill rule, and stroking draws marching ants on both
+  // the canvas border and the shape (no bridging seam).
+  if (selection.inverted && selection.canvasBounds) {
+    const cb = selection.canvasBounds;
+    path.rect(cb.x, cb.y, cb.width, cb.height);
+  }
 
   if (selection.type === 'rectangular') {
     path.rect(
@@ -175,7 +188,8 @@ export function getSelectionMask(
 
   ctx.fillStyle = 'white';
   const path = selectionToPath2D(selection);
-  ctx.fill(path);
+  // even-odd so an inverted selection's shape is cut out of the canvas rect.
+  ctx.fill(path, 'evenodd');
 
   if (selection.feather > 0) {
     ctx.filter = `blur(${selection.feather}px)`;

@@ -22,6 +22,27 @@ export async function buildMaskData(
 
   if (selection && selection.path.length > 2) {
     const localPath = selection.path.map((p) => ({ x: p.x - t.x, y: p.y - t.y }));
+    if (selection.inverted) {
+      // Inverted selection: reveal the layer EXCEPT the shape — paint white,
+      // then cut the shape out (destination-out) so its region stays hidden.
+      const canvas = new OffscreenCanvas(w, h);
+      const ctx = canvas.getContext('2d')!;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, w, h);
+      ctx.globalCompositeOperation = 'destination-out';
+      if (selection.feather > 0) ctx.filter = `blur(${selection.feather}px)`;
+      ctx.beginPath();
+      ctx.moveTo(localPath[0].x, localPath[0].y);
+      for (let i = 1; i < localPath.length; i++) ctx.lineTo(localPath[i].x, localPath[i].y);
+      ctx.closePath();
+      ctx.fill();
+      const blob = await canvas.convertToBlob();
+      return new Promise<string>((resolve) => {
+        const r = new FileReader();
+        r.onload = () => resolve(r.result as string);
+        r.readAsDataURL(blob);
+      });
+    }
     return createMaskFromSelection(localPath, w, h, selection.feather);
   }
 

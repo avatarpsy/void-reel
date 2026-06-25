@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import {
   MousePointer2,
+  HelpCircle,
   Hand,
   Type,
   Square,
@@ -244,6 +245,7 @@ export function Toolbar() {
     toggleInspectorCollapsed,
     setCurrentView,
     openExportDialog,
+    toggleShortcutsPanel,
   } = useUIStore();
 
   const { project, setProjectName, undo, redo, canUndo, canRedo } = useProjectStore();
@@ -302,6 +304,14 @@ export function Toolbar() {
       <div className="flex-1" />
 
       <div className="flex items-center gap-0.5 bg-secondary/50 rounded-lg p-1">
+        <button
+          onClick={toggleShortcutsPanel}
+          className="p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+          title="Help & keyboard shortcuts"
+        >
+          <HelpCircle size={18} />
+        </button>
+        <div className="w-px h-5 bg-border/50 mx-0.5" />
         {toolGroups.map((group, idx) => (
           <div key={group.id} className="flex items-center">
             <ToolGroupButton group={group} activeTool={activeTool} onSelectTool={setActiveTool} />

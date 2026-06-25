@@ -66,13 +66,15 @@ export async function applyGenerativeFill(prompt: string, model?: FillModelId, r
   sc.getContext('2d')!.drawImage(compImg, 0, 0, tw, th);
   const sourceBlob = await canvasToBlob(sc, 'image/jpeg');
 
-  // 2) Mask — BLACK = keep, WHITE = inpaint the selection (FLUX Fill convention).
+  // 2) Mask — BLACK = keep, WHITE = inpaint (FLUX Fill convention). For an
+  //    inverted selection the inpaint region is the canvas MINUS the shape, so
+  //    we flood white and cut the shape out in black; otherwise the reverse.
   const mc = document.createElement('canvas');
   mc.width = tw; mc.height = th;
   const mx = mc.getContext('2d')!;
-  mx.fillStyle = 'black';
+  mx.fillStyle = selection.inverted ? 'white' : 'black';
   mx.fillRect(0, 0, tw, th);
-  mx.fillStyle = 'white';
+  mx.fillStyle = selection.inverted ? 'black' : 'white';
   mx.beginPath();
   mx.moveTo(selection.path[0].x * scale, selection.path[0].y * scale);
   for (let i = 1; i < selection.path.length; i++) {

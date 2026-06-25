@@ -61,16 +61,22 @@ function gateToSelection(
   orig: OffscreenCanvas,
   selectionPath: { x: number; y: number }[],
   transform: { x: number; y: number; width: number; height: number },
+  inverted = false,
 ): OffscreenCanvas {
   const W = painted.width;
   const H = painted.height;
   const sx = W / transform.width;
   const sy = H / transform.height;
 
-  // Selection polygon in buffer-pixel space.
+  // Selection polygon in buffer-pixel space. For an inverted selection, reveal
+  // the whole buffer and cut the shape OUT (paint everywhere except the shape).
   const mask = new OffscreenCanvas(W, H);
   const mc = mask.getContext('2d')!;
   mc.fillStyle = 'white';
+  if (inverted) {
+    mc.fillRect(0, 0, W, H);
+    mc.globalCompositeOperation = 'destination-out';
+  }
   mc.beginPath();
   mc.moveTo((selectionPath[0].x - transform.x) * sx, (selectionPath[0].y - transform.y) * sy);
   for (let i = 1; i < selectionPath.length; i++) {
@@ -2378,7 +2384,7 @@ export function Canvas() {
         const sel = useSelectionStore.getState().active;
         if (sel && sel.path.length > 2 && origPaintRef.current && currentLayer &&
             (activeTool === 'brush' || activeTool === 'eraser')) {
-          finalCanvas = gateToSelection(tempCanvas as OffscreenCanvas, origPaintRef.current, sel.path, currentLayer.transform);
+          finalCanvas = gateToSelection(tempCanvas as OffscreenCanvas, origPaintRef.current, sel.path, currentLayer.transform, sel.inverted ?? false);
         }
         origPaintRef.current = null;
 

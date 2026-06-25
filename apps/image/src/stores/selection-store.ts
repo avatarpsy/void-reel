@@ -164,15 +164,22 @@ export const useSelectionStore = create<SelectionState & SelectionActions>()(
     invertSelection: (canvasBounds) => {
       const { active } = get();
       if (!active) {
+        // Nothing selected → Inverse selects everything (Photoshop behaviour).
         get().selectAll(canvasBounds);
         return;
       }
 
-      const inverted: Selection = {
-        ...active,
-        id: generateId(),
-      };
-      set({ active: inverted });
+      // Flip the inverted flag and remember the canvas rect to subtract from.
+      // selectionToPath2D / the mask builders read these to cut the shape out
+      // of the full canvas. A second ⌘⇧I restores the original selection.
+      set({
+        active: {
+          ...active,
+          id: generateId(),
+          inverted: !active.inverted,
+          canvasBounds,
+        },
+      });
     },
 
     featherSelection: (amount) => {

@@ -163,8 +163,18 @@ export function useKeyboardShortcuts() {
             useSelectionStore.getState().clearSelection();
             break;
           case 'i':
-            // PS: Cmd/Ctrl+Shift+I = Invert selection.
-            if (e.shiftKey) { e.preventDefault(); useSelectionStore.getState().invertSelection({ x: 0, y: 0, width: 0, height: 0 }); }
+            // PS: Cmd/Ctrl+Shift+I = Invert selection — across the active artboard.
+            if (e.shiftKey) {
+              e.preventDefault();
+              const ps = useProjectStore.getState();
+              const ab = ps.project?.artboards.find((a) => a.id === ps.selectedArtboardId)
+                ?? ps.project?.artboards[0];
+              if (ab) {
+                useSelectionStore.getState().invertSelection({
+                  x: 0, y: 0, width: ab.size.width, height: ab.size.height,
+                });
+              }
+            }
             break;
           case 'a': e.preventDefault(); selectAllLayers(); break;
           case 'g':
