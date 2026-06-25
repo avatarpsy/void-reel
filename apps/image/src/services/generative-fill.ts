@@ -11,6 +11,37 @@
 
 import { getVoidspaceIdToken, NotSignedInError } from './voidspace-storage';
 
+/** Generative-fill failure, classified by HTTP status — NO server/provider text
+ *  is carried, so the UI can show clean copy (402 = user out of credits;
+ *  503 = our provider is temporarily unavailable; else = generic failure). */
+export class GenFillError extends Error {
+  code: number;
+  available?: number;
+  required?: number;
+  constructor(code: number, info: { available?: number; required?: number } = {}) {
+    super(`gen-fill ${code}`);
+    this.name = 'GenFillError';
+    this.code = code;
+    this.available = info.available;
+    this.required = info.required;
+  }
+}
+
+/** The user's billing situation, used to tailor the out-of-credits popup
+ *  (subscribed → top up; not → subscribe). Best-effort; defaults to not-subscribed. */
+export async function fetchCreditSituation(): Promise<{ isSubscribed: boolean }> {
+  try {
+    const token = await getVoidspaceIdToken();
+    if (!token) return { isSubscribed: false };
+    const res = await fetch('/api/me/subscription-status', { headers: { Authorization: `Bearer ${token}` } });
+    if (!res.ok) return { isSubscribed: false };
+    const j = await res.json();
+    return { isSubscribed: j?.isSubscribed === true };
+  } catch {
+    return { isSubscribed: false };
+  }
+}
+
 /** Inpaint models the user can pick, with their credit cost (per ~1MP fill). */
 export const FILL_MODELS = [
   { id: 'flux-dev-inpaint', label: 'FLUX.1 Fill (dev)', credits: 4 },
@@ -58,9 +89,15 @@ export async function runGenerativeFill(opts: GenerativeFillOpts): Promise<strin
     body: JSON.stringify({ imageUrl, maskUrl, prompt: opts.prompt, model: opts.model }),
   });
   if (!res.ok) {
-    let msg = `Generative fill failed (${res.status})`;
-    try { const j = await res.json(); if (j?.statusMessage || j?.message) msg = j.statusMessage || j.message; } catch { /* ignore */ }
-    throw new Error(msg);
+    // Classify by status ONLY — never surface server/provider text to the user.
+    let available: number | undefined;
+    let required: number | undefined;
+    try {
+      const j = await res.json();
+      available = j?.data?.available ?? j?.available;
+      required = j?.data?.required ?? j?.required;
+    } catch { /* ignore */ }
+    throw new GenFillError(res.status, { available, required });
   }
   const j = await res.json();
   const resultUrl: string = j.url;

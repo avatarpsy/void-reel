@@ -3,7 +3,7 @@ import { Sparkles, X, Loader2 } from 'lucide-react';
 import { useUIStore } from '../../../stores/ui-store';
 import { useSelectionStore } from '../../../stores/selection-store';
 import { applyGenerativeFill } from '../../../services/apply-generative-fill';
-import { FILL_MODELS, type FillModelId } from '../../../services/generative-fill';
+import { FILL_MODELS, type FillModelId, GenFillError, fetchCreditSituation } from '../../../services/generative-fill';
 import { NotSignedInError } from '../../../services/voidspace-storage';
 
 /**
@@ -21,6 +21,8 @@ export function GenerativeFillPanel() {
   const [model, setModel] = useState<FillModelId>(FILL_MODELS[0].id);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Out-of-credits popup (null = closed). `subscribed` tailors the call-to-action.
+  const [credits, setCredits] = useState<{ available?: number; required?: number; subscribed: boolean } | null>(null);
 
   if (!open) return null;
 
@@ -34,14 +36,25 @@ export function GenerativeFillPanel() {
       setOpen(false);
       setPrompt('');
     } catch (e) {
-      if (e instanceof NotSignedInError) setError('Sign in on Voidspace to use Generative Fill.');
-      else setError(e instanceof Error ? e.message : 'Generation failed');
+      if (e instanceof NotSignedInError) {
+        setError('Sign in to Voidspace to use Generative Fill.');
+      } else if (e instanceof GenFillError && e.code === 402) {
+        // The USER is out of credits → show the top-up / subscribe popup.
+        const sit = await fetchCreditSituation();
+        setCredits({ available: e.available, required: e.required, subscribed: sit.isSubscribed });
+      } else if (e instanceof GenFillError && (e.code === 503 || e.code === 429)) {
+        setError('Generative Fill is busy right now — please try again in a moment.');
+      } else {
+        // Never surface server/provider details.
+        setError("Couldn't generate. Please try again.");
+      }
     } finally {
       setBusy(false);
     }
   };
 
   return (
+    <>
     <div className="border-b border-border bg-card shrink-0">
       <div className="flex items-center justify-between px-3 py-2 border-b border-border">
         <span className="flex items-center gap-1.5 text-xs font-medium">
@@ -90,5 +103,43 @@ export function GenerativeFillPanel() {
         </button>
       </div>
     </div>
+
+    {/* Out-of-credits popup — tailored to whether the user is subscribed. */}
+    {credits && (
+      <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50" onClick={() => setCredits(null)}>
+        <div className="w-[320px] rounded-lg border border-border bg-card p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+          <div className="flex items-center gap-2 mb-2">
+            <Sparkles size={16} className="text-primary" />
+            <span className="text-sm font-semibold">Out of credits</span>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {credits.subscribed
+              ? "You've used up your credits. Top up to keep using Generative Fill."
+              : 'Subscribe to a plan to use Generative Fill and the rest of Voidspace AI.'}
+          </p>
+          {typeof credits.available === 'number' && (
+            <p className="text-[10px] text-muted-foreground mt-1">
+              You have {credits.available} credit{credits.available === 1 ? '' : 's'}
+              {typeof credits.required === 'number' ? ` · this needs ${credits.required}` : ''}.
+            </p>
+          )}
+          <div className="flex gap-2 mt-4">
+            <button
+              onClick={() => { window.open('/pricing', '_blank', 'noopener'); setCredits(null); }}
+              className="flex-1 px-3 py-1.5 text-xs rounded-md bg-primary text-primary-foreground font-medium hover:bg-primary/90 transition-colors"
+            >
+              {credits.subscribed ? 'Top up credits' : 'View plans'}
+            </button>
+            <button
+              onClick={() => setCredits(null)}
+              className="px-3 py-1.5 text-xs rounded-md bg-secondary text-secondary-foreground hover:bg-accent transition-colors"
+            >
+              Not now
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 }
