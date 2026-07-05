@@ -17,7 +17,15 @@ export default defineConfig({
     format: "es",
   },
   optimizeDeps: {
-    exclude: ["@ffmpeg/ffmpeg", "@ffmpeg/util", "@ffmpeg/core", "@ffmpeg/core-mt"],
+    // transformers.js (on-device Whisper for the teleprompter) ships its own
+    // WASM + worker glue — pre-bundling it breaks those; load it as-is, lazily.
+    exclude: [
+      "@ffmpeg/ffmpeg",
+      "@ffmpeg/util",
+      "@ffmpeg/core",
+      "@ffmpeg/core-mt",
+      "@huggingface/transformers",
+    ],
   },
   build: {
     target: "esnext",
@@ -35,6 +43,15 @@ export default defineConfig({
           }
           if (id.includes("node_modules/@radix-ui")) {
             return "radix";
+          }
+          // Keep the Whisper stack (transformers.js + onnxruntime-web) in its
+          // own lazily-loaded chunk so it never weighs down the editor's initial
+          // load — it's fetched only when the teleprompter starts recording.
+          if (
+            id.includes("node_modules/@huggingface/transformers") ||
+            id.includes("node_modules/onnxruntime")
+          ) {
+            return "whisper";
           }
         },
       },

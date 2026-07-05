@@ -460,6 +460,23 @@ export class ScreenRecorderService {
     return this.screenRecorder?.state === "paused";
   }
 
+  /**
+   * The live microphone stream, for on-device speech-to-text (the teleprompter's
+   * Whisper auto-scroll). The mic is captured separately as `this.micStream` for
+   * screen / camera / both, and IS the primary stream for audio-only mode. A
+   * second AudioContext consumer can safely tap the same track while the recorder
+   * records it. Returns null when no mic was captured (e.g. screen-only, mic off).
+   */
+  getMicStream(): MediaStream | null {
+    if (this.micStream && this.micStream.getAudioTracks().length > 0) {
+      return this.micStream;
+    }
+    if (this.screenStream && this.screenStream.getAudioTracks().length > 0) {
+      return this.screenStream;
+    }
+    return null;
+  }
+
   private stopRecorder(recorder: MediaRecorder, chunks: Blob[]): Promise<Blob> {
     return new Promise((resolve) => {
       recorder.onstop = () => {

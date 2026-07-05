@@ -24,6 +24,7 @@ import {
 } from "../../services/screen-recorder";
 import { RecordingControls } from "./RecordingControls";
 import { Teleprompter } from "./Teleprompter";
+import { ensureWhisperModel } from "../../services/teleprompter-asr";
 import {
   Dialog,
   DialogContent,
@@ -119,6 +120,14 @@ export const ScreenRecorder: React.FC<ScreenRecorderProps> = ({
     if (isOpen) setOptions({ targetAspect: projectAspect });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, projectAspect]);
+
+  // Belt-and-suspenders: make sure the on-device Whisper model is being fetched
+  // (silently, in the background) by the time the Record dialog opens with the
+  // teleprompter on. Idempotent + shares the browser cache, so it never causes a
+  // redundant download — in the common case it's already installed site-wide.
+  useEffect(() => {
+    if (isOpen && teleprompterEnabled) ensureWhisperModel();
+  }, [isOpen, teleprompterEnabled]);
 
   const mode: RecordingMode = options.mode ?? "screen";
   const showScreenSettings = mode === "screen" || mode === "both";

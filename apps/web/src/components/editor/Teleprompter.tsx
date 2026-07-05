@@ -5,23 +5,31 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { Minus, Plus, X, Gauge, Play, Pause } from "lucide-react";
+import { Minus, Plus, X, Gauge, Play, Pause, Contrast } from "lucide-react";
+import { screenRecorderService } from "../../services/screen-recorder";
+import { TeleprompterAsr, type AsrStatus } from "../../services/teleprompter-asr";
 
 /**
- * Teleprompter — a professional prompter OVERLAID on the editor's video player
- * while you record. The user writes their script up front; on record it
+ * Teleprompter — a professional prompter OVERLAID on TOP of the editor's video
+ * player while you record. The user writes their script up front; on record it
  * projects over the player (right where they look) and scrolls.
+ *
+ * Layering: the panel sits at a very high z-index (just below the recording
+ * controls) so the script always renders ON TOP of the live webcam/self-view,
+ * never behind it. A solid dark scrim with a USER-ADJUSTABLE opacity sits behind
+ * the text for readability against a bright shot — dial it up over a busy
+ * background, down to keep more of the shot visible.
  *
  * Scroll model (why it's reliable now):
  *   • PRIMARY: a smooth, always-on time-based crawl at an adjustable speed
- *     (WPM). This ALWAYS moves — it does not depend on the microphone, which
- *     the recorder holds during a take. (The old version only crawled when the
- *     Web Speech API was ABSENT, so on Chrome — where the API exists but gets
- *     no audio because the recorder owns the mic — it never scrolled at all.)
- *   • ENHANCEMENT: when speech recognition does produce results, we fuzzily
- *     align the spoken words to the script and SNAP the read position to keep
- *     the crawl synced to where the speaker actually is. If speech is silent
- *     or unavailable, the crawl carries it.
+ *     (WPM). This ALWAYS moves — it does not depend on the microphone.
+ *   • ENHANCEMENT (English): on-device Whisper. The recorder OWNS the mic during
+ *     a take, so the Web Speech API gets no audio on Chrome and never fires.
+ *     Instead we TAP the recorder's live mic track (screenRecorderService.
+ *     getMicStream) and run a local whisper-base.en model on the trailing few
+ *     seconds ~once a second, fuzzily aligning the spoken words to the script and
+ *     SNAPPING the read position to where the speaker actually is. If speech is
+ *     silent, still loading, or unavailable, the crawl carries it.
  *
  * Positioning: the panel measures the player element ([data-tour='preview'])
  * and overlays it exactly, so it reads as part of the video — not a stray
@@ -39,14 +47,22 @@ interface PrompterSettings {
   fontSize: number;
   /** Scroll pace in words/second (≈ wpm/60). 2.3 ≈ 138 wpm (natural speaking). */
   speed: number;
+  /** Darkness of the scrim behind the text, 0 (see-through) → 1 (opaque). */
+  opacity: number;
 }
 
-const DEFAULTS: PrompterSettings = { fontSize: 38, speed: 2.3 };
+const DEFAULTS: PrompterSettings = { fontSize: 38, speed: 2.3, opacity: 0.72 };
 const LS_KEY = "voidspace.teleprompter.settings";
 // Keep the active word at this fraction down the panel ("reading line").
 const READ_LINE = 0.4;
 const SPEED_MIN = 0.8;
 const SPEED_MAX = 4.5;
+const OPACITY_MIN = 0.3;
+const OPACITY_MAX = 0.95;
+// Above the inline recording preview (webcam self-view, z-40 inside the player)
+// so the script renders ON TOP of the shot. One below the recording controls
+// (2147483000) so Stop/Pause always stay reachable above the prompter.
+const OVERLAY_Z = 2147482000;
 
 function normalizeWord(w: string): string {
   return w.toLowerCase().replace(/[^a-z0-9']/g, "");
@@ -57,10 +73,12 @@ function loadSettings(): PrompterSettings {
     const raw = localStorage.getItem(LS_KEY);
     if (raw) {
       const s = JSON.parse(raw);
-      // Migrate older saves (which had x/y/width) — keep only what we use now.
+      // Migrate older saves (which had x/y/width, and no opacity) — keep only
+      // what we use now and backfill new fields from defaults.
       return {
         fontSize: typeof s.fontSize === "number" ? s.fontSize : DEFAULTS.fontSize,
         speed: typeof s.speed === "number" ? s.speed : DEFAULTS.speed,
+        opacity: typeof s.opacity === "number" ? s.opacity : DEFAULTS.opacity,
       };
     }
   } catch {
@@ -89,9 +107,12 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
 }) => {
   const [settings, setSettings] = useState<PrompterSettings>(loadSettings);
   const [currentIndex, setCurrentIndex] = useState(0);
-  const [listening, setListening] = useState(false);
   const [paused, setPaused] = useState(false);
   const [rect, setRect] = useState(measurePlayerRect);
+  // On-device Whisper state — only "listening" (green dot) vs not. The model
+  // download is a silent background concern (prewarmed site-wide), so there is
+  // deliberately NO "setting up / downloading" state shown here.
+  const [asrStatus, setAsrStatus] = useState<AsrStatus>("idle");
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const wordRefs = useRef<(HTMLSpanElement | null)[]>([]);
@@ -181,65 +202,73 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
     [normWords],
   );
 
-  // ── Speech recognition (ENHANCEMENT — syncs the crawl, never gates it) ────
-  useEffect(() => {
-    if (!active) return;
-    const SR: any =
-      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SR) return; // no API → the crawl below carries the scroll on its own
-
-    let stopped = false;
-    const recognition = new SR();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = "en-US";
-
-    recognition.onresult = (e: any) => {
-      const last = e.results[e.results.length - 1];
-      if (!last) return;
-      const transcript: string = last[0]?.transcript ?? "";
-      const probe = transcript
-        .split(/\s+/)
-        .map(normalizeWord)
-        .filter(Boolean)
-        .slice(-6);
+  // Snap the read position to where the speaker actually is, but only ever
+  // FORWARD (and not a huge jump) so noise can't fling the prompter around.
+  const snapToWords = useCallback(
+    (probe: string[]) => {
       const next = matchProbe(probe);
-      // Snap the read position to where the speaker actually is, but only ever
-      // FORWARD (and not a huge jump) so noise can't fling the prompter around.
       if (next >= 0 && next > readPosRef.current && next - readPosRef.current < 18) {
         readPosRef.current = next;
       }
-    };
-    recognition.onerror = () => {
-      /* transient (no-speech / aborted) — onend restarts */
-    };
-    recognition.onend = () => {
-      if (!stopped && activeRef.current) {
-        try {
-          recognition.start();
-        } catch {
-          /* already started */
-        }
-      }
+    },
+    [matchProbe],
+  );
+
+  // ── On-device Whisper (English) — ENHANCEMENT; syncs the crawl, never gates it ──
+  // The recorder owns the mic, so Web Speech gets no audio on Chrome. We tap the
+  // recorder's live mic track and transcribe it locally, snapping the scroll to
+  // the recognized words. The crawl below carries scrolling until Whisper warms.
+  useEffect(() => {
+    if (!active) return;
+    let disposed = false;
+    let asr: TeleprompterAsr | null = null;
+    let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+    const begin = (stream: MediaStream) => {
+      if (disposed) return;
+      asr = new TeleprompterAsr({
+        onWords: (words) => {
+          if (!activeRef.current) return; // paused / stopped — ignore late results
+          snapToWords(words);
+        },
+        onStatus: (s) => setAsrStatus(s),
+      });
+      void asr.start(stream);
     };
 
-    try {
-      recognition.start();
-      setListening(true);
-    } catch {
-      /* ignore */
-    }
-    return () => {
-      stopped = true;
-      setListening(false);
-      try {
-        recognition.onend = null;
-        recognition.stop();
-      } catch {
-        /* ignore */
+    // The mic track may land a beat after `recording` begins (permissions →
+    // stream assignment). Poll briefly for it, then give up (crawl-only).
+    const tryStart = () => {
+      const stream = screenRecorderService.getMicStream();
+      if (stream) {
+        if (pollTimer) {
+          clearInterval(pollTimer);
+          pollTimer = null;
+        }
+        begin(stream);
+        return true;
       }
+      return false;
     };
-  }, [active, matchProbe]);
+    if (!tryStart()) {
+      let attempts = 0;
+      pollTimer = setInterval(() => {
+        if (tryStart() || ++attempts > 12) {
+          if (pollTimer) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+          }
+        }
+      }, 300);
+    }
+
+    return () => {
+      disposed = true;
+      if (pollTimer) clearInterval(pollTimer);
+      asr?.stop();
+      setAsrStatus("idle");
+    };
+  }, [active, snapToWords]);
 
   // ── Unified scroll loop: crawl + ease (always running) ───────────────────
   useEffect(() => {
@@ -291,26 +320,38 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
     setSettings((s) => ({ ...s, fontSize: Math.max(20, Math.min(96, s.fontSize + delta)) }));
   const bumpSpeed = (delta: number) =>
     setSettings((s) => ({ ...s, speed: Math.round(Math.max(SPEED_MIN, Math.min(SPEED_MAX, s.speed + delta)) * 10) / 10 }));
+  const setOpacity = (v: number) =>
+    setSettings((s) => ({ ...s, opacity: Math.max(OPACITY_MIN, Math.min(OPACITY_MAX, v)) }));
 
   // Position: overlay the player when measured, else a centered viewport band.
   const panelStyle: React.CSSProperties = rect
     ? { position: "fixed", left: rect.left, top: rect.top, width: rect.width, height: rect.height }
     : { position: "fixed", left: "50%", top: "12vh", transform: "translateX(-50%)", width: "min(760px, 92vw)", height: "46vh" };
 
+  // Header speech-tracking indicator. Green = live Whisper auto-scroll, grey =
+  // crawl-only (mic off / model still warming). No download/loading state is
+  // ever shown — the model is fetched silently in the background.
+  const asrLive = asrStatus === "listening";
+  const dotColor = asrLive ? "#46d39a" : "rgba(150,160,190,0.7)";
+  const headerLabel = "Teleprompter";
+
+  // Solid dark scrim behind the text at the user's chosen opacity, with the
+  // edges nudged a touch darker for readability. This paints ON TOP of the
+  // webcam self-view (see OVERLAY_Z) so the script is never behind the shot.
+  const op = settings.opacity;
+  const edgeOp = Math.min(1, op + 0.1);
+
   return (
     <div
       className="teleprompter-overlay"
       style={{
         ...panelStyle,
-        zIndex: 190, // above the player/preview, below the recording controls (200)
+        zIndex: OVERLAY_Z,
         display: "flex",
         flexDirection: "column",
         borderRadius: 16,
         overflow: "hidden",
-        // Translucent scrim so the player/self-view stays faintly visible behind
-        // the text; darker at the edges for readability.
-        background:
-          "linear-gradient(180deg, rgba(6,9,18,0.86) 0%, rgba(6,9,18,0.62) 40%, rgba(6,9,18,0.62) 60%, rgba(6,9,18,0.86) 100%)",
+        background: `linear-gradient(180deg, rgba(6,9,18,${edgeOp}) 0%, rgba(6,9,18,${op}) 22%, rgba(6,9,18,${op}) 78%, rgba(6,9,18,${edgeOp}) 100%)`,
         backdropFilter: "blur(3px)",
         WebkitBackdropFilter: "blur(3px)",
         boxShadow: "0 20px 70px rgba(0,0,0,0.5), inset 0 0 0 1px rgba(120,150,230,0.22)",
@@ -318,35 +359,61 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
         pointerEvents: "auto",
       }}
     >
-      {/* Compact control bar */}
+      {/* Compact control bar — wraps instead of clipping on a narrow player. */}
       <div
         style={{
           display: "flex",
           alignItems: "center",
+          flexWrap: "wrap",
           gap: 6,
           padding: "7px 10px",
-          background: "rgba(10,14,28,0.55)",
+          background: "rgba(10,14,28,0.72)",
           borderBottom: "1px solid rgba(120,150,230,0.18)",
         }}
       >
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11, fontWeight: 700, letterSpacing: 0.3, color: "rgba(241,244,255,0.82)" }}>
-          <span style={{ width: 7, height: 7, borderRadius: 999, background: listening ? "#46d39a" : "rgba(150,160,190,0.7)", boxShadow: listening ? "0 0 8px #46d39a" : "none" }} />
-          Teleprompter
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11, fontWeight: 700, letterSpacing: 0.3, color: "rgba(241,244,255,0.82)", whiteSpace: "nowrap" }}>
+          <span
+            style={{
+              width: 7,
+              height: 7,
+              borderRadius: 999,
+              background: dotColor,
+              boxShadow: asrLive ? "0 0 8px #46d39a" : "none",
+            }}
+          />
+          {headerLabel}
         </span>
-        <div style={{ flex: 1 }} />
+        <div style={{ flex: 1, minWidth: 8 }} />
 
         {/* Pause / play the scroll */}
         <button type="button" onClick={() => setPaused((p) => !p)} style={ctrlBtn} title={paused ? "Resume scroll" : "Pause scroll"}>
           {paused ? <Play size={13} /> : <Pause size={13} />}
         </button>
         {/* Speed */}
-        <div style={chip} title="Scroll speed">
+        <div style={chip} title="Scroll speed (words per minute)">
           <button type="button" onClick={() => bumpSpeed(-0.2)} style={ctrlBtn} title="Slower"><Minus size={13} /></button>
           <Gauge size={13} style={{ color: "rgba(241,244,255,0.6)" }} />
           <span style={{ fontSize: 11, color: "rgba(241,244,255,0.7)", width: 30, textAlign: "center", fontVariantNumeric: "tabular-nums" }}>
             {Math.round(settings.speed * 60)}
           </span>
           <button type="button" onClick={() => bumpSpeed(0.2)} style={ctrlBtn} title="Faster"><Plus size={13} /></button>
+        </div>
+        {/* Background opacity */}
+        <div style={chip} title="Background darkness">
+          <Contrast size={13} style={{ color: "rgba(241,244,255,0.6)" }} />
+          <input
+            type="range"
+            min={OPACITY_MIN}
+            max={OPACITY_MAX}
+            step={0.05}
+            value={settings.opacity}
+            onChange={(e) => setOpacity(parseFloat(e.target.value))}
+            style={{ width: 68, accentColor: "#5b9dff", cursor: "pointer" }}
+            title="Background darkness"
+          />
+          <span style={{ fontSize: 11, color: "rgba(241,244,255,0.7)", width: 32, textAlign: "center", fontVariantNumeric: "tabular-nums" }}>
+            {Math.round(settings.opacity * 100)}%
+          </span>
         </div>
         {/* Font size */}
         <div style={chip} title="Text size">
