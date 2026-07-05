@@ -3121,7 +3121,9 @@ export const useProjectStore = create<ProjectState>()(
 
         const updatedClip = titleEngine.updateTextClip(clipId, { keyframes });
         if (updatedClip) {
-          set({ project: { ...get().project, modifiedAt: Date.now() } });
+          // Sync engine → project.textClips so caption keyframes persist across
+          // autosave / reload / cloud render (see updateStyle).
+          set({ project: { ...get().project, textClips: titleEngine.getAllTextClips(), modifiedAt: Date.now() } });
         }
         return updatedClip || null;
       },
@@ -3155,7 +3157,9 @@ export const useProjectStore = create<ProjectState>()(
 
         if (updatedClip) {
           const { project } = get();
-          set({ project: { ...project, modifiedAt: Date.now() } });
+          // Sync engine → project.textClips so the animation preset persists
+          // across autosave / reload / cloud render (see updateStyle).
+          set({ project: { ...project, textClips: titleEngine.getAllTextClips(), modifiedAt: Date.now() } });
         }
         return updatedClip || null;
       },
@@ -3799,9 +3803,17 @@ export const useProjectStore = create<ProjectState>()(
         const deleted = titleEngine.deleteTextClip(clipId);
         if (deleted) {
           const { project } = get();
+          // Sync engine → project.textClips so the deletion PERSISTS. Without
+          // this, the engine drops the caption (the live preview looks right)
+          // but the stale project.textClips snapshot still carries it — and
+          // that snapshot is what gets serialized to autosave / Firestore, read
+          // by the cloud render, and reloaded via loadTextClips (which rebuilds
+          // the engine FROM the snapshot, resurrecting the deleted caption).
+          // Mirrors updateText / updateStyle / updateTextTransform etc.
           set({
             project: {
               ...project,
+              textClips: titleEngine.getAllTextClips(),
               modifiedAt: Date.now(),
             },
           });

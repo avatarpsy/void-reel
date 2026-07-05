@@ -877,6 +877,95 @@ export async function fetchSceneListContext(
   setSceneListContext(sceneListId, slData);
 }
 
+/** Upstream hosts that hand out short-lived (~3-day TTL) media URLs: Kie
+ *  (`tempfile.redpandaai.co`), Grok (`aiquickdraw`), Suno
+ *  (`apiboxfiles.erweima.ai`). A URL on one of these WILL rot, so it must
+ *  never be trusted as the durable pointer in a saved blob. */
+export function isEphemeralMediaHost(u: unknown): u is string {
+  return (
+    typeof u === "string" &&
+    /(tempfile\.redpandaai\.co|redpandaai\.co|tempfile\.aiquickdraw\.com|aiquickdraw\.com|apiboxfiles\.erweima\.ai)/i.test(
+      u,
+    )
+  );
+}
+
+/** Minimal media-item shape the heal touches — structural, so the matcher
+ *  stays unit-testable without the full MediaItem/Firestore types. */
+export interface HealableMediaItem {
+  id?: string;
+  originalUrl?: string | null;
+  blob?: unknown;
+  thumbnailUrl?: string | null;
+  type?: string;
+  role?: string;
+  category?: string;
+}
+
+/** Minimal live-scene shape: the per-scene durable URL fields + docId. */
+export interface HealableScene {
+  _docId: string;
+  narration_url?: string;
+  video_url?: string;
+  first_frame_url?: string;
+}
+
+/**
+ * Re-point any media item whose `originalUrl` is a frozen *ephemeral-host*
+ * link (an expiring Kie/Grok/Suno temp URL) to its live, durable Firestore
+ * value. Generated per-scene media ids embed the scene docId
+ * (`media-narration-<docId>-…`, `media-video-<docId>…`,
+ * `media-frame-<docId>-…`); project-level BGM is matched by `media-music-`
+ * id / `music` role / `Music` category and healed against `musicUrl`.
+ *
+ * Conservative by design — a rewrite happens ONLY when the live replacement
+ * is itself a non-ephemeral http(s) URL that differs from the current value,
+ * so durable URLs and user imports are never disturbed and a still-temp
+ * (un-mirrored) field is left alone rather than swapped for another dead
+ * link. Mutates the passed items in place (nulls the stale in-memory blob so
+ * the hydrate pass re-fetches + re-caches) and returns the count healed.
+ * Pure + Firestore-free so it can be unit-tested — see voidspace-loader.test.ts.
+ */
+export function healStaleGeneratedMediaUrls(
+  items: HealableMediaItem[],
+  liveScenes: HealableScene[],
+  musicUrl?: unknown,
+): number {
+  let healed = 0;
+  const repoint = (m: HealableMediaItem, durable: unknown): void => {
+    if (
+      typeof durable === "string" &&
+      /^https?:\/\//i.test(durable) &&
+      !isEphemeralMediaHost(durable) &&
+      durable !== m.originalUrl
+    ) {
+      m.originalUrl = durable;
+      if (!(m.blob instanceof Blob)) m.blob = null;
+      if (m.type === "image") m.thumbnailUrl = durable;
+      healed++;
+    }
+  };
+
+  for (const m of items) {
+    if (!isEphemeralMediaHost(m?.originalUrl) || typeof m?.id !== "string") continue;
+    const id = m.id;
+    const scene = liveScenes.find(
+      (s) =>
+        id.startsWith(`media-narration-${s._docId}-`) ||
+        id.startsWith(`media-video-${s._docId}`) ||
+        id.startsWith(`media-frame-${s._docId}-`),
+    );
+    if (scene) {
+      if (id.startsWith("media-narration-")) repoint(m, scene.narration_url);
+      else if (id.startsWith("media-video-")) repoint(m, scene.video_url);
+      else if (id.startsWith("media-frame-")) repoint(m, scene.first_frame_url);
+    } else if (id.startsWith("media-music-") || m.role === "music" || m.category === "Music") {
+      repoint(m, musicUrl);
+    }
+  }
+  return healed;
+}
+
 /**
  * Load a Voidspace scene list and build a complete OpenReel Project.
  */
@@ -1112,6 +1201,36 @@ export async function loadSceneListAsProject(
           if (musicClipsCollapsed > 0) {
             console.warn(`[voidspace-loader] Collapsed ${musicClipsCollapsed} duplicate per-scene music clip(s) into contiguous segments. Old per-scene-BGM blob auto-healed.`);
           }
+
+          // ── Stale generated-media URL heal ──
+          // project_state froze whatever media URL was live at save time.
+          // Generated assets (narration / video / frames / BGM) come from
+          // upstreams with ~3-day TTLs; the chat pipeline mirrors each to a
+          // durable GCS copy and repoints the per-scene Firestore field, but
+          // that repoint lands AFTER the editor blob was saved with the temp
+          // URL — and the blob is the load SSOT, so the timeline 404s once the
+          // TTL lapses even though the chat (reading live Firestore) still
+          // plays it. Re-point frozen temp-host URLs to their live durable
+          // value via the pure matcher (unit-tested in voidspace-loader.test).
+          // Same shape as the transition / music auto-heals above. Cheap
+          // pre-check gates the extra Firestore read to blobs that need it.
+          try {
+            const items = (parsed.mediaLibrary?.items ?? []) as HealableMediaItem[];
+            if (items.some((m) => isEphemeralMediaHost(m?.originalUrl))) {
+              const liveScenes = await fetchScenes(userId, sceneListId);
+              const healed = healStaleGeneratedMediaUrls(
+                items,
+                liveScenes,
+                (slData as Record<string, unknown>).music_url,
+              );
+              if (healed > 0) {
+                console.warn(`[voidspace-loader] Healed ${healed} stale generated-media URL(s) in project_state blob → live durable Firestore value (expired temp-host link(s) re-pointed; will re-fetch + cache to IndexedDB).`);
+              }
+            }
+          } catch (e) {
+            console.warn("[voidspace-loader] stale-media-URL heal skipped (non-blocking):", e);
+          }
+
           console.log(`[voidspace-loader] Using project_state blob (${projectStateRaw.json.length} bytes${projectStateRaw.history ? `, +${projectStateRaw.history.length}b history` : ""})`);
           return parsed;
         }

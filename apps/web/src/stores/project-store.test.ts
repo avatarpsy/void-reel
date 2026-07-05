@@ -773,6 +773,42 @@ describe("ProjectStore - Text Clips", () => {
     const presets = useProjectStore.getState().getAvailableAnimationPresets();
     expect(Array.isArray(presets)).toBe(true);
   });
+
+  it("syncs project.textClips on delete so the deletion persists (no render/reload ghost)", () => {
+    const { project } = useProjectStore.getState();
+    const trackId = project.timeline.tracks[0].id;
+
+    const clip = useProjectStore
+      .getState()
+      .createTextClip(trackId, 0, "Delete me", 3);
+    expect(clip).toBeDefined();
+    const id = clip!.id;
+
+    // Force project.textClips to mirror the engine — this is the state a save /
+    // reload leaves behind (project.textClips holds the persisted snapshot).
+    // updateTextContent is a synced mutator, so afterwards the snapshot has it.
+    useProjectStore.getState().updateTextContent(id, "Delete me edited");
+    expect(
+      (useProjectStore.getState().project.textClips ?? []).some(
+        (c: { id: string }) => c.id === id,
+      ),
+    ).toBe(true);
+
+    useProjectStore.getState().deleteTextClip(id);
+
+    // Regression: the persisted snapshot MUST reflect the deletion. Before the
+    // fix, deleteTextClip dropped the caption from the title engine but left it
+    // in project.textClips → it resurfaced in autosave/Firestore, the cloud
+    // render, and on reload (loadTextClips rebuilds the engine from the snapshot).
+    expect(
+      (useProjectStore.getState().project.textClips ?? []).some(
+        (c: { id: string }) => c.id === id,
+      ),
+    ).toBe(false);
+    expect(
+      useProjectStore.getState().getAllTextClips().some((c) => c.id === id),
+    ).toBe(false);
+  });
 });
 
 describe("ProjectStore - Subtitles (consolidated into text clips)", () => {
