@@ -185,6 +185,13 @@ interface UIState {
   maskEditLayerId: string | null;
   /** Generative Fill panel open (opened from the selection right-click menu). */
   generativeFillOpen: boolean;
+  /** Generate Image popup open (opened from the "+" beside Layers). */
+  generateImageOpen: boolean;
+  /** When set, the Generate popup opens preset to place the result on a NEW
+   *  page (carousel slide) instead of a new layer. */
+  generateImageAsPage: boolean;
+  /** Publish Carousel modal open. */
+  publishCarouselOpen: boolean;
   zoom: number;
   panX: number;
   panY: number;
@@ -230,6 +237,8 @@ interface UIActions {
   toggleInspectorCollapsed: () => void;
   setMaskEditLayerId: (layerId: string | null) => void;
   setGenerativeFillOpen: (open: boolean) => void;
+  setGenerateImageOpen: (open: boolean, asPage?: boolean) => void;
+  setPublishCarouselOpen: (open: boolean) => void;
   setZoom: (zoom: number) => void;
   setPan: (x: number, y: number) => void;
   resetView: () => void;
@@ -292,6 +301,9 @@ export const useUIStore = create<UIState & UIActions>()(
     isInspectorCollapsed: false,
     maskEditLayerId: null,
     generativeFillOpen: false,
+    generateImageOpen: false,
+    generateImageAsPage: false,
+    publishCarouselOpen: false,
     zoom: 1,
     panX: 0,
     panY: 0,
@@ -449,6 +461,8 @@ export const useUIStore = create<UIState & UIActions>()(
     toggleInspectorCollapsed: () => set((s) => ({ isInspectorCollapsed: !s.isInspectorCollapsed })),
     setMaskEditLayerId: (layerId) => set({ maskEditLayerId: layerId }),
     setGenerativeFillOpen: (open: boolean) => set({ generativeFillOpen: open }),
+    setGenerateImageOpen: (open: boolean, asPage = false) => set({ generateImageOpen: open, generateImageAsPage: open ? asPage : false }),
+    setPublishCarouselOpen: (open: boolean) => set({ publishCarouselOpen: open }),
 
     setZoom: (zoom) => set({ zoom: Math.max(0.1, Math.min(8, zoom)) }),
     setPan: (x, y) => set({ panX: x, panY: y }),

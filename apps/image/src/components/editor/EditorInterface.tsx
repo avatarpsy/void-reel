@@ -4,6 +4,7 @@ import { LeftPanel } from './panels/LeftPanel';
 import { Canvas } from './canvas/Canvas';
 import { Inspector } from './inspector/Inspector';
 import { GenerativeFillPanel } from './inspector/GenerativeFillPanel';
+import { GenerateImagePanel } from './inspector/GenerateImagePanel';
 import { HistoryPanel } from './panels/HistoryPanel';
 import { GuidePanel } from './panels/GuidePanel';
 import { PagesBar } from './pages/PagesBar';
@@ -12,6 +13,7 @@ import { useProjectStore } from '../../stores/project-store';
 import { History, Ruler } from 'lucide-react';
 
 const ExportDialog = lazy(() => import('./ExportDialog').then(m => ({ default: m.ExportDialog })));
+const PublishCarouselModal = lazy(() => import('./PublishCarouselModal').then(m => ({ default: m.PublishCarouselModal })));
 
 // Layers now live in the LEFT panel (full height — Figma-style). The right side
 // is the selected-layer Inspector plus a resizable Guides/History dock.
@@ -19,6 +21,8 @@ type BottomTab = 'history' | 'guides';
 
 export function EditorInterface() {
   const { isPanelCollapsed, isInspectorCollapsed, isExportDialogOpen, closeExportDialog } = useUIStore();
+  const publishCarouselOpen = useUIStore((s) => s.publishCarouselOpen);
+  const setPublishCarouselOpen = useUIStore((s) => s.setPublishCarouselOpen);
   const { project } = useProjectStore();
   const [bottomTab, setBottomTab] = useState<BottomTab>('history');
   const [dockHeight, setDockHeight] = useState(240);
@@ -148,6 +152,14 @@ export function EditorInterface() {
       {isExportDialogOpen && (
         <Suspense fallback={null}>
           <ExportDialog open={isExportDialogOpen} onClose={closeExportDialog} />
+        </Suspense>
+      )}
+
+      <GenerateImagePanel />
+
+      {publishCarouselOpen && (
+        <Suspense fallback={null}>
+          <PublishCarouselModal open={publishCarouselOpen} onClose={() => setPublishCarouselOpen(false)} />
         </Suspense>
       )}
     </div>

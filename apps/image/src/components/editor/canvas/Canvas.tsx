@@ -256,6 +256,25 @@ function clearLayerCache(layerIds?: Set<string>): void {
 }
 
 const failedImages = new Set<string>();
+// How many times each source has failed to decode. Self-contained sources
+// (data:/blob:) can fail TRANSIENTLY under memory/decode pressure (e.g. while
+// several large carousel-slide dataURLs load at once), so we retry them a few
+// times before giving up — otherwise a single transient failure blacklists the
+// image and the page is stuck on "Loading" forever.
+const imageLoadAttempts = new Map<string, number>();
+
+// Watchdog: while any layer image is still loading, ensure we re-render soon so
+// the page resolves even if an image's onload fired at a moment renderCallback
+// was momentarily unavailable (mount/unmount race). Self-terminating — once
+// everything is loaded, getCachedImage stops returning null and stops re-arming.
+let loadWatchdog: ReturnType<typeof setTimeout> | null = null;
+function armLoadWatchdog() {
+  if (loadWatchdog) return;
+  loadWatchdog = setTimeout(() => {
+    loadWatchdog = null;
+    renderCallback?.();
+  }, 350);
+}
 
 function getCachedImage(src: string): HTMLImageElement | null {
   if (!src) return null;
@@ -288,19 +307,30 @@ function getCachedImage(src: string): HTMLImageElement | null {
     imageCacheOrder.push(src);
 
     img.onload = () => {
+      imageLoadAttempts.delete(src);
       if (renderCallback) {
         renderCallback();
       }
     };
 
     img.onerror = () => {
-      failedImages.add(src);
       imageCache.delete(src);
       const idx = imageCacheOrder.indexOf(src);
       if (idx > -1) {
         imageCacheOrder.splice(idx, 1);
       }
-      console.warn(`Failed to load image: ${src.substring(0, 100)}`);
+      const selfContained = /^(data:|blob:)/i.test(src);
+      const attempts = (imageLoadAttempts.get(src) ?? 0) + 1;
+      imageLoadAttempts.set(src, attempts);
+      // Retry self-contained sources a few times (removed from cache above, so
+      // the next getCachedImage recreates the Image); blacklist remote URLs
+      // immediately and self-contained ones only after repeated failures.
+      if (!selfContained || attempts >= 4) {
+        failedImages.add(src);
+        console.warn(`Failed to load image: ${src.substring(0, 100)}`);
+      } else {
+        armLoadWatchdog(); // nudge a re-render so the retry actually happens
+      }
     };
 
     img.src = src;
@@ -311,6 +341,8 @@ function getCachedImage(src: string): HTMLImageElement | null {
     return img;
   }
 
+  // Still decoding — guarantee an eventual re-check.
+  armLoadWatchdog();
   return null;
 }
 

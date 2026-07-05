@@ -7,6 +7,7 @@ import { SettingsDialog } from './components/editor/SettingsDialog';
 import { useKeyboardShortcuts } from './services/keyboard-service';
 import { useAutoSave } from './hooks/useAutoSave';
 import { readHandoffParams, clearHandoffUrl, loadSrcAsProject, parseLocalAssetSource } from './services/image-handoff';
+import { openCloudCarouselById } from './services/carousel-cloud';
 
 export default function App() {
   const { currentView, showShortcutsPanel, toggleShortcutsPanel, showSettingsDialog, closeSettingsDialog } = useUIStore();
@@ -18,6 +19,25 @@ export default function App() {
 
   useEffect(() => {
     document.documentElement.classList.add('dark');
+  }, []);
+
+  // Deep-link: the Studio projects hub's Images tab opens a specific carousel
+  // via /image/?carousel=<draftId>. Load it as a multi-page project.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const carouselId = params.get('carousel');
+    if (!carouselId) return;
+    // Strip the param so a refresh doesn't re-open it.
+    const url = new URL(window.location.href);
+    url.searchParams.delete('carousel');
+    window.history.replaceState({}, '', url.toString());
+    (async () => {
+      try {
+        await openCloudCarouselById(carouselId);
+      } catch (e) {
+        console.warn('[image] could not open carousel:', e);
+      }
+    })();
   }, []);
 
   // "Edit this image" handoff: another surface opened us with ?src=…&from=…

@@ -36,6 +36,7 @@ import {
   Moon,
   Spline,
   SquareStack,
+  Send,
 } from 'lucide-react';
 import { useUIStore, Tool } from '../../../stores/ui-store';
 import { useProjectStore } from '../../../stores/project-store';
@@ -245,6 +246,7 @@ export function Toolbar() {
     setCurrentView,
     openExportDialog,
     toggleShortcutsPanel,
+    setPublishCarouselOpen,
   } = useUIStore();
 
   const { project, setProjectName, undo, redo, canUndo, canRedo } = useProjectStore();
@@ -358,6 +360,15 @@ export function Toolbar() {
         title="Save Project (Ctrl+S)"
       >
         <Save size={18} />
+      </button>
+
+      <button
+        onClick={() => setPublishCarouselOpen(true)}
+        className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+        title={(project?.artboards.length ?? 0) > 1 ? 'Publish carousel' : 'Publish as a post'}
+      >
+        <Send size={16} />
+        Publish
       </button>
 
       <button

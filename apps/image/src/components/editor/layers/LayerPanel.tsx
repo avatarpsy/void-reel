@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Eye, EyeOff, Lock, Unlock, Trash2, Copy, ChevronUp, ChevronDown, ChevronRight, CornerDownRight, ArrowUp, ArrowDown, ArrowUpToLine, ArrowDownToLine, Clipboard, ClipboardCopy, Scissors, Paintbrush, Search, X, Image, Type, Hexagon, Folder, FolderPlus, FolderOpen, ChevronsDown, SquareStack } from 'lucide-react';
+import { Eye, EyeOff, Lock, Unlock, Trash2, Copy, ChevronUp, ChevronDown, ChevronRight, CornerDownRight, ArrowUp, ArrowDown, ArrowUpToLine, ArrowDownToLine, Clipboard, ClipboardCopy, Scissors, Paintbrush, Search, X, Image, Type, Hexagon, Folder, FolderPlus, FolderOpen, ChevronsDown, SquareStack, Plus } from 'lucide-react';
 import { useProjectStore } from '../../../stores/project-store';
 import { useSelectionStore } from '../../../stores/selection-store';
 import { useUIStore } from '../../../stores/ui-store';
@@ -56,6 +56,7 @@ export function LayerPanel() {
   const clearSelection = useSelectionStore((s) => s.clearSelection);
   const maskEditLayerId = useUIStore((s) => s.maskEditLayerId);
   const setMaskEditLayerId = useUIStore((s) => s.setMaskEditLayerId);
+  const setGenerateImageOpen = useUIStore((s) => s.setGenerateImageOpen);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState<FilterType>('all');
@@ -283,7 +284,16 @@ export function LayerPanel() {
   return (
     <div className="h-full flex flex-col">
       <div className="flex items-center justify-between px-3 py-2 border-b border-border">
-        <h3 className="text-xs font-medium text-foreground">Layers</h3>
+        <div className="flex items-center gap-1.5">
+          <h3 className="text-xs font-medium text-foreground">Layers</h3>
+          <button
+            onClick={() => setGenerateImageOpen(true)}
+            className="w-5 h-5 flex items-center justify-center rounded-md bg-white/10 hover:bg-white/20 text-white transition-colors"
+            title="Generate an image with AI"
+          >
+            <Plus size={16} strokeWidth={2.5} />
+          </button>
+        </div>
         <span className="text-[10px] text-muted-foreground">
           {layers.length}/{allLayers.length}
         </span>
