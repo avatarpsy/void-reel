@@ -19,12 +19,14 @@
 // GET /api/studio/library (type=image) exactly like a generated video frame.
 // -----------------------------------------------------------------------------
 
-// Public Firebase web config (identifies the voidspace-v1 project; not a secret
-// — already shipped in the site + video editor bundles).
-const FIREBASE_API_KEY = 'AIzaSyAeSTgdUZEEabdJttus2sn8NNh5gAX8yqA';
 const FB_DB = 'firebaseLocalStorageDb';
 const FB_STORE = 'firebaseLocalStorage';
-const FB_KEY = `firebase:authUser:${FIREBASE_API_KEY}:[DEFAULT]`;
+// Firebase persists the signed-in user under a key shaped like
+// `firebase:authUser:<WEB_API_KEY>:[DEFAULT]`. We discover that record — and the
+// project's public web API key embedded in its name — at RUNTIME from the
+// same-origin site's IndexedDB, so no Firebase key is hardcoded in this bundle.
+const FB_AUTH_PREFIX = 'firebase:authUser:';
+const FB_AUTH_SUFFIX = ':[DEFAULT]';
 
 // Pseudo-project that groups standalone images in the Library, matching the
 // agent image flow's convention (server/utils/agent-tools/create-tools.ts).
@@ -43,10 +45,10 @@ interface StsTokenManager {
   expirationTime?: number;
 }
 
-function readPersistedUser(): Promise<{ sts: StsTokenManager } | null> {
+function readPersistedUser(): Promise<{ sts: StsTokenManager; apiKey: string } | null> {
   return new Promise((resolve) => {
     let settled = false;
-    const done = (v: { sts: StsTokenManager } | null) => { if (!settled) { settled = true; resolve(v); } };
+    const done = (v: { sts: StsTokenManager; apiKey: string } | null) => { if (!settled) { settled = true; resolve(v); } };
     try {
       // Open without a version so we never trigger an upgrade on Firebase's DB.
       const req = indexedDB.open(FB_DB);
@@ -55,14 +57,25 @@ function readPersistedUser(): Promise<{ sts: StsTokenManager } | null> {
         const db = req.result;
         try {
           if (!db.objectStoreNames.contains(FB_STORE)) { done(null); return; }
-          const tx = db.transaction(FB_STORE, 'readonly');
-          const getReq = tx.objectStore(FB_STORE).get(FB_KEY);
-          getReq.onerror = () => done(null);
-          getReq.onsuccess = () => {
-            // Firebase stores records as { fbase_key, value: <user> }.
-            const rec = getReq.result as { value?: { stsTokenManager?: StsTokenManager } } | undefined;
-            const sts = rec?.value?.stsTokenManager;
-            done(sts ? { sts } : null);
+          const store = db.transaction(FB_STORE, 'readonly').objectStore(FB_STORE);
+          // Find the persisted-auth record by shape rather than by a hardcoded
+          // key, and recover the project's public web API key from its name.
+          const keysReq = store.getAllKeys();
+          keysReq.onerror = () => done(null);
+          keysReq.onsuccess = () => {
+            const authKey = (keysReq.result || [])
+              .map((k) => String(k))
+              .find((k) => k.startsWith(FB_AUTH_PREFIX) && k.endsWith(FB_AUTH_SUFFIX));
+            if (!authKey) { done(null); return; }
+            const apiKey = authKey.slice(FB_AUTH_PREFIX.length, authKey.length - FB_AUTH_SUFFIX.length);
+            const getReq = store.get(authKey); // same tx — still open in this success handler
+            getReq.onerror = () => done(null);
+            getReq.onsuccess = () => {
+              // Firebase stores records as { fbase_key, value: <user> }.
+              const rec = getReq.result as { value?: { stsTokenManager?: StsTokenManager } } | undefined;
+              const sts = rec?.value?.stsTokenManager;
+              done(sts && apiKey ? { sts, apiKey } : null);
+            };
           };
         } catch {
           done(null);
@@ -74,10 +87,10 @@ function readPersistedUser(): Promise<{ sts: StsTokenManager } | null> {
   });
 }
 
-async function refreshIdToken(refreshToken: string): Promise<string | null> {
+async function refreshIdToken(refreshToken: string, apiKey: string): Promise<string | null> {
   try {
     const res = await fetch(
-      `https://securetoken.googleapis.com/v1/token?key=${FIREBASE_API_KEY}`,
+      `https://securetoken.googleapis.com/v1/token?key=${encodeURIComponent(apiKey)}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -100,7 +113,7 @@ export async function getVoidspaceIdToken(): Promise<string | null> {
   const fresh = typeof expirationTime === 'number' && expirationTime - Date.now() > 5 * 60 * 1000;
   if (accessToken && fresh) return accessToken;
   if (refreshToken) {
-    const refreshed = await refreshIdToken(refreshToken);
+    const refreshed = await refreshIdToken(refreshToken, persisted.apiKey);
     if (refreshed) return refreshed;
   }
   return accessToken ?? null; // stale but better than nothing; server re-validates
