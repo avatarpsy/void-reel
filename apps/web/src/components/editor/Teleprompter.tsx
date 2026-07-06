@@ -150,6 +150,22 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
   currentIndexRef.current = currentIndex;
   const asrStatusRef = useRef<AsrStatus>("idle");
   asrStatusRef.current = asrStatus;
+  // Voice activity from the mic tap (RMS gate) + accumulated speaking time
+  // without a single confirmed match. If the user is audibly SPEAKING but
+  // recognition produces nothing for a while, recognition is broken on this
+  // device — fall back to the crawl instead of freezing at the top.
+  const voiceActiveRef = useRef(false);
+  const voicedNoMatchMsRef = useRef(0);
+  // When "listening" began — bounds the worst-case freeze: if NOTHING has
+  // matched after this long (even if the voice gate never fired, e.g. a
+  // silently-dead audio tap), fall back to the crawl.
+  const listeningSinceRef = useRef(0);
+  const [syncLost, setSyncLost] = useState(false);
+  const syncLostRef = useRef(false);
+  syncLostRef.current = syncLost;
+  useEffect(() => {
+    listeningSinceRef.current = asrStatus === "listening" ? performance.now() : 0;
+  }, [asrStatus]);
 
   const tokens = useMemo(() => {
     const out: { display: string; norm: string }[] = [];
@@ -218,6 +234,9 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
           onRecognized(words);
         },
         onStatus: (s) => setAsrStatus(s),
+        onVoice: (v) => {
+          voiceActiveRef.current = v;
+        },
       });
       void asr.start(stream);
     };
@@ -268,7 +287,37 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
       if (activeRef.current && tokens.length > 0) {
         const listening = asrStatusRef.current === "listening";
         const tracker = trackerRef.current;
-        if (listening && tracker?.hasSpoken) {
+
+        // ── Recognition health ──
+        // Accumulate time the user is audibly SPEAKING while recognition
+        // produces no confirmed match. Silence doesn't count (holding during a
+        // pause is correct). Past ~8s of voiced-but-unmatched speech, treat
+        // recognition as broken on this device and fall back to the crawl so
+        // the prompter NEVER freezes. A confirmed match instantly restores
+        // voice-follow.
+        if (listening && tracker) {
+          const sinceMatch = tracker.lastMatchAtMs > 0 ? now - tracker.lastMatchAtMs : Infinity;
+          if (sinceMatch < 2500) {
+            voicedNoMatchMsRef.current = 0;
+            if (syncLostRef.current) setSyncLost(false);
+          } else if (voiceActiveRef.current) {
+            voicedNoMatchMsRef.current += dt * 1000;
+            if (voicedNoMatchMsRef.current > 8000 && !syncLostRef.current) setSyncLost(true);
+          }
+          // Absolute freeze bound: listening but NOTHING has ever matched
+          // (covers a silently-dead audio tap the voice gate can't see).
+          if (
+            !tracker.hasSpoken &&
+            !syncLostRef.current &&
+            listeningSinceRef.current > 0 &&
+            now - listeningSinceRef.current > 12000
+          ) {
+            setSyncLost(true);
+          }
+        }
+
+        const followVoice = listening && tracker?.hasSpoken && !syncLostRef.current;
+        if (followVoice && tracker) {
           // FOLLOW your voice. The tracker's target = last confirmed word plus
           // a speculative creep at ~85% of your measured speaking rate (capped
           // +3 words) so the highlight tracks the word you're saying NOW — but
@@ -278,10 +327,11 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
             readPosRef.current += (tgt - readPosRef.current) * Math.min(1, dt * 5);
             if (tgt - readPosRef.current < 0.05) readPosRef.current = tgt;
           }
-        } else if (listening) {
+        } else if (listening && !syncLostRef.current) {
           // Warm + listening but you haven't spoken yet → hold at the top.
         } else {
-          // FALLBACK crawl (model warming / mic off / unsupported): time-based.
+          // FALLBACK crawl (model warming / mic off / unsupported / sync lost):
+          // time-based at the chosen speed.
           readPosRef.current = Math.min(
             tokens.length - 1,
             readPosRef.current + speedRef.current * dt,
@@ -312,6 +362,9 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
     if (active) {
       readPosRef.current = 0;
       trackerRef.current?.reset(speedRef.current);
+      voiceActiveRef.current = false;
+      voicedNoMatchMsRef.current = 0;
+      setSyncLost(false);
       setCurrentIndex(0);
       setPaused(false);
       targetScrollRef.current = 0;
@@ -374,16 +427,20 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
   };
 
   // Speech-tracking status → dot colour + label so the user KNOWS what's happening.
-  const asrLive = asrStatus === "listening";
-  const dotColor =
-    asrStatus === "listening" ? "#46d39a" : asrStatus === "warming" ? "#f5c451" : "rgba(150,160,190,0.7)";
-  const statusLabel =
-    asrStatus === "listening"
+  const asrLive = asrStatus === "listening" && !syncLost;
+  const dotColor = asrLive
+    ? "#46d39a"
+    : asrStatus === "warming" || syncLost
+      ? "#f5c451"
+      : "rgba(150,160,190,0.7)";
+  const statusLabel = syncLost
+    ? "Auto-scroll · voice sync lost"
+    : asrStatus === "listening"
       ? "Following your voice"
       : asrStatus === "warming"
         ? "Warming up…"
         : asrStatus === "unsupported"
-          ? "Voice off · manual"
+          ? "Voice off · auto-scroll"
           : active
             ? "Auto-scroll"
             : "Ready";
@@ -401,9 +458,10 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
         flexDirection: "column",
         borderRadius: 16,
         overflow: "hidden",
+        // NO backdrop-filter: blurring a live <video> underneath forces the
+        // compositor to re-blur every frame — visible preview jank while
+        // recording. The user-adjustable dark scrim does the readability work.
         background: `linear-gradient(180deg, rgba(6,9,18,${edgeOp}) 0%, rgba(6,9,18,${op}) 22%, rgba(6,9,18,${op}) 78%, rgba(6,9,18,${edgeOp}) 100%)`,
-        backdropFilter: "blur(3px)",
-        WebkitBackdropFilter: "blur(3px)",
         boxShadow: "0 20px 70px rgba(0,0,0,0.5), inset 0 0 0 1px rgba(120,150,230,0.22)",
         userSelect: "none",
         pointerEvents: "auto",

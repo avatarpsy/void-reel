@@ -246,6 +246,12 @@ export class SpeechTracker {
     return this.lastMatchTs > 0;
   }
 
+  /** Timestamp (ms) of the last confirmed match — 0 when none yet. Lets the
+   *  prompter detect "speaking but nothing matches" and fall back gracefully. */
+  get lastMatchAtMs(): number {
+    return this.lastMatchTs;
+  }
+
   get ratePerSec(): number {
     return this.rate;
   }
