@@ -32,6 +32,7 @@
     "@types/uuid": "^11.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "double-metaphone": "^2.0.1",
     "firebase": "^11.0.0",
     "framer-motion": "^12.23.24",
     "gsap": "^3.14.2",

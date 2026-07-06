@@ -34,8 +34,9 @@
  */
 
 export type AsrStatus =
-  | "idle" // not tracking speech yet (warming, silent, or crawl-only)
-  | "listening" // warm, transcribing live
+  | "idle" // not tracking (stopped, or model failed → crawl fallback)
+  | "warming" // mic tapped, Whisper model still downloading/initializing
+  | "listening" // warm, transcribing live — speech drives the scroll
   | "unsupported"; // no AudioContext / mic track
 
 export interface AsrCallbacks {
@@ -51,7 +52,9 @@ const SAMPLE_RATE = 16000;
 const WINDOW_SECONDS = 8;
 const WINDOW_SAMPLES = SAMPLE_RATE * WINDOW_SECONDS;
 const MIN_SAMPLES = SAMPLE_RATE * 0.6; // < 0.6 s — too little to bother
-const TAIL_WORDS = 6;
+// The trailing spoken words handed to the aligner each tick. A longer probe
+// aligns more robustly against the script (more context to survive ASR slips).
+const TAIL_WORDS = 10;
 
 // ── Whisper pipeline singleton (loads once per page session; downloads once ──
 // per browser, into the shared "transformers-cache" bucket) ──────────────────
@@ -219,8 +222,10 @@ export class TeleprompterAsr {
     }
 
     // Warm the model (already cached + prewarmed in the common case, so this is
-    // usually instant). Silent — no download UI. Speech-tracking flips on only
-    // once it's ready; until then the teleprompter's crawl carries the scroll.
+    // usually instant). Speech-tracking flips to "listening" once it's ready;
+    // until then we report "warming" so the UI can say so (and fall back to a
+    // gentle crawl). On failure → "idle" (crawl-only).
+    this.setStatus("warming");
     void getAsr()
       .then(() => {
         if (!this.stopped) this.setStatus("listening");
