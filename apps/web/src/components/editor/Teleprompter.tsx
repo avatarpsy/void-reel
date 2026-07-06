@@ -156,16 +156,9 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
   // device — fall back to the crawl instead of freezing at the top.
   const voiceActiveRef = useRef(false);
   const voicedNoMatchMsRef = useRef(0);
-  // When "listening" began — bounds the worst-case freeze: if NOTHING has
-  // matched after this long (even if the voice gate never fired, e.g. a
-  // silently-dead audio tap), fall back to the crawl.
-  const listeningSinceRef = useRef(0);
   const [syncLost, setSyncLost] = useState(false);
   const syncLostRef = useRef(false);
   syncLostRef.current = syncLost;
-  useEffect(() => {
-    listeningSinceRef.current = asrStatus === "listening" ? performance.now() : 0;
-  }, [asrStatus]);
 
   const tokens = useMemo(() => {
     const out: { display: string; norm: string }[] = [];
@@ -304,19 +297,14 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
             voicedNoMatchMsRef.current += dt * 1000;
             if (voicedNoMatchMsRef.current > 8000 && !syncLostRef.current) setSyncLost(true);
           }
-          // Absolute freeze bound: listening but NOTHING has ever matched
-          // (covers a silently-dead audio tap the voice gate can't see).
-          if (
-            !tracker.hasSpoken &&
-            !syncLostRef.current &&
-            listeningSinceRef.current > 0 &&
-            now - listeningSinceRef.current > 12000
-          ) {
-            setSyncLost(true);
-          }
         }
 
+        // ── The scroll ladder. INVARIANT: scroll ⇔ speech. ──
+        // No branch may advance the script on a timer while the user is silent;
+        // the ONLY exception is when we have no speech signal at all
+        // (mic denied / model dead) — and that state is clearly labelled.
         const followVoice = listening && tracker?.hasSpoken && !syncLostRef.current;
+        const noSpeechSignal = asrStatusRef.current === "unsupported" || asrStatusRef.current === "idle";
         if (followVoice && tracker) {
           // FOLLOW your voice. The tracker's target = last confirmed word plus
           // a speculative creep at ~85% of your measured speaking rate (capped
@@ -328,10 +316,18 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
             if (tgt - readPosRef.current < 0.05) readPosRef.current = tgt;
           }
         } else if (listening && !syncLostRef.current) {
-          // Warm + listening but you haven't spoken yet → hold at the top.
-        } else {
-          // FALLBACK crawl (model warming / mic off / unsupported / sync lost):
-          // time-based at the chosen speed.
+          // Listening but nothing matched yet → HOLD (silence must not scroll).
+        } else if (noSpeechSignal) {
+          // No mic / no model — the only time-based crawl left, and the header
+          // says so ("Voice off · auto-scroll").
+          readPosRef.current = Math.min(
+            tokens.length - 1,
+            readPosRef.current + speedRef.current * dt,
+          );
+        } else if (voiceActiveRef.current) {
+          // Model warming, or voice-sync lost: we can't ALIGN yet, but we can
+          // still hear WHEN the user is speaking — crawl only during speech
+          // energy so silence always holds.
           readPosRef.current = Math.min(
             tokens.length - 1,
             readPosRef.current + speedRef.current * dt,

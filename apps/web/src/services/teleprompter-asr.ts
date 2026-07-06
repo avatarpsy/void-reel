@@ -57,8 +57,10 @@ const MIN_SAMPLES = SAMPLE_RATE * 0.6; // < 0.6 s — too little to bother
 // The trailing spoken words handed to the aligner each tick. A longer probe
 // aligns more robustly against the script (more context to survive ASR slips).
 const TAIL_WORDS = 10;
-// RMS above this ≈ speech (normal mics idle ~0.001-0.005; speech ~0.02-0.2).
-const VOICE_RMS = 0.012;
+// RMS above this ≈ speech. With the recorder's AGC + noise suppression on the
+// tapped track, speech sits ~0.02-0.2 and suppressed room noise ~0.001-0.003,
+// so 0.008 keeps margin on both sides (quiet mics still register, noise doesn't).
+const VOICE_RMS = 0.008;
 
 // ── Worker singleton (one pipeline per page session; downloads once, ever) ──
 let _worker: Worker | null = null;
@@ -261,10 +263,15 @@ export class TeleprompterAsr {
 
     // Ship the rolling window to the worker on a cadence, adapting to how long
     // inference actually takes so we never queue-flood a slow (WASM) device.
+    // SILENCE never reaches Whisper: the model notoriously HALLUCINATES words
+    // ("thank you", "thanks for watching") on empty audio, which would fake
+    // matches and scroll the prompter while the user isn't speaking — so we
+    // only transcribe when speech energy occurred in the recent window.
     const tickMs = () => Math.min(4000, Math.max(900, _lastInferMs * 1.3));
     const tick = () => {
       if (this.stopped) return;
-      if (this.buffer.length >= MIN_SAMPLES && _workerReady) {
+      const voicedRecently = performance.now() - this.lastVoiceTs < 2500;
+      if (this.buffer.length >= MIN_SAMPLES && _workerReady && voicedRecently) {
         // Copy → transfer, so the rolling buffer stays intact on our side.
         const snap = this.buffer.slice();
         getWorker()?.postMessage({ type: "pcm", pcm: snap }, [snap.buffer]);
