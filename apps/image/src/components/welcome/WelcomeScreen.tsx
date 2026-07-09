@@ -1,12 +1,10 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
-  ArrowRight, FolderOpen, Layout, Square, Smartphone, Image as ImageIcon,
-  Trash2, Clock, MoreVertical, Plus,
+  ArrowRight, FolderOpen, Layout, Square, Smartphone, Image as ImageIcon, Plus,
 } from 'lucide-react';
 import { useProjectStore } from '../../stores/project-store';
 import { useUIStore } from '../../stores/ui-store';
 import { CANVAS_PRESETS, Project } from '../../types/project';
-import { loadSavedProject, getSavedProjectIds, deleteSavedProject } from '../../hooks/useAutoSave';
 import { CosmicField } from '../CosmicField';
 
 // Voidspace brand mark (the gradient "S"), bundled at /image/images/logo.png.
@@ -14,13 +12,6 @@ const LOGO_SRC = `${import.meta.env.BASE_URL}images/logo.png`;
 
 type Category = 'all' | 'Social Media' | 'Presentation' | 'Print' | 'Desktop' | 'Mobile' | 'Logo';
 type ViewMode = 'home' | 'formats';
-
-interface SavedProjectInfo {
-  id: string;
-  name: string;
-  updatedAt: number;
-  size: { width: number; height: number };
-}
 
 // The three primary on-ramp formats — real image use-cases (not video
 // orientations). The full preset list is one click away under "Browse all".
@@ -70,22 +61,9 @@ export function WelcomeScreen() {
   const [showCustomSize, setShowCustomSize] = useState(false);
   const [customWidth, setCustomWidth] = useState(1920);
   const [customHeight, setCustomHeight] = useState(1080);
-  const [recentProjects, setRecentProjects] = useState<SavedProjectInfo[]>([]);
-  const [projectMenuOpen, setProjectMenuOpen] = useState<string | null>(null);
-  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
   const { createProject, loadProject } = useProjectStore();
   const { setCurrentView } = useUIStore();
-
-  useEffect(() => { loadRecentProjects(); }, []);
-
-  useEffect(() => {
-    const handleClickOutside = () => setProjectMenuOpen(null);
-    if (projectMenuOpen) {
-      document.addEventListener('click', handleClickOutside);
-      return () => document.removeEventListener('click', handleClickOutside);
-    }
-  }, [projectMenuOpen]);
 
   // Esc: from the all-formats view, back to the hero.
   useEffect(() => {
@@ -96,40 +74,10 @@ export function WelcomeScreen() {
     return () => window.removeEventListener('keydown', onKey);
   }, [viewMode]);
 
-  const loadRecentProjects = async () => {
-    const ids = await getSavedProjectIds();
-    const projects: SavedProjectInfo[] = [];
-    for (const id of ids) {
-      const project = await loadSavedProject(id);
-      if (project) {
-        projects.push({
-          id: project.id,
-          name: project.name,
-          updatedAt: project.updatedAt,
-          size: project.artboards?.[0]?.size ?? { width: 0, height: 0 },
-        });
-      }
-    }
-    projects.sort((a, b) => b.updatedAt - a.updatedAt);
-    setRecentProjects(projects);
-  };
-
   const create = useCallback((name: string, width: number, height: number) => {
     createProject(name, { width, height });
     setCurrentView('editor');
   }, [createProject, setCurrentView]);
-
-  const handleOpenProject = async (projectId: string) => {
-    const project = await loadSavedProject(projectId);
-    if (project) { loadProject(project); setCurrentView('editor'); }
-  };
-
-  const handleDeleteProject = (projectId: string) => {
-    deleteSavedProject(projectId);
-    setRecentProjects((prev) => prev.filter((p) => p.id !== projectId));
-    setDeleteConfirmId(null);
-    setProjectMenuOpen(null);
-  };
 
   const handleImportProject = () => {
     const input = document.createElement('input');
@@ -149,22 +97,6 @@ export function WelcomeScreen() {
       }
     };
     input.click();
-  };
-
-  const formatDate = (timestamp: number) => {
-    const diff = Date.now() - timestamp;
-    const days = Math.floor(diff / 86_400_000);
-    if (days === 0) {
-      const hours = Math.floor(diff / 3_600_000);
-      if (hours === 0) {
-        const minutes = Math.floor(diff / 60_000);
-        return minutes <= 1 ? 'Just now' : `${minutes} minutes ago`;
-      }
-      return hours === 1 ? '1 hour ago' : `${hours} hours ago`;
-    }
-    if (days === 1) return 'Yesterday';
-    if (days < 7) return `${days} days ago`;
-    return new Date(timestamp).toLocaleDateString();
   };
 
   const filteredPresets = selectedCategory === 'all'
@@ -319,52 +251,6 @@ export function WelcomeScreen() {
               <Plus size={15} /> Custom size
             </button>
           </div>
-
-          {recentProjects.length > 0 && (
-            <div className="mt-12">
-              <h2 className="text-sm font-medium text-text-secondary mb-4 text-center">Recent projects</h2>
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-                {recentProjects.slice(0, 8).map((project) => (
-                  <div key={project.id}
-                    className="group relative flex flex-col p-4 rounded-xl border border-border bg-background-secondary hover:border-primary/40 transition-all cursor-pointer"
-                    onClick={() => handleOpenProject(project.id)}>
-                    <div className="flex items-center justify-between mb-3">
-                      <div className="bg-background-tertiary rounded-lg flex items-center justify-center"
-                        style={{
-                          width: Math.min(48, (project.size.width / Math.max(project.size.width, project.size.height, 1)) * 48),
-                          height: Math.min(48, (project.size.height / Math.max(project.size.width, project.size.height, 1)) * 48),
-                        }}>
-                        <Layout size={14} className="text-text-muted" />
-                      </div>
-                      <div className="relative">
-                        <button
-                          onClick={(e) => { e.stopPropagation(); setProjectMenuOpen(projectMenuOpen === project.id ? null : project.id); }}
-                          className="p-1.5 rounded-md opacity-0 group-hover:opacity-100 hover:bg-background-tertiary transition-all">
-                          <MoreVertical size={16} className="text-text-muted" />
-                        </button>
-                        {projectMenuOpen === project.id && (
-                          <div className="absolute right-0 top-full mt-1 z-50 min-w-[140px] rounded-lg border border-border bg-popover shadow-lg py-1">
-                            <button onClick={(e) => { e.stopPropagation(); handleOpenProject(project.id); }}
-                              className="w-full px-3 py-2 text-left text-sm hover:bg-background-tertiary transition-colors flex items-center gap-2">
-                              <FolderOpen size={14} /> Open
-                            </button>
-                            <button onClick={(e) => { e.stopPropagation(); setDeleteConfirmId(project.id); }}
-                              className="w-full px-3 py-2 text-left text-sm text-destructive hover:bg-destructive/10 transition-colors flex items-center gap-2">
-                              <Trash2 size={14} /> Delete
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                    <h3 className="text-sm font-medium text-text-primary truncate mb-1">{project.name}</h3>
-                    <div className="flex items-center gap-2 text-xs text-text-muted">
-                      <Clock size={12} /><span>{formatDate(project.updatedAt)}</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
         </div>
 
         <div className="absolute bottom-6 left-1/2 -translate-x-1/2">
@@ -373,27 +259,6 @@ export function WelcomeScreen() {
           </p>
         </div>
       </div>
-
-      {deleteConfirmId && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setDeleteConfirmId(null)}>
-          <div className="bg-background-secondary border border-border rounded-xl p-6 max-w-sm mx-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-base font-semibold text-text-primary mb-2">Delete Project?</h3>
-            <p className="text-sm text-text-muted mb-6">
-              This action cannot be undone. The project will be permanently deleted from your browser storage.
-            </p>
-            <div className="flex justify-end gap-3">
-              <button onClick={() => setDeleteConfirmId(null)}
-                className="px-4 py-2 rounded-lg text-sm font-medium text-text-secondary hover:text-text-primary hover:bg-background-tertiary transition-colors">
-                Cancel
-              </button>
-              <button onClick={() => handleDeleteProject(deleteConfirmId)}
-                className="px-4 py-2 bg-destructive text-destructive-foreground rounded-lg text-sm font-medium hover:bg-destructive/90 transition-colors">
-                Delete
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
