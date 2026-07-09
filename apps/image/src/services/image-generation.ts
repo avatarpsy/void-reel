@@ -47,6 +47,9 @@ export interface ImageModel {
   /** Credits for a default (1K) call — from registry publicView. */
   defaultCallCredits?: number;
   priceLabel?: string;
+  /** Billed surcharge per EXTRA input image (first free). 0 for most models;
+   *  Seedream 5 Pro charges a small amount per additional context image. */
+  perRefImageCredits?: number;
   /** Max reference images this model accepts. */
   maxRefs: number;
   /** Premium model the current (unsubscribed) user can't use. */
@@ -85,6 +88,7 @@ export async function fetchImageModels(): Promise<ImageModelCatalog> {
       resolutions: Array.isArray(m.resolutions) ? m.resolutions : undefined,
       defaultCallCredits: typeof m.defaultCallCredits === 'number' ? m.defaultCallCredits : undefined,
       priceLabel: m.priceLabel,
+      perRefImageCredits: typeof m.perRefImageCredits === 'number' ? m.perRefImageCredits : 0,
       maxRefs: m?.capabilities?.refImages?.max ?? 0,
       locked: m.locked === true,
       requiresPlan: m.requiresPlan ?? null,
@@ -157,6 +161,27 @@ export async function generateStudioImage(opts: GenerateImageOpts): Promise<stri
   const resultUrl: string = j.url;
   if (!resultUrl) throw new Error('Image generation returned no image');
   return fetchAsDataUrl(resultUrl);
+}
+
+/**
+ * Seedream 5 Pro layer separation: send a composite image (public URL) and get
+ * back N image URLs, one per separated layer. Classify failures like
+ * generation (402 credits / 403 locked / 503 busy). Returns the raw result URLs
+ * (the caller fetches each via the media-proxy and imports it as a layer).
+ */
+export async function separateLayers(opts: { imageUrl: string; prompt?: string; resolution?: string; aspectRatio?: string }): Promise<string[]> {
+  const token = await getVoidspaceIdToken();
+  if (!token) throw new NotSignedInError();
+  const res = await fetch('/api/studio/seedream-layers', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ imageUrl: opts.imageUrl, prompt: opts.prompt, resolution: opts.resolution, aspectRatio: opts.aspectRatio }),
+  });
+  if (!res.ok) await throwImageGenError(res);
+  const j = await res.json();
+  const urls: string[] = Array.isArray(j.urls) ? j.urls.filter((u: any) => typeof u === 'string' && u) : [];
+  if (!urls.length) throw new Error('Layer separation returned no images');
+  return urls;
 }
 
 /** Credit situation for the out-of-credits popup (subscribed → top up). */

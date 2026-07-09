@@ -5,6 +5,7 @@ import { Canvas } from './canvas/Canvas';
 import { Inspector } from './inspector/Inspector';
 import { GenerativeFillPanel } from './inspector/GenerativeFillPanel';
 import { GenerateImagePanel } from './inspector/GenerateImagePanel';
+import { LayerSeparationModal } from './inspector/LayerSeparationModal';
 import { HistoryPanel } from './panels/HistoryPanel';
 import { GuidePanel } from './panels/GuidePanel';
 import { PagesBar } from './pages/PagesBar';
@@ -156,6 +157,7 @@ export function EditorInterface() {
       )}
 
       <GenerateImagePanel />
+      <LayerSeparationModal />
 
       {publishCarouselOpen && (
         <Suspense fallback={null}>

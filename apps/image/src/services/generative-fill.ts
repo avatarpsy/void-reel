@@ -49,6 +49,7 @@ export async function fetchCreditSituation(): Promise<{ isSubscribed: boolean }>
  *                 region back (outside stays untouched).
  *  refMode 'none' | 'optional' | 'required' drives the reference-image UI. */
 export const FILL_MODELS = [
+  { id: 'seedream-5-pro', label: 'Seedream 5.0 Pro (edit)', credits: 4, engine: 'kie', refMode: 'optional' },
   { id: 'flux-dev-inpaint', label: 'FLUX.1 Fill (dev)', credits: 4, engine: 'fal', refMode: 'none' },
   { id: 'flux-pro-fill', label: 'FLUX.1 Fill (pro)', credits: 6, engine: 'fal', refMode: 'none' },
   { id: 'flux-kontext-ref', label: 'FLUX Kontext (reference)', credits: 4, engine: 'fal', refMode: 'required' },

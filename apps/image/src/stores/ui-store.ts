@@ -192,6 +192,8 @@ interface UIState {
   generateImageAsPage: boolean;
   /** Publish Carousel modal open. */
   publishCarouselOpen: boolean;
+  /** AI "Separate into layers" (Seedream 5 Pro) modal open. */
+  layerSeparationOpen: boolean;
   zoom: number;
   panX: number;
   panY: number;
@@ -239,6 +241,7 @@ interface UIActions {
   setGenerativeFillOpen: (open: boolean) => void;
   setGenerateImageOpen: (open: boolean, asPage?: boolean) => void;
   setPublishCarouselOpen: (open: boolean) => void;
+  setLayerSeparationOpen: (open: boolean) => void;
   setZoom: (zoom: number) => void;
   setPan: (x: number, y: number) => void;
   resetView: () => void;
@@ -304,6 +307,7 @@ export const useUIStore = create<UIState & UIActions>()(
     generateImageOpen: false,
     generateImageAsPage: false,
     publishCarouselOpen: false,
+    layerSeparationOpen: false,
     zoom: 1,
     panX: 0,
     panY: 0,
@@ -463,6 +467,7 @@ export const useUIStore = create<UIState & UIActions>()(
     setGenerativeFillOpen: (open: boolean) => set({ generativeFillOpen: open }),
     setGenerateImageOpen: (open: boolean, asPage = false) => set({ generateImageOpen: open, generateImageAsPage: open ? asPage : false }),
     setPublishCarouselOpen: (open: boolean) => set({ publishCarouselOpen: open }),
+    setLayerSeparationOpen: (open: boolean) => set({ layerSeparationOpen: open }),
 
     setZoom: (zoom) => set({ zoom: Math.max(0.1, Math.min(8, zoom)) }),
     setPan: (x, y) => set({ panX: x, panY: y }),

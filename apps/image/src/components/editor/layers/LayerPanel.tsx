@@ -18,6 +18,15 @@ import {
 
 type FilterType = 'all' | LayerType;
 
+// Seedream 5 Pro "separate into layers": the full pipeline (flatten → upload →
+// /api/studio/seedream-layers → import each returned image as a layer) is wired
+// and correct, but kie/Seedream currently returns a SINGLE image (no multi-layer
+// output shipped by the provider yet). Keep the button hidden so users aren't
+// charged for a non-separation; flip to true the moment the provider returns
+// multiple layer images — no other change needed (pickResultUrls already returns
+// all urls and the client imports each).
+const LAYER_SEPARATION_ENABLED = false;
+
 const LAYER_TYPE_ICONS: Record<LayerType, React.ReactNode> = {
   image: <Image size={12} />,
   text: <Type size={12} />,
@@ -57,6 +66,8 @@ export function LayerPanel() {
   const maskEditLayerId = useUIStore((s) => s.maskEditLayerId);
   const setMaskEditLayerId = useUIStore((s) => s.setMaskEditLayerId);
   const setGenerateImageOpen = useUIStore((s) => s.setGenerateImageOpen);
+  const setLayerSeparationOpen = useUIStore((s) => s.setLayerSeparationOpen);
+  const hasContent = (project?.artboards.find((a) => a.id === selectedArtboardId) ?? project?.artboards[0])?.layerIds.length ?? 0;
 
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState<FilterType>('all');
@@ -736,6 +747,19 @@ export function LayerPanel() {
 
       {/* Photoshop-style bottom toolbar (acts on the active layer). */}
       <div className="flex items-center justify-center gap-2 px-2 py-2 border-t border-border">
+        {LAYER_SEPARATION_ENABLED && (
+          <>
+            <button
+              onClick={() => setLayerSeparationOpen(true)}
+              disabled={!hasContent}
+              className="p-1.5 rounded text-primary hover:bg-primary/10 disabled:opacity-30 disabled:hover:bg-transparent"
+              title="Separate this page into editable layers with AI (Seedream 5.0 Pro)"
+            >
+              <SquareStack size={15} />
+            </button>
+            <div className="w-px h-4 bg-border" />
+          </>
+        )}
         <button
           onClick={(e) => { const l = project?.layers[selectedLayerIds[0]]; if (l) void handleAddMask(l, e); }}
           disabled={!selectedLayerIds.length || !['image', 'group'].includes(project?.layers[selectedLayerIds[0]]?.type ?? '') || !!project?.layers[selectedLayerIds[0]]?.mask?.data}

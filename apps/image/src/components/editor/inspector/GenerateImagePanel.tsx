@@ -63,6 +63,7 @@ export function GenerateImagePanel() {
   const [catalog, setCatalog] = useState<{ models: ImageModel[]; defaultModelId: string; subscribed: boolean } | null>(null);
   const [modelId, setModelId] = useState('');
   const [aspect, setAspect] = useState('1:1');
+  const [quality, setQuality] = useState('1K');
   const [placement, setPlacement] = useState<Placement>('layer');
   const [refs, setRefs] = useState<ContextRef[]>([]);
   const [refSource, setRefSource] = useState<RefSource>('none');
@@ -74,6 +75,12 @@ export function GenerateImagePanel() {
   const model = useMemo(() => catalog?.models.find((m) => m.id === modelId), [catalog, modelId]);
   const supportedAspects = model?.aspectRatios?.filter((a) => /^\d+:\d+$/.test(a)) ?? ['1:1', '9:16', '16:9', '4:5', '4:3', '3:4'];
   const maxRefs = model?.maxRefs ?? 0;
+  const resolutions = model?.resolutions ?? [];
+  // Some models (Seedream 5 Pro) offer a quality tier. 2K isn't supported on
+  // 16:9 / 9:16, so effective quality clamps down there.
+  const twoKBlocked = aspect === '16:9' || aspect === '9:16';
+  const effectiveQuality = quality === '2K' && twoKBlocked ? '1K' : quality;
+  const perRef = model?.perRefImageCredits ?? 0;
 
   // Load model catalog + set defaults when the popup opens.
   useEffect(() => {
@@ -95,6 +102,8 @@ export function GenerateImagePanel() {
   useEffect(() => {
     if (!open || !currentArtboard) return;
     setAspect(sizeToAspectRatio(currentArtboard.size.width, currentArtboard.size.height, supportedAspects));
+    // Reset quality to the model's first tier when the model changes.
+    setQuality((model?.resolutions?.[0]) ?? '1K');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, modelId, currentArtboard?.id]);
 
@@ -135,6 +144,7 @@ export function GenerateImagePanel() {
         prompt: prompt.trim(),
         aspectRatio: aspect,
         model: modelId,
+        resolution: effectiveQuality,
         referenceUrls: refs.map((r) => r.publicUrl),
       });
       const { width, height } = await imageDims(dataUrl);
@@ -262,11 +272,35 @@ export function GenerateImagePanel() {
             {model?.description && <p className="text-[10px] text-muted-foreground">{model.description}</p>}
           </div>
 
+          {/* Quality tier — only for models that offer more than one. */}
+          {resolutions.length > 1 && (
+            <div className="space-y-1.5">
+              <label className="text-[11px] font-medium text-muted-foreground">Quality</label>
+              <div className="flex gap-1 p-0.5 bg-secondary rounded-lg">
+                {resolutions.map((r) => (
+                  <button
+                    key={r}
+                    onClick={() => setQuality(r)}
+                    className={`flex-1 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                      quality === r ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    {r}{r === '1K' ? ' · Basic' : r === '2K' ? ' · High' : ''}
+                  </button>
+                ))}
+              </div>
+              {quality === '2K' && twoKBlocked && (
+                <p className="text-[10px] text-amber-500">2K isn't supported for {aspect} — this will render at 1K.</p>
+              )}
+            </div>
+          )}
+
           {/* Context images */}
           {maxRefs > 0 && (
             <div className="space-y-1.5">
               <label className="text-[11px] font-medium text-muted-foreground">
                 Context images <span className="text-muted-foreground/60">({refs.length}/{maxRefs})</span>
+                {perRef > 0 && <span className="text-muted-foreground/60"> · +{perRef} cr per extra image</span>}
               </label>
               <div className="flex flex-wrap gap-2">
                 {refs.map((r) => (
