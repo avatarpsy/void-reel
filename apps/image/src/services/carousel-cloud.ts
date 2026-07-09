@@ -78,48 +78,60 @@ async function fetchImageAsDataUrl(url: string): Promise<{ dataUrl: string; widt
 }
 
 /**
- * Open a cloud carousel as a multi-page editor project. Page N = slide N,
- * full-bleed, all sized to the carousel's aspect ratio. Uses the validated
- * store actions (createProject/addArtboard/addImageLayer) so the project is
- * well-formed; autosave then persists it locally so it also joins Recent.
- * Switches the app into the editor view.
+ * Open a cloud carousel as a multi-page editor project. Page N = slide N.
+ *
+ * IMPORTANT: each page/artboard is sized to the slide image's ACTUAL pixel
+ * dimensions (not the carousel's declared aspect_ratio), so the image is placed
+ * 1:1 with no stretching. The declared aspect_ratio is only a fallback when an
+ * image's dimensions can't be read. Uses the validated store actions so the
+ * project is well-formed; autosave persists it locally. Switches to the editor.
  */
 export async function openCloudCarousel(c: CloudCarousel): Promise<void> {
   const P = useProjectStore.getState();
-  const size = aspectRatioToSize(c.aspectRatio);
-
-  P.createProject(c.name || 'Carousel', size);
-
-  const addSlide = async (url: string, index: number, isFirst: boolean) => {
-    if (!isFirst) {
-      const artboardId = P.addArtboard(`Page ${index + 1}`, size);
-      P.selectArtboard(artboardId);
-    }
-    try {
-      const { dataUrl, width, height } = await fetchImageAsDataUrl(url);
-      const asset: MediaAsset = {
-        id: `carousel-${c.id}-${index}`,
-        name: `Slide ${index + 1}`,
-        type: 'image',
-        mimeType: 'image/png',
-        size: dataUrl.length,
-        width: width || size.width,
-        height: height || size.height,
-        thumbnailUrl: dataUrl,
-        dataUrl,
-      };
-      P.addAsset(asset);
-      P.addImageLayer(asset.id, { x: 0, y: 0, width: size.width, height: size.height });
-    } catch (e) {
-      // A single unreachable slide shouldn't break the whole open — leave the
-      // page blank so the rest of the carousel still loads.
-      console.warn('[carousel-cloud] slide load failed:', url, e);
-    }
-  };
+  const fallback = aspectRatioToSize(c.aspectRatio);
+  let created = false;
 
   for (let i = 0; i < c.imageUrls.length; i++) {
-    await addSlide(c.imageUrls[i], i, i === 0);
+    let img: { dataUrl: string; width: number; height: number };
+    try {
+      img = await fetchImageAsDataUrl(c.imageUrls[i]);
+    } catch (e) {
+      // A single unreachable slide shouldn't break the whole open — skip it.
+      console.warn('[carousel-cloud] slide load failed:', c.imageUrls[i], e);
+      continue;
+    }
+    // The page is exactly the image's real size → aspect ratio preserved,
+    // image placed full-bleed at native dimensions (no distortion).
+    const size = {
+      width: Math.max(1, Math.round(img.width || fallback.width)),
+      height: Math.max(1, Math.round(img.height || fallback.height)),
+    };
+
+    if (!created) {
+      P.createProject(c.name || 'Carousel', size);
+      created = true;
+    } else {
+      const artboardId = P.addArtboard(`Page ${i + 1}`, size);
+      P.selectArtboard(artboardId);
+    }
+
+    const asset: MediaAsset = {
+      id: `carousel-${c.id}-${i}`,
+      name: `Slide ${i + 1}`,
+      type: 'image',
+      mimeType: 'image/png',
+      size: img.dataUrl.length,
+      width: size.width,
+      height: size.height,
+      thumbnailUrl: img.dataUrl,
+      dataUrl: img.dataUrl,
+    };
+    P.addAsset(asset);
+    P.addImageLayer(asset.id, { x: 0, y: 0, width: size.width, height: size.height });
   }
+
+  // Every slide failed → still give the editor a (blank) project to show.
+  if (!created) P.createProject(c.name || 'Carousel', fallback);
 
   // Back to page 1 for editing.
   const first = useProjectStore.getState().project?.artboards[0];
