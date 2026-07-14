@@ -37,9 +37,31 @@ let renderCallback: (() => void) | null = null;
 // "Loading" placeholder. The layer's asset.dataUrl is updated in place (same
 // id) only for save/export/reload — never creating extra Assets-panel entries.
 const rasterBuffers = new Map<string, OffscreenCanvas | HTMLCanvasElement>();
+/**
+ * The asset dataUrl each buffer currently REPRESENTS. After we commit a stroke
+ * the buffer already holds exactly the committed pixels, so it must survive the
+ * commit — blindly clearing every buffer on `project.updatedAt` (the old
+ * behaviour) forced the next stroke to wait on a fresh multi-MB PNG decode, and
+ * the brush's `img.complete` guard silently DROPPED any stroke started inside
+ * that window. That was the "most of my strokes are missed" bug.
+ *
+ * So: keep the buffer while its token still matches the layer's live asset, and
+ * invalidate only when the pixels changed underneath us (undo / redo /
+ * generative fill / relink) — which is exactly when the dataUrl differs.
+ */
+const rasterBufferTokens = new Map<string, string>();
 /** Drop a layer's raster buffer (call when the layer is deleted). */
 export function dropRasterBuffer(layerId: string) {
   rasterBuffers.delete(layerId);
+  rasterBufferTokens.delete(layerId);
+}
+function setRasterBuffer(
+  layerId: string,
+  buf: OffscreenCanvas | HTMLCanvasElement,
+  token: string,
+) {
+  rasterBuffers.set(layerId, buf);
+  rasterBufferTokens.set(layerId, token);
 }
 
 // While a mask stroke is in progress, the layer's pixels are unchanged but its
@@ -255,6 +277,19 @@ function clearLayerCache(layerIds?: Set<string>): void {
   });
 }
 
+/**
+ * The ONE source of truth for "which pixels is this asset". The renderer and the
+ * exporter read `dataUrl ?? blobUrl`, so every tool must too: when an asset had
+ * both, the brush/crop/eyedropper silently worked on a DIFFERENT image than the
+ * one on screen (wrong pixels sampled, crop scaled by the wrong dimensions, and
+ * the raster-buffer token could never match, so buffers were dropped every frame).
+ */
+export function assetSrc(
+  asset: { dataUrl?: string; blobUrl?: string } | undefined | null,
+): string {
+  return asset?.dataUrl ?? asset?.blobUrl ?? '';
+}
+
 const failedImages = new Set<string>();
 // How many times each source has failed to decode. Self-contained sources
 // (data:/blob:) can fail TRANSIENTLY under memory/decode pressure (e.g. while
@@ -263,16 +298,28 @@ const failedImages = new Set<string>();
 // image and the page is stuck on "Loading" forever.
 const imageLoadAttempts = new Map<string, number>();
 
+// Sources still decoding right now. The watchdog keeps nudging while this is
+// non-empty, so a layer can never be left sitting on "Loading…".
+const pendingImages = new Set<string>();
+// An image finished decoding while NO canvas was listening (renderCallback null
+// during a mount/remount). The next canvas to mount renders immediately instead
+// of waiting for an unrelated state change that may never come.
+let renderRequestedWhileUnmounted = false;
+
 // Watchdog: while any layer image is still loading, ensure we re-render soon so
 // the page resolves even if an image's onload fired at a moment renderCallback
-// was momentarily unavailable (mount/unmount race). Self-terminating — once
-// everything is loaded, getCachedImage stops returning null and stops re-arming.
+// was momentarily unavailable (mount/unmount race). Self-terminating — it stops
+// re-arming as soon as nothing is pending.
 let loadWatchdog: ReturnType<typeof setTimeout> | null = null;
 function armLoadWatchdog() {
   if (loadWatchdog) return;
   loadWatchdog = setTimeout(() => {
     loadWatchdog = null;
     renderCallback?.();
+    // Keep nudging while anything is still decoding. The single-shot version
+    // could fire during a moment when renderCallback was null and then NEVER
+    // re-arm (nothing else re-arms it) — the image sat on "Loading…" forever.
+    if (pendingImages.size > 0) armLoadWatchdog();
   }, 350);
 }
 
@@ -294,10 +341,10 @@ function getCachedImage(src: string): HTMLImageElement | null {
     if (imageCache.size >= MAX_IMAGE_CACHE_SIZE) {
       const oldest = imageCacheOrder.shift();
       if (oldest) {
-        const oldImg = imageCache.get(oldest);
-        if (oldImg?.src?.startsWith('blob:')) {
-          URL.revokeObjectURL(oldImg.src);
-        }
+        // Evict from the cache ONLY. We do not own these blob URLs — the project
+        // store does, and the asset may still be on the canvas. Revoking one here
+        // permanently broke that image (it could never be decoded again), which
+        // showed up as a layer stuck on "Loading…" forever.
         imageCache.delete(oldest);
       }
     }
@@ -305,16 +352,18 @@ function getCachedImage(src: string): HTMLImageElement | null {
     const img = new window.Image();
     imageCache.set(src, img);
     imageCacheOrder.push(src);
+    pendingImages.add(src);
 
     img.onload = () => {
       imageLoadAttempts.delete(src);
-      if (renderCallback) {
-        renderCallback();
-      }
+      pendingImages.delete(src);
+      if (renderCallback) renderCallback();
+      else renderRequestedWhileUnmounted = true; // picked up when a canvas mounts
     };
 
     img.onerror = () => {
       imageCache.delete(src);
+      pendingImages.delete(src);
       const idx = imageCacheOrder.indexOf(src);
       if (idx > -1) {
         imageCacheOrder.splice(idx, 1);
@@ -338,12 +387,45 @@ function getCachedImage(src: string): HTMLImageElement | null {
 
   const img = imageCache.get(src);
   if (img && img.complete && img.naturalWidth > 0) {
+    pendingImages.delete(src);
     return img;
   }
 
   // Still decoding — guarantee an eventual re-check.
   armLoadWatchdog();
   return null;
+}
+
+/**
+ * Build the working canvas for a paint stroke on an image layer.
+ *
+ * PREFERS the layer's live raster buffer — it already holds the current pixels,
+ * so a stroke can begin with ZERO decode latency. Only falls back to the decoded
+ * asset image (first stroke on a layer, before any buffer exists).
+ *
+ * Every paint tool used to require `img.complete && naturalWidth > 0`, so a
+ * stroke started while a freshly-committed multi-MB PNG dataUrl was still
+ * decoding hit that guard and was SILENTLY DROPPED — the cause of "most of my
+ * strokes are missed" when painting quickly. Preferring the buffer removes the
+ * race entirely.
+ */
+function createPaintBuffer(
+  layerId: string,
+  src: string,
+): { canvas: OffscreenCanvas; ctx: OffscreenCanvasRenderingContext2D; width: number; height: number } | null {
+  const buf = rasterBuffers.get(layerId);
+  const img = getCachedImage(src);
+  const source: CanvasImageSource | null =
+    buf ?? (img && img.complete && img.naturalWidth > 0 ? img : null);
+  if (!source) return null;
+  const width = buf ? buf.width : (img as HTMLImageElement).naturalWidth;
+  const height = buf ? buf.height : (img as HTMLImageElement).naturalHeight;
+  if (!width || !height) return null;
+  const canvas = new OffscreenCanvas(width, height);
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return null;
+  ctx.drawImage(source, 0, 0);
+  return { canvas, ctx, width, height };
 }
 
 interface ViewportBounds {
@@ -450,6 +532,10 @@ export function Canvas() {
   const cloneStampToolRef = useRef<CloneStampTool | null>(null);
   const healingBrushToolRef = useRef<HealingBrushTool | null>(null);
   const spotHealingToolRef = useRef<SpotHealingTool | null>(null);
+  // True from the instant a drag starts (set synchronously in the native
+  // mousedown listener) until its mouseup — the canvas's own hover handler
+  // defers to the window listeners for the whole drag.
+  const dragActiveRef = useRef(false);
   const paintCanvasRef = useRef<OffscreenCanvas | null>(null);
   const paintLayerIdRef = useRef<string | null>(null);
   // True while a brush/eraser stroke is editing a layer MASK (not its pixels).
@@ -917,8 +1003,14 @@ export function Canvas() {
     renderScheduledRef.current = true;
 
     requestAnimationFrame(() => {
-      render();
-      renderScheduledRef.current = false;
+      // finally: a throw inside render() used to leave the "already scheduled"
+      // flag stuck on, so every later scheduleRender() bailed out and the canvas
+      // never repainted again — one bad frame froze the whole editor.
+      try {
+        render();
+      } finally {
+        renderScheduledRef.current = false;
+      }
     });
   }, [render]);
 
@@ -931,20 +1023,39 @@ export function Canvas() {
     scheduleRender();
   }, [scheduleRender]);
 
-  // Invalidate raster buffers on every COMMITTED edit (incl. undo/redo, which
-  // bump updatedAt) so the canvas always reflects the current asset pixels — an
-  // undone brush stroke can't linger in a stale buffer. Live strokes don't bump
-  // updatedAt, so the in-progress buffer survives the stroke; this fires once on
-  // commit, after which the layer re-derives from its (now-current) asset.
+  // Invalidate raster buffers whose pixels changed UNDERNEATH us (undo, redo,
+  // generative fill, relink…) so a stale buffer can never linger. A buffer whose
+  // token still matches its layer's live asset is kept: it already holds exactly
+  // those pixels, so the next stroke can start from it INSTANTLY instead of
+  // waiting on a multi-MB PNG decode (during which strokes used to be dropped).
   useEffect(() => {
-    rasterBuffers.clear();
+    const proj = useProjectStore.getState().project;
+    for (const layerId of Array.from(rasterBuffers.keys())) {
+      const layer = proj?.layers[layerId];
+      const asset =
+        layer?.type === 'image' ? proj?.assets[(layer as ImageLayer).sourceId] : undefined;
+      const live = assetSrc(asset);
+      if (!live || rasterBufferTokens.get(layerId) !== live) {
+        rasterBuffers.delete(layerId);
+        rasterBufferTokens.delete(layerId);
+      }
+    }
     renderCallback?.(); // redraw from the now-current assets
   }, [project?.updatedAt]);
 
   useEffect(() => {
     renderCallback = forceRender;
+    // An image may have finished decoding while no canvas was listening. Without
+    // this, nothing would ever ask for that repaint and the layer stayed on
+    // "Loading…" until an unrelated edit happened to trigger a render.
+    if (renderRequestedWhileUnmounted) {
+      renderRequestedWhileUnmounted = false;
+      forceRender();
+    }
     return () => {
-      renderCallback = null;
+      // Only clear if it's still ours — a remount installs the new callback
+      // BEFORE the old one's cleanup runs, and blindly nulling would drop it.
+      if (renderCallback === forceRender) renderCallback = null;
     };
   }, [forceRender]);
 
@@ -1105,7 +1216,7 @@ export function Canvas() {
         if (c) return { data: c.getImageData(0, 0, buf.width, buf.height), w: buf.width, h: buf.height };
       }
       const asset = project?.assets[layer.sourceId];
-      const img = getCachedImage(asset?.dataUrl ?? asset?.blobUrl ?? '');
+      const img = getCachedImage(assetSrc(asset));
       if (!img || !img.complete || img.naturalWidth === 0) return null;
       const oc = new OffscreenCanvas(img.naturalWidth, img.naturalHeight);
       const c = oc.getContext('2d', { willReadFrequently: true });
@@ -1374,23 +1485,23 @@ export function Canvas() {
           if (layer?.type === 'image') {
             const imageLayer = layer as ImageLayer;
             const asset = project.assets[imageLayer.sourceId];
-            const src = asset?.blobUrl ?? asset?.dataUrl;
+            const src = assetSrc(asset);
             if (src) {
-              const img = getCachedImage(src);
-              if (img && img.complete && img.naturalWidth > 0) {
-                const tempCanvas = new OffscreenCanvas(img.naturalWidth, img.naturalHeight);
-                const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
-                if (tempCtx) {
-                  tempCtx.drawImage(rasterBuffers.get(layerId) ?? img, 0, 0);
+              // Buffer-first: never blocks on a decode, so a stroke started right
+              // after the previous one commits is no longer dropped.
+              const painted = createPaintBuffer(layerId, src);
+              if (painted) {
+                const { canvas: tempCanvas, width: bw, height: bh } = painted;
+                {
                   paintCanvasRef.current = tempCanvas;
                   paintLayerIdRef.current = layerId;
                   origPaintRef.current = snapshotCanvas(tempCanvas);
 
-                  const localX = (x - layer.transform.x) * (img.naturalWidth / layer.transform.width);
-                  const localY = (y - layer.transform.y) * (img.naturalHeight / layer.transform.height);
+                  const localX = (x - layer.transform.x) * (bw / layer.transform.width);
+                  const localY = (y - layer.transform.y) * (bh / layer.transform.height);
 
                   const tool = new BrushTool({
-                    size: brushSettings.size * (img.naturalWidth / layer.transform.width),
+                    size: brushSettings.size * (bw / layer.transform.width),
                     hardness: brushSettings.hardness,
                     opacity: brushSettings.opacity,
                     flow: brushSettings.flow,
@@ -1422,23 +1533,23 @@ export function Canvas() {
           if (layer?.type === 'image') {
             const imageLayer = layer as ImageLayer;
             const asset = project.assets[imageLayer.sourceId];
-            const src = asset?.blobUrl ?? asset?.dataUrl;
+            const src = assetSrc(asset);
             if (src) {
-              const img = getCachedImage(src);
-              if (img && img.complete && img.naturalWidth > 0) {
-                const tempCanvas = new OffscreenCanvas(img.naturalWidth, img.naturalHeight);
-                const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
-                if (tempCtx) {
-                  tempCtx.drawImage(rasterBuffers.get(layerId) ?? img, 0, 0);
+              // Buffer-first: never blocks on a decode, so a stroke started right
+              // after the previous one commits is no longer dropped.
+              const painted = createPaintBuffer(layerId, src);
+              if (painted) {
+                const { canvas: tempCanvas, width: bw, height: bh } = painted;
+                {
                   paintCanvasRef.current = tempCanvas;
                   paintLayerIdRef.current = layerId;
                   origPaintRef.current = snapshotCanvas(tempCanvas);
 
-                  const localX = (x - layer.transform.x) * (img.naturalWidth / layer.transform.width);
-                  const localY = (y - layer.transform.y) * (img.naturalHeight / layer.transform.height);
+                  const localX = (x - layer.transform.x) * (bw / layer.transform.width);
+                  const localY = (y - layer.transform.y) * (bh / layer.transform.height);
 
                   const tool = new EraserTool({
-                    size: eraserSettings.size * (img.naturalWidth / layer.transform.width),
+                    size: eraserSettings.size * (bw / layer.transform.width),
                     hardness: eraserSettings.hardness,
                     opacity: eraserSettings.opacity,
                     flow: eraserSettings.flow,
@@ -1482,23 +1593,20 @@ export function Canvas() {
           if (layer?.type === 'image') {
             const imageLayer = layer as ImageLayer;
             const asset = project.assets[imageLayer.sourceId];
-            const src = asset?.blobUrl ?? asset?.dataUrl;
+            const src = assetSrc(asset);
             if (src) {
-              const img = getCachedImage(src);
-              if (img && img.complete && img.naturalWidth > 0) {
+              // Buffer-first (see createPaintBuffer) — a fill right after a stroke
+              // must not wait on the committed dataUrl to finish decoding.
+              const painted = createPaintBuffer(layerId, src);
+              if (painted) {
+                const { canvas: tempCanvas, ctx: tempCtx, width: bw, height: bh } = painted;
                 const localX = x - layer.transform.x;
                 const localY = y - layer.transform.y;
-                const scaleX = img.naturalWidth / layer.transform.width;
-                const scaleY = img.naturalHeight / layer.transform.height;
+                const scaleX = bw / layer.transform.width;
+                const scaleY = bh / layer.transform.height;
                 const imgX = Math.floor(localX * scaleX);
                 const imgY = Math.floor(localY * scaleY);
-
-                const tempCanvas = document.createElement('canvas');
-                tempCanvas.width = img.naturalWidth;
-                tempCanvas.height = img.naturalHeight;
-                const tempCtx = tempCanvas.getContext('2d');
-                if (tempCtx) {
-                  tempCtx.drawImage(rasterBuffers.get(layerId) ?? img, 0, 0);
+                {
                   const imageData = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
 
                   const fillOptions: FloodFillOptions = {
@@ -1513,9 +1621,16 @@ export function Canvas() {
 
                   // Phase 2: persist the fill into the layer's raster buffer and
                   // update its existing asset in place (no new "filled-*" asset).
-                  rasterBuffers.set(layerId, tempCanvas);
                   const sourceId = imageLayer.sourceId;
-                  const dataUrl = tempCanvas.toDataURL('image/png');
+                  // OffscreenCanvas has no toDataURL — blit to a real canvas.
+                  const outCanvas = document.createElement('canvas');
+                  outCanvas.width = tempCanvas.width;
+                  outCanvas.height = tempCanvas.height;
+                  outCanvas.getContext('2d')?.drawImage(tempCanvas, 0, 0);
+                  const dataUrl = outCanvas.toDataURL('image/png');
+                  // Token the buffer with the pixels it now represents so the
+                  // invalidation pass keeps it (see rasterBufferTokens).
+                  setRasterBuffer(layerId, tempCanvas, dataUrl);
                   if (asset?.blobUrl?.startsWith('blob:')) {
                     URL.revokeObjectURL(asset.blobUrl);
                   }
@@ -1555,23 +1670,23 @@ export function Canvas() {
           if (layer?.type === 'image') {
             const imageLayer = layer as ImageLayer;
             const asset = project.assets[imageLayer.sourceId];
-            const src = asset?.blobUrl ?? asset?.dataUrl;
+            const src = assetSrc(asset);
             if (src) {
-              const img = getCachedImage(src);
-              if (img && img.complete && img.naturalWidth > 0) {
-                const tempCanvas = new OffscreenCanvas(img.naturalWidth, img.naturalHeight);
-                const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
-                if (tempCtx) {
-                  tempCtx.drawImage(rasterBuffers.get(layerId) ?? img, 0, 0);
+              // Buffer-first: never blocks on a decode, so a stroke started right
+              // after the previous one commits is no longer dropped.
+              const painted = createPaintBuffer(layerId, src);
+              if (painted) {
+                const { canvas: tempCanvas, width: bw, height: bh } = painted;
+                {
                   paintCanvasRef.current = tempCanvas;
                   paintLayerIdRef.current = layerId;
 
-                  const localX = (x - layer.transform.x) * (img.naturalWidth / layer.transform.width);
-                  const localY = (y - layer.transform.y) * (img.naturalHeight / layer.transform.height);
+                  const localX = (x - layer.transform.x) * (bw / layer.transform.width);
+                  const localY = (y - layer.transform.y) * (bh / layer.transform.height);
 
                   if (activeTool === 'smudge') {
                     const tool = new SmudgeTool({
-                      size: smudgeSettings.size * (img.naturalWidth / layer.transform.width),
+                      size: smudgeSettings.size * (bw / layer.transform.width),
                       hardness: 50,
                       strength: smudgeSettings.strength,
                       fingerPainting: smudgeSettings.fingerPainting,
@@ -1584,7 +1699,7 @@ export function Canvas() {
                     blurSharpenToolRef.current = null;
                   } else {
                     const tool = new BlurSharpenTool({
-                      size: blurSharpenSettings.size * (img.naturalWidth / layer.transform.width),
+                      size: blurSharpenSettings.size * (bw / layer.transform.width),
                       hardness: 50,
                       strength: blurSharpenSettings.strength,
                       mode: activeTool === 'blur' ? 'blur' : 'sharpen',
@@ -1615,23 +1730,23 @@ export function Canvas() {
           if (layer?.type === 'image') {
             const imageLayer = layer as ImageLayer;
             const asset = project.assets[imageLayer.sourceId];
-            const src = asset?.blobUrl ?? asset?.dataUrl;
+            const src = assetSrc(asset);
             if (src) {
-              const img = getCachedImage(src);
-              if (img && img.complete && img.naturalWidth > 0) {
-                const tempCanvas = new OffscreenCanvas(img.naturalWidth, img.naturalHeight);
-                const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
-                if (tempCtx) {
-                  tempCtx.drawImage(rasterBuffers.get(layerId) ?? img, 0, 0);
+              // Buffer-first: never blocks on a decode, so a stroke started right
+              // after the previous one commits is no longer dropped.
+              const painted = createPaintBuffer(layerId, src);
+              if (painted) {
+                const { canvas: tempCanvas, ctx: tempCtx, width: bw, height: bh } = painted;
+                {
                   paintCanvasRef.current = tempCanvas;
                   paintLayerIdRef.current = layerId;
 
-                  const localX = (x - layer.transform.x) * (img.naturalWidth / layer.transform.width);
-                  const localY = (y - layer.transform.y) * (img.naturalHeight / layer.transform.height);
+                  const localX = (x - layer.transform.x) * (bw / layer.transform.width);
+                  const localY = (y - layer.transform.y) * (bh / layer.transform.height);
 
                   if (activeTool === 'dodge' || activeTool === 'burn') {
                     const tool = new DodgeBurnTool({
-                      size: dodgeBurnSettings.size * (img.naturalWidth / layer.transform.width),
+                      size: dodgeBurnSettings.size * (bw / layer.transform.width),
                       type: activeTool,
                       range: dodgeBurnSettings.range,
                       exposure: dodgeBurnSettings.exposure,
@@ -1642,7 +1757,7 @@ export function Canvas() {
                     dodgeBurnToolRef.current = tool;
                   } else if (activeTool === 'sponge') {
                     const tool = new SpongeTool({
-                      size: spongeSettings.size * (img.naturalWidth / layer.transform.width),
+                      size: spongeSettings.size * (bw / layer.transform.width),
                       mode: spongeSettings.mode,
                       flow: spongeSettings.flow,
                     });
@@ -1652,7 +1767,7 @@ export function Canvas() {
                     spongeToolRef.current = tool;
                   } else if (activeTool === 'spot-healing') {
                     const tool = new SpotHealingTool({
-                      size: spotHealingSettings.size * (img.naturalWidth / layer.transform.width),
+                      size: spotHealingSettings.size * (bw / layer.transform.width),
                       type: spotHealingSettings.type,
                       sampleAllLayers: spotHealingSettings.sampleAllLayers,
                     });
@@ -1683,25 +1798,25 @@ export function Canvas() {
           if (layer?.type === 'image') {
             const imageLayer = layer as ImageLayer;
             const asset = project.assets[imageLayer.sourceId];
-            const src = asset?.blobUrl ?? asset?.dataUrl;
+            const src = assetSrc(asset);
             if (src) {
-              const img = getCachedImage(src);
-              if (img && img.complete && img.naturalWidth > 0) {
-                const tempCanvas = new OffscreenCanvas(img.naturalWidth, img.naturalHeight);
-                const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
-                if (tempCtx) {
-                  tempCtx.drawImage(rasterBuffers.get(layerId) ?? img, 0, 0);
+              // Buffer-first: never blocks on a decode, so a stroke started right
+              // after the previous one commits is no longer dropped.
+              const painted = createPaintBuffer(layerId, src);
+              if (painted) {
+                const { canvas: tempCanvas, ctx: tempCtx, width: bw, height: bh } = painted;
+                {
                   paintCanvasRef.current = tempCanvas;
                   paintLayerIdRef.current = layerId;
 
-                  const localX = (x - layer.transform.x) * (img.naturalWidth / layer.transform.width);
-                  const localY = (y - layer.transform.y) * (img.naturalHeight / layer.transform.height);
+                  const localX = (x - layer.transform.x) * (bw / layer.transform.width);
+                  const localY = (y - layer.transform.y) * (bh / layer.transform.height);
 
                   if (e.altKey) {
                     if (activeTool === 'clone-stamp') {
                       if (!cloneStampToolRef.current) {
                         cloneStampToolRef.current = new CloneStampTool({
-                          size: cloneStampSettings.size * (img.naturalWidth / layer.transform.width),
+                          size: cloneStampSettings.size * (bw / layer.transform.width),
                           hardness: cloneStampSettings.hardness,
                           opacity: cloneStampSettings.opacity,
                           flow: cloneStampSettings.flow,
@@ -1713,7 +1828,7 @@ export function Canvas() {
                     } else {
                       if (!healingBrushToolRef.current) {
                         healingBrushToolRef.current = new HealingBrushTool({
-                          size: healingBrushSettings.size * (img.naturalWidth / layer.transform.width),
+                          size: healingBrushSettings.size * (bw / layer.transform.width),
                           hardness: healingBrushSettings.hardness,
                           aligned: healingBrushSettings.aligned,
                         });
@@ -1726,7 +1841,7 @@ export function Canvas() {
 
                   if (activeTool === 'clone-stamp' && cloneStampToolRef.current?.hasSource()) {
                     cloneStampToolRef.current.updateSettings({
-                      size: cloneStampSettings.size * (img.naturalWidth / layer.transform.width),
+                      size: cloneStampSettings.size * (bw / layer.transform.width),
                       hardness: cloneStampSettings.hardness,
                       opacity: cloneStampSettings.opacity,
                       flow: cloneStampSettings.flow,
@@ -1737,7 +1852,7 @@ export function Canvas() {
                     cloneStampToolRef.current.clone(tempCtx, localX, localY);
                   } else if (activeTool === 'healing-brush' && healingBrushToolRef.current?.hasSource()) {
                     healingBrushToolRef.current.updateSettings({
-                      size: healingBrushSettings.size * (img.naturalWidth / layer.transform.width),
+                      size: healingBrushSettings.size * (bw / layer.transform.width),
                       hardness: healingBrushSettings.hardness,
                       aligned: healingBrushSettings.aligned,
                     });
@@ -1788,17 +1903,35 @@ export function Canvas() {
       }
 
       if (activeTool === 'crop') {
-        const layerId = findLayerAtPoint(x, y);
+        // Prefer the layer under the cursor; otherwise crop the SELECTED image
+        // layer. Without this fallback a drag that begins just outside the image
+        // (grabbing from the corner — the natural way to crop) did nothing at
+        // all. The rect is clamped to the layer in the drag handler, so starting
+        // outside simply pins that edge to the layer bound.
+        const layerId =
+          findLayerAtPoint(x, y) ??
+          selectedLayerIds.find((id) => project?.layers[id]?.type === 'image');
         if (layerId) {
           const layer = project?.layers[layerId];
           if (layer) {
             selectLayer(layerId);
-            startCrop(layerId, {
-              x: 0,
-              y: 0,
-              width: layer.transform.width,
-              height: layer.transform.height,
-            });
+            // Only (re)initialise when this layer isn't already being cropped.
+            // Calling startCrop on EVERY mousedown reset the box to the whole
+            // layer, so any stray click destroyed the crop you'd just dragged
+            // (and re-seeded the aspect lock from the full layer) — the crop
+            // "jumping back" glitch. A fresh drag still redefines the box via
+            // updateCropRect below; a click alone now leaves it untouched.
+            // Read LIVE (not the render-time closure — `crop` isn't in this
+            // callback's deps, so a captured copy would be stale mid-session).
+            const liveCrop = useUIStore.getState().crop;
+            if (!liveCrop.isActive || liveCrop.layerId !== layerId) {
+              startCrop(layerId, {
+                x: 0,
+                y: 0,
+                width: layer.transform.width,
+                height: layer.transform.height,
+              });
+            }
             startMarqueeSelect(x, y);
             startDrag('crop', e.clientX, e.clientY);
           }
@@ -2057,10 +2190,20 @@ export function Canvas() {
         if (dragMode === 'crop' && crop.layerId && marqueeRect) {
           const layer = project?.layers[crop.layerId];
           if (layer) {
-            const relX = marqueeRect.x - layer.transform.x;
-            const relY = marqueeRect.y - layer.transform.y;
-            let width = Math.min(marqueeRect.width, layer.transform.width - relX);
-            let height = Math.min(marqueeRect.height, layer.transform.height - relY);
+            const { width: layerW, height: layerH } = layer.transform;
+            // CLIP the dragged box to the layer. Dragging from outside the layer
+            // produced a NEGATIVE origin (only the x/y were clamped later, never
+            // the width/height), so the box overhung the layer and the applied
+            // crop read from outside the source image — the garbage/blank crop.
+            // Clamp the origin AND shrink the size by whatever got clipped off.
+            const rawX = marqueeRect.x - layer.transform.x;
+            const rawY = marqueeRect.y - layer.transform.y;
+            const relX = Math.min(Math.max(0, rawX), Math.max(0, layerW - 1));
+            const relY = Math.min(Math.max(0, rawY), Math.max(0, layerH - 1));
+            let width = marqueeRect.width - (relX - rawX);
+            let height = marqueeRect.height - (relY - rawY);
+            width = Math.max(1, Math.min(width, layerW - relX));
+            height = Math.max(1, Math.min(height, layerH - relY));
 
             if (crop.lockAspect && crop.initialAspectRatio) {
               const currentAspect = width / height;
@@ -2069,14 +2212,12 @@ export function Canvas() {
               } else {
                 height = width / crop.initialAspectRatio;
               }
+              // Re-clip after the aspect adjustment so it can't overhang either.
+              width = Math.max(1, Math.min(width, layerW - relX));
+              height = Math.max(1, Math.min(height, layerH - relY));
             }
 
-            updateCropRect({
-              x: Math.max(0, relX),
-              y: Math.max(0, relY),
-              width,
-              height,
-            });
+            updateCropRect({ x: relX, y: relY, width, height });
           }
         }
         scheduleRender();
@@ -2490,9 +2631,12 @@ export function Canvas() {
           // NOT create a new asset; instead update the EXISTING asset in place
           // (same id, original name) so save/export/reload still work and the
           // Assets panel never fills up with "*-edited" copies.
-          rasterBuffers.set(layerId, finalCanvas);
           const existing = oldSourceId ? useProjectStore.getState().project?.assets[oldSourceId] : undefined;
           const dataUrl = canvas.toDataURL('image/png');
+          // Stamp the buffer with the dataUrl it now represents, so the
+          // invalidation pass below KEEPS it (the pixels are already correct) —
+          // the next stroke starts from it instantly instead of racing a decode.
+          setRasterBuffer(layerId, finalCanvas, dataUrl);
           if (oldSourceId) {
             // Commit the stroke as an UNDOABLE asset edit (in place — same id, so
             // no per-stroke Assets-panel copies). Ctrl+Z restores the prior pixels.
@@ -2571,6 +2715,42 @@ export function Canvas() {
     endDrag();
     clearSmartGuides();
   }, [endDrag, clearSmartGuides, drawing.isDrawing, finishDrawing, addPathLayer, penSettings, brushSettings, scheduleRender, dragMode, endMarqueeSelect, findLayersInRect, selectLayers, setActiveResizeHandle, activeTool, gradientDrag, gradientSettings, artboard, addShapeLayer, updateLayer, project, selectedLayerIds, commitLassoSelection, commitMarqueeSelection]);
+
+  // ── Drags are owned by the WINDOW, not the canvas element ────────────────
+  // A brush stroke that wanders past the canvas edge (or a marquee/crop drag
+  // released outside it) must keep tracking and end on the REAL mouse-up.
+  // Element-level move/up + `onMouseLeave={handleMouseUp}` used to truncate the
+  // stroke the moment the cursor left the canvas. Refs keep these listeners
+  // pointing at the latest handler without re-binding on every render.
+  const moveHandlerRef = useRef(handleMouseMove);
+  moveHandlerRef.current = handleMouseMove;
+  const upHandlerRef = useRef(handleMouseUp);
+  upHandlerRef.current = handleMouseUp;
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    // Bind the window listeners SYNCHRONOUSLY on mousedown — NOT from an effect
+    // keyed on `isDragging`, which only runs after React re-renders. A fast drag
+    // fires its first moves (and can even finish) inside that gap, so those
+    // events would hit no listener at all and the stroke would be lost.
+    const onDown = () => {
+      if (dragActiveRef.current) return;
+      dragActiveRef.current = true;
+      const onMove = (e: MouseEvent) => moveHandlerRef.current(e as unknown as React.MouseEvent);
+      const onUp = () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+        dragActiveRef.current = false;
+        upHandlerRef.current();
+      };
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    };
+    canvas.addEventListener('mousedown', onDown);
+    return () => {
+      canvas.removeEventListener('mousedown', onDown);
+    };
+  }, []);
 
   // Double-click the canvas to select the layer under the cursor (Photoshop's
   // way to reach a layer when Auto-Select is off). Single clicks never switch.
@@ -2861,9 +3041,14 @@ export function Canvas() {
       <canvas
         ref={canvasRef}
         onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
+        // While a drag (stroke, marquee, crop…) is in flight, the WINDOW
+        // listeners below own move/up so it survives the cursor leaving the
+        // canvas. This element handler only serves the idle/hover case —
+        // previously `onMouseLeave={handleMouseUp}` chopped any stroke that
+        // crossed the canvas edge, and a fast drag outside it stopped updating.
+        // Gate on the synchronous ref (not `isDragging` state) so a move can
+        // never be processed twice in the tick before React re-renders.
+        onMouseMove={(e) => { if (!dragActiveRef.current) handleMouseMove(e); }}
         onDoubleClick={handleDoubleClick}
         onContextMenu={handleContextMenu}
         className="absolute"
@@ -3100,7 +3285,7 @@ function renderLayer(
   // painted (buffer) and plain image layers.
   if (layer.type === 'image' && layer.mask?.enabled && (layer.mask.data || liveMaskPaint?.layerId === layer.id)) {
     const asset = project.assets[(layer as ImageLayer).sourceId];
-    const content = rasterBuffers.get(layer.id) ?? getCachedImage(asset?.dataUrl ?? asset?.blobUrl ?? '');
+    const content = rasterBuffers.get(layer.id) ?? getCachedImage(assetSrc(asset));
     // Use the in-progress mask buffer during a mask stroke; else the saved mask.
     const liveMask = liveMaskPaint?.layerId === layer.id ? liveMaskPaint.maskCanvas : null;
     const maskSrc: CanvasImageSource | null = liveMask ?? getCachedImage(layer.mask.data ?? '');
@@ -3353,7 +3538,7 @@ function renderImageLayerInternal(
     return;
   }
 
-  const src = asset.dataUrl ?? asset.blobUrl ?? '';
+  const src = assetSrc(asset);
   const img = getCachedImage(src);
 
   if (!img) {

@@ -2,6 +2,7 @@ import { useCallback, useMemo } from 'react';
 import { useProjectStore } from '../../../stores/project-store';
 import { useUIStore, CropAspectRatio } from '../../../stores/ui-store';
 import type { ImageLayer } from '../../../types/project';
+import { assetSrc } from '../canvas/Canvas';
 import { Crop, Check, X, RotateCcw, Lock, Unlock } from 'lucide-react';
 
 const imageCache = new Map<string, HTMLImageElement>();
@@ -43,7 +44,9 @@ export function CropSection({ layer }: Props) {
     if (!project) return null;
     const asset = project.assets[layer.sourceId];
     if (!asset) return null;
-    const src = asset.blobUrl ?? asset.dataUrl;
+    // Same source the canvas draws — cropping measured a different image when an
+    // asset carried both a dataUrl and a blobUrl, scaling the crop wrongly.
+    const src = assetSrc(asset);
     if (!src) return null;
     const img = getCachedImage(src);
     if (img && img.complete && img.naturalWidth > 0) {
