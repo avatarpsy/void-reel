@@ -7,18 +7,23 @@ import { KeyboardShortcutsPanel } from './components/editor/KeyboardShortcutsPan
 import { SettingsDialog } from './components/editor/SettingsDialog';
 import { CosmicField } from './components/CosmicField';
 import { useKeyboardShortcuts } from './services/keyboard-service';
-import { useAutoSave } from './hooks/useAutoSave';
+import { useAutoSave, loadSavedProject } from './hooks/useAutoSave';
+import { useProjectCloudSync } from './hooks/useProjectCloudSync';
 import { readHandoffParams, clearHandoffUrl, loadSrcAsProject, parseLocalAssetSource } from './services/image-handoff';
 import { openCloudCarouselById } from './services/carousel-cloud';
+import { openCloudImageProject } from './services/project-cloud-open';
+import { useProjectStore } from './stores/project-store';
 
 // Was the app opened to DIRECTLY load a project (carousel deep-link or an
 // "edit this image" handoff)? Read once, synchronously, before first paint —
 // so we render a loading screen instead of flashing the welcome/landing page
 // and only then jumping into the editor.
-function readBootTarget(): { carouselId?: string } | null {
+function readBootTarget(): { carouselId?: string; projectId?: string } | null {
   const p = new URLSearchParams(window.location.search);
   const carouselId = p.get('carousel');
   if (carouselId) return { carouselId };
+  const projectId = p.get('project');
+  if (projectId) return { projectId };
   if (readHandoffParams()) return {};
   return null;
 }
@@ -34,6 +39,7 @@ export default function App() {
 
   useKeyboardShortcuts();
   useAutoSave();
+  useProjectCloudSync();
 
   useEffect(() => {
     document.documentElement.classList.add('dark');
@@ -56,6 +62,30 @@ export default function App() {
       }
     })();
   }, []);
+
+  // Reopen an image-editor project from the Studio Images tab: /image/?project=<id>.
+  // Local-first — the full, layer-preserving project lives in this browser's
+  // IndexedDB, so restore that exactly. On another device (no local copy) fall
+  // back to a flattened rebuild from the cloud page thumbnails.
+  useEffect(() => {
+    const projectId = new URLSearchParams(window.location.search).get('project');
+    if (!projectId) return;
+    (async () => {
+      try {
+        const local = await loadSavedProject(projectId);
+        if (local) {
+          useProjectStore.getState().loadProject(local);
+          setCurrentView('editor');
+          return;
+        }
+        await openCloudImageProject(projectId);
+      } catch (e) {
+        console.warn('[image] could not open project:', e);
+      } finally {
+        setBooting(false);
+      }
+    })();
+  }, [setCurrentView]);
 
   // "Edit this image" handoff: another surface opened us with ?src=…&from=…
   // Load the image as a fresh project; the user saves it from Export when done.
