@@ -544,8 +544,12 @@ export function Canvas() {
   // True while a brush/eraser stroke is editing a layer MASK (not its pixels).
   const paintingMaskRef = useRef(false);
   // Pre-stroke snapshot of the painted buffer — used to confine brush/eraser
-  // strokes to the active selection (Photoshop clips painting to the marquee).
+  // strokes to the active selection (Photoshop clips painting to the marquee) AND
+  // to redraw a straight line while Shift is held (Photoshop's shift = straight).
   const origPaintRef = useRef<OffscreenCanvas | null>(null);
+  // The brush stroke's anchor point in BUFFER-local coords. While Shift is held we
+  // draw a straight rubber-band line from this anchor to the cursor.
+  const brushAnchorRef = useRef<{ x: number; y: number } | null>(null);
 
   // Pixel selections (marquee / lasso / wand). `lassoDraftRef` holds the
   // in-progress freehand path (artboard coords); the committed selection lives
@@ -1434,19 +1438,22 @@ export function Canvas() {
         return;
       }
 
-      // If the mask is targeted but the user clicks a DIFFERENT layer, they want
-      // to paint that layer's pixels — leave mask mode (prevents painting one
-      // layer's mask while clicking another).
-      if ((activeTool === 'brush' || activeTool === 'eraser') && maskEditLayerId) {
+      // ERASER only: clicking a DIFFERENT layer leaves mask mode so you can erase
+      // that layer's pixels. The BRUSH always paints the active mask (below), so a
+      // canvas click must NOT drop mask mode — that was the bug where painting near
+      // the layer's edge selected the background artwork and made a new layer.
+      if (activeTool === 'eraser' && maskEditLayerId) {
         const hit = findLayerAtPoint(x, y);
         if (hit && hit !== maskEditLayerId) setMaskEditLayerId(null);
       }
 
       // Paint-on-mask: when a layer's MASK is the active edit target (its mask
-      // thumbnail was clicked), the brush paints onto the mask — grayscale, so
-      // black hides and white reveals (Photoshop). The stroke is stamped by the
-      // normal paint-move handler and saved to mask.data on mouse-up.
-      if (activeTool === 'brush' && maskEditLayerId && project && findLayerAtPoint(x, y) === maskEditLayerId) {
+      // thumbnail was clicked), the brush ALWAYS paints onto that mask — anywhere
+      // on the canvas, even outside the layer's box or over other layers, exactly
+      // like Photoshop. It is grayscale (black hides, white reveals). We return
+      // unconditionally so a mask-mode click can never fall through to selecting
+      // another layer or starting a brand-new drawing layer.
+      if (activeTool === 'brush' && maskEditLayerId && project) {
         const layer = project.layers[maskEditLayerId];
         if (layer?.type === 'image' && layer.mask?.data) {
           const W = Math.max(1, Math.round(layer.transform.width));
@@ -1460,8 +1467,10 @@ export function Canvas() {
               paintCanvasRef.current = buf;
               paintLayerIdRef.current = layer.id;
               paintingMaskRef.current = true;
+              origPaintRef.current = snapshotCanvas(buf);
               const localX = x - layer.transform.x;
               const localY = y - layer.transform.y;
+              brushAnchorRef.current = { x: localX, y: localY };
               const tool = new BrushTool({
                 size: brushSettings.size,
                 hardness: brushSettings.hardness,
@@ -1475,10 +1484,11 @@ export function Canvas() {
               brushToolRef.current = tool;
               if (!selectedLayerIds.includes(layer.id)) selectLayer(layer.id);
               startDrag('paint', e.clientX, e.clientY);
-              return;
             }
           }
         }
+        // Mask is the active target: never create a new layer / select another.
+        return;
       }
 
       if (activeTool === 'brush') {
@@ -1502,6 +1512,7 @@ export function Canvas() {
 
                   const localX = (x - layer.transform.x) * (bw / layer.transform.width);
                   const localY = (y - layer.transform.y) * (bh / layer.transform.height);
+                  brushAnchorRef.current = { x: localX, y: localY };
 
                   const tool = new BrushTool({
                     size: brushSettings.size * (bw / layer.transform.width),
@@ -2067,7 +2078,20 @@ export function Canvas() {
 
             const ctx = paintCanvasRef.current.getContext('2d', { willReadFrequently: true });
             if (ctx) {
-              brushToolRef.current.apply(ctx, localX, localY, 1);
+              if (e.shiftKey && brushAnchorRef.current && origPaintRef.current) {
+                // Shift = straight line (Photoshop). Restore the pre-stroke pixels
+                // and redraw a single line from the anchor to the cursor, so the
+                // result is one clean straight stroke rather than the freehand path.
+                ctx.save();
+                ctx.globalCompositeOperation = 'source-over';
+                ctx.clearRect(0, 0, paintCanvasRef.current.width, paintCanvasRef.current.height);
+                ctx.drawImage(origPaintRef.current, 0, 0);
+                ctx.restore();
+                brushToolRef.current.startStroke(brushAnchorRef.current.x, brushAnchorRef.current.y, 1);
+                brushToolRef.current.apply(ctx, localX, localY, 1);
+              } else {
+                brushToolRef.current.apply(ctx, localX, localY, 1);
+              }
             }
           }
           scheduleRender();
@@ -2557,6 +2581,8 @@ export function Canvas() {
       paintCanvasRef.current = null;
       paintLayerIdRef.current = null;
       paintingMaskRef.current = false;
+      origPaintRef.current = null;
+      brushAnchorRef.current = null;
       liveMaskPaint = null;
       forceRender();
       endDrag();
@@ -2622,6 +2648,7 @@ export function Canvas() {
           finalCanvas = gateToSelection(tempCanvas as OffscreenCanvas, origPaintRef.current, sel.path, currentLayer.transform, sel.inverted ?? false);
         }
         origPaintRef.current = null;
+        brushAnchorRef.current = null;
 
         const canvas = document.createElement('canvas');
         canvas.width = finalCanvas.width;

@@ -497,10 +497,15 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
         if (!project || !selectedArtboardId || points.length <= 1) return id;
         const artboard = project.artboards.find((a) => a.id === selectedArtboardId);
         if (!artboard) return id;
-        const minX = Math.min(...points.map((p) => p.x));
-        const minY = Math.min(...points.map((p) => p.y));
-        const maxX = Math.max(...points.map((p) => p.x));
-        const maxY = Math.max(...points.map((p) => p.y));
+        // Pad the bounds by half the stroke width (+ a hair for round caps and
+        // antialiasing). The stroke extends strokeWidth/2 beyond the point centres
+        // on every side, so a box fitted to the raw points clipped the stroke's
+        // edges and caps — the "cropped drawing" bug.
+        const pad = Math.ceil(strokeWidth / 2) + 2;
+        const minX = Math.min(...points.map((p) => p.x)) - pad;
+        const minY = Math.min(...points.map((p) => p.y)) - pad;
+        const maxX = Math.max(...points.map((p) => p.x)) + pad;
+        const maxY = Math.max(...points.map((p) => p.y)) + pad;
         const width = Math.max(maxX - minX, 1);
         const height = Math.max(maxY - minY, 1);
         const normalizedPoints = points.map((p) => ({ x: p.x - minX, y: p.y - minY }));
