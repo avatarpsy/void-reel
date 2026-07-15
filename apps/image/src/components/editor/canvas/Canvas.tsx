@@ -1,5 +1,6 @@
 import { useEffect, useRef, useCallback, useState, useMemo } from 'react';
 import { useProjectStore } from '../../../stores/project-store';
+import { fileToImageAsset } from '../../../services/image-import';
 import { useUIStore } from '../../../stores/ui-store';
 import { useCanvasStore, type ResizeHandle } from '../../../stores/canvas-store';
 import { useSelectionStore } from '../../../stores/selection-store';
@@ -502,6 +503,8 @@ export function Canvas() {
     moveLayerToBottom,
     groupLayers,
     ungroupLayers,
+    addAsset,
+    addImageLayer,
   } = useProjectStore();
   const { zoom, panX, panY, setPan, setZoom, activeTool, showGrid, showRulers, toggleGrid, toggleRulers, gridSize, crop, snapToObjects, snapToGuides, snapToGrid, penSettings, brushSettings, eraserSettings, drawing, startDrawing, addDrawingPoint, finishDrawing, startCrop, updateCropRect, setBrushSettings, gradientSettings, paintBucketSettings, smudgeSettings, blurSharpenSettings, dodgeBurnSettings, spongeSettings, cloneStampSettings, healingBrushSettings, spotHealingSettings, maskEditLayerId, setMaskEditLayerId, setGenerativeFillOpen } = useUIStore();
   const { setCanvasRef, setContainerRef, startDrag, updateDrag, endDrag, isDragging, dragMode, dragStartX, dragStartY, dragCurrentX, dragCurrentY, guides, smartGuides, setSmartGuides, clearSmartGuides, isMarqueeSelecting, marqueeRect, startMarqueeSelect, updateMarqueeSelect, endMarqueeSelect, activeResizeHandle, setActiveResizeHandle } = useCanvasStore();
@@ -3018,6 +3021,88 @@ export function Canvas() {
     };
   }, [showsBrushCircle, activeTool, brushSettings.size, eraserSettings.size, zoom]);
 
+  // ---- Drag & drop image files straight onto the canvas ------------------
+  // Dropped images become new layers on TOP of the stack (addImageLayer inserts
+  // at index 0), positioned where they were dropped. `dropDepth` tracks nested
+  // dragenter/leave so the highlight doesn't flicker as the pointer crosses the
+  // canvas / overlay children.
+  const [isFileDropTarget, setIsFileDropTarget] = useState(false);
+  const dropDepthRef = useRef(0);
+
+  const dragHasFiles = (e: React.DragEvent) =>
+    Array.from(e.dataTransfer.types).includes('Files');
+
+  const handleFileDragEnter = useCallback((e: React.DragEvent) => {
+    if (!dragHasFiles(e)) return;
+    e.preventDefault();
+    dropDepthRef.current += 1;
+    setIsFileDropTarget(true);
+  }, []);
+
+  const handleFileDragOver = useCallback((e: React.DragEvent) => {
+    if (!dragHasFiles(e)) return;
+    e.preventDefault(); // required for the drop to fire
+    e.dataTransfer.dropEffect = 'copy';
+  }, []);
+
+  const handleFileDragLeave = useCallback((e: React.DragEvent) => {
+    if (!dragHasFiles(e)) return;
+    dropDepthRef.current = Math.max(0, dropDepthRef.current - 1);
+    if (dropDepthRef.current === 0) setIsFileDropTarget(false);
+  }, []);
+
+  const handleFileDrop = useCallback(
+    async (e: React.DragEvent) => {
+      if (!dragHasFiles(e)) return;
+      e.preventDefault();
+      dropDepthRef.current = 0;
+      setIsFileDropTarget(false);
+
+      const files = Array.from(e.dataTransfer.files).filter((f) =>
+        f.type.startsWith('image/'),
+      );
+      if (files.length === 0) return;
+
+      const P = useProjectStore.getState();
+      const ab = P.project?.artboards.find((a) => a.id === P.selectedArtboardId);
+      if (!ab) return;
+
+      // Drop point in artboard-local pixels. If dropped in the gray area outside
+      // the artboard, anchor at its center instead.
+      const drop = screenToCanvas(e.clientX, e.clientY);
+      const inside =
+        drop.x >= 0 && drop.y >= 0 && drop.x <= ab.size.width && drop.y <= ab.size.height;
+      const anchor = inside
+        ? drop
+        : { x: ab.size.width / 2, y: ab.size.height / 2 };
+
+      const newIds: string[] = [];
+      for (let i = 0; i < files.length; i++) {
+        const asset = await fileToImageAsset(files[i]);
+        if (!asset || !asset.width || !asset.height) continue;
+
+        // Scale down to fit within the artboard (keep aspect); never scale up.
+        const fit = Math.min(1, ab.size.width / asset.width, ab.size.height / asset.height);
+        const w = Math.max(1, Math.round(asset.width * fit));
+        const h = Math.max(1, Math.round(asset.height * fit));
+
+        addAsset(asset);
+        // Cascade multiple files so they don't land exactly on top of each other.
+        const cx = anchor.x + i * 16;
+        const cy = anchor.y + i * 16;
+        const id = addImageLayer(asset.id, {
+          x: Math.round(cx - w / 2),
+          y: Math.round(cy - h / 2),
+          width: w,
+          height: h,
+        });
+        newIds.push(id);
+      }
+      if (newIds.length > 0) selectLayers(newIds);
+    },
+    [screenToCanvas, addAsset, addImageLayer, selectLayers],
+  );
+
   const effectiveCursor = (() => {
     if (showsBrushCircle) return 'none'; // the circle overlay IS the cursor
     if ((activeTool === 'select' || activeTool === 'free-transform') && cursorStyle !== 'default') {
@@ -3031,6 +3116,10 @@ export function Canvas() {
       ref={containerRef}
       className="flex-1 overflow-hidden relative"
       style={{ cursor: effectiveCursor }}
+      onDragEnter={handleFileDragEnter}
+      onDragOver={handleFileDragOver}
+      onDragLeave={handleFileDragLeave}
+      onDrop={handleFileDrop}
     >
       {showRulers && (
         <Rulers
@@ -3060,6 +3149,16 @@ export function Canvas() {
           cursor: effectiveCursor,
         }}
       />
+      {/* Drop-an-image affordance. pointer-events-none so the drop event still
+          reaches the container underneath. */}
+      {isFileDropTarget && (
+        <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-primary/10 border-2 border-dashed border-primary">
+          <div className="rounded-lg bg-background/90 px-4 py-2 text-sm font-medium text-foreground shadow-lg">
+            Drop image to add as a new layer
+          </div>
+        </div>
+      )}
+
       {/* Brush-size circle cursor (positioned imperatively in the effect above). */}
       <div
         ref={brushCursorRef}
