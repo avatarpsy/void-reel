@@ -399,6 +399,27 @@ export class UpdateLayerStyleCommand implements Command {
   merge(next: Command): Command | null {
     if (!(next instanceof UpdateLayerStyleCommand)) return null;
     if (next.layerId !== this.layerId) return null;
+
+    // Distinct, one-shot changes are ALWAYS their own undo step — never folded
+    // into a neighbouring edit. Without this, cropping and then nudging any
+    // slider on the same layer collapsed into one entry, so "undo the crop" (and
+    // many other actions) appeared to do nothing / skip. A slider drag, by
+    // contrast, streams the SAME key repeatedly and should coalesce to one step.
+    const STRUCTURAL = new Set([
+      'cropRect', 'mask', 'sourceId', 'clippingMask',
+      'flipHorizontal', 'flipVertical', 'visible', 'locked', 'parentId', 'name',
+    ]);
+    const keysThis = Object.keys(this.updates);
+    const keysNext = Object.keys(next.updates);
+    if (keysThis.some((k) => STRUCTURAL.has(k)) || keysNext.some((k) => STRUCTURAL.has(k))) {
+      return null;
+    }
+    // Only coalesce a CONTINUOUS edit of the SAME property set (e.g. dragging one
+    // slider). Editing a different property is a new action → a new undo step.
+    const sameKeys =
+      keysThis.length === keysNext.length && keysNext.every((k) => keysThis.includes(k));
+    if (!sameKeys) return null;
+
     const mergedUpdates = { ...this.updates, ...next.updates };
     const mergedPrev = { ...next.prevValues, ...this.prevValues };
     return new UpdateLayerStyleCommand(

@@ -506,10 +506,16 @@ async function renderImageLayerToContext(
   }
   const { filters } = layer;
   applyFilters(tctx, filters);
+  const cr = layer.cropRect;
   if (filters.blur > 0 && filters.blurType === 'motion') {
     applyMotionBlur(tctx, img, W, H, filters.blur, filters.blurAngle);
   } else if (filters.blur > 0 && filters.blurType === 'radial') {
     applyRadialBlur(tctx, img, W, H, filters.blur);
+  } else if (cr) {
+    // Respect the layer's crop so export (and the cloud-sync thumbnails that
+    // reuse this renderer) match the canvas — otherwise a cropped layer exported
+    // the whole image squished into the crop box.
+    tctx.drawImage(img, cr.x, cr.y, cr.width, cr.height, 0, 0, W, H);
   } else {
     tctx.drawImage(img, 0, 0, W, H);
   }

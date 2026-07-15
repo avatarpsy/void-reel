@@ -413,22 +413,46 @@ describe('UpdateLayerStyleCommand', () => {
     expect(restored.layers['l-1'].visible).toBe(true);
   });
 
-  it('merges style updates on the same layer', () => {
+  it('coalesces a continuous edit of the SAME property (e.g. a slider drag)', () => {
     let project = makeProject();
     project = new AddLayerCommand(AB_ID, makeTextLayer('l-1'), 0).apply(project);
 
-    const cmd1 = new UpdateLayerStyleCommand('l-1', { visible: false }, { visible: true });
-    const cmd2 = new UpdateLayerStyleCommand('l-1', { locked: true }, { locked: false });
+    // Two updates to the same key (opacity via transform-less style) — a drag.
+    const cmd1 = new UpdateLayerStyleCommand('l-1', { blendMode: { mode: 'multiply' } } as never, { blendMode: { mode: 'normal' } } as never);
+    const cmd2 = new UpdateLayerStyleCommand('l-1', { blendMode: { mode: 'screen' } } as never, { blendMode: { mode: 'multiply' } } as never);
     const merged = cmd1.merge!(cmd2);
     expect(merged).not.toBeNull();
 
     const next = merged!.apply(project);
-    expect(next.layers['l-1'].visible).toBe(false);
-    expect(next.layers['l-1'].locked).toBe(true);
-
+    expect((next.layers['l-1'].blendMode as { mode: string }).mode).toBe('screen');
+    // Undo returns to the ORIGINAL value before the drag began.
     const restored = merged!.invert().apply(next);
-    expect(restored.layers['l-1'].visible).toBe(true);
-    expect(restored.layers['l-1'].locked).toBe(false);
+    expect((restored.layers['l-1'].blendMode as { mode: string }).mode).toBe('normal');
+  });
+
+  it('does NOT merge two distinct properties — each is its own undo step', () => {
+    // visible and locked are structural one-shot toggles; folding them into one
+    // undo entry is exactly the bug that made "undo the crop" skip actions.
+    const cmd1 = new UpdateLayerStyleCommand('l-1', { visible: false }, { visible: true });
+    const cmd2 = new UpdateLayerStyleCommand('l-1', { locked: true }, { locked: false });
+    expect(cmd1.merge!(cmd2)).toBeNull();
+  });
+
+  it('NEVER merges a crop into an adjacent style edit', () => {
+    const crop = new UpdateLayerStyleCommand(
+      'l-1',
+      { cropRect: { x: 0, y: 0, width: 10, height: 10 } } as never,
+      { cropRect: null } as never,
+    );
+    const opacityDrag = new UpdateLayerStyleCommand('l-1', { opacity: 0.5 } as never, { opacity: 1 } as never);
+    expect(crop.merge!(opacityDrag)).toBeNull();
+    expect(opacityDrag.merge!(crop)).toBeNull();
+  });
+
+  it('does not merge style updates on different layers', () => {
+    const cmd1 = new UpdateLayerStyleCommand('l-1', { opacity: 0.5 } as never, { opacity: 1 } as never);
+    const cmd2 = new UpdateLayerStyleCommand('l-2', { opacity: 0.5 } as never, { opacity: 1 } as never);
+    expect(cmd1.merge!(cmd2)).toBeNull();
   });
 });
 

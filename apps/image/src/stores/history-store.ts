@@ -85,6 +85,12 @@ interface HistoryActions {
   getCurrentIndex: () => number;
 
   clear: (baseProject?: Project) => void;
+  /**
+   * Invalidate the redo stack WITHOUT touching undo history. Call after a
+   * project-data mutation that bypasses `execute` (e.g. addAsset/removeAsset), so
+   * a stale redo can't replay a command onto a now-divergent project.
+   */
+  invalidateRedo: () => void;
   setMaxSize: (max: number) => void;
 
   // ── Named snapshots (checkpoint-style) ──────────────────────────────────
@@ -101,6 +107,10 @@ interface HistoryActions {
 // ---------------------------------------------------------------------------
 
 const generateId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+
+// Only consecutive edits within this gap coalesce into a single undo step (a
+// slider drag streams many updates). Past it, each edit is its own step.
+const MERGE_WINDOW_MS = 600;
 
 // ---------------------------------------------------------------------------
 // Store
@@ -122,14 +132,23 @@ export const useHistoryStore = create<HistoryState & HistoryActions>()(
 
       // Attempt to coalesce with the most recent command via Command.merge.
       // Merge is called on the LAST (older) command with the NEW command as argument.
+      // We ONLY coalesce edits that land within MERGE_WINDOW_MS of the previous
+      // one — a continuous gesture like dragging a slider. A pause ends the run,
+      // so two deliberate edits are two undo steps (Photoshop-like granularity).
+      // The command's own merge() additionally refuses to fold DISTINCT actions
+      // (crop, mask, flip…) together — so those are always their own step, which
+      // is what makes "undo the crop" work as a discrete action.
       if (undoStack.length > 0) {
         const last = undoStack[undoStack.length - 1];
-        const merged = last.command.merge?.(cmd) ?? null;
+        const withinWindow = Date.now() - last.timestamp <= MERGE_WINDOW_MS;
+        const merged = withinWindow ? (last.command.merge?.(cmd) ?? null) : null;
         if (merged !== null) {
           const newProject = cmd.apply(currentProject);
           const updatedStack = [
             ...undoStack.slice(0, -1),
-            { ...last, command: merged },
+            // Refresh the timestamp so a long continuous drag keeps coalescing
+            // as long as each event stays within the window of the previous.
+            { ...last, command: merged, timestamp: Date.now() },
           ];
           set({
             undoStack: updatedStack,
@@ -256,6 +275,10 @@ export const useHistoryStore = create<HistoryState & HistoryActions>()(
         redoStack: [],
         baseProject: baseProject ? JSON.stringify(baseProject) : null,
       });
+    },
+
+    invalidateRedo: () => {
+      if (get().redoStack.length > 0) set({ redoStack: [] });
     },
 
     setMaxSize: (max) => set({ maxSize: max }),

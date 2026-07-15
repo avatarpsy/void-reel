@@ -3395,7 +3395,10 @@ function renderLayer(
       const temp = new OffscreenCanvas(w, h);
       const tctx = temp.getContext('2d');
       if (tctx) {
-        tctx.drawImage(content, 0, 0, w, h);
+        // Respect the layer's crop — draw only the cropped source region into the
+        // (cropped-size) mask box. Drawing the FULL image here squished the whole
+        // picture into the crop box, so a cropped+masked layer visibly shrank.
+        drawImageWithCrop(tctx, content, w, h, (layer as ImageLayer).cropRect ?? null);
         tctx.globalCompositeOperation = 'destination-in';
         tctx.drawImage(maskToAlphaCanvas(maskSrc, w, h, !!layer.mask.invert, layer.mask.density ?? 100), 0, 0);
         tctx.globalCompositeOperation = 'source-over';
@@ -3412,7 +3415,10 @@ function renderLayer(
   // effect watching project.updatedAt, so it can never out-live the asset.
   const raster = layer.type === 'image' ? rasterBuffers.get(layer.id) : undefined;
   if (raster) {
-    ctx.drawImage(raster, 0, 0, transform.width, transform.height);
+    // A painted layer that was later cropped must show only its cropped region,
+    // not the whole buffer squished into the smaller box (same crop bug as the
+    // masked path above). drawImageWithCrop is a no-op when cropRect is null.
+    drawImageWithCrop(ctx, raster, transform.width, transform.height, (layer as ImageLayer).cropRect ?? null);
     ctx.restore();
     return;
   }
@@ -3607,7 +3613,7 @@ function applyRadialBlur(
 
 function drawImageWithCrop(
   ctx: RenderContext,
-  img: HTMLImageElement,
+  img: CanvasImageSource,
   layerWidth: number,
   layerHeight: number,
   cropRect: { x: number; y: number; width: number; height: number } | null

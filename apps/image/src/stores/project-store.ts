@@ -217,6 +217,10 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
           return;
         }
         const validated = parsed.data;
+        // Reset history to THIS project — otherwise the previous project's
+        // undo/redo stacks survive and the first Ctrl+Z applies an inverse from
+        // the old project onto this one (cross-project corruption).
+        useHistoryStore.getState().clear(validated);
         set({
           project: validated,
           selectedLayerIds: [],
@@ -692,7 +696,9 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
         const { project, selectedArtboardId } = get();
         if (!project || !selectedArtboardId) return null;
         const newId = generateId();
-        const duplicated = duplicateLayerInProject(project, selectedArtboardId, layerId, newId);
+        // Duplicate IN PLACE (Photoshop Ctrl+J) — same position, stacked directly
+        // on top. A non-zero offset made the copy jump, which the user never wants.
+        const duplicated = duplicateLayerInProject(project, selectedArtboardId, layerId, newId, { x: 0, y: 0 });
         if (!duplicated) return null;
         const artboard = project.artboards.find((a) => a.id === selectedArtboardId);
         const originalIndex = artboard?.layerIds.indexOf(layerId) ?? 0;
@@ -999,6 +1005,9 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
             state.isDirty = true;
           }
         });
+        // This mutation bypasses the command stack; a live redo stack would now
+        // replay onto a divergent project. Invalidate it (a new edit ends redo).
+        useHistoryStore.getState().invalidateRedo();
       },
 
       commitRasterEdit: (assetId, newAsset, description) => {
@@ -1024,6 +1033,7 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
             state.isDirty = true;
           }
         });
+        useHistoryStore.getState().invalidateRedo();
       },
 
       markDirty: () => set({ isDirty: true }),
