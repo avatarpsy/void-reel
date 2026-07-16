@@ -212,11 +212,16 @@ export function consolidateCaptionTextClips(
     const end = c.startTime + c.duration;
     if (isAnchor(c)) {
       captionSourceTrackIds.add(c.trackId);
-      // collapse onto track-captions; drop an anchor overlapping a kept one
+      // Collapse onto track-captions. An overlapping anchor is only junk
+      // when it's ALSO a duplicate (same text+start seen twice — the
+      // regenerate-leftover signature). UNIQUE overlapping captions are
+      // legitimate content: AE template titles routinely show two lines
+      // in the same window ("SPACE" + "SLIDESHOW") — dropping them ate
+      // 29 of 38 imported titles.
       const overlapsKept = keptSpans.some(
         (s) => c.startTime < s.end - 0.05 && end > s.start + 0.05,
       );
-      if (overlapsKept) {
+      if (overlapsKept && isDuplicated(c)) {
         changed = true;
         continue;
       }

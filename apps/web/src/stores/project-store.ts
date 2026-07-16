@@ -3016,6 +3016,10 @@ export const useProjectStore = create<ProjectState>()(
         set({
           project: {
             ...project,
+            // Snapshot sync — project.textClips is the persisted SSOT the
+            // loader rebuilds the engine from; without this, every remote
+            // tick wipes clips that existed only inside the title engine.
+            textClips: titleEngine.getAllTextClips(),
             modifiedAt: Date.now(), // Mark project as modified
           },
           clipUndoStack: [...clipUndoStack, historyEntry], // Push entry to undo stack
@@ -3313,7 +3317,10 @@ export const useProjectStore = create<ProjectState>()(
                 }
               : {}),
           });
-          set({ project: { ...get().project, modifiedAt: Date.now() } });
+          // Snapshot sync (same reason as createTextClip): persist the
+          // engine's captions into project.textClips or the next loader
+          // tick rebuilds the engine without them.
+          set({ project: { ...get().project, textClips: titleEngine?.getAllTextClips() ?? get().project.textClips, modifiedAt: Date.now() } });
         }
       },
 
