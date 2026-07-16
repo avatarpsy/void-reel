@@ -171,8 +171,11 @@ export async function fetchVoidspaceLibrary(
   };
 }
 
-/** Append the auth token to a local-asset URL so an <img>/<canvas> can load it. */
+/** Append the auth token to a local-asset URL so an <img>/<canvas> can load it.
+ *  Absolute cloud URLs (Firestore-sourced Library items on Firebase Storage /
+ *  GCS) are public + durable — returned unchanged, never token-stamped. */
 export function withMediaToken(url: string, token: string | null): string {
+  if (/^https?:\/\//i.test(url)) return url;
   if (!token || /[?&]t=/.test(url)) return url;
   return `${url}${url.includes('?') ? '&' : '?'}t=${encodeURIComponent(token)}`;
 }
@@ -188,8 +191,18 @@ export async function libraryImageToAsset(
   id: string; name: string; type: 'image'; mimeType: string; size: number;
   width: number; height: number; thumbnailUrl: string; dataUrl: string;
 }> {
-  const res = await fetch(withMediaToken(item.url, token));
-  if (!res.ok) throw new Error(`fetch image ${res.status}`);
+  const absolute = /^https?:\/\//i.test(item.url);
+  let res: Response | null = null;
+  try {
+    res = await fetch(withMediaToken(item.url, token));
+  } catch (e) {
+    if (!absolute) throw e; // relative local-asset — nothing else to try
+  }
+  if ((!res || !res.ok) && absolute) {
+    // Cloud item whose bucket lacks CORS headers — route through our proxy.
+    res = await fetch(`/api/studio/media-proxy?url=${encodeURIComponent(item.url)}`);
+  }
+  if (!res || !res.ok) throw new Error(`fetch image ${res ? res.status : 'failed'}`);
   const blob = await res.blob();
   const dataUrl: string = await new Promise((resolve, reject) => {
     const fr = new FileReader();

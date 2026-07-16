@@ -14,10 +14,52 @@ import { saveMediaBlob } from "./media-storage";
  * Used by BOTH timeline drop targets (Timeline.tsx tracks-area + TrackLane).
  */
 export interface DroppedLibraryItem {
-  url: string;   // /api/studio/local-asset?... (same-origin; auth-stamped by the main.tsx fetch hook)
+  url: string;   // /api/studio/local-asset?... (same-origin; auth-stamped by the main.tsx fetch hook) OR an absolute cloud URL (Firestore-sourced Library items)
   kind: string;  // video | image | music | sfx | narration
   type: string;  // video | image | music | sfx | voice (coarse)
   label?: string;
+}
+
+/** Parent origin when embedded in the website iframe; else same origin. */
+function apiBase(): string {
+  if (typeof window !== "undefined") {
+    try {
+      if (window.parent && window.parent !== window) return window.parent.location.origin;
+    } catch { /* cross-origin — fall through */ }
+  }
+  return "";
+}
+
+/**
+ * Fetch a Library asset's bytes. Handles BOTH url shapes the library returns:
+ *   • relative `/api/studio/local-asset?...` — served from the caller's own
+ *     disk partition; auth-stamped by the main.tsx fetch hook.
+ *   • absolute https — Firestore-sourced items (agent/app/automation media on
+ *     Firebase Storage / GCS). Direct fetch first; when the bucket lacks CORS
+ *     headers, falls back to the website's media-proxy.
+ */
+export async function fetchLibraryBlob(url: string): Promise<Blob | null> {
+  // blob:/data: URLs come from the Library's "On this device" section
+  // (IndexedDB media minted as object URLs) — fetch directly, no prefixing.
+  if (/^(blob:|data:)/i.test(url)) {
+    try {
+      const r = await fetch(url);
+      return r.ok ? await r.blob() : null;
+    } catch { return null; }
+  }
+  const absolute = /^https?:\/\//i.test(url);
+  try {
+    const r = await fetch(absolute ? url : `${apiBase()}${url}`);
+    if (r.ok) return await r.blob();
+    if (!absolute) return null;
+  } catch {
+    if (!absolute) return null;
+  }
+  try {
+    const r = await fetch(`${apiBase()}/api/studio/media-proxy?url=${encodeURIComponent(url)}`);
+    if (r.ok) return await r.blob();
+  } catch { /* upstream unreachable */ }
+  return null;
 }
 
 /** Read a timeline drop payload that may be a native media item OR a Library
@@ -42,10 +84,10 @@ export async function importLibraryItemToProject(li: DroppedLibraryItem): Promis
   const existing = store.project.mediaLibrary.items.find((m: any) => m.originalUrl === li.url);
   if (existing) return existing.id;
   try {
-    // Same-origin local-asset fetch; the main.tsx hook stamps the auth token.
-    const r = await fetch(li.url);
-    if (!r.ok) return null;
-    const blob = await r.blob();
+    // Local-asset fetches are auth-stamped by the main.tsx hook; absolute
+    // cloud URLs fall back to the media-proxy when CORS blocks them.
+    const blob = await fetchLibraryBlob(li.url);
+    if (!blob) return null;
     const ext = li.kind === "image" ? "jpg" : li.type === "video" ? "mp4" : "mp3";
     const safe = (li.label || li.kind).replace(/[^a-z0-9._-]+/gi, "-").slice(0, 48) || li.kind;
     const file = new File([blob], `${safe}.${ext}`, { type: blob.type || "application/octet-stream" });

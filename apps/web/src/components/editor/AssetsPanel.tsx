@@ -1293,10 +1293,25 @@ export const AssetsPanel: React.FC = () => {
             <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-t-full shadow-[0_-2px_8px_rgba(99,102,241,0.5)]" />
           )}
         </button>
-        {/* Cloud + AI tabs hidden in the studio shell — the chat
-            sidebar is the authoritative AI surface, and Voidspace
-            cloud media flows in automatically via the scene_list
-            subscription, so a separate "Cloud" tab was redundant. */}
+        <button
+          onClick={() => setActiveTab("voidspace")}
+          className={`pb-3 transition-all relative ${
+            activeTab === "voidspace"
+              ? "text-text-primary"
+              : "hover:text-text-secondary"
+          }`}
+        >
+          Cloud
+          {activeTab === "voidspace" && (
+            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-t-full shadow-[0_-2px_8px_rgba(99,102,241,0.5)]" />
+          )}
+        </button>
+        {/* Cloud tab restored: the CURRENT project's media flows in via the
+            scene_list subscription, but this panel is the only browser for
+            the user's OTHER projects' cloud media (automation-generated scene
+            frames/videos/narrations + published posts) — every generation
+            must be reachable from the assets panel. The AI tab stays hidden
+            (the chat sidebar is the authoritative AI surface). */}
       </div>
 
       {/* Search & view toggle - only show for media tab */}
