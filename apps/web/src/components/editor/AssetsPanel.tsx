@@ -759,10 +759,14 @@ export const AssetsPanel: React.FC = () => {
       });
       if (result.ok) {
         toast.success(
-          `Imported ${result.assetsImported} asset${result.assetsImported === 1 ? "" : "s"} from "${result.slug}"`,
-          result.clipsPlaced
-            ? `${result.clipsPlaced} clip(s) placed on the timeline — overlays are in the library.`
-            : "Assets are in the library — drag them in or ask the agent.",
+          result.timelineComp
+            ? `Rebuilt "${result.timelineComp}" — ${result.clipsPlaced} clips, ${result.textsPlaced ?? 0} titles`
+            : `Imported ${result.assetsImported} asset${result.assetsImported === 1 ? "" : "s"} from "${result.slug}"`,
+          result.slotCount
+            ? `${result.clipsPlaced} clip(s) + ${result.slotCount} photo placeholder${result.slotCount === 1 ? "" : "s"} on the timeline — replace each placeholder with your image, or ask the agent.`
+            : result.clipsPlaced
+              ? `${result.clipsPlaced} clip(s) placed on the timeline — overlays are in the library.`
+              : "Assets are in the library — drag them in or ask the agent.",
         );
         setAdobeOpen(false);
         setAdobePath("");

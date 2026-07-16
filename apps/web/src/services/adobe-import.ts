@@ -70,6 +70,50 @@ interface ManifestItem {
   group: string;
 }
 
+/** Tracks this import creates carry this name prefix so a RE-RUN can drop
+ *  exactly its own previous tracks and never a track the user built. */
+const AE_TRACK_PREFIX = "AE·"; // "AE·"
+
+/** A visible "drop a photo here" card at the comp's aspect — fills empty
+ *  template photo slots so the preview reads as a slideshow instead of
+ *  rendering black where the (not-yet-supplied) photos go. One image,
+ *  reused for every slot. */
+async function makePhotoPlaceholderBlob(w: number, h: number): Promise<Blob | null> {
+  try {
+    if (typeof document === "undefined") return null;
+    const scale = Math.min(1, 960 / Math.max(w || 1920, h || 1080));
+    const cw = Math.max(320, Math.round((w || 1920) * scale));
+    const ch = Math.max(180, Math.round((h || 1080) * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = cw;
+    canvas.height = ch;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    const g = ctx.createLinearGradient(0, 0, cw, ch);
+    g.addColorStop(0, "#20293c");
+    g.addColorStop(1, "#0e1420");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, cw, ch);
+    ctx.strokeStyle = "rgba(255,255,255,0.30)";
+    ctx.lineWidth = Math.max(2, Math.round(cw * 0.006));
+    ctx.setLineDash([Math.round(cw * 0.03), Math.round(cw * 0.02)]);
+    const m = Math.round(cw * 0.045);
+    ctx.strokeRect(m, m, cw - 2 * m, ch - 2 * m);
+    ctx.setLineDash([]);
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "rgba(255,255,255,0.88)";
+    ctx.font = `600 ${Math.round(ch * 0.1)}px sans-serif`;
+    ctx.fillText("🖼  Photo slot", cw / 2, ch * 0.43);
+    ctx.fillStyle = "rgba(255,255,255,0.55)";
+    ctx.font = `400 ${Math.round(ch * 0.05)}px sans-serif`;
+    ctx.fillText("drop an image here or ask the agent", cw / 2, ch * 0.57);
+    return await new Promise<Blob | null>((res) => canvas.toBlob((b) => res(b), "image/png"));
+  } catch {
+    return null;
+  }
+}
+
 /** Find a same-type track with a free slot, else create one; returns the
  *  placed duration (sec) or null. Mirrors the add-clip RPC's routing. */
 async function placeAuto(mediaId: string, startTime: number): Promise<number | null> {
@@ -189,24 +233,83 @@ export async function importAdobeProject(
   // ── Faithful timeline from the .aep main comp (when parsed) ──────────
   let placed = 0;
   let textsPlaced = 0;
+  let slotsPlaced = 0;
   const tl = manifest.timeline;
   if (tl && (tl.clips.length > 0 || tl.texts.length > 0)) {
     onProgress?.({ phase: "placing", detail: `Rebuilding "${tl.comp}" (${tl.clips.length} clips, ${tl.texts.length} titles)…` });
 
-    const importedIds = new Set(mediaIdByUrl.values());
-
-    // Re-run idempotence: drop tracks that consist ONLY of clips from this
-    // import set (a previous run of the same import), then re-place fresh.
+    // Re-run idempotence: drop ONLY the tracks a PREVIOUS import created
+    // (tagged with AE_TRACK_PREFIX). Never touches user-built/renamed
+    // tracks — the reviewer's data-loss concern.
     try {
       const tracksNow = [...(useProjectStore.getState().project.timeline?.tracks ?? [])];
       for (const t of tracksNow) {
-        const clips = t.clips ?? [];
-        if (clips.length > 0 && clips.every((c: any) => importedIds.has(c.mediaId))) {
+        if (String(t.name || "").startsWith(AE_TRACK_PREFIX)) {
           await useProjectStore.getState().removeTrack(t.id);
         }
       }
     } catch (e) {
       console.warn("[adobe-import] previous-import cleanup failed:", e);
+    }
+
+    // Helper: create a fresh track of a type and tag it as import-owned.
+    const newAeTrack = async (type: "audio" | "image" | "video", label: string): Promise<string | null> => {
+      const store = useProjectStore.getState();
+      const before = new Set((store.project.timeline?.tracks ?? []).map((t: any) => t.id));
+      const tRes = await store.addTrack(type);
+      if (!tRes.success) return null;
+      const fresh = useProjectStore.getState().project.timeline?.tracks?.find(
+        (t: any) => t.type === type && !before.has(t.id),
+      );
+      if (!fresh) return null;
+      try { useProjectStore.getState().renameTrack(fresh.id, `${AE_TRACK_PREFIX}${label}`); } catch { /* naming is cosmetic */ }
+      return fresh.id;
+    };
+
+    // ── Photo slots FIRST — so after footage tracks prepend above them,
+    // they sit at the BACK (photo = scene background in AE). Empty slots
+    // otherwise render black; a visible placeholder card reads as a real
+    // slideshow frame the user/agent then replaces. ────────────────────
+    if (tl.slots && tl.slots.length > 0) {
+      try {
+        const blob = await makePhotoPlaceholderBlob(tl.width, tl.height);
+        if (blob) {
+          const file = new File([blob], "photo-placeholder.png", { type: "image/png" });
+          const before = new Set(useProjectStore.getState().project.mediaLibrary.items.map((m: any) => m.id));
+          const res = await useProjectStore.getState().importMedia(file);
+          if (res.success) {
+            const ph = useProjectStore.getState().project.mediaLibrary.items.find((m: any) => !before.has(m.id)) as any;
+            if (ph) {
+              useProjectStore.setState((s: any) => ({
+                project: {
+                  ...s.project,
+                  mediaLibrary: {
+                    ...s.project.mediaLibrary,
+                    items: s.project.mediaLibrary.items.map((m: any) =>
+                      m.id === ph.id ? { ...m, name: "Photo slot — replace me", category: `Imported: ${manifest.slug}` } : m,
+                    ),
+                  },
+                  modifiedAt: Date.now(),
+                },
+              }));
+              const lanes: Array<{ trackId: string; lastEnd: number }> = [];
+              for (const s of [...tl.slots].sort((a, b) => a.startSec - b.startSec)) {
+                let lane = lanes.find((L) => L.lastEnd <= s.startSec + 0.01);
+                if (!lane) {
+                  const tid = await newAeTrack("image", "Photos");
+                  if (!tid) continue;
+                  lane = { trackId: tid, lastEnd: 0 };
+                  lanes.push(lane);
+                }
+                const r = await useProjectStore.getState().addClip(lane.trackId, ph.id, s.startSec, s.durationSec);
+                if (r.success) { slotsPlaced++; lane.lastEnd = s.startSec + s.durationSec; }
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.warn("[adobe-import] photo-slot placement failed:", e);
+      }
     }
 
     // Lane packing per SOURCE: clips arrive bottom-most first, so groups
@@ -221,7 +324,6 @@ export async function importAdobeProject(
       g.push(c);
       groups.set(c.url, g);
     }
-    const createdTrackIds: string[] = [];
     for (const [url, clipsOfUrl] of groups) {
       const mediaId = mediaIdByUrl.get(url)!;
       const m = useProjectStore.getState().getMediaItem(mediaId) as any;
@@ -229,18 +331,14 @@ export async function importAdobeProject(
         "audio" | "image" | "video";
       const mediaDur = typeof m?.metadata?.duration === "number" && m.metadata.duration > 0 ? m.metadata.duration : null;
       const lanes: Array<{ trackId: string; lastEnd: number }> = [];
+      const label = trackType === "audio" ? "Audio" : trackType === "image" ? "Image" : "Video";
       for (const c of [...clipsOfUrl].sort((a, b) => a.startSec - b.startSec)) {
         const dur = mediaDur && trackType !== "image" ? Math.min(c.durationSec, mediaDur) : c.durationSec;
         let lane = lanes.find((L) => L.lastEnd <= c.startSec + 0.01);
         if (!lane) {
-          const tRes = await useProjectStore.getState().addTrack(trackType);
-          if (!tRes.success) continue;
-          const fresh = useProjectStore.getState().project.timeline?.tracks?.find(
-            (t: any) => t.type === trackType && (t.clips ?? []).length === 0 && !createdTrackIds.includes(t.id),
-          );
-          if (!fresh) continue;
-          createdTrackIds.push(fresh.id);
-          lane = { trackId: fresh.id, lastEnd: 0 };
+          const tid = await newAeTrack(trackType, label);
+          if (!tid) continue;
+          lane = { trackId: tid, lastEnd: 0 };
           lanes.push(lane);
         }
         try {
@@ -326,7 +424,7 @@ export async function importAdobeProject(
     assetsImported: imported,
     clipsPlaced: placed,
     textsPlaced,
-    slotCount: tl?.slots?.length ?? 0,
+    slotCount: slotsPlaced,
     timelineComp: tl?.comp,
     compNames: manifest.projectMeta?.compNames ?? [],
   };
