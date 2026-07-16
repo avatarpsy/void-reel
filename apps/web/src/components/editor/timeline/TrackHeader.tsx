@@ -3,7 +3,7 @@ import { Eye, EyeOff, Volume2, Lock, Trash2, ChevronDown, ChevronRight, Pencil }
 import type { Track } from "@openreel/core";
 import { useProjectStore } from "../../../stores/project-store";
 import { useTimelineStore } from "../../../stores/timeline-store";
-import { getTrackInfo } from "./utils";
+import { getTrackInfo, getKeyframeLaneHeight } from "./utils";
 import {
   ContextMenu,
   ContextMenuTrigger,
@@ -79,7 +79,14 @@ export const TrackHeader: React.FC<TrackHeaderProps> = ({
           onDragStart={(e) => onDragStart(e, track.id)}
           onDragOver={onDragOver}
           onDrop={(e) => onDrop(e, track.id)}
-          style={{ height: getTrackHeight(track.id) }}
+          // Match the lane column: base height + the in-flow keyframe lane
+          // (getKeyframeLaneHeight) so both columns stay row-aligned. The
+          // extension goes into bottom padding so the name/buttons stay
+          // anchored in the base-height region.
+          style={{
+            height: getTrackHeight(track.id) + getKeyframeLaneHeight(track, isExpanded),
+            paddingBottom: 8 + getKeyframeLaneHeight(track, isExpanded),
+          }}
           className={`border-b border-border flex flex-col justify-between py-2 px-3 relative group transition-colors cursor-grab active:cursor-grabbing ${
             track.hidden ? "opacity-50" : ""
           } ${

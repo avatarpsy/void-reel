@@ -2,6 +2,7 @@ import React, { useMemo, useCallback } from "react";
 import type { Keyframe, Clip } from "@openreel/core";
 import { KeyframeMarker } from "./KeyframeMarker";
 import { EasingCurve } from "./EasingCurve";
+import { KEYFRAME_PROPERTY_ROW_HEIGHT } from "./utils";
 
 const PROPERTY_COLORS: Record<string, string> = {
   "position.x": "#22d3ee",
@@ -88,7 +89,7 @@ export const KeyframeTrack: React.FC<KeyframeTrackProps> = ({
     );
   }
 
-  const PROPERTY_ROW_HEIGHT = 24;
+  const PROPERTY_ROW_HEIGHT = KEYFRAME_PROPERTY_ROW_HEIGHT;
 
   return (
     <div className="bg-background-tertiary/30 border-t border-border/30">

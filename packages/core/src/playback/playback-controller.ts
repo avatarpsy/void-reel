@@ -605,6 +605,11 @@ export class PlaybackController {
         // lazily fetch and decode using `originalUrl` so the very next
         // scheduler tick has audio for this clip.
         if (!mediaItem) continue;
+        // Image media lands on video tracks too (drag-drop, agent
+        // placement) — it has no audio, so keep it out of the decode
+        // pipeline entirely (decodeAudioData churn + bogus <audio>
+        // fallbacks otherwise).
+        if (mediaItem.type === "image") continue;
         if (!mediaItem.blob && !mediaItem.originalUrl) continue;
 
         const cachedBuffer = this.getOrDecodeAudioBuffer(mediaItem);
@@ -644,6 +649,7 @@ export class PlaybackController {
       for (const clip of track.clips) {
         const mediaItem = mediaLibrary.items.find((m) => m.id === clip.mediaId);
         if (!mediaItem) continue;
+        if (mediaItem.type === "image") continue; // images carry no audio
         // Preload anything we can hydrate — either an in-memory blob
         // OR a remote `originalUrl` (Voidspace narration / music /
         // Remotion-rendered clips, which arrive blob-less after
@@ -680,6 +686,7 @@ export class PlaybackController {
       for (const clip of track.clips) {
         const mediaItem = mediaLibrary.items.find((m) => m.id === clip.mediaId);
         if (!mediaItem) continue;
+        if (mediaItem.type === "image") continue; // never <audio>-fallback an image
         const failed = (this.audioDecodeFailures.get(mediaItem.id) ?? 0) >= 2;
         const decoded = this.audioBufferCache.has(mediaItem.id);
         if (!decoded && failed) {
@@ -735,6 +742,7 @@ export class PlaybackController {
       return null;
     }
 
+    if (mediaItem.type === "image") return null; // images carry no audio
     if (!mediaItem.blob && !mediaItem.originalUrl) return null;
 
     const audioContext = this.masterClock.getAudioContext();

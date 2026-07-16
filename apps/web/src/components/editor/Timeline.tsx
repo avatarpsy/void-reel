@@ -52,6 +52,7 @@ import {
   BeatMarkerOverlay,
   MarkerIndicator,
   getTrackInfo,
+  getKeyframeLaneHeight,
 } from "./timeline/index";
 import { Transport } from "./Transport";
 
@@ -98,7 +99,19 @@ export const Timeline: React.FC = () => {
     setTrackHeight,
     setTrackHeightById,
     getTrackHeight,
+    isTrackExpanded,
+    expandedTracks,
   } = useTimelineStore();
+
+  // Effective row height: base lane + the in-flow keyframe lane when
+  // expanded. Every cumulative-Y computation (drag targeting, box
+  // selection, total height) must use this, or rows below an expanded
+  // track are hit-tested against the wrong Y ranges.
+  const getEffectiveTrackHeight = useCallback(
+    (track: (typeof tracks)[number]) =>
+      getTrackHeight(track.id) + getKeyframeLaneHeight(track, isTrackExpanded(track.id)),
+    [getTrackHeight, isTrackExpanded],
+  );
 
   const [showLayersPanel, setShowLayersPanel] = useState(false);
 
@@ -155,18 +168,18 @@ export const Timeline: React.FC = () => {
   const totalTracksHeight = useMemo(() => {
     let height = 0;
     for (const track of tracks) {
-      height += getTrackHeight(track.id);
+      height += getEffectiveTrackHeight(track);
     }
     return height;
-  }, [tracks, getTrackHeight]);
+  }, [tracks, getEffectiveTrackHeight, expandedTracks]);
 
   const trackHeightsMap = useMemo(() => {
     const map = new Map<string, number>();
     for (const track of tracks) {
-      map.set(track.id, getTrackHeight(track.id));
+      map.set(track.id, getEffectiveTrackHeight(track));
     }
     return map;
-  }, [tracks, getTrackHeight]);
+  }, [tracks, getEffectiveTrackHeight, expandedTracks]);
 
   const handleTrackDragStart = useCallback(
     (e: React.DragEvent, trackId: string) => {
@@ -423,7 +436,7 @@ export const Timeline: React.FC = () => {
 
     // Iterate through tracks to find which are overlapped by selection box
     for (const track of tracks) {
-      const trackH = getTrackHeight(track.id);
+      const trackH = getEffectiveTrackHeight(track);
       const trackMinY = currentY;
       const trackMaxY = currentY + trackH;
 
@@ -465,7 +478,7 @@ export const Timeline: React.FC = () => {
     selectionBox,
     pixelsPerSecond,
     tracks,
-    getTrackHeight,
+    getEffectiveTrackHeight,
     selectMultiple,
   ]);
 
@@ -479,7 +492,38 @@ export const Timeline: React.FC = () => {
 
   const handleDropMedia = useCallback(
     async (trackId: string, mediaId: string, startTime: number) => {
-      const { addClip, addClipToNewTrack } = useProjectStore.getState();
+      const store = useProjectStore.getState();
+      const { addClip, addClipToNewTrack, getMediaItem } = store;
+      // Route by MEDIA type — an image dropped on a video lane goes to an
+      // image track (audio → audio track, etc.), reusing an existing
+      // same-type track with a free slot before creating one. Same type
+      // mapping addClipToNewTrack uses; keeps video tracks video-only.
+      const media = getMediaItem(mediaId);
+      const targetType =
+        media?.type === "image" ? "image"
+        : media?.type === "audio" ? "audio"
+        : "video";
+      const target = trackId
+        ? store.project.timeline.tracks.find((t) => t.id === trackId)
+        : undefined;
+      if (target && target.type !== targetType) {
+        const estDur = media?.metadata?.duration && media.metadata.duration > 0
+          ? media.metadata.duration
+          : 5;
+        const free = store.project.timeline.tracks.find(
+          (t) =>
+            t.type === targetType &&
+            !t.clips.some(
+              (c) => c.startTime < startTime + estDur && c.startTime + c.duration > startTime,
+            ),
+        );
+        if (free) {
+          await addClip(free.id, mediaId, startTime);
+        } else {
+          await addClipToNewTrack(mediaId, startTime);
+        }
+        return;
+      }
       if (trackId) {
         await addClip(trackId, mediaId, startTime);
       } else {

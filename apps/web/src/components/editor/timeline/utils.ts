@@ -209,6 +209,29 @@ export const formatTimecode = (
     .padStart(2, "0")}`;
 };
 
+/** Height of one animated-property row in the expanded keyframe lane.
+ *  KeyframeTrack renders rows at this height; the layout math below must
+ *  agree with it exactly or the header/lane columns drift out of sync. */
+export const KEYFRAME_PROPERTY_ROW_HEIGHT = 24;
+
+/** Extra vertical space a track occupies when its keyframe lane is
+ *  expanded: one row per distinct animated property, per keyframed clip.
+ *  Single source of truth for TrackHeader, TrackLane and the Timeline's
+ *  cumulative-Y math (drag targeting, box selection, total height). */
+export const getKeyframeLaneHeight = (
+  track: Track,
+  isExpanded: boolean,
+): number => {
+  if (!isExpanded) return 0;
+  let height = 0;
+  for (const clip of track.clips) {
+    if (!clip.keyframes || clip.keyframes.length === 0) continue;
+    const properties = new Set(clip.keyframes.map((kf) => kf.property));
+    height += properties.size * KEYFRAME_PROPERTY_ROW_HEIGHT;
+  }
+  return height;
+};
+
 export const getTrackInfo = (track: Track, index: number): TrackInfo => {
   switch (track.type) {
     case "video":

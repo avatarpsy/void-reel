@@ -1207,6 +1207,7 @@ export const Preview: React.FC = () => {
         if (!mediaItem) {
           continue;
         }
+        if (mediaItem.type === "image") continue; // images carry no audio
 
         const mediaBlob = await resolveMediaBlob(mediaItem);
         if (!mediaBlob) continue;
@@ -1943,16 +1944,25 @@ export const Preview: React.FC = () => {
       // Note: Text/graphics overlays are now supported in native video playback
       // They are rendered using CPU canvas2D after the video frame
 
-      // Collect image clips for background compositing (don't disable native playback)
-      const imageTracks = tracks.filter((t) => t.type === "image" && !t.hidden);
+      // Collect image clips for background compositing (don't disable native playback).
+      // Image MEDIA also lands on video-type tracks (drag-drop, agent auto-placement);
+      // those clips are skipped by the video collector above (media-type check), so
+      // classify by media type here too or they render black during playback.
       const imageClips: Array<{
         clip: (typeof tracks)[0]["clips"][0];
         trackIndex: number;
       }> = [];
-      imageTracks.forEach((track) => {
+      tracks.forEach((track) => {
+        if (track.hidden) return;
+        if (track.type !== "image" && track.type !== "video") return;
         const trackIndex = tracks.indexOf(track);
         for (const clip of track.clips) {
-          imageClips.push({ clip, trackIndex });
+          if (
+            track.type === "image" ||
+            getMediaItem(clip.mediaId)?.type === "image"
+          ) {
+            imageClips.push({ clip, trackIndex });
+          }
         }
       });
 
@@ -3007,8 +3017,10 @@ export const Preview: React.FC = () => {
 
     const preCacheAllImageBitmaps = async () => {
       const tracks = timelineTracksRef.current;
+      // Video-type tracks can hold image MEDIA too — the per-clip media-type
+      // check below keeps real videos out of the bitmap cache.
       const imageTracks = tracks.filter(
-        (t) => t.type === "image" && !t.hidden,
+        (t) => (t.type === "image" || t.type === "video") && !t.hidden,
       );
 
       for (const track of imageTracks) {
@@ -3355,7 +3367,10 @@ export const Preview: React.FC = () => {
               };
             }
 
-            if (track.type === "image") {
+            const isImageMedia =
+              track.type === "image" ||
+              getMediaItem(clip.mediaId)?.type === "image";
+            if (isImageMedia) {
               const cachedBitmap = imageBitmapCacheRef.current.get(clip.id);
               if (cachedBitmap) {
                 // IMAGE clips must get the effects pass too — this branch

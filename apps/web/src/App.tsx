@@ -1375,6 +1375,12 @@ function App() {
               if (/music|bgm|score/.test(haystack)) return 'music';
               if (/narration|voice|vo|dialogue/.test(haystack)) return 'narration';
               if (/sfx|sound[\s_-]?effect/.test(haystack)) return 'sfx';
+              // The timeline's own track type is authoritative for the
+              // remaining kinds — without this, IMAGE tracks (where stills
+              // now land) read back as "video" and the agent can't tell
+              // them apart; bare "audio" tracks similarly reported wrong.
+              if (tr?.type === 'image') return 'image';
+              if (tr?.type === 'audio') return 'music';
               return 'video';
             };
             // Build a mediaId → originalUrl index so the get-state reply
@@ -1891,7 +1897,9 @@ function App() {
                 break;
               }
               const mType = media.type;
-              const wantTypes: string[] = mType === "audio" ? ["audio"] : mType === "image" ? ["image", "video"] : ["video"];
+              // Images go on IMAGE tracks only (never video tracks) — same
+              // routing the timeline drop handler enforces.
+              const wantTypes: string[] = mType === "audio" ? ["audio"] : mType === "image" ? ["image"] : ["video"];
               const estDur = (typeof duration === "number" && duration > 0)
                 ? duration
                 : (Number(media.metadata?.duration) || Number(media.duration) || 5);

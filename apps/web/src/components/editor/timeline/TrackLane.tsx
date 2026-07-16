@@ -10,7 +10,7 @@ import { ClipComponent } from "./ClipComponent";
 import { TextClipComponent } from "./TextClipComponent";
 import { ShapeClipComponent } from "./ShapeClipComponent";
 import { KeyframeTrack } from "./KeyframeTrack";
-import { calculateSnap } from "./utils";
+import { calculateSnap, getKeyframeLaneHeight } from "./utils";
 import { useTimelineStore } from "../../../stores/timeline-store";
 import { useUIStore } from "../../../stores/ui-store";
 import { useProjectStore } from "../../../stores/project-store";
@@ -129,7 +129,7 @@ export const TrackLane: React.FC<TrackLaneProps> = ({
           snapSettings,
           pixelsPerSecond,
         );
-        const { importMedia, addClip } = useProjectStore.getState();
+        const { importMedia } = useProjectStore.getState();
         for (const file of Array.from(e.dataTransfer.files)) {
           try {
             const beforeIds = new Set(
@@ -141,8 +141,11 @@ export const TrackLane: React.FC<TrackLaneProps> = ({
                 .getState()
                 .project.mediaLibrary.items.find(i => !beforeIds.has(i.id));
               if (newItem) {
-                await addClip(track.id, newItem.id, snapResult.time);
-                toast.success(`Added to ${track.name}`, file.name);
+                // onDropMedia routes by MEDIA type (an image dropped on a
+                // video lane lands on an image track) — same path internal
+                // drags take, so both drop flavors behave identically.
+                onDropMedia(track.id, newItem.id, snapResult.time);
+                toast.success("Added to timeline", file.name);
               }
             }
           } catch (err) {
@@ -289,15 +292,22 @@ export const TrackLane: React.FC<TrackLaneProps> = ({
             </span>
           </div>
         )}
+        <div
+          className={`absolute bottom-0 left-0 right-0 h-1 cursor-row-resize hover:bg-primary/50 transition-colors z-10 ${
+            isResizing ? "bg-primary" : ""
+          }`}
+          onMouseDown={handleResizeStart}
+        />
       </div>
-      <div
-        className={`absolute bottom-0 left-0 right-0 h-1 cursor-row-resize hover:bg-primary/50 transition-colors z-10 ${
-          isResizing ? "bg-primary" : ""
-        }`}
-        onMouseDown={handleResizeStart}
-      />
       {isExpanded && clipsWithKeyframes.length > 0 && (
-        <div className="absolute left-0 right-0" style={{ top: trackHeight }}>
+        // In normal flow (not absolute) so the expanded lane pushes the
+        // following tracks down instead of painting over them. Explicit
+        // height keeps the header column (which adds the same
+        // getKeyframeLaneHeight) pixel-aligned with this lane.
+        <div
+          className="overflow-hidden border-b border-border/50"
+          style={{ height: getKeyframeLaneHeight(track, true) }}
+        >
           {clipsWithKeyframes.map((clip) => (
             <div
               key={`keyframes-${clip.id}`}
