@@ -340,12 +340,23 @@ class AutoSaveManager {
    * reload after Ctrl+S could miss the most recent state.
    */
   async forceSave(project: Project): Promise<void> {
-    this.pendingProject = project;
-    await this.save(project);
+    // Prefer the registered getter over the caller's argument: the getter
+    // is the ONE place that merges engine state into the project (text /
+    // graphics clips AND the EffectsBridge's effectsState). Callers pass
+    // `useProjectStore.getState().project`, which lacks those merges — a
+    // manual Save used to OVERWRITE the blob without the video effects the
+    // debounced autosave had just persisted. The argument remains the
+    // fallback for detached/test usage without a registered getter.
+    let effective = project;
+    if (this.getProjectFn) {
+      try { effective = this.getProjectFn(); } catch { /* fall back to arg */ }
+    }
+    this.pendingProject = effective;
+    await this.save(effective);
     if (this.remoteSyncInFlight) {
       try { await this.remoteSyncInFlight; } catch { /* logged inside the runner */ }
     }
-    this.lastSavedHash = this.computeHash(project);
+    this.lastSavedHash = this.computeHash(effective);
     this.isDirty = false;
   }
 

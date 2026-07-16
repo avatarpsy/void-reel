@@ -2550,6 +2550,14 @@ function App() {
                   `Before ${surface.name} · ${new Date().toLocaleTimeString()}`,
                 );
               } catch {}
+              // Capture full BEFORE states — the surfaces mutate through
+              // direct store setters that never touch the ActionExecutor, so
+              // without an explicit history entry the edit is invisible to
+              // Ctrl+Z/redo (and the snapshot above bookmarks an executor
+              // stack the setters never grow, making its restore a no-op).
+              const beforeStates = new Map<string, unknown>(
+                targets.map((t: any) => [t.id, JSON.parse(JSON.stringify(t))]),
+              );
               const ctx = { project, store: useProjectStore.getState() as unknown as Record<string, unknown> };
               const results: Array<{ clipId: string; ok: boolean; note?: string; error?: string }> = [];
               for (const t of targets) {
@@ -2557,6 +2565,53 @@ function App() {
                 results.push({ clipId: t.id, ok: r.ok, note: r.note, error: r.error });
               }
               const okCount = results.filter((r) => r.ok).length;
+              // Register the mutation on the UNDO stack (Ctrl+Z / History
+              // panel / redo) as a generic before/after state patch covering
+              // every inspector surface — media clips and text clips.
+              // (Graphics clips live in engine stores the executor can't
+              // reach; the Snapshots panel remains their rewind path.)
+              try {
+                const applied = new Set(results.filter((r) => r.ok).map((r) => r.clipId));
+                if (applied.size > 0) {
+                  const fresh = useProjectStore.getState().project;
+                  const freshTextClips: any[] = useEngineStore.getState().getTitleEngine()?.getAllTextClips()
+                    ?? (fresh as any).textClips ?? [];
+                  const clips: Array<{ clipId: string; state: any }> = [];
+                  const textClips: Array<{ clipId: string; state: any }> = [];
+                  const invClips: Array<{ clipId: string; state: any }> = [];
+                  const invTextClips: Array<{ clipId: string; state: any }> = [];
+                  for (const t of targets as any[]) {
+                    if (!applied.has(t.id)) continue;
+                    const before = beforeStates.get(t.id);
+                    let after: any = null;
+                    let isText = false;
+                    for (const tr of fresh.timeline?.tracks ?? []) {
+                      const c = (tr.clips ?? []).find((cc: any) => cc.id === t.id);
+                      if (c) { after = c; break; }
+                    }
+                    if (!after) {
+                      const tc = freshTextClips.find((x: any) => x?.id === t.id);
+                      if (tc) { after = tc; isText = true; }
+                    }
+                    if (!before || !after) continue;
+                    const b = JSON.parse(JSON.stringify(before));
+                    const a = JSON.parse(JSON.stringify(after));
+                    if (JSON.stringify(b) === JSON.stringify(a)) continue; // no visible change
+                    (isText ? textClips : clips).push({ clipId: t.id, state: a });
+                    (isText ? invTextClips : invClips).push({ clipId: t.id, state: b });
+                  }
+                  if (clips.length > 0 || textClips.length > 0) {
+                    const label = `Apply ${surface.name}`;
+                    const now = Date.now();
+                    (useProjectStore.getState() as any).actionHistory.push(
+                      { id: `agent-apply-${now.toString(36)}`, type: "clip/applyState", timestamp: now, params: { label, clips, textClips } },
+                      { id: `agent-apply-inv-${now.toString(36)}`, type: "clip/applyState", timestamp: now, params: { label, clips: invClips, textClips: invTextClips } },
+                    );
+                  }
+                }
+              } catch (histErr) {
+                console.warn("[apply-inspector-tool] undo registration failed:", histErr);
+              }
               reply({
                 type: "voidspace:inspector-tool-applied",
                 requestId: args.requestId,

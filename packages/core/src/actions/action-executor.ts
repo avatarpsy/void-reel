@@ -241,6 +241,14 @@ export class ActionExecutor {
   ): Promise<void> {
     const type = action.type;
 
+    // Generic state patch — must be intercepted BEFORE the `clip/` prefix
+    // dispatch below (applyClipAction doesn't know this type).
+    if (type === "clip/applyState") {
+      this.applyClipStateAction(action as import("../types/actions").ClipStateAction, project);
+      this.recalculateTimelineDuration(project);
+      return;
+    }
+
     if (type.startsWith("project/")) {
       this.applyProjectAction(action as ProjectAction, project);
     } else if (type.startsWith("media/")) {
@@ -267,6 +275,42 @@ export class ActionExecutor {
 
     // Recompute timeline duration from clips after any action that may affect it
     this.recalculateTimelineDuration(project);
+  }
+
+  /** Install full clip states (media clips by array replacement; text clips
+   *  through the title engine so the render path sees them, mirrored onto
+   *  project.textClips which is the load SSOT). Both the action and its
+   *  inverse are this same type with before/after swapped, so undo and redo
+   *  are symmetric replacements. */
+  private applyClipStateAction(
+    action: import("../types/actions").ClipStateAction,
+    project: Project,
+  ): void {
+    for (const { clipId, state } of action.params.clips ?? []) {
+      for (const track of project.timeline.tracks) {
+        const clips = track.clips as unknown as Record<string, unknown>[];
+        const idx = clips.findIndex((c) => (c as { id?: string }).id === clipId);
+        if (idx >= 0) {
+          clips[idx] = state;
+          break;
+        }
+      }
+    }
+    const textStates = action.params.textClips ?? [];
+    if (textStates.length > 0) {
+      const engine = this.getTitleEngine();
+      for (const { clipId, state } of textStates) {
+        if (engine) {
+          engine.updateTextClip(clipId, state as never);
+        }
+        const mirror = (project as unknown as { textClips?: Record<string, unknown>[] }).textClips;
+        if (Array.isArray(mirror)) {
+          const i = mirror.findIndex((t) => (t as { id?: string })?.id === clipId);
+          if (i >= 0) mirror[i] = state;
+        }
+      }
+    }
+    (project as unknown as { modifiedAt: number }).modifiedAt = Date.now();
   }
 
   private recalculateTimelineDuration(project: Project): void {

@@ -488,6 +488,17 @@ export const useProjectStore = create<ProjectState>()(
         const titleEngine = useEngineStore.getState().getTitleEngine();
         const graphicsEngine = useEngineStore.getState().getGraphicsEngine();
 
+        // Restore video effects + color grading captured by the autosave
+        // (project.effectsState → EffectsBridge maps). Pre-init loads are
+        // buffered inside the bridge and flushed when it initializes.
+        try {
+          const effectsState = (project as any).effectsState;
+          console.log(`[loadProject] effectsState: ${effectsState ? Object.keys(effectsState).length + ' clip(s)' : 'ABSENT'}`);
+          if (effectsState) getEffectsBridge().restoreAllEffects(effectsState);
+        } catch (e) {
+          console.warn('[loadProject] effects restore failed:', e);
+        }
+
         if (titleEngine && project.textClips) {
           titleEngine.loadTextClips(project.textClips);
         }
@@ -2588,7 +2599,10 @@ export const useProjectStore = create<ProjectState>()(
         // Fall back to action executor for timeline operations, track changes, media operations, etc.
         const result = await actionExecutor.undo(project);
         if (result.success) {
-          set({ project: { ...project } });
+          // Bump modifiedAt so the hash-gated autosave persists the undone
+          // state — previously an undo that changed no clip/track COUNT
+          // (moves, effect tweaks, clip/applyState) was never written.
+          set({ project: { ...project, modifiedAt: Date.now() } });
         }
         return result;
       },
@@ -2702,7 +2716,8 @@ export const useProjectStore = create<ProjectState>()(
         // Fall back to action executor for timeline operations
         const result = await actionExecutor.redo(project);
         if (result.success) {
-          set({ project: { ...project } });
+          // Same rationale as undo(): make the redone state autosave-eligible.
+          set({ project: { ...project, modifiedAt: Date.now() } });
         }
         return result;
       },
@@ -2770,13 +2785,25 @@ export const useProjectStore = create<ProjectState>()(
             const titleEngine = useEngineStore.getState().getTitleEngine();
             const graphicsEngine = useEngineStore.getState().getGraphicsEngine();
 
+            // Video effects + color grading live in the EffectsBridge's
+            // in-memory maps, NOT on the clips — without embedding them
+            // here every agent/inspector-applied effect silently vanished
+            // on reload while the autosave "succeeded".
+            let effectsState: Record<string, unknown> | undefined;
+            try {
+              const eb = getEffectsBridge();
+              const all = eb.serializeAllEffects();
+              if (Object.keys(all).length > 0) effectsState = all;
+            } catch { /* bridge unavailable — save proceeds without */ }
+
             return {
               ...project,
               textClips: titleEngine?.getAllTextClips() || [],
               shapeClips: graphicsEngine?.getAllShapeClips() || [],
               svgClips: graphicsEngine?.getAllSVGClips() || [],
               stickerClips: graphicsEngine?.getAllStickerClips() || [],
-            };
+              ...(effectsState ? { effectsState } : {}),
+            } as Project;
           },
           // Capture serialised ActionHistory alongside every autosave
           // so undo/redo + named snapshots survive page reloads. Without
@@ -2848,6 +2875,18 @@ export const useProjectStore = create<ProjectState>()(
 
           const titleEngine = useEngineStore.getState().getTitleEngine();
           const graphicsEngine = useEngineStore.getState().getGraphicsEngine();
+
+          // Local-recovery is the COMMON reopen path (it wins over the
+          // Firestore blob and skips loadProject entirely) — restore video
+          // effects + color grading here too or they only survive reloads
+          // that happen to cold-load from Firestore.
+          try {
+            const effectsState = (recoveredProject as any).effectsState;
+            console.log(`[recoverFromAutoSave] effectsState: ${effectsState ? Object.keys(effectsState).length + ' clip(s)' : 'ABSENT'}`);
+            if (effectsState) getEffectsBridge().restoreAllEffects(effectsState);
+          } catch (e) {
+            console.warn('[recoverFromAutoSave] effects restore failed:', e);
+          }
 
           if (titleEngine && recoveredProject.textClips) {
             titleEngine.loadTextClips(recoveredProject.textClips);
@@ -3300,6 +3339,10 @@ export const useProjectStore = create<ProjectState>()(
                 s.id === subtitleId ? { ...s, ...updates } : s,
               ),
             },
+            // Autosave is hash-gated on modifiedAt — without the bump a
+            // subtitle edit was never persisted until some LATER edit
+            // happened to change the hash.
+            modifiedAt: Date.now(),
           },
         }));
       },

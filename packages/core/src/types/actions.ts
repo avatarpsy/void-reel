@@ -271,6 +271,25 @@ export type TextClipAction =
       };
     };
 
+// Generic before/after clip-state patch. The agent's inspector-tool applies
+// (emphasis animation, transitions, transforms, keyframes, text style, …)
+// mutate clips through direct store setters that never route through the
+// executor, so they were invisible to undo/redo. This action carries FULL
+// clip objects; applying it replaces the clip's state wholesale. The pusher
+// constructs the inverse itself (same type, before/after swapped) — no
+// InverseActionGenerator support required.
+export type ClipStateAction = {
+  type: "clip/applyState";
+  params: {
+    /** Human label for the History panel (e.g. "Apply emphasis-animation"). */
+    label?: string;
+    /** Timeline media clips: full clip objects to install, keyed by id. */
+    clips?: Array<{ clipId: string; state: Record<string, unknown> }>;
+    /** Title-engine text clips: full text-clip objects, keyed by id. */
+    textClips?: Array<{ clipId: string; state: Record<string, unknown> }>;
+  };
+};
+
 export type TimelineAction =
   | ProjectAction
   | MediaAction
@@ -282,4 +301,5 @@ export type TimelineAction =
   | TransitionAction
   | AudioAction
   | SubtitleAction
-  | TextClipAction;
+  | TextClipAction
+  | ClipStateAction;

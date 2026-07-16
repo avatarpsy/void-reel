@@ -33,6 +33,7 @@ const ACTION_DESCRIPTIONS: Record<
   "clip/split": () => "Split clip",
   "clip/rippleDelete": () => "Ripple delete",
   "clip/duplicate": () => "Duplicate clip",
+  "clip/applyState": (params) => String(params.label || "Apply effect"),
   "track/add": (params) => `Add ${params.trackType} track`,
   "track/remove": () => "Remove track",
   "effect/add": (params) => `Add ${params.effectType} effect`,

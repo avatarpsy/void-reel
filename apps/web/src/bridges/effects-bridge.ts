@@ -113,6 +113,10 @@ export class EffectsBridge {
   // Store effects per clip
   private clipEffects: Map<string, VideoEffect[]> = new Map();
   private clipColorGrading: Map<string, ColorGradingSettings> = new Map();
+  /** Effects payload restored from a project blob BEFORE initialize() ran —
+   *  flushed the moment the engines come up. Without this buffer a project
+   *  load that races initialization silently drops every saved effect. */
+  private pendingRestore: Record<string, { effects: SerializedEffect[]; colorGrading: SerializedColorGrading }> | null = null;
 
   // WebGPU renderer support
   // Note: Actual rendering is delegated to VideoEffectsEngine which handles
@@ -148,6 +152,13 @@ export class EffectsBridge {
       this.colorGradingEngine.initialize();
 
       this.initialized = true;
+
+      // Flush any project-blob effects that arrived before init finished.
+      if (this.pendingRestore) {
+        const pending = this.pendingRestore;
+        this.pendingRestore = null;
+        this.restoreAllEffects(pending);
+      }
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : "Unknown initialization error";
@@ -816,6 +827,69 @@ export class EffectsBridge {
   }
 
   /**
+   * Serialize EVERY clip's effects + color grading in one payload. The
+   * autosave blob embeds this (project.effectsState) so inspector/agent-
+   * applied looks survive reload — these maps are in-memory only, and
+   * before this existed every video effect and color grade silently
+   * vanished on reopen while the autosave "succeeded".
+   */
+  serializeAllEffects(): Record<string, { effects: SerializedEffect[]; colorGrading: SerializedColorGrading }> {
+    const out: Record<string, { effects: SerializedEffect[]; colorGrading: SerializedColorGrading }> = {};
+    const ids = new Set<string>([...this.clipEffects.keys(), ...this.clipColorGrading.keys()]);
+    for (const id of ids) {
+      try {
+        const payload = this.serializeEffects(id);
+        if ((payload.effects?.length ?? 0) > 0 || Object.keys(payload.colorGrading ?? {}).length > 0) {
+          out[id] = payload;
+        }
+      } catch { /* one bad clip must not poison the save */ }
+    }
+    return out;
+  }
+
+  /**
+   * Everything needed to survive a dispose→recreate cycle: the un-flushed
+   * pending payload when initialization never completed, else the live maps.
+   */
+  exportCarryOverState(): Record<string, { effects: SerializedEffect[]; colorGrading: SerializedColorGrading }> | null {
+    if (this.pendingRestore) return this.pendingRestore;
+    const all = this.serializeAllEffects();
+    return Object.keys(all).length > 0 ? all : null;
+  }
+
+  /**
+   * Restore a serializeAllEffects() payload (project load). Safe to call
+   * before initialize(): the payload is stashed and flushed when the
+   * engines come up.
+   */
+  restoreAllEffects(data: Record<string, { effects: SerializedEffect[]; colorGrading: SerializedColorGrading }> | null | undefined): void {
+    if (!data || typeof data !== "object") return;
+    if (!this.initialized) {
+      // Permanent diagnostic — the effects-persistence chain has multiple
+      // async hops (blob → loadProject → bridge → init flush → dispose
+      // carry-over); grep `[EffectsBridge]` to see where state stops.
+      console.log(`[EffectsBridge] restore buffered pre-init (${Object.keys(data).length} clips)`);
+      this.pendingRestore = data;
+      return;
+    }
+    let restored = 0;
+    for (const [clipId, payload] of Object.entries(data)) {
+      try {
+        if (payload && (Array.isArray(payload.effects) || payload.colorGrading)) {
+          this.deserializeEffects(clipId, {
+            effects: Array.isArray(payload.effects) ? payload.effects : [],
+            colorGrading: payload.colorGrading ?? {},
+          });
+          restored++;
+        }
+      } catch (e) {
+        console.warn(`[EffectsBridge] restore failed for clip ${clipId}:`, e);
+      }
+    }
+    console.log(`[EffectsBridge] restored effects for ${restored} clip(s)`);
+  }
+
+  /**
    * Deserialize effects from JSON-compatible format
    *
    * Deserialize effect parameters and restore to clip
@@ -1009,6 +1083,21 @@ export class EffectsBridge {
 // Singleton instance
 let effectsBridgeInstance: EffectsBridge | null = null;
 let bridgeInitPromise: Promise<EffectsBridge> | null = null;
+// Effect state preserved across dispose→recreate. The editor's engine-init
+// effect re-runs on dependency churn during startup and its CLEANUP disposes
+// the bridge — without this carry-over, every re-init silently wiped all
+// applied video effects + color grading (including state just restored from
+// the project blob). Consumed by the next instance creation.
+let effectsCarryOver: Record<string, { effects: SerializedEffect[]; colorGrading: SerializedColorGrading }> | null = null;
+
+function createBridgeInstance(): EffectsBridge {
+  const instance = new EffectsBridge();
+  if (effectsCarryOver) {
+    instance.restoreAllEffects(effectsCarryOver); // buffers until initialize()
+    effectsCarryOver = null;
+  }
+  return instance;
+}
 
 // Track initialization dimensions for auto-initialization
 let lastInitWidth = 1920;
@@ -1021,7 +1110,7 @@ let lastInitHeight = 1080;
  */
 export function getEffectsBridge(): EffectsBridge {
   if (!effectsBridgeInstance) {
-    effectsBridgeInstance = new EffectsBridge();
+    effectsBridgeInstance = createBridgeInstance();
   }
 
   if (!effectsBridgeInstance.isInitialized()) {
@@ -1056,7 +1145,7 @@ export async function getEffectsBridgeAsync(
 
   bridgeInitPromise = (async () => {
     if (!effectsBridgeInstance) {
-      effectsBridgeInstance = new EffectsBridge();
+      effectsBridgeInstance = createBridgeInstance();
     }
     await effectsBridgeInstance.initialize(width, height);
     lastInitWidth = width;
@@ -1082,7 +1171,11 @@ export async function initializeEffectsBridge(
  */
 export function disposeEffectsBridge(): void {
   if (effectsBridgeInstance) {
+    // Preserve the logical effect state for the next instance — see the
+    // effectsCarryOver comment above.
+    try { effectsCarryOver = effectsBridgeInstance.exportCarryOverState(); } catch { effectsCarryOver = null; }
     effectsBridgeInstance.dispose();
     effectsBridgeInstance = null;
   }
+  bridgeInitPromise = null;
 }
