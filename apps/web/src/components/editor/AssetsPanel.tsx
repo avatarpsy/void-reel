@@ -23,6 +23,7 @@ import {
   Grid2x2,
   List,
   Link2,
+  FolderInput,
 } from "lucide-react";
 import {
   BACKGROUND_PRESETS,
@@ -689,6 +690,12 @@ export const AssetsPanel: React.FC = () => {
     itemToAdd: MediaItem;
   } | null>(null);
   const [mediaViewMode, setMediaViewMode] = useState<MediaViewMode>("large");
+  // Adobe AE/Premiere project-folder import (server copies into local
+  // Voidspace storage — no cloud upload; see services/adobe-import.ts).
+  const [adobeOpen, setAdobeOpen] = useState(false);
+  const [adobePath, setAdobePath] = useState("");
+  const [adobeBusy, setAdobeBusy] = useState(false);
+  const [adobeStatus, setAdobeStatus] = useState("");
   // Clicking a Media tile opens a fullscreen preview (consistent with the
   // Library/Voidspace tabs); it never auto-adds — drag onto the timeline to use.
   const [previewMediaItem, setPreviewMediaItem] = useState<MediaItem | null>(null);
@@ -739,6 +746,36 @@ export const AssetsPanel: React.FC = () => {
     const cur = useUIStore.getState().panels.mediaLibrary.width ?? DEFAULT_W;
     setPanelWidth("mediaLibrary", cur >= EXPANDED_W ? DEFAULT_W : EXPANDED_W);
   }, [setPanelWidth]);
+
+  const runAdobeImport = useCallback(async () => {
+    const path = adobePath.trim();
+    if (!path || adobeBusy) return;
+    setAdobeBusy(true);
+    setAdobeStatus("Starting…");
+    try {
+      const { importAdobeProject } = await import("../../services/adobe-import");
+      const result = await importAdobeProject(path, (p) => {
+        setAdobeStatus(p.total ? `${p.detail} (${p.current}/${p.total})` : p.detail);
+      });
+      if (result.ok) {
+        toast.success(
+          `Imported ${result.assetsImported} asset${result.assetsImported === 1 ? "" : "s"} from "${result.slug}"`,
+          result.clipsPlaced
+            ? `${result.clipsPlaced} clip(s) placed on the timeline — overlays are in the library.`
+            : "Assets are in the library — drag them in or ask the agent.",
+        );
+        setAdobeOpen(false);
+        setAdobePath("");
+      } else {
+        toast.error("Adobe import failed", result.error || "Unknown error");
+      }
+    } catch (e: any) {
+      toast.error("Adobe import failed", e?.message ?? String(e));
+    } finally {
+      setAdobeBusy(false);
+      setAdobeStatus("");
+    }
+  }, [adobePath, adobeBusy]);
 
   // When embedded in the Voidspace chat (the studio shell), the "+" / "Add
   // media" affordances open the parent's rich Add-Media popup
@@ -1198,6 +1235,17 @@ export const AssetsPanel: React.FC = () => {
               descendant forces the click target to be the label itself
               → label-activation dispatches the synthetic click on the
               input → file picker opens. */}
+          <button
+            onClick={() => setAdobeOpen((v) => !v)}
+            title="Import an Adobe project folder (After Effects / Premiere) — media is copied into your LOCAL Voidspace storage, never the cloud"
+            className={`inline-flex items-center justify-center h-6 w-6 rounded-md transition-colors cursor-pointer ${
+              adobeOpen
+                ? "text-primary bg-primary/10"
+                : "text-text-secondary hover:text-text-primary hover:bg-background-elevated"
+            }`}
+          >
+            <FolderInput size={14} />
+          </button>
           {isEmbedded ? (
             <button
               onClick={() => openMediaPicker()}
@@ -1225,6 +1273,37 @@ export const AssetsPanel: React.FC = () => {
           <IconButton icon={X} title="Close panel" />
         </div>
       </div>
+
+      {adobeOpen && (
+        <div className="mx-5 mb-4 p-3 rounded-lg border border-border bg-background-secondary space-y-2">
+          <div className="text-[11px] font-semibold text-text-primary flex items-center gap-1.5">
+            <FolderInput size={12} className="text-primary" />
+            Import Adobe project (AE / Premiere)
+          </div>
+          <input
+            value={adobePath}
+            onChange={(e) => setAdobePath(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") void runAdobeImport(); e.stopPropagation(); }}
+            placeholder="Path to the project folder…"
+            disabled={adobeBusy}
+            className="w-full text-[11px] bg-background-elevated border border-border rounded px-2 py-1.5 outline-none focus:border-primary/50 text-text-primary placeholder:text-text-muted"
+          />
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[10px] text-text-muted leading-tight">
+              {adobeBusy
+                ? adobeStatus || "Working…"
+                : "Copies footage into your local Voidspace storage — nothing uploads to the cloud."}
+            </span>
+            <button
+              onClick={() => void runAdobeImport()}
+              disabled={adobeBusy || !adobePath.trim()}
+              className="shrink-0 text-[11px] px-3 py-1 rounded bg-primary text-white disabled:opacity-40 hover:bg-primary/90 transition-colors"
+            >
+              {adobeBusy ? "Importing…" : "Import"}
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Tabs */}
       <div className="flex px-5 gap-6 border-b border-border text-xs font-medium text-text-muted mb-5">
