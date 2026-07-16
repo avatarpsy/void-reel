@@ -1341,8 +1341,12 @@ function App() {
             // scenes) on Ctrl+S — same gap the iframe Save button used
             // to have before Toolbar.tsx started passing url through.
             const mediaIndex = new Map<string, string>();
+            const mediaNameIndex = new Map<string, string>();
+            const mediaTypeIndex = new Map<string, string>();
             for (const m of (proj.mediaLibrary?.items ?? [])) {
               if (m.id && m.originalUrl) mediaIndex.set(m.id, m.originalUrl);
+              if (m.id && (m as any).name) mediaNameIndex.set(m.id, String((m as any).name));
+              if (m.id && (m as any).type) mediaTypeIndex.set(m.id, String((m as any).type));
             }
             // Media tracks: video, narration, music. The "track-captions"
             // entry in timeline.tracks has empty clips[] (text clips live
@@ -1357,6 +1361,11 @@ function App() {
                 clips: (tr.clips ?? []).map((c: any) => ({
                   id: c.id, mediaId: c.mediaId,
                   url: mediaIndex.get(c.mediaId) || '',
+                  // Human-readable identity so the agent can describe what's
+                  // on the timeline ("your image d3b5f115….webp") and tell
+                  // an IMAGE clip apart from a video on the same track.
+                  name: mediaNameIndex.get(c.mediaId) || undefined,
+                  kind: mediaTypeIndex.get(c.mediaId) || undefined,
                   startTime: c.startTime, duration: c.duration,
                   inPoint: c.inPoint, outPoint: c.outPoint,
                   volume: c.volume, muted: c.muted,
@@ -1380,6 +1389,35 @@ function App() {
             const captionTracks = captionClips.length > 0
               ? [{ id: 'track-captions', name: 'Captions', kind: 'captions' as const, clips: captionClips }]
               : [];
+            // Graphics (shapes / SVGs / stickers) + STT subtitles — the agent
+            // must be able to READ everything it can EDIT (the inspector
+            // surfaces already target these), so expose them as synthetic
+            // tracks alongside media + captions.
+            const graphicClips = [
+              ...((proj as any).shapeClips ?? []),
+              ...((proj as any).svgClips ?? []),
+              ...((proj as any).stickerClips ?? []),
+            ].map((g: any) => ({
+              id: g.id,
+              kind: String(g.type || 'graphic'),
+              startTime: g.startTime ?? 0,
+              duration: g.duration ?? 0,
+              endTime: (g.startTime ?? 0) + (g.duration ?? 0),
+            }));
+            const graphicsTracks = graphicClips.length > 0
+              ? [{ id: 'track-graphics', name: 'Graphics', kind: 'graphics' as const, clips: graphicClips }]
+              : [];
+            const subtitleClips = ((proj as any).subtitles ?? []).map((s: any) => ({
+              id: s.id,
+              kind: 'subtitle' as const,
+              startTime: s.startTime ?? 0,
+              duration: Math.max(0, (s.endTime ?? 0) - (s.startTime ?? 0)),
+              endTime: s.endTime ?? 0,
+              text: typeof s.text === 'string' ? s.text.slice(0, 200) : '',
+            }));
+            const subtitleTracks = subtitleClips.length > 0
+              ? [{ id: 'track-subtitles', name: 'Subtitles', kind: 'subtitles' as const, clips: subtitleClips }]
+              : [];
             reply({
               type: "voidspace:state",
               requestId: msg.requestId,
@@ -1388,7 +1426,7 @@ function App() {
                 name: proj.name,
                 settings: proj.settings,
                 duration: proj.timeline?.duration ?? 0,
-                tracks: [...mediaTracks, ...captionTracks],
+                tracks: [...mediaTracks, ...captionTracks, ...graphicsTracks, ...subtitleTracks],
                 mediaCount: proj.mediaLibrary?.items?.length ?? 0,
                 textClipCount: captionClips.length,
               },
