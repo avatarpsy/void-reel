@@ -28,6 +28,10 @@ const PROPERTY_LABELS: Record<string, string> = {
 interface KeyframeTrackProps {
   clip: Clip;
   pixelsPerSecond: number;
+  /** Timeline-x of the clip's start in px. Markers/curves render at
+   *  offsetPx + keyframe.time*pps so they sit exactly under the clip
+   *  (keyframe times are clip-local); the property label pins here too. */
+  offsetPx?: number;
   onKeyframeSelect: (keyframeId: string, addToSelection: boolean) => void;
   onKeyframeMove: (keyframeId: string, newTime: number) => void;
   onKeyframeDelete: (keyframeId: string) => void;
@@ -44,6 +48,7 @@ interface PropertyGroup {
 export const KeyframeTrack: React.FC<KeyframeTrackProps> = ({
   clip,
   pixelsPerSecond,
+  offsetPx = 0,
   onKeyframeSelect,
   onKeyframeMove,
   onKeyframeDelete,
@@ -99,7 +104,12 @@ export const KeyframeTrack: React.FC<KeyframeTrackProps> = ({
           className="relative border-b border-border/20 last:border-b-0"
           style={{ height: PROPERTY_ROW_HEIGHT }}
         >
-          <div className="absolute left-0 top-0 bottom-0 w-20 flex items-center px-2 bg-background-tertiary/50 border-r border-border/30 z-10">
+          {/* Label sits AT the clip's start; pointer-events-none + low z so
+              a keyframe at time 0 (fade-ins) stays visible and draggable. */}
+          <div
+            className="absolute top-0 bottom-0 w-20 flex items-center px-2 bg-background-tertiary/50 border-r border-border/30 pointer-events-none"
+            style={{ left: offsetPx }}
+          >
             <div
               className="w-2 h-2 rounded-full mr-1.5 flex-shrink-0"
               style={{ backgroundColor: group.color }}
@@ -109,17 +119,17 @@ export const KeyframeTrack: React.FC<KeyframeTrackProps> = ({
             </span>
           </div>
 
-          <div className="absolute left-20 right-0 top-0 bottom-0">
+          <div className="absolute inset-0 z-10">
             {group.keyframes.map((keyframe, index) => {
               const nextKeyframe = group.keyframes[index + 1];
-              const xPos = keyframe.time * pixelsPerSecond;
+              const xPos = offsetPx + keyframe.time * pixelsPerSecond;
 
               return (
                 <React.Fragment key={keyframe.id}>
                   {nextKeyframe && (
                     <EasingCurve
                       startX={xPos}
-                      endX={nextKeyframe.time * pixelsPerSecond}
+                      endX={offsetPx + nextKeyframe.time * pixelsPerSecond}
                       easing={keyframe.easing}
                       color={group.color}
                       height={PROPERTY_ROW_HEIGHT}

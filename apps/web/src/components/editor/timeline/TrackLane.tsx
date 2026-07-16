@@ -309,14 +309,15 @@ export const TrackLane: React.FC<TrackLaneProps> = ({
           style={{ height: getKeyframeLaneHeight(track, true) }}
         >
           {clipsWithKeyframes.map((clip) => (
-            <div
-              key={`keyframes-${clip.id}`}
-              className="relative"
-              style={{ left: clip.startTime * pixelsPerSecond }}
-            >
+            // Full-width block; KeyframeTrack anchors markers/labels at
+            // offsetPx (the clip's timeline x) so they align with the clip
+            // above — shifting the whole block here would double-offset and
+            // push content past the scroll container's right edge.
+            <div key={`keyframes-${clip.id}`} className="relative">
               <KeyframeTrack
                 clip={clip}
                 pixelsPerSecond={pixelsPerSecond}
+                offsetPx={clip.startTime * pixelsPerSecond}
                 onKeyframeSelect={onKeyframeSelect ?? (() => {})}
                 onKeyframeMove={onKeyframeMove ?? (() => {})}
                 onKeyframeDelete={onKeyframeDelete ?? (() => {})}
