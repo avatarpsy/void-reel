@@ -63,7 +63,7 @@ export async function saveMediaToDisk(
   blob: Blob,
   label: string,
   ext: string,
-  kind: "recordings" | "sfx" | "music" | "narration" = "recordings",
+  kind: "recordings" | "sfx" | "music" | "narration" | "image" = "recordings",
 ): Promise<SavedRecording | null> {
   try {
     if (!blob || blob.size === 0) return null;

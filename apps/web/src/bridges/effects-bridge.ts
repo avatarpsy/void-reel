@@ -173,6 +173,30 @@ export class EffectsBridge {
     return this.initialized;
   }
 
+  /** Monotonic state version — bumped on EVERY effects/color-grading
+   *  mutation. The preview's RAM-cache invalidation hash includes this so
+   *  cached playback frames can't outlive an effect change (they used to:
+   *  the hash only saw clip.effects.length, which bridge-stored effects
+   *  never touch, so playback kept serving stale pre-effect frames). */
+  private stateVersion = 0;
+  getStateVersion(): number {
+    return this.stateVersion;
+  }
+  private bumpStateVersion(): void {
+    this.stateVersion++;
+  }
+
+  /** True when this clip has ANY bridge-stored look (video effects or color
+   *  grading). Playback paths use this alongside clip.effects.length to
+   *  decide whether a frame needs the effects pass — inspector/agent
+   *  effects live ONLY in the bridge maps. */
+  hasClipEffects(clipId: string): boolean {
+    const effects = this.clipEffects.get(clipId);
+    if (effects && effects.some((e) => e.enabled)) return true;
+    const grading = this.clipColorGrading.get(clipId);
+    return !!grading && Object.keys(grading).length > 0;
+  }
+
   /**
    * Apply a video effect to a clip
    *
@@ -203,6 +227,7 @@ export class EffectsBridge {
 
     effects.push(newEffect);
     this.clipEffects.set(clipId, effects);
+    this.bumpStateVersion();
 
     return { success: true, effectId: newEffect.id };
   }
@@ -239,6 +264,7 @@ export class EffectsBridge {
     });
 
     this.clipEffects.set(clipId, effects);
+    this.bumpStateVersion();
     return { success: true };
   }
 
@@ -316,6 +342,7 @@ export class EffectsBridge {
     });
 
     this.clipEffects.set(clipId, reorderedEffects);
+    this.bumpStateVersion();
     return { success: true };
   }
 
@@ -370,6 +397,7 @@ export class EffectsBridge {
     }
 
     effect.enabled = enabled;
+    this.bumpStateVersion();
     return { success: true, effectId };
   }
 
@@ -557,6 +585,7 @@ export class EffectsBridge {
     const colorGrading = this.clipColorGrading.get(clipId) || {};
     colorGrading.colorWheels = values;
     this.clipColorGrading.set(clipId, colorGrading);
+    this.bumpStateVersion();
 
     return { success: true };
   }
@@ -578,6 +607,7 @@ export class EffectsBridge {
     const colorGrading = this.clipColorGrading.get(clipId) || {};
     colorGrading.curves = curves;
     this.clipColorGrading.set(clipId, colorGrading);
+    this.bumpStateVersion();
 
     return { success: true };
   }
@@ -599,6 +629,7 @@ export class EffectsBridge {
     const colorGrading = this.clipColorGrading.get(clipId) || {};
     colorGrading.lut = lutData;
     this.clipColorGrading.set(clipId, colorGrading);
+    this.bumpStateVersion();
 
     return { success: true };
   }
@@ -620,6 +651,7 @@ export class EffectsBridge {
     const colorGrading = this.clipColorGrading.get(clipId) || {};
     colorGrading.hsl = hsl;
     this.clipColorGrading.set(clipId, colorGrading);
+    this.bumpStateVersion();
 
     return { success: true };
   }
@@ -650,6 +682,7 @@ export class EffectsBridge {
       curves: { ...DEFAULT_CURVES },
       hsl: { ...DEFAULT_HSL },
     });
+    this.bumpStateVersion();
 
     return { success: true };
   }
@@ -918,6 +951,7 @@ export class EffectsBridge {
       order: e.order,
     }));
     this.clipEffects.set(clipId, effects);
+    this.bumpStateVersion();
 
     // Restore color grading
     const colorGrading: ColorGradingSettings = {};
@@ -943,6 +977,7 @@ export class EffectsBridge {
     }
 
     this.clipColorGrading.set(clipId, colorGrading);
+    this.bumpStateVersion();
 
     return { success: true };
   }
@@ -954,7 +989,9 @@ export class EffectsBridge {
    */
   clearEffects(clipId: string): void {
     this.clipEffects.delete(clipId);
+    this.bumpStateVersion();
     this.clipColorGrading.delete(clipId);
+    this.bumpStateVersion();
   }
 
   // ============================================

@@ -141,6 +141,7 @@ export interface ProjectState {
     trackId: string,
     mediaId: string,
     startTime: number,
+    duration?: number,
   ) => Promise<ActionResult>;
   addClipToNewTrack: (
     mediaId: string,
@@ -1268,7 +1269,7 @@ export const useProjectStore = create<ProjectState>()(
       },
 
       // Clip actions
-      addClip: async (trackId: string, mediaId: string, startTime: number) => {
+      addClip: async (trackId: string, mediaId: string, startTime: number, duration?: number) => {
         const { project, actionExecutor } = get();
 
         // IMPORTANT: Deep clone the project BEFORE mutation
@@ -1280,7 +1281,14 @@ export const useProjectStore = create<ProjectState>()(
           type: "clip/add",
           id: uuidv4(),
           timestamp: Date.now(),
-          params: { trackId, mediaId, startTime },
+          params: {
+            trackId,
+            mediaId,
+            startTime,
+            // clip/add honours an explicit duration (images/graphics
+            // default to 5s otherwise) — used for lyric-timed stills.
+            ...(typeof duration === "number" && duration > 0 ? { duration } : {}),
+          },
         };
 
         const result = await actionExecutor.execute(action, projectCopy);

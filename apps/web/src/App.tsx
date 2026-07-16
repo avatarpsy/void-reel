@@ -724,17 +724,60 @@ function App() {
               resolve({ ok: false, error: "timeout" });
             }, 15000);
           });
+          // Firestore-blob size guard. The parent's timeline-state endpoint
+          // rejects payloads > 900KB (Firestore doc hard limit is 1MiB), and
+          // a rejected save means the user's WORK stops persisting — losing
+          // undo history is strictly better than losing the save. Trim the
+          // history the same way ActionHistory trims on overflow (drop oldest
+          // entries + remap snapshot stackIndex bookmarks); drop it entirely
+          // as the last resort. Local IndexedDB keeps the full history for
+          // same-machine recovery either way.
+          const SIZE_CAP = 830_000; // chars ≈ bytes, headroom under the 900KB cap
+          let historyPayload: string | null = historyData;
+          try {
+            const projectSize = JSON.stringify(project).length;
+            if (historyPayload && projectSize + historyPayload.length > SIZE_CAP) {
+              let trimmed: string | null = null;
+              try {
+                const h = JSON.parse(historyPayload);
+                if (Array.isArray(h?.undoStack)) {
+                  for (const keep of [30, 15, 5]) {
+                    const cut = Math.max(0, h.undoStack.length - keep);
+                    const candidate = JSON.stringify({
+                      ...h,
+                      undoStack: h.undoStack.slice(cut),
+                      redoStack: [],
+                      snapshots: (Array.isArray(h.snapshots) ? h.snapshots : [])
+                        .map((s: any) => ({ ...s, stackIndex: s.stackIndex - cut }))
+                        .filter((s: any) => s.stackIndex >= 0),
+                    });
+                    if (projectSize + candidate.length <= SIZE_CAP) { trimmed = candidate; break; }
+                  }
+                }
+              } catch { /* malformed history — drop it below */ }
+              historyPayload = trimmed;
+              console.warn(
+                `[Voidspace] project blob near size cap (${Math.round(projectSize / 1024)}KB project) — ${historyPayload ? "trimmed" : "dropped"} undo history for this remote save`,
+              );
+            }
+          } catch { /* sizing failed — send as-is and let the server decide */ }
           window.parent.postMessage({
             type: "voidspace:save-project",
             requestId,
             sceneListId,
             project,
-            history: historyData,
+            history: historyPayload,
           }, "*");
           const r = await ack;
           if (!r.ok) {
             throw new Error(`remote sync failed: ${r.error || "unknown"}`);
           }
+          // Fire-and-forget: upload any blob-only media the timeline uses so
+          // the project renders on OTHER machines too (bytes otherwise live
+          // only in this browser's IndexedDB → placeholder everywhere else).
+          import("./services/media-materialize")
+            .then((m) => m.sweepMaterializeTimelineMedia())
+            .catch(() => { /* best-effort */ });
         });
         // Capture ActionHistory state on every save so undo/redo +
         // chat-message snapshots survive page reload via the blob.
@@ -1590,6 +1633,56 @@ function App() {
             }
             break;
           }
+          case "voidspace:add-text-clip": {
+            // Agent-authored text/captions. Routes through the store's
+            // addSubtitle — the SAME primitive the pipeline captions use:
+            // find-or-creates the canonical `track-captions` track, styles
+            // virally, and supports per-word karaoke timing (words[] with
+            // ABSOLUTE start/end seconds → kinetic word-highlight), which is
+            // exactly what lyric-timed music-video captions need.
+            const { text, startTime, durationSec, words, animationStyle } = msg as {
+              text?: string; startTime?: number; durationSec?: number;
+              words?: Array<{ text: string; start: number; end: number }>;
+              animationStyle?: string;
+            };
+            if (typeof text !== "string" || !text.trim() || typeof startTime !== "number") {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: "text and startTime required" });
+              break;
+            }
+            try {
+              const endTime = startTime + (typeof durationSec === "number" && durationSec > 0 ? durationSec : 3);
+              await useProjectStore.getState().addSubtitle({
+                id: `agent-text-${Date.now().toString(36)}`,
+                text: text.trim(),
+                startTime,
+                endTime,
+                ...(Array.isArray(words) && words.length > 0
+                  ? {
+                      words: words
+                        .filter((w) => w && typeof w.text === "string")
+                        .map((w) => ({ text: w.text, startTime: Number(w.start) || 0, endTime: Number(w.end) || 0 })),
+                    }
+                  : {}),
+                ...(typeof animationStyle === "string" ? { animationStyle } : {}),
+              } as any);
+              // addSubtitle doesn't return the clip — resolve it for the agent
+              // so follow-up styling (apply_inspector_tool) can target it.
+              const titleEng = useEngineStore.getState().getTitleEngine();
+              const createdClip = (titleEng?.getAllTextClips() ?? [])
+                .filter((tc: any) => Math.abs((tc.startTime ?? 0) - startTime) < 0.05 && tc.text === text.trim())
+                .pop();
+              reply({
+                type: "voidspace:text-clip-added",
+                requestId: msg.requestId,
+                ok: true,
+                clipId: createdClip?.id ?? null,
+                trackId: "track-captions",
+              });
+            } catch (err: any) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: err?.message ?? String(err) });
+            }
+            break;
+          }
           case "voidspace:materialize-media": {
             // Turn a LOCAL-ONLY media item (a webcam clip the user recorded or
             // dragged in — bytes live only as a Blob in IndexedDB, no server
@@ -1780,12 +1873,51 @@ function App() {
           // discovery triplet (list/get-schema/apply); the old single-
           // purpose tool is gone with its bridge-coupled implementation.
           case "voidspace:add-clip": {
-            const { trackId, mediaId, startTime } = msg as any;
-            if (!trackId || !mediaId || typeof startTime !== "number") {
-              reply({ type: "voidspace:error", requestId: msg.requestId, error: "trackId, mediaId, startTime required" });
+            const { trackId, mediaId, startTime, duration } = msg as any;
+            if (!mediaId || typeof startTime !== "number") {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: "mediaId, startTime required" });
               break;
             }
-            const r = await useProjectStore.getState().addClip(trackId, mediaId, startTime);
+            const store = useProjectStore.getState();
+            // Resolve the target track. Explicit trackId wins; otherwise
+            // auto-pick a type-compatible track with a free slot at
+            // [startTime, startTime+duration), creating one when none
+            // exists — so agents can place media without knowing track ids.
+            let targetTrackId: string = typeof trackId === "string" ? trackId : "";
+            if (!targetTrackId) {
+              const media: any = store.getMediaItem(mediaId);
+              if (!media) {
+                reply({ type: "voidspace:error", requestId: msg.requestId, error: "no media found for that id" });
+                break;
+              }
+              const mType = media.type;
+              const wantTypes: string[] = mType === "audio" ? ["audio"] : mType === "image" ? ["image", "video"] : ["video"];
+              const estDur = (typeof duration === "number" && duration > 0)
+                ? duration
+                : (Number(media.metadata?.duration) || Number(media.duration) || 5);
+              const tracks = store.project.timeline?.tracks ?? [];
+              const free = tracks.find((t: any) =>
+                wantTypes.includes(t.type) &&
+                !(t.clips ?? []).some((c: any) => c.startTime < startTime + estDur && c.startTime + c.duration > startTime));
+              if (free) {
+                targetTrackId = free.id;
+              } else {
+                const trackType = (mType === "audio" ? "audio" : mType === "image" ? "image" : "video") as any;
+                const tRes = await store.addTrack(trackType);
+                if (!tRes.success) {
+                  reply({ type: "voidspace:error", requestId: msg.requestId, error: "could not create a track for that media type" });
+                  break;
+                }
+                const fresh = useProjectStore.getState().project.timeline?.tracks?.find(
+                  (t: any) => t.type === trackType && (t.clips ?? []).length === 0);
+                if (!fresh) {
+                  reply({ type: "voidspace:error", requestId: msg.requestId, error: "track created but not found" });
+                  break;
+                }
+                targetTrackId = fresh.id;
+              }
+            }
+            const r = await useProjectStore.getState().addClip(targetTrackId, mediaId, startTime, typeof duration === "number" && duration > 0 ? duration : undefined);
             if (!r.success) {
               const e: any = r.error;
               const errStr = e && typeof e === "object" ? `${e.code ?? "ERROR"}: ${e.message ?? "addClip failed"}` : (typeof e === "string" ? e : "addClip failed");
@@ -1794,9 +1926,9 @@ function App() {
             }
             // Look up the just-created clip — it's the newest one on
             // the track at the requested startTime.
-            const tr = useProjectStore.getState().project.timeline?.tracks?.find((t: any) => t.id === trackId);
+            const tr = useProjectStore.getState().project.timeline?.tracks?.find((t: any) => t.id === targetTrackId);
             const newClip = (tr?.clips ?? []).find((c: any) => c.startTime === startTime && c.mediaId === mediaId);
-            reply({ type: "voidspace:clip-added", requestId: msg.requestId, clip: newClip ?? null, ok: true });
+            reply({ type: "voidspace:clip-added", requestId: msg.requestId, clip: newClip ?? null, ok: true, trackId: targetTrackId });
             break;
           }
           case "voidspace:add-sfx-clip": {

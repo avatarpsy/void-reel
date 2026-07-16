@@ -24,6 +24,7 @@ import { useUIStore } from "../../stores/ui-store";
 import { useThemeStore } from "../../stores/theme-store";
 import { getRenderBridge } from "../../bridges/render-bridge";
 import { setRamCacheState } from "../../bridges/ram-cache-bridge";
+import { getEffectsBridge } from "../../bridges/effects-bridge";
 import {
   RendererFactory,
   type Renderer,
@@ -540,9 +541,14 @@ export const Preview: React.FC = () => {
   // ticks during generation (same content, new refs) still keep the cache.
   const prevTracksHashRef = useRef('');
   useEffect(() => {
+    // Bridge-stored looks (Inspector/agent video effects + color grading)
+    // never touch clip.effects, so the hash must consume the bridge's own
+    // state version or cached playback frames outlive every effect change.
+    let bridgeVersion = 0;
+    try { bridgeVersion = getEffectsBridge().getStateVersion(); } catch { /* bridge unavailable */ }
     const tracksHash = timelineTracks.map(t =>
-      `${t.id}:${t.clips.map(c => `${c.id}|${c.startTime}|${c.duration}|${(c.effects||[]).length}`).join(',')}`
-    ).join('|');
+      `${t.id}:${t.clips.map(c => `${c.id}|${c.startTime}|${c.duration}|${c.inPoint ?? ''}|${c.outPoint ?? ''}|${JSON.stringify(c.effects || [])}|${JSON.stringify((c as any).emphasisAnimation ?? null)}`).join(',')}`
+    ).join('|') + `#eb${bridgeVersion}`;
     const textHash = allTextClips.map((tc: any) =>
       `${tc.id}|${tc.text}|${tc.style?.color || ''}|${tc.style?.fontSize || ''}|${tc.style?.fontFamily || ''}|${tc.style?.fontWeight || ''}|${tc.style?.strokeColor || ''}|${tc.style?.strokeWidth ?? ''}|${tc.captionHighlight ? 1 : 0}|${tc.captionHighlightColor || ''}|${tc.captionAnimation || ''}|${tc.transform?.position?.x ?? ''}|${tc.transform?.position?.y ?? ''}`
     ).join('~');
@@ -553,7 +559,10 @@ export const Preview: React.FC = () => {
     cache.invalidate();
     setRamCacheCount(0);
     setRamCacheState([], 0);
-  }, [timelineTracks, allTextClips]);
+    // modifiedAt dep: bridge-effect mutations bump modifiedAt WITHOUT
+    // changing the tracks array reference — without this dep the effect
+    // never re-runs to observe the new bridge state version.
+  }, [timelineTracks, allTextClips, project.modifiedAt]);
 
   // Keep a ref to allTextClips for use in playback effect
   const allTextClipsRef = useRef(allTextClips);
@@ -1865,6 +1874,31 @@ export const Preview: React.FC = () => {
       const tracks = timelineTracksRef.current;
       const videoTracks = tracks.filter((t) => t.type === "video" && !t.hidden);
 
+      // Effects/emphasis parity gate. The native fast path draws frames
+      // straight to the canvas: it can't run the EffectsBridge pass at all,
+      // and it skips emphasis for IMAGE clips. Any still-visible clip
+      // carrying a bridge look (video effects / color grading), a
+      // clip.effects entry, or an image with an emphasis animation must go
+      // through the multi-track compositor — otherwise the user's applied
+      // effects show while paused but disappear during playback.
+      try {
+        const eb = getEffectsBridge();
+        for (const track of tracks) {
+          if (track.hidden) continue;
+          for (const clip of track.clips) {
+            if (clip.startTime + clip.duration <= startPosition) continue;
+            if ((clip.effects?.length ?? 0) > 0 || eb.hasClipEffects(clip.id)) {
+              return { canUse: false, clips: [] };
+            }
+            const emph = (clip as any).emphasisAnimation;
+            const isImage = getMediaItem(clip.mediaId)?.type === "image";
+            if (isImage && emph && emph.type && emph.type !== "none") {
+              return { canUse: false, clips: [] };
+            }
+          }
+        }
+      } catch { /* bridge unavailable — keep the fast path */ }
+
       const allVideoClips: Array<{
         clip: (typeof tracks)[0]["clips"][0];
         mediaItem: NonNullable<ReturnType<typeof getMediaItem>>;
@@ -2784,7 +2818,11 @@ export const Preview: React.FC = () => {
                 | OffscreenCanvas = frameCanvas;
               try {
                 const frameBitmap = await createImageBitmap(frameCanvas);
-                const hasEffects = clip.effects && clip.effects.length > 0;
+                // Inspector/agent effects live in the EffectsBridge maps,
+                // NOT clip.effects — consult both or playback silently
+                // skips every applied look.
+                const hasEffects = (clip.effects && clip.effects.length > 0)
+                  || (() => { try { return getEffectsBridge().hasClipEffects(clip.id); } catch { return false; } })();
                 processedFrame = hasEffects
                   ? await applyEffectsToFrame(clip.id, frameBitmap)
                   : frameBitmap;
@@ -3320,7 +3358,18 @@ export const Preview: React.FC = () => {
             if (track.type === "image") {
               const cachedBitmap = imageBitmapCacheRef.current.get(clip.id);
               if (cachedBitmap) {
-                imageClipFrames.push({ clip, transform, frame: cachedBitmap });
+                // IMAGE clips must get the effects pass too — this branch
+                // used to push the raw bitmap, so brightness/contrast/
+                // grading applied to an image showed while PAUSED (path A
+                // runs applyEffectsToFrame unconditionally) but vanished
+                // the moment playback started.
+                let imgFrame: ImageBitmap | HTMLCanvasElement | OffscreenCanvas = cachedBitmap;
+                try {
+                  if (getEffectsBridge().hasClipEffects(clip.id) || (clip.effects?.length ?? 0) > 0) {
+                    imgFrame = await applyEffectsToFrame(clip.id, cachedBitmap);
+                  }
+                } catch { /* effects pass failed — show the raw frame */ }
+                imageClipFrames.push({ clip, transform, frame: imgFrame });
               }
               continue;
             }
@@ -3361,7 +3410,10 @@ export const Preview: React.FC = () => {
                       const frameBitmap = await createImageBitmap(
                         frameResult.canvas,
                       );
-                      const clipHasEffects = clip.effects && clip.effects.length > 0;
+                      // Same dual check as path C — bridge-stored looks
+                      // never populate clip.effects.
+                      const clipHasEffects = (clip.effects && clip.effects.length > 0)
+                        || (() => { try { return getEffectsBridge().hasClipEffects(clip.id); } catch { return false; } })();
                       processedFrame = clipHasEffects
                         ? await applyEffectsToFrame(clip.id, frameBitmap)
                         : frameBitmap;
