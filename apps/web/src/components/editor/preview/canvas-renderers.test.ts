@@ -1,7 +1,11 @@
-import { describe, it, expect } from "vitest";
-import { getAnimatedTransform } from "./canvas-renderers";
+import { describe, it, expect, beforeAll, vi } from "vitest";
+import {
+  getAnimatedTransform,
+  renderTextClipToCanvas,
+  renderShapeClipToCanvas,
+} from "./canvas-renderers";
 import { DEFAULT_TRANSFORM, type ClipTransform } from "./types";
-import type { Keyframe } from "@openreel/core";
+import type { Keyframe, TextClip } from "@openreel/core";
 
 describe("getAnimatedTransform", () => {
   const baseTransform: ClipTransform = {
@@ -182,5 +186,114 @@ describe("Playback Transform Consistency", () => {
     expect(correctClipLocalTime).toBe(1);
     expect(incorrectClipLocalTime).toBe(2);
     expect(correctClipLocalTime).not.toBe(incorrectClipLocalTime);
+  });
+});
+
+/**
+ * Robustness contract for the clip renderers: a bad clip must NEVER throw out
+ * of the renderer (a throw kills the preview's playback loop / paused-frame
+ * fallback → permanent black canvas) and must never leak ctx save() depth or
+ * transforms into the caller (a leaked transform draws every later layer
+ * offscreen — same visible symptom).
+ */
+describe("clip renderer exception safety", () => {
+  beforeAll(() => {
+    // jsdom has no FontFaceSet; ensureFontLoaded needs document.fonts.load.
+    if (!(document as unknown as { fonts?: unknown }).fonts) {
+      (document as unknown as { fonts: unknown }).fonts = {
+        load: () => Promise.resolve([]),
+      };
+    }
+  });
+
+  function makeMockCtx(overrides: Record<string, unknown> = {}) {
+    let depth = 0;
+    const ctx = {
+      get saveDepth() {
+        return depth;
+      },
+      save: () => {
+        depth += 1;
+      },
+      restore: () => {
+        depth = Math.max(0, depth - 1);
+      },
+      translate: () => {},
+      rotate: () => {},
+      scale: () => {},
+      measureText: () => ({ width: 10 }),
+      fillText: vi.fn(),
+      strokeText: () => {},
+      fillRect: () => {},
+      drawImage: () => {},
+      globalAlpha: 1,
+      font: "",
+      textAlign: "left",
+      textBaseline: "alphabetic",
+      shadowColor: "",
+      shadowBlur: 0,
+      shadowOffsetX: 0,
+      shadowOffsetY: 0,
+      fillStyle: "",
+      strokeStyle: "",
+      lineWidth: 1,
+      lineJoin: "miter",
+      miterLimit: 10,
+      ...overrides,
+    };
+    return ctx as unknown as CanvasRenderingContext2D & { saveDepth: number };
+  }
+
+  const validTextClip = {
+    id: "txt-1",
+    text: "Hello\nWorld",
+    startTime: 0,
+    duration: 5,
+    style: {
+      fontFamily: "Inter",
+      fontSize: 48,
+      fontWeight: 700,
+      fontStyle: "normal",
+      color: "#ffffff",
+      textAlign: "center",
+      lineHeight: 1.2,
+    },
+    transform: {
+      position: { x: 0.5, y: 0.5 },
+      scale: { x: 1, y: 1 },
+      rotation: 0,
+      opacity: 1,
+    },
+  } as unknown as TextClip;
+
+  it("renders a valid text clip (sanity: guard does not swallow normal path)", () => {
+    const ctx = makeMockCtx();
+    expect(() => renderTextClipToCanvas(ctx, validTextClip, 1920, 1080, 1)).not.toThrow();
+    expect((ctx.fillText as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(0);
+    expect(ctx.saveDepth).toBe(0);
+  });
+
+  it("does not throw for a malformed text clip (missing style/transform)", () => {
+    const ctx = makeMockCtx();
+    const malformed = { id: "bad-1", startTime: 0, duration: 5 } as unknown as TextClip;
+    expect(() => renderTextClipToCanvas(ctx, malformed, 1920, 1080, 1)).not.toThrow();
+    expect(ctx.saveDepth).toBe(0);
+  });
+
+  it("restores ctx save depth when the draw throws mid-render", () => {
+    const ctx = makeMockCtx({
+      fillText: () => {
+        throw new Error("boom mid-draw");
+      },
+    });
+    expect(() => renderTextClipToCanvas(ctx, validTextClip, 1920, 1080, 1)).not.toThrow();
+    expect(ctx.saveDepth).toBe(0);
+  });
+
+  it("does not throw for a malformed graphic clip", () => {
+    const ctx = makeMockCtx();
+    const malformed = { id: "shape-bad", startTime: 0, duration: 5, type: "shape" } as never;
+    expect(() => renderShapeClipToCanvas(ctx, malformed, 1920, 1080, 1)).not.toThrow();
+    expect(ctx.saveDepth).toBe(0);
   });
 });

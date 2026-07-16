@@ -2088,7 +2088,7 @@ export const Preview: React.FC = () => {
         return null;
       };
 
-      const drawFrame = async () => {
+      const drawFrameBody = async () => {
         if (!isActive || !nativePlaybackActiveRef.current) return;
 
         const currentPlayhead = masterClock.currentTime;
@@ -2349,6 +2349,35 @@ export const Preview: React.FC = () => {
         rafId = requestAnimationFrame(() => {
           drawFrame();
         });
+      };
+
+      // Loop-survival wrapper. drawFrameBody self-reschedules at its END, so
+      // any throw inside it used to kill the RAF chain silently (no pause, no
+      // cleanup) — the canvas froze on the last frame, which is pure #000000
+      // whenever the playhead sat in a gap. One bad frame must not kill the
+      // only scheduler: retry a bounded number of consecutive failures, then
+      // stop playback CLEANLY (same path as the masterClock-stopped exit) so
+      // the paused renderer takes the canvas back.
+      let consecutiveFrameErrors = 0;
+      const drawFrame = async () => {
+        try {
+          await drawFrameBody();
+          consecutiveFrameErrors = 0;
+        } catch (e) {
+          consecutiveFrameErrors += 1;
+          if (
+            consecutiveFrameErrors <= 30 &&
+            isActive &&
+            nativePlaybackActiveRef.current
+          ) {
+            console.warn("[Preview] native frame failed (retrying):", e);
+            rafId = requestAnimationFrame(() => { drawFrame(); });
+          } else {
+            console.warn("[Preview] native playback stopped after repeated frame errors:", e);
+            cleanup();
+            if (!isScrubbingRef.current) onEnd();
+          }
+        }
       };
 
       const cleanup = () => {
@@ -3786,29 +3815,82 @@ export const Preview: React.FC = () => {
   ]);
 
   const lastModifiedAtRef = useRef<number>(project.modifiedAt);
+  // Paused-render bookkeeping for the self-healing watchdog below: the key of
+  // the last frame that actually PAINTED, whether a paused render is running,
+  // and how long the interaction flag has been observed stuck.
+  const lastPausedPaintKeyRef = useRef<string>("");
+  const pausedRenderInFlightRef = useRef<boolean>(false);
+  const stuckInteractionTicksRef = useRef<number>(0);
 
   useEffect(() => {
     if (isPlaying) return;
 
-    // COMPLETELY skip rendering during resize/move interactions
-    // The last rendered frame stays visible, preventing black flashing
-    if (isInteractingRef.current) {
-      lastModifiedAtRef.current = project.modifiedAt;
-      return;
-    }
     lastModifiedAtRef.current = project.modifiedAt;
 
     const canvas = canvasRef.current;
     if (!canvas) return;
 
+    // Identifies THIS frame request; recorded only after a paint completes so
+    // the watchdog can tell "painted" from "skipped/failed".
+    const renderKey = `${playheadPosition}|${project.modifiedAt}|${isDark}`;
+
     const renderFrame = async () => {
-      const rendered = await renderFrameDirectly(playheadPosition);
-      if (!rendered) {
-        renderFallbackFrame(playheadPosition);
+      pausedRenderInFlightRef.current = true;
+      try {
+        const rendered = await renderFrameDirectly(playheadPosition);
+        if (!rendered) {
+          renderFallbackFrame(playheadPosition);
+        }
+      } catch (e) {
+        // A rejected direct render used to skip the fallback entirely
+        // (unhandled rejection), leaving whatever was on the canvas — black
+        // after a playback gap. Always land on SOME deliberate frame.
+        console.warn("[Preview] paused frame render failed — using fallback:", e);
+        try {
+          renderFallbackFrame(playheadPosition);
+        } catch { /* keep the last frame — never leave a half-drawn canvas */ }
+      } finally {
+        pausedRenderInFlightRef.current = false;
+        lastPausedPaintKeyRef.current = renderKey;
       }
     };
 
-    renderFrame();
+    // COMPLETELY skip rendering during resize/move interactions
+    // The last rendered frame stays visible, preventing black flashing
+    if (!isInteractingRef.current) {
+      void renderFrame();
+    }
+
+    // Self-healing watchdog: if this frame request never painted (a skipped
+    // render, a wedged async render, or — the big one — isInteractingRef
+    // stuck true because the pointer was released before the scoped mouseup
+    // listener attached), retry until the canvas reflects current state. The
+    // stuck flag otherwise blocks EVERY future paused repaint → the preview
+    // freezes on the last frame forever (black, if that frame was a playback
+    // gap). Cleared on every effect re-run; never runs during playback.
+    const watchdog = window.setInterval(() => {
+      if (lastPausedPaintKeyRef.current === renderKey) {
+        stuckInteractionTicksRef.current = 0;
+        return; // painted — nothing to heal
+      }
+      if (pausedRenderInFlightRef.current) return; // render still running
+      if (isInteractingRef.current) {
+        stuckInteractionTicksRef.current += 1;
+        // No real drag goes this long without a pointer release; the flag is
+        // stranded. Clear it so rendering can resume.
+        if (stuckInteractionTicksRef.current >= 4) {
+          console.warn("[Preview] interaction flag stuck — clearing and repainting");
+          isInteractingRef.current = false;
+          stuckInteractionTicksRef.current = 0;
+          void renderFrame();
+        }
+        return;
+      }
+      stuckInteractionTicksRef.current = 0;
+      void renderFrame();
+    }, 2000);
+
+    return () => window.clearInterval(watchdog);
   }, [
     playheadPosition,
     isPlaying,
@@ -4852,6 +4934,48 @@ export const Preview: React.FC = () => {
     playheadPosition,
     updateClipTransform,
   ]);
+
+  // SAFETY NET for the interaction flag. The scoped listener above only
+  // exists while `interactionMode !== "none"`, i.e. after a React re-render —
+  // but isInteractingRef is set SYNCHRONOUSLY in the pointer-down handlers. A
+  // fast click releases the mouse before that listener attaches, the mouseup
+  // is missed, and the flag stays true forever: every paused repaint is then
+  // skipped and the preview freezes on its last frame (pure black if that
+  // frame was a playback gap) — the "preview went black" bug. Listen for the
+  // release unconditionally and, AFTER the scoped handler has had its chance
+  // to run (setTimeout 0), clean up anything it left behind.
+  useEffect(() => {
+    const settle = () => {
+      setTimeout(() => {
+        if (!isInteractingRef.current) return; // scoped handler already cleaned up
+        if (pendingTransformRef.current) {
+          updateClipTransform(
+            pendingTransformRef.current.clipId,
+            pendingTransformRef.current.transform,
+          );
+          pendingTransformRef.current = null;
+        }
+        if (rafIdRef.current) {
+          cancelAnimationFrame(rafIdRef.current);
+          rafIdRef.current = null;
+        }
+        isInteractingRef.current = false;
+        setInteractionMode("none");
+        setActiveHandle(null);
+        interactionStartRef.current = null;
+        setLiveTransform(null);
+        renderFrameDirectly(playheadPosition);
+      }, 0);
+    };
+    window.addEventListener("pointerup", settle);
+    window.addEventListener("pointercancel", settle);
+    window.addEventListener("blur", settle);
+    return () => {
+      window.removeEventListener("pointerup", settle);
+      window.removeEventListener("pointercancel", settle);
+      window.removeEventListener("blur", settle);
+    };
+  }, [renderFrameDirectly, playheadPosition, updateClipTransform]);
 
   const handleFullscreen = useCallback(() => {
     const container = containerRef.current;

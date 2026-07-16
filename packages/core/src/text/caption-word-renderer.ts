@@ -117,6 +117,10 @@ export function renderCaptionWordHighlight(
   const fit = needed > maxWidth && needed > 0 ? maxWidth / needed : 1;
 
   ctx.save();
+  // finally-restore below: a throw mid-draw must not leak the save (or the
+  // align/baseline overrides) into the caller's ctx — preview AND export
+  // share this renderer, and an unbalanced save corrupts every later layer.
+  try {
   if (fit !== 1) ctx.scale(fit, fit);
 
   if (opts.backgroundColor && opts.backgroundColor !== "transparent") {
@@ -160,7 +164,9 @@ export function renderCaptionWordHighlight(
     x += w + gap;
   }
 
-  ctx.restore();
-  ctx.textAlign = prevAlign;
-  ctx.textBaseline = prevBaseline;
+  } finally {
+    ctx.restore();
+    ctx.textAlign = prevAlign;
+    ctx.textBaseline = prevBaseline;
+  }
 }

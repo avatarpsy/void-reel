@@ -558,7 +558,7 @@ const ensureFontLoaded = async (
   }
 };
 
-export const renderTextClipToCanvas = (
+const renderTextClipToCanvasUnsafe = (
   ctx: CanvasRenderingContext2D,
   textClip: TextClip,
   canvasWidth: number,
@@ -648,6 +648,11 @@ export const renderTextClipToCanvas = (
   ensureFontLoaded(style.fontFamily, style.fontSize);
 
   ctx.save();
+  // finally-restore (bottom of function): a throw mid-render must never leak
+  // the translate/rotate/alpha into the caller's ctx — a leaked transform
+  // makes every subsequent layer draw offscreen, which reads as a dead
+  // preview even though the loop is alive.
+  try {
 
   const posX = transform.position.x * canvasWidth;
   const posY = transform.position.y * canvasHeight;
@@ -774,7 +779,39 @@ export const renderTextClipToCanvas = (
     }
   }
 
-  ctx.restore();
+  } finally {
+    ctx.restore();
+  }
+};
+
+// Warn once per clip id — a persistently broken clip would otherwise spam the
+// console at 60 fps from the playback loops.
+const warnedTextClipIds = new Set<string>();
+
+/**
+ * Exception-safe text render. Every caller (paused direct render, fallback
+ * render, native + multi-track playback loops) invokes this in a hot path
+ * where an uncaught throw either kills the frame's fallback or kills the
+ * playback RAF loop outright — the canvas is left black/frozen ("preview
+ * went black" bug). One bad clip must only cost its own pixels, never the
+ * frame or the loop.
+ */
+export const renderTextClipToCanvas = (
+  ctx: CanvasRenderingContext2D,
+  textClip: TextClip,
+  canvasWidth: number,
+  canvasHeight: number,
+  time: number,
+): void => {
+  try {
+    renderTextClipToCanvasUnsafe(ctx, textClip, canvasWidth, canvasHeight, time);
+  } catch (e) {
+    const id = String((textClip as { id?: string })?.id ?? "unknown");
+    if (!warnedTextClipIds.has(id)) {
+      warnedTextClipIds.add(id);
+      console.warn(`[canvas-renderers] text clip ${id} failed to render (skipping it):`, e);
+    }
+  }
 };
 
 export const getActiveTextClips = (
@@ -1400,7 +1437,7 @@ const renderShapeOnly = (
   ctx.restore();
 };
 
-export const renderShapeClipToCanvas = (
+const renderShapeClipToCanvasUnsafe = (
   ctx: CanvasRenderingContext2D,
   clip: GraphicClipUnion,
   canvasWidth: number,
@@ -1520,6 +1557,29 @@ export const renderShapeClipToCanvas = (
       canvasWidth,
       canvasHeight,
     );
+  }
+};
+
+const warnedShapeClipIds = new Set<string>();
+
+/** Exception-safe shape/SVG/sticker render — same contract as
+ *  renderTextClipToCanvas: one bad clip must never kill a frame or a
+ *  playback loop (black/frozen preview). */
+export const renderShapeClipToCanvas = (
+  ctx: CanvasRenderingContext2D,
+  clip: GraphicClipUnion,
+  canvasWidth: number,
+  canvasHeight: number,
+  time: number,
+): void => {
+  try {
+    renderShapeClipToCanvasUnsafe(ctx, clip, canvasWidth, canvasHeight, time);
+  } catch (e) {
+    const id = String((clip as { id?: string })?.id ?? "unknown");
+    if (!warnedShapeClipIds.has(id)) {
+      warnedShapeClipIds.add(id);
+      console.warn(`[canvas-renderers] graphic clip ${id} failed to render (skipping it):`, e);
+    }
   }
 };
 
