@@ -55,7 +55,11 @@ interface ManifestTimeline {
   height: number;
   framerate: number;
   durationSec: number;
-  clips: Array<{ label: string; url: string; kind: string; startSec: number; durationSec: number; mediaInSec: number; blend?: string }>;
+  clips: Array<{
+    label: string; url: string; kind: string; startSec: number; durationSec: number; mediaInSec: number; blend?: string;
+    transformBase?: { opacity?: number; scaleX?: number; scaleY?: number; rotation?: number; posX?: number; posY?: number };
+    keyframes?: Array<{ property: string; time: number; value: number; easing: string }>;
+  }>;
   texts: Array<{ text: string; startSec: number; durationSec: number }>;
   slots: Array<{ name: string; startSec: number; durationSec: number }>;
 }
@@ -238,6 +242,12 @@ export async function importAdobeProject(
   if (tl && (tl.clips.length > 0 || tl.texts.length > 0)) {
     onProgress?.({ phase: "placing", detail: `Rebuilding "${tl.comp}" (${tl.clips.length} clips, ${tl.texts.length} titles)…` });
 
+    // Match the canvas to the AE composition so layer positions (parsed in
+    // comp pixels → centre-offset) and the comp aspect line up.
+    if (tl.width > 0 && tl.height > 0) {
+      try { await useProjectStore.getState().updateSettings({ width: tl.width, height: tl.height }); } catch { /* keep existing size */ }
+    }
+
     // Re-run idempotence: drop ONLY the tracks a PREVIOUS import created
     // (tagged with AE_TRACK_PREFIX). Never touches user-built/renamed
     // tracks — the reviewer's data-loss concern.
@@ -347,12 +357,27 @@ export async function importAdobeProject(
           if (r.success) {
             placed++;
             lane.lastEnd = c.startSec + dur;
-            // AE decorative overlays composite via screen/add (black
-            // transparent) — apply the blend to the freshly-placed clip.
-            if (c.blend && c.blend !== "normal") {
-              const made = (useProjectStore.getState().project.timeline?.tracks?.find((t: any) => t.id === lane.trackId)?.clips ?? []).find((x: any) => !before.has(x.id));
-              if (made?.id) {
-                try { useProjectStore.getState().updateClipBlendMode(made.id, c.blend as any); } catch { /* non-fatal */ }
+            const made = (useProjectStore.getState().project.timeline?.tracks?.find((t: any) => t.id === lane.trackId)?.clips ?? []).find((x: any) => !before.has(x.id));
+            if (made?.id) {
+              const store = useProjectStore.getState();
+              // AE decorative overlays composite via screen/add.
+              if (c.blend && c.blend !== "normal") {
+                try { store.updateClipBlendMode(made.id, c.blend as any); } catch { /* non-fatal */ }
+              }
+              // AE layer transform (static) → clip transform.
+              const b = c.transformBase;
+              if (b) {
+                const patch: any = {};
+                if (typeof b.opacity === "number") patch.opacity = b.opacity;
+                if (typeof b.scaleX === "number" || typeof b.scaleY === "number") patch.scale = { x: b.scaleX ?? 1, y: b.scaleY ?? b.scaleX ?? 1 };
+                if (typeof b.rotation === "number") patch.rotation = b.rotation;
+                if (typeof b.posX === "number" || typeof b.posY === "number") patch.position = { x: b.posX ?? 0, y: b.posY ?? 0 };
+                if (Object.keys(patch).length) { try { store.updateClipTransform(made.id, patch); } catch { /* non-fatal */ } }
+              }
+              // AE keyframes → clip.keyframes (position/scale/rotation/opacity).
+              if (c.keyframes && c.keyframes.length) {
+                const kfs = c.keyframes.map((k, idx) => ({ id: `aep-kf-${made.id}-${idx}`, property: k.property, time: k.time, value: k.value, easing: k.easing as any }));
+                try { store.updateClipKeyframes(made.id, kfs as any); } catch { /* non-fatal */ }
               }
             }
           } else {
