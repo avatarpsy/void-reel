@@ -547,7 +547,7 @@ export const Preview: React.FC = () => {
     let bridgeVersion = 0;
     try { bridgeVersion = getEffectsBridge().getStateVersion(); } catch { /* bridge unavailable */ }
     const tracksHash = timelineTracks.map(t =>
-      `${t.id}:${t.clips.map(c => `${c.id}|${c.startTime}|${c.duration}|${c.inPoint ?? ''}|${c.outPoint ?? ''}|${JSON.stringify(c.effects || [])}|${JSON.stringify((c as any).emphasisAnimation ?? null)}`).join(',')}`
+      `${t.id}:${t.clips.map(c => `${c.id}|${c.startTime}|${c.duration}|${c.inPoint ?? ''}|${c.outPoint ?? ''}|${(c as any).blendMode ?? ''}|${JSON.stringify(c.keyframes || [])}|${JSON.stringify(c.effects || [])}|${JSON.stringify((c as any).emphasisAnimation ?? null)}`).join(',')}`
     ).join('|') + `#eb${bridgeVersion}`;
     const textHash = allTextClips.map((tc: any) =>
       `${tc.id}|${tc.text}|${tc.style?.color || ''}|${tc.style?.fontSize || ''}|${tc.style?.fontFamily || ''}|${tc.style?.fontWeight || ''}|${tc.style?.strokeColor || ''}|${tc.style?.strokeWidth ?? ''}|${tc.captionHighlight ? 1 : 0}|${tc.captionHighlightColor || ''}|${tc.captionAnimation || ''}|${tc.transform?.position?.x ?? ''}|${tc.transform?.position?.y ?? ''}`
@@ -1586,6 +1586,7 @@ export const Preview: React.FC = () => {
                         animatedTransform,
                         canvas.width,
                         canvas.height,
+                        (clip as { blendMode?: string }).blendMode,
                       );
                       hasRenderedFrame = true;
                     } else {
@@ -1595,6 +1596,7 @@ export const Preview: React.FC = () => {
                         animatedTransform,
                         canvas.width,
                         canvas.height,
+                        (clip as { blendMode?: string }).blendMode,
                       );
                       hasRenderedFrame = true;
                     }
@@ -1605,6 +1607,7 @@ export const Preview: React.FC = () => {
                       animatedTransform,
                       canvas.width,
                       canvas.height,
+                      (clip as { blendMode?: string }).blendMode,
                     );
                     hasRenderedFrame = true;
                   }
@@ -1889,6 +1892,12 @@ export const Preview: React.FC = () => {
           for (const clip of track.clips) {
             if (clip.startTime + clip.duration <= startPosition) continue;
             if ((clip.effects?.length ?? 0) > 0 || eb.hasClipEffects(clip.id)) {
+              return { canUse: false, clips: [] };
+            }
+            // A blend mode needs the compositing path (native <video> draws
+            // opaque, no globalCompositeOperation).
+            const bm = (clip as { blendMode?: string }).blendMode;
+            if (bm && bm !== "normal") {
               return { canUse: false, clips: [] };
             }
             const emph = (clip as any).emphasisAnimation;
@@ -3501,8 +3510,16 @@ export const Preview: React.FC = () => {
               )
               .sort((a, b) => b.originalIndex - a.originalIndex);
 
+            // Per-clip blend (AE screen/add/multiply/…) only exists on the
+            // canvas 2D path (globalCompositeOperation). When any visible
+            // clip carries a non-normal blend, composite the whole frame on
+            // canvas so layers blend against each other in true z-order.
+            const hasBlend = validFrames.some(
+              (f) => (f.clip as { blendMode?: string }).blendMode &&
+                (f.clip as { blendMode?: string }).blendMode !== "normal",
+            );
             const useGPU =
-              rendererRef.current && rendererRef.current.type === "webgpu";
+              rendererRef.current && rendererRef.current.type === "webgpu" && !hasBlend;
 
             if (useGPU) {
               const gpuLayers: GPULayer[] = [];
@@ -3633,13 +3650,14 @@ export const Preview: React.FC = () => {
                   const trackFrames = validFrames.filter(
                     (f) => clipToTrackIndex.get(f.clip.id) === originalIndex,
                   );
-                  for (const { transform, frame } of trackFrames) {
+                  for (const { clip, transform, frame } of trackFrames) {
                     drawFrameWithTransform(
                       ctx,
                       frame,
                       transform,
                       canvas.width,
                       canvas.height,
+                      (clip as { blendMode?: string }).blendMode,
                     );
                   }
                 } else if (track.type === "graphics") {

@@ -55,7 +55,7 @@ interface ManifestTimeline {
   height: number;
   framerate: number;
   durationSec: number;
-  clips: Array<{ label: string; url: string; kind: string; startSec: number; durationSec: number; mediaInSec: number }>;
+  clips: Array<{ label: string; url: string; kind: string; startSec: number; durationSec: number; mediaInSec: number; blend?: string }>;
   texts: Array<{ text: string; startSec: number; durationSec: number }>;
   slots: Array<{ name: string; startSec: number; durationSec: number }>;
 }
@@ -342,10 +342,19 @@ export async function importAdobeProject(
           lanes.push(lane);
         }
         try {
+          const before = new Set((useProjectStore.getState().project.timeline?.tracks?.find((t: any) => t.id === lane.trackId)?.clips ?? []).map((x: any) => x.id));
           const r = await useProjectStore.getState().addClip(lane.trackId, mediaId, c.startSec, dur);
           if (r.success) {
             placed++;
             lane.lastEnd = c.startSec + dur;
+            // AE decorative overlays composite via screen/add (black
+            // transparent) — apply the blend to the freshly-placed clip.
+            if (c.blend && c.blend !== "normal") {
+              const made = (useProjectStore.getState().project.timeline?.tracks?.find((t: any) => t.id === lane.trackId)?.clips ?? []).find((x: any) => !before.has(x.id));
+              if (made?.id) {
+                try { useProjectStore.getState().updateClipBlendMode(made.id, c.blend as any); } catch { /* non-fatal */ }
+              }
+            }
           } else {
             console.warn("[adobe-import] timeline clip failed:", c.label, (r as any).error);
           }

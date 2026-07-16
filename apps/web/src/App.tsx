@@ -1941,6 +1941,12 @@ function App() {
             // the track at the requested startTime.
             const tr = useProjectStore.getState().project.timeline?.tracks?.find((t: any) => t.id === targetTrackId);
             const newClip = (tr?.clips ?? []).find((c: any) => c.startTime === startTime && c.mediaId === mediaId);
+            // Optional blend mode (AE decorative overlays composite via
+            // screen/add so black is transparent) — set it on the fresh clip.
+            const { blendMode } = msg as { blendMode?: string };
+            if (newClip?.id && typeof blendMode === "string" && blendMode && blendMode !== "normal") {
+              try { useProjectStore.getState().updateClipBlendMode(newClip.id, blendMode as any); } catch { /* non-fatal */ }
+            }
             reply({ type: "voidspace:clip-added", requestId: msg.requestId, clip: newClip ?? null, ok: true, trackId: targetTrackId });
             break;
           }

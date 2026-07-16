@@ -1589,6 +1589,7 @@ export const drawFrameWithTransform = (
   transform: ClipTransform | undefined,
   canvasWidth: number,
   canvasHeight: number,
+  blendMode?: string,
 ): void => {
   const t: ClipTransform = {
     ...DEFAULT_TRANSFORM,
@@ -1609,6 +1610,12 @@ export const drawFrameWithTransform = (
 
   ctx.save();
   ctx.globalAlpha = t.opacity ?? 1;
+  // Per-clip blend (AE blending modes) — CSS/canvas blend names line up 1:1
+  // with our BlendMode union, so it maps straight to globalCompositeOperation.
+  // The layer blends against whatever the compositor already drew beneath it.
+  if (blendMode && blendMode !== "normal") {
+    ctx.globalCompositeOperation = blendMode as GlobalCompositeOperation;
+  }
 
   const centerX = canvasWidth / 2;
   const centerY = canvasHeight / 2;
