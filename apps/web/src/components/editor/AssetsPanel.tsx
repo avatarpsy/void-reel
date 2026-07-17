@@ -36,8 +36,6 @@ import { useUIStore } from "../../stores/ui-store";
 import type { MediaItem } from "@openreel/core";
 import { AspectRatioMatchDialog } from "./dialogs/AspectRatioMatchDialog";
 import { LibraryPanel } from "./LibraryPanel";
-// Voidspace fork: keep Voidspace media panel + add upstream's AI generation tab + Kie.ai dialog.
-import { VoidspaceMediaPanel } from "./VoidspaceMediaPanel";
 import { MediaPreviewOverlay, type PreviewKind } from "./MediaPreviewOverlay";
 import { AIGenTab } from "./AIGenTab";
 import { AIMusicSection } from "./AIMusicSection";
@@ -673,9 +671,9 @@ const LoadingIndicator: React.FC<{ message: string }> = ({ message }) => (
 export const AssetsPanel: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTabRaw] = useState<
-    "media" | "library" | "text" | "graphics" | "ai-music" | "voidspace" | "ai-gen"
+    "media" | "library" | "text" | "graphics" | "ai-music" | "ai-gen"
   >(useUIStore.getState().appMode === "music" ? "ai-music" : "media");
-  const setActiveTab = useCallback((tab: "media" | "library" | "text" | "graphics" | "ai-music" | "voidspace" | "ai-gen") => {
+  const setActiveTab = useCallback((tab: "media" | "library" | "text" | "graphics" | "ai-music" | "ai-gen") => {
     setActiveTabRaw(tab);
   }, []);
 
@@ -1376,24 +1374,9 @@ export const AssetsPanel: React.FC = () => {
             <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-t-full shadow-[0_-2px_8px_rgba(99,102,241,0.5)]" />
           )}
         </button>
-        <button
-          onClick={() => setActiveTab("voidspace")}
-          className={`pb-3 transition-all relative ${
-            activeTab === "voidspace"
-              ? "text-text-primary"
-              : "hover:text-text-secondary"
-          }`}
-        >
-          Cloud
-          {activeTab === "voidspace" && (
-            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-t-full shadow-[0_-2px_8px_rgba(99,102,241,0.5)]" />
-          )}
-        </button>
-        {/* Cloud tab restored: the CURRENT project's media flows in via the
-            scene_list subscription, but this panel is the only browser for
-            the user's OTHER projects' cloud media (automation-generated scene
-            frames/videos/narrations + published posts) — every generation
-            must be reachable from the assets panel. The AI tab stays hidden
+        {/* Cloud tab removed: /api/studio/library now unions the automation
+            scene tree (users/{uid}/scene_lists/**) into the Library tab, so
+            the separate Cloud browser was redundant. The AI tab stays hidden
             (the chat sidebar is the authoritative AI surface). */}
       </div>
 
@@ -2018,9 +2001,6 @@ export const AssetsPanel: React.FC = () => {
 
       {/* Library tab — cross-project, local-first reuse of past generations */}
       {activeTab === "library" && <LibraryPanel />}
-
-      {/* Voidspace Cloud Media Tab */}
-      {activeTab === "voidspace" && <VoidspaceMediaPanel />}
 
       {/* AI generation tab — upstream's panel (Kie.ai brief, aspect, live timeline placeholders) */}
       {activeTab === "ai-gen" && <AIGenTab />}

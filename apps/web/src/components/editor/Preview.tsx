@@ -910,6 +910,12 @@ export const Preview: React.FC = () => {
   // dropping the whole layer for a frame — a one-frame layer dropout reads
   // as a flicker, the worst kind of glitch on multi-track timelines.
   const lastClipFrameRef = useRef<Map<string, ImageBitmap>>(new Map());
+  // PLAYBACK render scale (paused/scrub renders stay full-res). Consumed by
+  // initClipResources for decode dims and by the multi-track compositor for
+  // its offscreen dims. Sourced from the Preview Quality gauge at play start
+  // ("auto" = 0.5) — the gauge existed but was never wired to anything.
+  const playbackScaleRef = useRef<number>(1);
+  const lastPlaybackScaleRef = useRef<number>(1);
   // Watchdog that recovers the multi-track loop if a frame's decode
   // (MediaBunny getCanvas / createImageBitmap) HANGS — otherwise
   // `isProcessingFrame` stays true forever and playback freezes (the
@@ -1254,10 +1260,16 @@ export const Preview: React.FC = () => {
 
     const allTracks = [...audioTracks, ...videoTracks];
 
+    // Decode in PARALLEL — this runs at play start and used to be a serial
+    // await-per-clip loop, so pressing Play on a long timeline stalled for
+    // the sum of every clip's fetch+decode. Dedupe by cache key so the same
+    // media on multiple clips decodes once.
+    const jobs: Promise<void>[] = [];
+    const inFlight = new Set<string>();
     for (const track of allTracks) {
       for (const clip of track.clips) {
         const cacheKey = getAudioBufferCacheKey(clip.mediaId, clip.audioTrackIndex);
-        if (audioBufferCacheRef.current.has(cacheKey)) {
+        if (audioBufferCacheRef.current.has(cacheKey) || inFlight.has(cacheKey)) {
           continue;
         }
 
@@ -1267,22 +1279,26 @@ export const Preview: React.FC = () => {
         }
         if (mediaItem.type === "image") continue; // images carry no audio
 
-        const mediaBlob = await resolveMediaBlob(mediaItem);
-        if (!mediaBlob) continue;
-
-        try {
-          const audioBuffer = await loadAudioBuffer(
-            audioContext,
-            mediaBlob,
-            clip.audioTrackIndex ?? 0,
-          );
-          if (audioBuffer) {
-            audioBufferCacheRef.current.set(cacheKey, audioBuffer);
+        inFlight.add(cacheKey);
+        jobs.push((async () => {
+          const mediaBlob = await resolveMediaBlob(mediaItem);
+          if (!mediaBlob) return;
+          try {
+            const audioBuffer = await loadAudioBuffer(
+              audioContext,
+              mediaBlob,
+              clip.audioTrackIndex ?? 0,
+            );
+            if (audioBuffer) {
+              audioBufferCacheRef.current.set(cacheKey, audioBuffer);
+            }
+          } catch {
+            /* undecodable clip — scheduler skips it */
           }
-        } catch {
-        }
+        })());
       }
     }
+    await Promise.all(jobs);
   }, [getMediaItem, resolveMediaBlob]);
 
   const getAudioClipsForScheduler = useCallback(
@@ -3057,8 +3073,13 @@ export const Preview: React.FC = () => {
           return null;
         }
 
-        const sinkWidth = settings.width || 1920;
-        const sinkHeight = settings.height || 1080;
+        // Decode at the PLAYBACK scale, not full project res — playback is
+        // upscaled from a smaller composite anyway (paused renders stay
+        // full-res via a separate path), and smaller decode = faster seeks,
+        // cheaper createImageBitmap, snappier boundaries.
+        const s = playbackScaleRef.current || 1;
+        const sinkWidth = Math.max(2, Math.round((settings.width || 1920) * s));
+        const sinkHeight = Math.max(2, Math.round((settings.height || 1080) * s));
         const sink = new CanvasSink(videoTrack, {
           width: sinkWidth,
           height: sinkHeight,
@@ -3213,19 +3234,64 @@ export const Preview: React.FC = () => {
         return;
       }
 
+      // ── Playback render scale ─────────────────────────────────────────
+      // Composite at a REDUCED resolution during playback and upscale the
+      // blit — the paused/scrub renderer stays full-res so stills are crisp.
+      // This finally consumes the Preview Quality gauge ("auto" = 0.5);
+      // it also drives decode dims in initClipResources.
+      const previewScale = Math.max(
+        0.125,
+        Math.min(1, useTimelineStore.getState().getPreviewScale() || 0.5),
+      );
+      playbackScaleRef.current = previewScale;
+      if (lastPlaybackScaleRef.current !== previewScale) {
+        // Cached frames from a previous playback are at a different
+        // resolution — mixing them with fresh frames would shimmer.
+        try { ramCacheRef.current.invalidate(); } catch { /* cache optional */ }
+        lastPlaybackScaleRef.current = previewScale;
+      }
+      const offW = Math.max(2, Math.round(canvas.width * previewScale));
+      const offH = Math.max(2, Math.round(canvas.height * previewScale));
       if (
         !offscreenCanvasRef.current ||
-        offscreenCanvasRef.current.width !== canvas.width ||
-        offscreenCanvasRef.current.height !== canvas.height
+        offscreenCanvasRef.current.width !== offW ||
+        offscreenCanvasRef.current.height !== offH
       ) {
-        offscreenCanvasRef.current = new OffscreenCanvas(
-          canvas.width,
-          canvas.height,
-        );
+        offscreenCanvasRef.current = new OffscreenCanvas(offW, offH);
         offscreenCtxRef.current = offscreenCanvasRef.current.getContext(
           "2d",
         ) as OffscreenCanvasRenderingContext2D;
       }
+      // Bind LOCALS for the whole playback run: the ResizeObserver can swap
+      // offscreenCanvasRef mid-play (panel resize), which would silently
+      // split "canvas we draw into" from "canvas we blit from".
+      const offscreen = offscreenCanvasRef.current;
+
+      // ── Non-blocking decoder init (the clip-boundary glitch fix) ──────
+      // Awaiting initClipResources INSIDE the frame loop stalled a visible
+      // frame at every clip boundary (demux open + decoder configure on the
+      // critical path — the "video glitches at audio boundaries" report:
+      // scenes start a video clip and its audio cue together). Init now runs
+      // in the background, and a lookahead prewarms decoders BEFORE the
+      // playhead reaches them, so boundaries cost nothing.
+      const initInFlight = new Map<string, Promise<void>>();
+      const kickInitClip = (
+        clip: Parameters<typeof initClipResources>[0],
+        trackIndex: number,
+      ) => {
+        if (playbackResourcesRef.current.has(clip.id) || initInFlight.has(clip.id)) return;
+        if (getMediaItem(clip.mediaId)?.type !== "video") return; // images use the bitmap cache
+        const p = initClipResources(clip, trackIndex)
+          .then((res) => {
+            if (!res) return;
+            if (isActive) playbackResourcesRef.current.set(clip.id, res);
+            else res.input[Symbol.dispose]?.();
+          })
+          .catch(() => { /* clip skips frames until retried */ })
+          .finally(() => { initInFlight.delete(clip.id); });
+        initInFlight.set(clip.id, p);
+      };
+      const PREWARM_SEC = 2;
 
       const ctx = offscreenCtxRef.current as unknown as CanvasRenderingContext2D;
       if (!ctx) {
@@ -3396,18 +3462,36 @@ export const Preview: React.FC = () => {
             }
           }
 
+          // Fire — never await — init for clips that just became active.
           for (const { clip, trackIndex } of activeClips) {
-            if (!playbackResourcesRef.current.has(clip.id)) {
-              const resources = await initClipResources(clip, trackIndex);
-              if (resources) {
-                playbackResourcesRef.current.set(clip.id, resources);
+            kickInitClip(clip, trackIndex);
+          }
+
+          // Prewarm decoders for clips STARTING within the lookahead window
+          // so they're ready before the playhead arrives.
+          const upcomingClipIds = new Set<string>();
+          {
+            const allTracks = timelineTracksRef.current;
+            for (let ti = 0; ti < allTracks.length; ti++) {
+              const t = allTracks[ti];
+              if ((t.type !== "video" && t.type !== "image") || t.hidden) continue;
+              for (const c of t.clips) {
+                if (
+                  c.startTime > currentPlayhead &&
+                  c.startTime <= currentPlayhead + PREWARM_SEC
+                ) {
+                  upcomingClipIds.add(c.id);
+                  kickInitClip(c, ti);
+                }
               }
             }
           }
 
           const activeClipIds = new Set(activeClips.map((c) => c.clip.id));
           for (const [clipId, resources] of playbackResourcesRef.current) {
-            if (!activeClipIds.has(clipId)) {
+            // Keep prewarmed upcoming clips — disposing them here would undo
+            // the lookahead and re-pay the init at the boundary.
+            if (!activeClipIds.has(clipId) && !upcomingClipIds.has(clipId)) {
               resources.input[Symbol.dispose]?.();
               playbackResourcesRef.current.delete(clipId);
             }
@@ -3610,6 +3694,10 @@ export const Preview: React.FC = () => {
             currentTextClips.length > 0 ||
             currentShapeClips.length > 0
           ) {
+            // Composite in PROJECT coordinates into the scaled offscreen —
+            // every renderer keeps receiving canvas.width/height while the
+            // backing store is previewScale× smaller.
+            ctx.setTransform(previewScale, 0, 0, previewScale, 0, 0);
             ctx.fillStyle = "#000000";
             ctx.fillRect(0, 0, canvas.width, canvas.height);
 
@@ -3827,15 +3915,16 @@ export const Preview: React.FC = () => {
               }
             }
 
-            mainCtx.drawImage(offscreenCanvasRef.current!, 0, 0);
+            // Upscale-blit the scaled composite onto the full-res main canvas.
+            mainCtx.drawImage(offscreen, 0, 0, canvas.width, canvas.height);
 
             try {
               lastGoodFrameRef.current?.close();
-              const _bmp = await createImageBitmap(offscreenCanvasRef.current!);
+              const _bmp = await createImageBitmap(offscreen);
               lastGoodFrameRef.current = _bmp;
-              // ── RAM cache: store downscaled frame ──
+              // ── RAM cache: store the composited frame (playback-scale) ──
               const _smfn = Math.round(currentPlayhead * 30);
-              downscaleAndCache(offscreenCanvasRef.current!, _smfn);
+              downscaleAndCache(offscreen, _smfn);
               if (_smfn % 10 === 0) {
                 const range = ramCacheRef.current.getCachedRange();
                 setRamCacheState(range, Math.ceil(actualEndTime * 30));
@@ -3843,6 +3932,7 @@ export const Preview: React.FC = () => {
               }
             } catch {}
           } else if (lastGoodFrameRef.current) {
+            ctx.setTransform(previewScale, 0, 0, previewScale, 0, 0);
             ctx.drawImage(
               lastGoodFrameRef.current,
               0,
@@ -3851,7 +3941,7 @@ export const Preview: React.FC = () => {
               canvas.height,
             );
 
-            mainCtx.drawImage(offscreenCanvasRef.current!, 0, 0);
+            mainCtx.drawImage(offscreen, 0, 0, canvas.width, canvas.height);
           }
 
           frameCount++;
