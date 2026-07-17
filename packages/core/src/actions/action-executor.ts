@@ -542,6 +542,12 @@ export class ActionExecutor {
           startTime: number;
           duration?: number;
           audioTrackIndex?: number;
+          // Optional initial state so a clip can be placed WITH its transform,
+          // keyframes and blend mode in a single (undoable) action — one undo
+          // step instead of an add + separate transform/keyframe edits.
+          transform?: Partial<Clip["transform"]>;
+          keyframes?: Clip["keyframes"];
+          blendMode?: Clip["blendMode"];
         };
         const track = timeline.tracks.find(
           (t: MutableTrack) => t.id === params.trackId,
@@ -557,6 +563,23 @@ export class ActionExecutor {
             (mediaItem?.metadata.duration && mediaItem.metadata.duration > 0
               ? mediaItem.metadata.duration
               : 5);
+          const baseTransform = {
+            position: { x: 0, y: 0 },
+            scale: { x: 1, y: 1 },
+            rotation: 0,
+            anchor: { x: 0.5, y: 0.5 },
+            opacity: 1,
+          };
+          const t = params.transform;
+          const transform = t
+            ? {
+                ...baseTransform,
+                ...t,
+                position: { ...baseTransform.position, ...(t.position ?? {}) },
+                scale: { ...baseTransform.scale, ...(t.scale ?? {}) },
+                anchor: { ...baseTransform.anchor, ...(t.anchor ?? {}) },
+              }
+            : baseTransform;
           const newClip = {
             id: `clip-${Date.now()}`,
             mediaId: params.mediaId,
@@ -567,15 +590,10 @@ export class ActionExecutor {
             outPoint: clipDuration,
             effects: [],
             audioEffects: [],
-            transform: {
-              position: { x: 0, y: 0 },
-              scale: { x: 1, y: 1 },
-              rotation: 0,
-              anchor: { x: 0.5, y: 0.5 },
-              opacity: 1,
-            },
+            transform,
             volume: 1,
-            keyframes: [],
+            keyframes: params.keyframes ? [...params.keyframes] : [],
+            ...(params.blendMode ? { blendMode: params.blendMode } : {}),
             ...(params.audioTrackIndex !== undefined
               ? { audioTrackIndex: params.audioTrackIndex }
               : {}),

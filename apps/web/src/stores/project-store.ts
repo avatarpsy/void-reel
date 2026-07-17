@@ -142,6 +142,11 @@ export interface ProjectState {
     mediaId: string,
     startTime: number,
     duration?: number,
+    opts?: {
+      transform?: Partial<Transform>;
+      keyframes?: Keyframe[];
+      blendMode?: import("@openreel/core").BlendMode;
+    },
   ) => Promise<ActionResult>;
   addClipToNewTrack: (
     mediaId: string,
@@ -1269,7 +1274,17 @@ export const useProjectStore = create<ProjectState>()(
       },
 
       // Clip actions
-      addClip: async (trackId: string, mediaId: string, startTime: number, duration?: number) => {
+      addClip: async (
+        trackId: string,
+        mediaId: string,
+        startTime: number,
+        duration?: number,
+        opts?: {
+          transform?: Partial<Transform>;
+          keyframes?: Keyframe[];
+          blendMode?: import("@openreel/core").BlendMode;
+        },
+      ) => {
         const { project, actionExecutor } = get();
 
         // IMPORTANT: Deep clone the project BEFORE mutation
@@ -1288,6 +1303,11 @@ export const useProjectStore = create<ProjectState>()(
             // clip/add honours an explicit duration (images/graphics
             // default to 5s otherwise) — used for lyric-timed stills.
             ...(typeof duration === "number" && duration > 0 ? { duration } : {}),
+            // Optional initial transform / keyframes / blend so the clip is
+            // placed WITH its motion in ONE undoable action.
+            ...(opts?.transform ? { transform: opts.transform } : {}),
+            ...(opts?.keyframes ? { keyframes: opts.keyframes } : {}),
+            ...(opts?.blendMode ? { blendMode: opts.blendMode } : {}),
           },
         };
 

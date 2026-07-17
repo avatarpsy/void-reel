@@ -1950,6 +1950,30 @@ function App() {
             reply({ type: "voidspace:clip-added", requestId: msg.requestId, clip: newClip ?? null, ok: true, trackId: targetTrackId });
             break;
           }
+          case "voidspace:add-slide": {
+            // Thin convenience alias for NORMAL image-clip placement — a
+            // "slideshow" is just image clips. Places one image on a reused (or
+            // new-on-overlap) image track, atomically, with an optional gentle
+            // Ken-Burns zoom + cover fit. For crossfades, overlap clips and use
+            // the normal transition tools.
+            const { mediaId, url, name, startTime, durationSec, zoom, fadeInSec, fitMode } = msg as any;
+            if (!mediaId && !url) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: "add-slide needs a mediaId or url" });
+              break;
+            }
+            try {
+              const { addSlide } = await import("./services/image-slide");
+              const res = await addSlide({ mediaId, url, name, startTime, durationSec, zoom, fadeInSec, fitMode });
+              if (!res.ok) {
+                reply({ type: "voidspace:error", requestId: msg.requestId, error: res.error || "add-slide failed" });
+                break;
+              }
+              reply({ type: "voidspace:slide-added", requestId: msg.requestId, ...res });
+            } catch (err) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: String((err as any)?.message ?? err) });
+            }
+            break;
+          }
           case "voidspace:add-sfx-clip": {
             // Agent-side SFX placement: fetch the URL, register it as a
             // MediaItem if not already present, then dispatch the

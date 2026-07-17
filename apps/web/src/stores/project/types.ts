@@ -84,6 +84,12 @@ export interface ProjectState {
     trackId: string,
     mediaId: string,
     startTime: number,
+    duration?: number,
+    opts?: {
+      transform?: Partial<Clip["transform"]>;
+      keyframes?: Clip["keyframes"];
+      blendMode?: Clip["blendMode"];
+    },
   ) => Promise<ActionResult>;
   removeClip: (clipId: string) => Promise<ActionResult>;
   moveClip: (
