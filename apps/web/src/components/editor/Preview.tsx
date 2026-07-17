@@ -76,6 +76,43 @@ const getAdaptivePoolSize = (width: number, height: number): number => {
   return 5;
 };
 
+/**
+ * Decode an image blob to an ImageBitmap sized for the PREVIEW canvas.
+ * Imported / user media is often much larger than the comp (2000x2000+
+ * stills), and compositing a full-res bitmap every frame is both slow and
+ * memory-heavy. We downscale to fit the canvas (never upscale) — the
+ * compositor cover-fits anyway, so nothing visible is lost, and this is
+ * the same "display a compressed copy" behaviour generated content gets.
+ * `createImageBitmap` decodes + resizes in one GPU-friendly step.
+ */
+const decodeImageFittedToCanvas = async (
+  blob: Blob,
+  canvasW: number,
+  canvasH: number,
+): Promise<ImageBitmap> => {
+  // Cap at 1.5x the canvas so a slight upscale on export/zoom still looks
+  // crisp, while huge originals are brought down.
+  const maxW = Math.max(16, Math.round((canvasW || 1920) * 1.5));
+  const maxH = Math.max(16, Math.round((canvasH || 1080) * 1.5));
+  const full = await createImageBitmap(blob);
+  if (full.width <= maxW && full.height <= maxH) return full;
+  const scale = Math.min(maxW / full.width, maxH / full.height);
+  const w = Math.max(1, Math.round(full.width * scale));
+  const h = Math.max(1, Math.round(full.height * scale));
+  try {
+    const small = await createImageBitmap(full, {
+      resizeWidth: w,
+      resizeHeight: h,
+      resizeQuality: "high",
+    });
+    full.close();
+    return small;
+  } catch {
+    // Resize unsupported — return the full bitmap rather than nothing.
+    return full;
+  }
+};
+
 
 interface GPULayer {
   bitmap: ImageBitmap;
@@ -866,6 +903,14 @@ export const Preview: React.FC = () => {
   >(new Map());
 
   const imageBitmapCacheRef = useRef<Map<string, ImageBitmap>>(new Map());
+  // Clip ids whose image bitmap is currently being resolved on-demand, so
+  // the compositor doesn't spawn duplicate decode jobs for the same frame.
+  const imageDecodeInFlightRef = useRef<Set<string>>(new Set());
+  // Watchdog that recovers the multi-track loop if a frame's decode
+  // (MediaBunny getCanvas / createImageBitmap) HANGS — otherwise
+  // `isProcessingFrame` stays true forever and playback freezes (the
+  // "preview wedges / only pause→play unsticks it" bug).
+  const frameWatchdogRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     rateRef.current = playbackRate;
@@ -878,6 +923,10 @@ export const Preview: React.FC = () => {
   }, [isPlaying, playheadPosition]);
 
   const cleanupPlaybackResources = useCallback(() => {
+    if (frameWatchdogRef.current) {
+      clearInterval(frameWatchdogRef.current);
+      frameWatchdogRef.current = null;
+    }
     const resources = playbackResourcesRef.current;
     for (const [, resource] of resources) {
       resource.input[Symbol.dispose]?.();
@@ -1313,7 +1362,7 @@ export const Preview: React.FC = () => {
 
       if (mediaItem.type === "image") {
         try {
-          return await createImageBitmap(mediaBlob);
+          return await decodeImageFittedToCanvas(mediaBlob, canvasWidth, canvasHeight);
         } catch {
           return null;
         }
@@ -3032,24 +3081,40 @@ export const Preview: React.FC = () => {
         (t) => (t.type === "image" || t.type === "video") && !t.hidden,
       );
 
+      // Resolve + decode in PARALLEL so a slideshow of many stills (imported
+      // AE templates place 16+ placeholder/photo frames) is ready fast.
+      const jobs: Promise<void>[] = [];
       for (const track of imageTracks) {
         for (const clip of track.clips) {
           if (imageBitmapCacheRef.current.has(clip.id)) continue;
-
           const mediaItem = getMediaItem(clip.mediaId);
-          if (mediaItem?.type === "image" && mediaItem.blob) {
-            try {
-              const bitmap = await createImageBitmap(mediaItem.blob);
-              imageBitmapCacheRef.current.set(clip.id, bitmap);
-            } catch (error) {
-              console.warn(
-                `[Preview] Failed to pre-cache image clip ${clip.id}:`,
-                error,
-              );
-            }
-          }
+          if (mediaItem?.type !== "image") continue;
+          jobs.push(
+            (async () => {
+              try {
+                // resolveMediaBlob FETCHES from originalUrl when the blob
+                // isn't resident — imported / local-asset media has a URL
+                // but often no in-memory blob, so the old blob-only check
+                // skipped them and they rendered BLACK.
+                const blob = await resolveMediaBlob(mediaItem);
+                if (!blob) return;
+                const bitmap = await decodeImageFittedToCanvas(
+                  blob,
+                  canvas.width,
+                  canvas.height,
+                );
+                imageBitmapCacheRef.current.set(clip.id, bitmap);
+              } catch (error) {
+                console.warn(
+                  `[Preview] Failed to pre-cache image clip ${clip.id}:`,
+                  error,
+                );
+              }
+            })(),
+          );
         }
       }
+      await Promise.all(jobs);
     };
 
     const startMultiTrackPlayback = async () => {
@@ -3172,6 +3237,27 @@ export const Preview: React.FC = () => {
       let lastFrameTimestamp = performance.now();
       let frameCount = 0;
       let isProcessingFrame = false;
+      // Frame generation + deadline power the hung-frame watchdog. Each
+      // frame takes a generation; the watchdog bumps it to invalidate a
+      // stuck frame so the resumed decode can't double-schedule the loop.
+      let frameGen = 0;
+      let frameStartedAt = 0;
+      const FRAME_HANG_MS = 3000;
+
+      if (frameWatchdogRef.current) clearInterval(frameWatchdogRef.current);
+      frameWatchdogRef.current = setInterval(() => {
+        if (!isActive) return;
+        if (isProcessingFrame && performance.now() - frameStartedAt > FRAME_HANG_MS) {
+          // A decode hung. Invalidate the stuck frame + restart the loop
+          // so playback keeps moving instead of freezing on one frame.
+          console.warn("[Preview] frame watchdog: decode hung, skipping frame");
+          frameGen++;
+          isProcessingFrame = false;
+          if (masterClock.isPlaying) {
+            animationRef.current = requestAnimationFrame(processMultiTrackFrame);
+          }
+        }
+      }, 750);
 
       const processMultiTrackFrame = async () => {
         if (!isActive) {
@@ -3184,6 +3270,8 @@ export const Preview: React.FC = () => {
           return;
         }
         isProcessingFrame = true;
+        const myGen = ++frameGen;
+        frameStartedAt = performance.now();
 
         const currentPlayhead = masterClock.currentTime;
 
@@ -3203,6 +3291,7 @@ export const Preview: React.FC = () => {
             lastPlayheadUpdateRef.current = _mph;
             setPlayheadPosition(currentPlayhead);
           }
+          if (myGen !== frameGen) return; // superseded by watchdog — abandon
           isProcessingFrame = false;
           if (isActive) animationRef.current = requestAnimationFrame(processMultiTrackFrame);
           return;
@@ -3394,6 +3483,22 @@ export const Preview: React.FC = () => {
                   }
                 } catch { /* effects pass failed — show the raw frame */ }
                 imageClipFrames.push({ clip, transform, frame: imgFrame });
+              } else if (!imageDecodeInFlightRef.current.has(clip.id)) {
+                // Not cached yet (pre-cache raced / fetch failed / clip added
+                // mid-play). Resolve in the background so it fills in on a
+                // later frame instead of staying a black hole.
+                imageDecodeInFlightRef.current.add(clip.id);
+                const mi = getMediaItem(clip.mediaId);
+                void (async () => {
+                  try {
+                    const blob = await resolveMediaBlob(mi);
+                    if (blob) {
+                      const bmp = await decodeImageFittedToCanvas(blob, canvas.width, canvas.height);
+                      imageBitmapCacheRef.current.set(clip.id, bmp);
+                    }
+                  } catch { /* try again next tick */ }
+                  finally { imageDecodeInFlightRef.current.delete(clip.id); }
+                })();
               }
               continue;
             }
@@ -3732,6 +3837,10 @@ export const Preview: React.FC = () => {
           const delay = Math.max(0, targetTime - elapsed);
           lastFrameTimestamp = now;
 
+          // Superseded by the watchdog while we were awaiting a slow decode:
+          // the new frame owns the loop now, so don't reset the guard or
+          // reschedule (that would run two loops at once).
+          if (myGen !== frameGen) return;
           isProcessingFrame = false;
 
           if (isActive) {
@@ -3750,6 +3859,7 @@ export const Preview: React.FC = () => {
             }
           }
         } catch (error) {
+          if (myGen !== frameGen) return;
           isProcessingFrame = false;
           console.error("[Preview] Multi-track frame error:", error);
           cleanupPlaybackResources();
@@ -3857,6 +3967,10 @@ export const Preview: React.FC = () => {
     return () => {
       isActive = false;
       nativePlaybackActiveRef.current = false;
+      if (frameWatchdogRef.current) {
+        clearInterval(frameWatchdogRef.current);
+        frameWatchdogRef.current = null;
+      }
       const masterClock = getMasterClock();
       if (masterClock.isPlaying || masterClock.isPaused) {
         startPositionRef.current = masterClock.currentTime;
