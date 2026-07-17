@@ -189,8 +189,8 @@ export function WelcomeScreen() {
       {/* Voidspace cosmic field — stars + crescent moons, matching the studio. */}
       <CosmicField />
 
-      {/* Back to the Voidspace Studio projects hub (where Create Image lives). */}
-      <a href="/studio/projects"
+      {/* Back to the Voidspace Studio projects hub, landing on the Images tab. */}
+      <a href="/studio/projects?tab=images"
         className="absolute top-5 left-6 z-20 inline-flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary transition-colors">
         <ArrowRight className="rotate-180" size={14} /> My Projects
       </a>

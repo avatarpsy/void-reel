@@ -671,6 +671,13 @@ function App() {
       // from IndexedDB. The Firestore subscription below uses it to
       // pick its merge strategy (additive vs wholesale-replace).
       let recoveredFromLocal = false;
+      // When the live subscription is installed, the loading spinner must
+      // stay up until the FIRST project tick actually lands (that tick can
+      // take seconds while scene media resolves). The `finally` below then
+      // skips its early clear — previously the spinner vanished the moment
+      // the subscription was merely INSTALLED, leaving a blank timeline
+      // with no loading indication for the whole resolve.
+      let spinnerClearedByFirstTick = false;
       try {
         const userId = await waitForAuth(10000);
         if (!userId) {
@@ -1127,6 +1134,14 @@ function App() {
         );
         let firstLoad = !recoveredFromLocal;
         let tickCount = 0;
+        // A local recovery already painted tracks — the spinner can drop at
+        // install time (the finally). Otherwise the first tick clears it.
+        spinnerClearedByFirstTick = !recoveredFromLocal;
+        if (spinnerClearedByFirstTick) {
+          // Safety net: never wedge the spinner if the first tick never
+          // fires (Firestore outage / permission error only in console).
+          setTimeout(() => setVoidspaceLoading(false), 45000);
+        }
         const unsubscribe = subscribeSceneListAsProject(
           userId,
           sceneListId,
@@ -1165,6 +1180,9 @@ function App() {
                 }
               }
               navigate("editor");
+              // The project is actually on screen now — drop the spinner
+              // (deferred from the finally for the subscription path).
+              setVoidspaceLoading(false);
               console.log(
                 `[Voidspace] Loaded project: ${project.name} (${project.mediaLibrary.items.length} media items)`,
               );
@@ -1248,8 +1266,11 @@ function App() {
         setVoidspaceError(
           err instanceof Error ? err.message : "Failed to load project",
         );
-      } finally {
         setVoidspaceLoading(false);
+      } finally {
+        // Subscription path: the first tick (or the 45s safety net) clears
+        // the spinner once tracks are actually visible — not install time.
+        if (!spinnerClearedByFirstTick) setVoidspaceLoading(false);
       }
     })();
   }, [forceSave, loadProject, navigate]);

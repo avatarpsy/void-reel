@@ -56,40 +56,46 @@
   }
 
   .dark {
-    /* Voidspace custom colors */
-    --color-background: 7 8 15;
-    --color-background-secondary: 15 15 35;
-    --color-background-tertiary: 24 24 52;
-    --color-background-elevated: 34 35 70;
+    /* Voidspace custom colors — matched EXACTLY to the AI chat window
+       (assets/studio/_layout.css .studio-gen): base #08111D deep navy;
+       surfaces = the chat's translucent whites composited over that base
+       (5% → #141D28, 8% → #1C242F, 12% → #262D38); border = white 10%
+       over navy; accent = the chat blue #4A9BD9 / #2F6FA3. Keep these in
+       lockstep with the chat palette — the editors sit next to the chat
+       pane and any drift is visible at the seam. */
+    --color-background: 8 17 29;
+    --color-background-secondary: 20 29 40;
+    --color-background-tertiary: 28 36 47;
+    --color-background-elevated: 38 45 56;
 
-    --color-text-primary: 240 242 255;
-    --color-text-secondary: 196 204 233;
-    --color-text-muted: 145 156 197;
+    --color-text-primary: 255 255 255;
+    --color-text-secondary: 181 184 187;
+    --color-text-muted: 112 117 124;
 
-    --color-border: 56 62 100;
-    --color-border-hover: 84 94 146;
-    --color-border-active: 120 133 192;
+    --color-border: 33 41 52;
+    --color-border-hover: 52 62 74;
+    --color-border-active: 74 92 110;
 
-    /* shadcn/ui CSS variables */
-    --background: 234 36% 4%;
-    --foreground: 229 100% 97%;
-    --card: 236 36% 10%;
-    --card-foreground: 229 100% 97%;
-    --popover: 236 36% 10%;
-    --popover-foreground: 229 100% 97%;
-    --primary: 239 84% 67%;
+    /* shadcn/ui CSS variables (same chat palette, HSL) */
+    --background: 214 57% 7%;
+    --foreground: 0 0% 100%;
+    --card: 213 33% 12%;
+    --card-foreground: 0 0% 100%;
+    --popover: 213 33% 12%;
+    --popover-foreground: 0 0% 100%;
+    --primary: 206 65% 57%;
     --primary-foreground: 0 0% 100%;
-    --secondary: 236 30% 16%;
-    --secondary-foreground: 229 100% 97%;
-    --muted: 236 30% 16%;
-    --muted-foreground: 230 30% 72%;
-    --accent: 189 85% 42%;
-    --accent-foreground: 229 100% 97%;
+    --secondary: 215 25% 15%;
+    --secondary-foreground: 0 0% 100%;
+    --muted: 215 25% 15%;
+    --muted-foreground: 210 3% 72%;
+    --accent: 207 55% 41%;
+    --accent-foreground: 0 0% 100%;
     --destructive: 0 62% 50%;
     --destructive-foreground: 0 0% 95%;
-    --border: 236 28% 28%;
-    --input: 236 28% 28%;
-    --ring: 239 84% 67%;
+    --border: 215 22% 17%;
+    --input: 215 22% 17%;
+    --ring: 206 65% 57%;
 
     color-scheme: dark;
     color: rgb(var(--color-text-primary));

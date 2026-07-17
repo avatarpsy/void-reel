@@ -27,9 +27,11 @@ export default {
         primary: {
           DEFAULT: "hsl(var(--primary))",
           foreground: "hsl(var(--primary-foreground))",
-          hover: "#16a34a",
-          active: "#15803d",
-          glow: "rgba(34, 197, 94, 0.5)",
+          // Chat-blue states (#4A9BD9 family) — were leftover green from an
+          // older theme, visibly clashing with the chat window's palette.
+          hover: "#3E8CC9",
+          active: "#2F6FA3",
+          glow: "rgba(74, 155, 217, 0.5)",
         },
         secondary: {
           DEFAULT: "hsl(var(--secondary))",
@@ -71,8 +73,8 @@ export default {
         mono: ['Geist Mono', 'monospace'],
       },
       boxShadow: {
-        'glow': '0 0 10px rgba(34, 197, 94, 0.3)',
-        'glow-lg': '0 0 20px rgba(34, 197, 94, 0.4)',
+        'glow': '0 0 10px rgba(74, 155, 217, 0.3)',
+        'glow-lg': '0 0 20px rgba(74, 155, 217, 0.4)',
         'panel': '0 4px 6px -1px rgba(0, 0, 0, 0.3), 0 2px 4px -1px rgba(0, 0, 0, 0.15)',
       },
       borderRadius: {

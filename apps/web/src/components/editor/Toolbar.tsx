@@ -1041,11 +1041,14 @@ export const Toolbar: React.FC = () => {
           <TooltipTrigger asChild>
             <button
               onClick={() => {
+                // Land on the matching projects tab: music editor → Music,
+                // video editor → Videos (?tab= is read by /studio/projects).
+                const backUrl = `/studio/projects?tab=${useUIStore.getState().appMode === "music" ? "music" : "videos"}`;
                 if (window.top && window.top !== window) {
-                  window.top.location.href = "/studio/projects";
+                  window.top.location.href = backUrl;
                   return;
                 }
-                window.location.href = "/studio/projects";
+                window.location.href = backUrl;
               }}
               className="flex items-center gap-3 hover:opacity-80 transition-opacity"
               title="Back to Studio Projects"
@@ -1065,11 +1068,12 @@ export const Toolbar: React.FC = () => {
         <div className="h-6 w-px bg-border hidden md:block" />
         <button
           onClick={() => {
+            const backUrl = `/studio/projects?tab=${useUIStore.getState().appMode === "music" ? "music" : "videos"}`;
             if (window.top && window.top !== window) {
-              window.top.location.href = "/studio/projects";
+              window.top.location.href = backUrl;
               return;
             }
-            window.location.href = "/studio/projects";
+            window.location.href = backUrl;
           }}
           /* Allow the button to size to its label and never overflow the
              toolbar gutter. The previous fixed height + no min-width let

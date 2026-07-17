@@ -1308,6 +1308,45 @@ export async function loadSceneListAsProject(
     }),
   );
 
+  // 3b) PARALLEL media prewarm. The build loop below resolves + downloads
+  // every asset SERIALLY (video, frame, narration, sfx per scene — each
+  // awaited in order), so a 10-scene automation project serialized ~30
+  // network fetches and the timeline couldn't render until the LAST one
+  // finished. Warming the module-level resolvedUrlCache/mediaBlobCache in
+  // parallel first makes the serial loop hit cache instantly — wall-clock
+  // becomes the slowest single download instead of the sum of all of them.
+  {
+    const rawUrls = new Set<string>();
+    const add = (u: unknown) => {
+      if (typeof u === "string" && u.trim()) rawUrls.add(u.trim());
+    };
+    add((slData as any).music_url);
+    for (const { scene, videos, images, narrations, sfxs } of sceneMedia) {
+      const s = scene as any;
+      add(s.first_frame_url); add(s.generated_first_frame_url);
+      add(s.preview_image_url); add(s.image_url);
+      add(s.narration_url); add(s.music_url); add(s.video_url);
+      for (const v of videos as any[]) { add(v.url); add(v.video_url); }
+      for (const im of images as any[]) { add(im.url); add(im.image_url); }
+      for (const n of narrations as any[]) { add(n.narration_url); add(n.url); }
+      for (const sx of sfxs as any[]) { add(sx.url); add(sx.sfx_url); add(sx.audio_url); }
+    }
+    if (rawUrls.size > 0) {
+      const t0 = performance.now();
+      await Promise.all(
+        [...rawUrls].map(async (raw) => {
+          try {
+            const resolved = await resolveMediaUrl(raw);
+            if (resolved) await fetchMediaBlob(resolved);
+          } catch { /* the build loop keeps its own per-asset error handling */ }
+        }),
+      );
+      console.log(
+        `[voidspace-loader] Prewarmed ${rawUrls.size} media URLs in ${Math.round(performance.now() - t0)}ms`,
+      );
+    }
+  }
+
   // 4) Build media library + timeline
   const mediaItems: MediaItem[] = [];
   const videoTrackClips: Clip[] = [];
