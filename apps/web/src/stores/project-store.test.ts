@@ -839,3 +839,49 @@ describe("ProjectStore - Subtitles (consolidated into text clips)", () => {
     expect(Array.isArray(presets)).toBe(true);
   });
 });
+
+describe("deletion tombstones (deleted tracks must not resurrect)", () => {
+  beforeEach(() => {
+    useProjectStore.getState().createNewProject();
+  });
+
+  it("removeTrack records a tombstone with the track's clip ids", async () => {
+    await useProjectStore.getState().addTrack("video");
+    const track = useProjectStore.getState().project.timeline.tracks[0];
+    expect(track).toBeDefined();
+
+    const result = await useProjectStore.getState().removeTrack(track.id);
+    expect(result.success).toBe(true);
+
+    const { project } = useProjectStore.getState();
+    expect(project.timeline.tracks.find((t) => t.id === track.id)).toBeUndefined();
+    const tomb = (project.deletedTracks ?? []).find((d) => d.id === track.id);
+    expect(tomb).toBeDefined();
+    expect(Array.isArray(tomb!.clipIds)).toBe(true);
+  });
+
+  it("undo (track/restore) clears the tombstone so the track survives future reloads", async () => {
+    await useProjectStore.getState().addTrack("video");
+    const track = useProjectStore.getState().project.timeline.tracks[0];
+
+    await useProjectStore.getState().removeTrack(track.id);
+    expect(
+      (useProjectStore.getState().project.deletedTracks ?? []).some((d) => d.id === track.id),
+    ).toBe(true);
+
+    await useProjectStore.getState().undo();
+
+    const { project } = useProjectStore.getState();
+    expect(project.timeline.tracks.some((t) => t.id === track.id)).toBe(true);
+    expect((project.deletedTracks ?? []).some((d) => d.id === track.id)).toBe(false);
+  });
+
+  it("tombstones survive JSON round-trip (the persistence path)", async () => {
+    await useProjectStore.getState().addTrack("video");
+    const track = useProjectStore.getState().project.timeline.tracks[0];
+    await useProjectStore.getState().removeTrack(track.id);
+
+    const roundTripped = JSON.parse(JSON.stringify(useProjectStore.getState().project));
+    expect((roundTripped.deletedTracks ?? []).some((d: any) => d.id === track.id)).toBe(true);
+  });
+});

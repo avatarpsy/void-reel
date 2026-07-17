@@ -1112,6 +1112,13 @@ export async function loadSceneListAsProject(
           if (typeof projectStateRaw.history === "string") {
             (slData as any).__pendingHistoryData = projectStateRaw.history;
           }
+          // Carry the blob's deletion tombstones into the rebuild — the
+          // rebuild re-derives every track from scene_lists and would
+          // otherwise resurrect tracks the user deleted (the deletion only
+          // exists as an absence in this blob).
+          if (Array.isArray((parsed as any)?.deletedTracks)) {
+            (slData as any).__pendingDeletedTracks = (parsed as any).deletedTracks;
+          }
           // Fall through to per-scene rebuild.
         } else if (staleBlobMissing > 0) {
           console.warn(
@@ -1119,6 +1126,9 @@ export async function loadSceneListAsProject(
           );
           if (typeof projectStateRaw.history === "string") {
             (slData as any).__pendingHistoryData = projectStateRaw.history;
+          }
+          if (Array.isArray((parsed as any)?.deletedTracks)) {
+            (slData as any).__pendingDeletedTracks = (parsed as any).deletedTracks;
           }
           // Fall through to per-scene rebuild.
         } else {
@@ -2217,6 +2227,25 @@ export async function loadSceneListAsProject(
 
   const now = Date.now();
 
+  // Honor the blob's deletion tombstones. This rebuild re-derives every
+  // track from scene_lists — which would RESURRECT user-deleted tracks: the
+  // first load after a reload is a WHOLESALE loadProject (the additive-merge
+  // tombstone guard in App.tsx only sees later live ticks). Filter out the
+  // clip ids that existed at deletion time and drop tombstoned tracks that
+  // end up empty; clips generated AFTER the deletion still come through.
+  const pendingDeleted = (slData as any).__pendingDeletedTracks;
+  const deletedTracks: Array<{ id: string; clipIds: string[]; at: number }> =
+    Array.isArray(pendingDeleted) ? pendingDeleted : [];
+  if (deletedTracks.length > 0) {
+    const tombClipIds = new Set(
+      deletedTracks.flatMap((d) => (Array.isArray(d.clipIds) ? d.clipIds : [])),
+    );
+    const tombTrackIds = new Set(deletedTracks.map((d) => d.id));
+    (timeline as { tracks: Track[] }).tracks = timeline.tracks
+      .map((t) => ({ ...t, clips: t.clips.filter((c) => !tombClipIds.has(c.id)) }))
+      .filter((t) => !tombTrackIds.has(t.id) || t.clips.length > 0);
+  }
+
   const project: Project = {
     id: buildVoidspaceProjectId(userId, sceneListId, slData.avatar_id as string | undefined),
     name: slData.name || slData.avatar_name || "Voidspace Project",
@@ -2230,6 +2259,9 @@ export async function loadSceneListAsProject(
     mediaLibrary: { items: mediaItems },
     timeline,
     textClips: captionTextClips,
+    // Keep the tombstones on the rebuilt project so they persist through the
+    // next autosave (otherwise one rebuild would erase the deletion record).
+    ...(deletedTracks.length > 0 ? { deletedTracks } : {}),
   };
 
   // If the empty-blob safety net flagged a stale history we should

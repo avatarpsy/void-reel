@@ -257,6 +257,18 @@ function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
   const store = useProjectStore.getState();
   const current = store.project;
 
+  // Deletion tombstones (see Project.deletedTracks): an additive union can
+  // only ADD, so a user's track deletion — an absence in the saved project —
+  // would be resurrected by every scene-list re-derivation without these.
+  // Skip re-adding tombstoned tracks and the exact clip ids that existed at
+  // deletion time; clips generated AFTER the deletion still stream in.
+  const tombById = new Map(
+    (current.deletedTracks ?? []).map((d) => [d.id, d] as const),
+  );
+  const tombClipIds = new Set(
+    (current.deletedTracks ?? []).flatMap((d) => [...d.clipIds]),
+  );
+
   const currentMediaById = new Map(
     current.mediaLibrary.items.map((m) => [m.id, m] as const),
   );
@@ -339,7 +351,9 @@ function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
   }
   const updatedClips = new Map<string, import("@openreel/core").Clip>();
   for (const tr of fresh.timeline.tracks) {
-    const adds = tr.clips.filter((c) => !knownClipIds.has(c.id));
+    const adds = tr.clips.filter(
+      (c) => !knownClipIds.has(c.id) && !tombClipIds.has(c.id),
+    );
     if (adds.length > 0) trackPatches.set(tr.id, adds);
     for (const freshClip of tr.clips) {
       const existing = currentClipById.get(freshClip.id);
@@ -395,7 +409,16 @@ function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
   });
   const knownTrackIds = new Set(mergedTracks.map((t) => t.id));
   for (const tr of fresh.timeline.tracks) {
-    if (!knownTrackIds.has(tr.id)) mergedTracks.push(tr);
+    if (knownTrackIds.has(tr.id)) continue;
+    if (tombById.has(tr.id)) {
+      // The user deleted this track. Only re-materialize it if the rebuild
+      // carries clips that did NOT exist at deletion time (fresh
+      // generations) — and even then, without the deleted clips.
+      const survivors = tr.clips.filter((c) => !tombClipIds.has(c.id));
+      if (survivors.length > 0) mergedTracks.push({ ...tr, clips: survivors });
+      continue;
+    }
+    mergedTracks.push(tr);
   }
 
   const mergedMediaItems = current.mediaLibrary.items.map(

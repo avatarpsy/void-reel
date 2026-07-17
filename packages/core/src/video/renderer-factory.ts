@@ -83,8 +83,15 @@ export class RendererFactory {
   async createRenderer(config: RendererConfig): Promise<Renderer> {
     this.config = config;
 
+    // Honor an explicit canvas2d preference — callers opt out of WebGPU
+    // deliberately (e.g. the preview compositor: the current WebGPU impl
+    // reads every frame back to the CPU, which paces worse than plain
+    // canvas2d compositing). Previously this parameter was accepted but
+    // silently ignored, so the opt-out never happened.
+    const preferGPU = config.preferredRenderer !== "canvas2d";
+
     // Try WebGPU first
-    if (isWebGPUSupported()) {
+    if (preferGPU && isWebGPUSupported()) {
       try {
         const { WebGPURenderer } = await import("./webgpu-renderer-impl");
         const renderer = new WebGPURenderer(config);

@@ -22,6 +22,21 @@ export interface Project {
   readonly shapeClips?: ShapeClip[];
   readonly svgClips?: SVGClip[];
   readonly stickerClips?: StickerClip[];
+  /**
+   * Deletion tombstones. Voidspace re-derives timeline tracks from the
+   * scene_lists tree on load and additively merges them into the live
+   * project ("only add what's new"). A user's track DELETION is only an
+   * ABSENCE in the saved blob — which a purely-additive union cannot
+   * express — so without a tombstone the re-derivation resurrects deleted
+   * tracks on every reload. `track/remove` records one; `track/restore`
+   * (undo) clears it; the merge + scene rebuild skip tombstoned tracks and
+   * their clip ids. Rides the project JSON like every other field.
+   */
+  readonly deletedTracks?: ReadonlyArray<{
+    id: string;
+    clipIds: readonly string[];
+    at: number;
+  }>;
 }
 
 export interface MediaLibrary {

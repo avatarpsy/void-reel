@@ -463,6 +463,25 @@ export class ActionExecutor {
 
       case "track/remove": {
         const params = action.params as { trackId: string };
+        // Tombstone the deletion BEFORE removing: Voidspace's additive
+        // scene-list merge can only re-add, never remove, so an absence in
+        // the saved project does not survive a re-derivation of tracks from
+        // scene_lists. The tombstone (id + the clip ids that existed at
+        // deletion time) lets the merge + rebuild skip exactly what the user
+        // deleted while still letting genuinely-new clips stream in.
+        const removed = timeline.tracks.find(
+          (t: MutableTrack) => t.id === params.trackId,
+        );
+        if (removed) {
+          const prev = (project as { deletedTracks?: Project["deletedTracks"] }).deletedTracks ?? [];
+          const entry = {
+            id: removed.id,
+            clipIds: removed.clips.map((c) => c.id),
+            at: Date.now(),
+          };
+          (project as { deletedTracks?: Project["deletedTracks"] }).deletedTracks =
+            [...prev.filter((d) => d.id !== removed.id), entry].slice(-100);
+        }
         timeline.tracks = timeline.tracks.filter(
           (t: MutableTrack) => t.id !== params.trackId,
         );
@@ -476,6 +495,12 @@ export class ActionExecutor {
           params.track,
           ...timeline.tracks.slice(params.position),
         ];
+        // The track is back (undo of track/remove) — its tombstone must go,
+        // or the next full reload's scene rebuild would drop it again.
+        const proj = project as { deletedTracks?: Project["deletedTracks"] };
+        if (proj.deletedTracks?.some((d) => d.id === params.track.id)) {
+          proj.deletedTracks = proj.deletedTracks.filter((d) => d.id !== params.track.id);
+        }
         break;
       }
 

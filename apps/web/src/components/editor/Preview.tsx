@@ -28,7 +28,6 @@ import { getEffectsBridge } from "../../bridges/effects-bridge";
 import {
   RendererFactory,
   type Renderer,
-  isWebGPUSupported,
   getSpeedEngine,
   getMasterClock,
   getRealtimeAudioGraph,
@@ -388,24 +387,15 @@ export const Preview: React.FC = () => {
   const [prerenderProgress, setPrerenderProgress] = useState(0);
   const prerenderCancelRef = useRef(false);
 
-  // Reusable downscale canvas for the RAM cache. Frames are stored at
-  // 1/2 resolution so 4× more fit in the same memory budget.
-  const cacheDownscaleCanvasRef = useRef<OffscreenCanvas | null>(null);
-  const cacheDownscaleCtxRef = useRef<OffscreenCanvasRenderingContext2D | null>(null);
+  // RAM-cache a composited frame at FULL resolution. It used to store at 1/2
+  // res (4× more frames per byte budget), but cache HITS were then upscaled
+  // while MISSES rendered sharp — alternating soft/sharp frames read as a
+  // visible shimmer during playback (and paths B/C already cache full-res, so
+  // identical frame numbers held different resolutions). Full-res = fewer
+  // cached frames, consistent premium quality.
   const downscaleAndCache = useCallback((source: OffscreenCanvas | HTMLCanvasElement, frameNum: number) => {
     try {
-      const dw = Math.max(2, Math.floor(source.width / 2));
-      const dh = Math.max(2, Math.floor(source.height / 2));
-      let dst = cacheDownscaleCanvasRef.current;
-      if (!dst || dst.width !== dw || dst.height !== dh) {
-        dst = new OffscreenCanvas(dw, dh);
-        cacheDownscaleCanvasRef.current = dst;
-        cacheDownscaleCtxRef.current = dst.getContext('2d');
-      }
-      const dctx = cacheDownscaleCtxRef.current;
-      if (!dctx) return;
-      dctx.drawImage(source, 0, 0, dw, dh);
-      createImageBitmap(dst).then((bmp) => {
+      createImageBitmap(source).then((bmp) => {
         ramCacheRef.current.set(frameNum, bmp);
       }).catch(() => {});
     } catch {}
@@ -831,11 +821,19 @@ export const Preview: React.FC = () => {
         if (!canvas) return;
 
         const factory = RendererFactory.getInstance();
+        // canvas2d, deliberately: the current WebGPU impl renders offscreen
+        // then does a FULL GPU→CPU readback every frame (copyTextureToBuffer
+        // + mapAsync + row copy + createImageBitmap) just to drawImage the
+        // result onto a 2D canvas — strictly slower than compositing on
+        // canvas2d directly, it stalls frame pacing (visible stutter), and
+        // its branch also breaks image↔video z-order + lacks blend modes.
+        // Re-prefer "webgpu" only if the renderer presents directly to the
+        // visible canvas instead of reading back.
         const renderer = await factory.createRenderer({
           canvas,
           width: settings.width,
           height: settings.height,
-          preferredRenderer: isWebGPUSupported() ? "webgpu" : "canvas2d",
+          preferredRenderer: "canvas2d",
         });
 
         rendererRef.current = renderer;
@@ -906,6 +904,12 @@ export const Preview: React.FC = () => {
   // Clip ids whose image bitmap is currently being resolved on-demand, so
   // the compositor doesn't spawn duplicate decode jobs for the same frame.
   const imageDecodeInFlightRef = useRef<Set<string>>(new Set());
+  // Per-clip LAST decoded frame. When one track's decoder misses a frame
+  // (GOP seek latency, warmup right after init, transient null from the
+  // sink) the compositor reuses that clip's previous frame instead of
+  // dropping the whole layer for a frame — a one-frame layer dropout reads
+  // as a flicker, the worst kind of glitch on multi-track timelines.
+  const lastClipFrameRef = useRef<Map<string, ImageBitmap>>(new Map());
   // Watchdog that recovers the multi-track loop if a frame's decode
   // (MediaBunny getCanvas / createImageBitmap) HANGS — otherwise
   // `isProcessingFrame` stays true forever and playback freezes (the
@@ -937,6 +941,11 @@ export const Preview: React.FC = () => {
       bitmap.close();
     }
     imageBitmapCacheRef.current = new Map();
+
+    for (const [, bitmap] of lastClipFrameRef.current) {
+      try { bitmap.close(); } catch { /* already closed */ }
+    }
+    lastClipFrameRef.current = new Map();
   }, []);
 
   const cleanupAudioResources = useCallback(() => {
@@ -3516,6 +3525,13 @@ export const Preview: React.FC = () => {
                   );
                 const mediaTime = (clip.inPoint || 0) + adjustedLocalTime;
 
+                // A decode miss must not drop this clip's layer for a frame
+                // (one-frame flicker) — fall back to the clip's LAST frame.
+                const heldFrame = () => {
+                  const held = lastClipFrameRef.current.get(clip.id);
+                  return held ? { clip, transform, frame: held } : null;
+                };
+
                 try {
                   const frameResult = await (
                     resources.sink as {
@@ -3548,8 +3564,20 @@ export const Preview: React.FC = () => {
                         : frameBitmap;
                     } catch {}
 
+                    // Remember this clip's newest frame for miss fallback.
+                    // Only bitmaps: a raw sink canvas is pooled + reused, so
+                    // holding it would show future frames' pixels.
+                    if (processedFrame instanceof ImageBitmap) {
+                      const prev = lastClipFrameRef.current.get(clip.id);
+                      if (prev && prev !== processedFrame) {
+                        try { prev.close(); } catch { /* already closed */ }
+                      }
+                      lastClipFrameRef.current.set(clip.id, processedFrame);
+                    }
+
                     return { clip, transform, frame: processedFrame };
                   }
+                  return heldFrame();
                 } catch (error) {
                   const errorMessage =
                     error instanceof Error ? error.message : String(error);
@@ -3561,12 +3589,16 @@ export const Preview: React.FC = () => {
                     error,
                   );
                 }
-                return null;
+                return heldFrame();
               })(),
             );
           }
 
           const videoFrameResults = await Promise.all(videoClipPromises);
+          // The decode awaits above are where a frame can hang long enough for
+          // the watchdog to supersede it. Bail BEFORE compositing/painting so a
+          // stale frame never flashes over the one that replaced it.
+          if (myGen !== frameGen) return;
           const validVideoFrames = videoFrameResults.filter(
             (f): f is NonNullable<typeof f> => f !== null,
           );
