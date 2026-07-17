@@ -78,6 +78,11 @@ const TYPE_PILLS: { id: LibType; label: string; Icon: typeof Film }[] = [
 const PAGE_SIZE = 120;
 const THUMB_CACHE = "voidspace-library-thumbs-v1";
 
+// Stale-while-revalidate cache: switching to the Library tab (or between type
+// pills / searches) shows the last result INSTANTLY while a fresh fetch runs in
+// the background. Keyed by type+query; module-level so it survives unmount.
+const libClientCache = new Map<string, { items: LibItem[]; total: number; at: number }>();
+
 /** Parent origin when embedded in the website iframe; else same origin. */
 function apiBase(): string {
   if (typeof window !== "undefined") {
@@ -249,9 +254,17 @@ export const LibraryPanel: React.FC = () => {
     return () => clearTimeout(t);
   }, [query]);
 
-  const load = useCallback(async (offset = 0) => {
+  const load = useCallback(async (offset = 0, force = false) => {
     const seq = ++reqSeq.current;
-    if (offset === 0) { setLoading(true); setError(null); } else { setLoadingMore(true); }
+    const cacheKey = `${type}::${debounced}`;
+    if (offset === 0) {
+      setError(null);
+      // Show the last result for this filter INSTANTLY, then revalidate. Only
+      // block with the spinner when we have nothing cached to show.
+      const cached = libClientCache.get(cacheKey);
+      if (cached) { setItems(cached.items); setTotal(cached.total); setLoading(false); }
+      else { setLoading(true); }
+    } else { setLoadingMore(true); }
     try {
       const token = await useVoidspaceStore.getState().getIdToken();
       if (token) setMediaToken(token);
@@ -261,6 +274,7 @@ export const LibraryPanel: React.FC = () => {
         q: debounced,
         limit: String(PAGE_SIZE),
         offset: String(offset),
+        ...(force ? { refresh: "1" } : {}),
       });
       const res = await fetch(`${apiBase()}/api/studio/library?${qs.toString()}`, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -269,10 +283,15 @@ export const LibraryPanel: React.FC = () => {
       const j = await res.json();
       if (seq !== reqSeq.current) return; // a newer request superseded this one
       const page: LibItem[] = Array.isArray(j.items) ? j.items : [];
+      const nextTotal = typeof j.total === "number" ? j.total : 0;
       setItems((prev) => (offset === 0 ? page : [...prev, ...page]));
-      setTotal(typeof j.total === "number" ? j.total : 0);
+      setTotal(nextTotal);
+      if (offset === 0) libClientCache.set(cacheKey, { items: page, total: nextTotal, at: Date.now() });
     } catch (e: any) {
-      if (seq === reqSeq.current && offset === 0) setError(e?.message ?? "Failed to load library");
+      // Keep any stale-but-shown results; only surface an error with nothing to show.
+      if (seq === reqSeq.current && offset === 0 && !libClientCache.get(cacheKey)) {
+        setError(e?.message ?? "Failed to load library");
+      }
     } finally {
       if (seq === reqSeq.current) { setLoading(false); setLoadingMore(false); }
     }
@@ -719,7 +738,7 @@ export const LibraryPanel: React.FC = () => {
         </div>
         <button
           type="button"
-          onClick={() => { void caches.delete(THUMB_CACHE).catch(() => {}); setRev((r) => r + 1); void load(0); void loadDevice(); }}
+          onClick={() => { void caches.delete(THUMB_CACHE).catch(() => {}); setRev((r) => r + 1); void load(0, true); void loadDevice(); }}
           title="Refresh library"
           className="w-9 h-9 flex items-center justify-center rounded-md border border-border text-text-secondary hover:text-text-primary hover:border-text-muted transition-colors"
         >

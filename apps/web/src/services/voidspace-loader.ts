@@ -37,6 +37,9 @@ import type {
 export interface VoidspaceSceneList {
   id: string;
   name?: string;
+  // Automation writes the list's display name here, not `name`.
+  title?: string;
+  mood?: string;
   avatar_id?: string;
   avatar_name?: string;
   status?: string;

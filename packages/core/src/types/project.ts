@@ -69,6 +69,15 @@ export interface MediaItem {
   readonly sceneNumber?: number;
   /** Sub-role within the scene: 'primary'|'first_frame'|'narration'|'music'|… */
   readonly role?: string;
+  /**
+   * Generation metadata so the AGENT can understand what an asset is without
+   * re-deriving it — the prompt it was generated from, its mood/genre, and a
+   * human title. Stamped by the loader / Cloud tab / Library from the durable
+   * generation record. Persisted in project JSON.
+   */
+  readonly prompt?: string;
+  readonly mood?: string;
+  readonly title?: string;
 }
 
 /** Thumbnail for filmstrip display in timeline */

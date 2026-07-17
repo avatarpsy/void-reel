@@ -55,6 +55,9 @@ interface VoidspaceAsset {
   sceneListName?: string;
   sceneNumber?: number;
   tag?: string; // e.g. "narration", "music", "ai-generated"
+  // Generation metadata so the agent can identify what an asset is.
+  prompt?: string;
+  mood?: string;
 }
 
 type AssetCategory = "videos" | "images" | "music" | "narrations";
@@ -68,6 +71,11 @@ interface AvatarContext {
 interface PanelSceneList {
   id: string;
   name?: string;
+  // Automation (workflow-c / n8n) writes the list's display name into `title`,
+  // not `name` — without this the Cloud tab showed every automation list as
+  // "Untitled".
+  title?: string;
+  mood?: string;
   avatar_id?: string;
   avatar_name?: string;
   music_url?: string;
@@ -125,6 +133,12 @@ function assetToMediaItem(asset: VoidspaceAsset): MediaItem {
     thumbnailUrl: asset.thumbnailUrl || null,
     waveformData: null,
     originalUrl: asset.url,
+    // Carry generation metadata so the agent can identify the asset later.
+    sceneNumber: asset.sceneNumber,
+    role: asset.tag,
+    title: asset.name,
+    prompt: asset.prompt,
+    mood: asset.mood,
   };
 }
 
@@ -233,6 +247,8 @@ async function fetchAvatarSceneLists(
   return filtered.slice(0, pageSize).map((sl) => ({
     id: sl.id,
     name: sl.name,
+    title: sl.title,
+    mood: sl.mood,
     avatar_id: sl.avatar_id,
     avatar_name: sl.avatar_name,
     music_url: sl.music_url,
@@ -275,7 +291,8 @@ async function fetchAllUserAssets(
   const sceneListSignature = buildSceneListSignature(sceneLists);
 
   for (const sl of sceneLists) {
-    const slName = sl.name || sl.music_title || "Untitled";
+    const slName = sl.name || sl.title || sl.music_title || "Untitled";
+    const slMood = sl.mood || "";
     const slId = String(sl.id || "");
     if (!slId) continue;
 
@@ -392,6 +409,8 @@ async function fetchAllUserAssets(
               tag: (im.tag as string) || "ai-generated",
               sceneListName: slName,
               sceneNumber: sn,
+              prompt: (im.prompt as string) || undefined,
+              mood: slMood || undefined,
             });
           }
         }
@@ -435,10 +454,12 @@ async function fetchAllUserAssets(
               type: "video",
               url: vUrl,
               thumbnailUrl: vThumb,
-              duration: ((v.duration_ms as number) || 0) / 1000,
+              duration: ((v.duration_ms as number) || (v.duration_seconds as number) || 0) / (v.duration_ms ? 1000 : 1),
               tag: (v.tag as string) || "ai-generated",
               sceneListName: slName,
               sceneNumber: sn,
+              prompt: (v.prompt as string) || undefined,
+              mood: slMood || undefined,
             });
           }
         }
