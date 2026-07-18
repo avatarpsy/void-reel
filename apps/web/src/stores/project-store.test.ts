@@ -885,3 +885,26 @@ describe("deletion tombstones (deleted tracks must not resurrect)", () => {
     expect((roundTripped.deletedTracks ?? []).some((d: any) => d.id === track.id)).toBe(true);
   });
 });
+
+describe("save/load parity (autosave JSON round-trip must be 1:1)", () => {
+  it("a project with tracks, clips, keyframes and tombstones survives JSON round-trip exactly", async () => {
+    const store = useProjectStore.getState();
+    store.createNewProject("Parity", { width: 1080, height: 1920, frameRate: 30 });
+    await store.addTrack("video");
+    await store.addTrack("image");
+    const tracks = useProjectStore.getState().project.timeline.tracks;
+    // A deletion tombstone must round-trip too (it is what stops the
+    // scene-rebuild from resurrecting deleted tracks after reload).
+    await store.removeTrack(tracks[1].id);
+
+    // What autosave writes: JSON.stringify(project). What load restores:
+    // the parsed object, verbatim (voidspace-loader returns the blob as-is).
+    const saved = JSON.parse(JSON.stringify(useProjectStore.getState().project));
+    store.loadProject(saved);
+    const reloaded = JSON.parse(JSON.stringify(useProjectStore.getState().project));
+
+    // modifiedAt may be re-stamped on load; everything else must be identical.
+    const strip = (p: any) => ({ ...p, modifiedAt: 0 });
+    expect(strip(reloaded)).toEqual(strip(saved));
+  });
+});

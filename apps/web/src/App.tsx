@@ -2285,29 +2285,57 @@ function App() {
               // to packages/core/src/actions and route through
               // actionExecutor.execute here.
               useProjectStore.setState((s: any) => {
-                const tracks = (s.project.timeline?.tracks ?? []).map((tr: any) => ({
-                  ...tr,
-                  clips: (tr.clips ?? []).map((c: any) => {
-                    if (c.id !== clipId) return c;
-                    // CLEAN SWAP: spread `c` so every prior edit is kept —
-                    // effects, audioEffects, transform, volume, fades,
-                    // keyframes, startTime — only the media + the trim window
-                    // change. Reconcile the trim to the NEW media's real length
-                    // so a shorter regen can't leave the clip reading past EOF
-                    // (the black-tail bug); a same-length regen is a no-op clamp.
-                    const md = newMediaDuration > 0 ? newMediaDuration : (c.outPoint ?? c.duration ?? 0);
-                    let inPoint = c.inPoint ?? 0;
-                    let outPoint = c.outPoint ?? md;
-                    let duration = c.duration;
-                    if (md > 0) {
-                      inPoint = Math.max(0, Math.min(inPoint, Math.max(0, md - 0.05)));
-                      outPoint = Math.min(outPoint, md);
-                      if (outPoint <= inPoint) outPoint = md;
-                      duration = Math.max(0.05, outPoint - inPoint);
-                    }
-                    return { ...c, mediaId: newMediaId, inPoint, outPoint, duration };
-                  }),
-                }));
+                const tracks = (s.project.timeline?.tracks ?? []).map((tr: any) => {
+                  if (!(tr.clips ?? []).some((c: any) => c.id === clipId)) return tr;
+                  // Free room on THIS track: the clip may grow until the next
+                  // clip starts (never overlap, never ripple).
+                  const target = (tr.clips ?? []).find((c: any) => c.id === clipId);
+                  const nextStart = (tr.clips ?? [])
+                    .filter((c: any) => c.id !== clipId && c.startTime > (target?.startTime ?? 0) + 1e-6)
+                    .reduce((min: number, c: any) => Math.min(min, c.startTime), Infinity);
+                  return {
+                    ...tr,
+                    clips: (tr.clips ?? []).map((c: any) => {
+                      if (c.id !== clipId) return c;
+                      // CLEAN SWAP: spread `c` so every prior edit is kept —
+                      // effects, audioEffects, transform, volume, fades,
+                      // keyframes, startTime — only the media + trim change.
+                      const md = newMediaDuration > 0 ? newMediaDuration : (c.outPoint ?? c.duration ?? 0);
+                      let inPoint = c.inPoint ?? 0;
+                      let outPoint = c.outPoint ?? md;
+                      let duration = c.duration;
+                      if (md > 0) {
+                        inPoint = Math.max(0, Math.min(inPoint, Math.max(0, md - 0.05)));
+                        // Was the OLD clip showing its media in full (the
+                        // normal scene-take shape), or a deliberate trim?
+                        const oldMd = (s.project.mediaLibrary?.items ?? [])
+                          .find((m: any) => m.id === c.mediaId)?.metadata?.duration ?? 0;
+                        const wasFullTake = oldMd > 0
+                          ? inPoint <= 0.05 && (c.outPoint ?? oldMd) >= oldMd - 0.1
+                          : true;
+                        const room = Number.isFinite(nextStart)
+                          ? Math.max(0.05, nextStart - (c.startTime ?? 0))
+                          : Infinity;
+                        if (wasFullTake) {
+                          // Full-take clip stays a full take: a LONGER regen
+                          // extends into the free gap (the old min() clamp
+                          // silently CUT the tail off longer narrations); a
+                          // shorter regen shrinks (no EOF black tail).
+                          duration = Math.max(0.05, Math.min(md - inPoint, room));
+                          outPoint = inPoint + duration;
+                        } else {
+                          // User trimmed this clip deliberately — preserve
+                          // the window, only clamp to the new media length.
+                          outPoint = Math.min(outPoint, md);
+                          if (outPoint <= inPoint) outPoint = md;
+                          duration = Math.max(0.05, Math.min(outPoint - inPoint, room));
+                          outPoint = inPoint + duration;
+                        }
+                      }
+                      return { ...c, mediaId: newMediaId, inPoint, outPoint, duration };
+                    }),
+                  };
+                });
                 return { project: { ...s.project, timeline: { ...s.project.timeline, tracks }, modifiedAt: Date.now() } };
               });
               // Record the authoritative swap (keyed on the swapped-to URL, not

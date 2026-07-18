@@ -358,8 +358,17 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
 
   // Trim-accurate waveform window (fractions of the source). The dense
   // canvas render itself is memoized inside <WaveformCanvas>.
-  const sourceDuration = mediaItem?.metadata?.duration || 0;
   const wavePeaks = mediaItem?.waveformData ?? null;
+  // Source length for the window DENOMINATOR. The peaks array is the domain
+  // being indexed, so derive the length from it (100 samples/sec) whenever
+  // peaks exist — metadata.duration is 0 or a placeholder for many
+  // Voidspace/AI assets, and the old `|| 0` guard then collapsed the window
+  // to [0,1]: the WHOLE file stretched across the clip, so trimming looked
+  // like the waveform was SHRINKING instead of being cropped.
+  const sourceDuration =
+    (wavePeaks && wavePeaks.length > 0 ? wavePeaks.length / 100 : 0) ||
+    (mediaItem?.metadata?.duration || 0) ||
+    (clip.outPoint || 0);
   const waveStartFrac = sourceDuration > 0 ? clip.inPoint / sourceDuration : 0;
   const waveEndFrac =
     sourceDuration > 0 && clip.outPoint > 0
@@ -405,14 +414,28 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
             {mediaItem?.filmstripThumbnails &&
             mediaItem.filmstripThumbnails.length > 0
               ? Array.from({ length: thumbnailCount }).map((_, i) => {
-                  const clipProgress = i / Math.max(1, thumbnailCount - 1);
-                  const thumbIndex = Math.min(
-                    Math.floor(
-                      clipProgress * mediaItem.filmstripThumbnails!.length,
-                    ),
-                    mediaItem.filmstripThumbnails!.length - 1,
-                  );
-                  const thumb = mediaItem.filmstripThumbnails![thumbIndex];
+                  // MEDIA-TIME anchored (Premiere/Resolve behaviour): each
+                  // tile shows the frame at inPoint + fraction·duration,
+                  // matched to the nearest generated thumbnail timestamp.
+                  // The old mapping spread the ENTIRE thumbnail set across
+                  // the clip's current pixel width, so trimming re-stretched
+                  // the same frames (the "shrinking instead of trimming"
+                  // complaint) — it never read inPoint/outPoint at all.
+                  const strip = mediaItem.filmstripThumbnails!;
+                  const frac = thumbnailCount > 1 ? i / (thumbnailCount - 1) : 0;
+                  const mediaT = (clip.inPoint || 0) + frac * clip.duration;
+                  let thumbIndex = 0;
+                  let bestDist = Infinity;
+                  for (let k = 0; k < strip.length; k++) {
+                    const d = Math.abs(strip[k].timestamp - mediaT);
+                    if (d < bestDist) {
+                      bestDist = d;
+                      thumbIndex = k;
+                    } else if (strip[k].timestamp > mediaT) {
+                      break; // sorted by timestamp — distance only grows now
+                    }
+                  }
+                  const thumb = strip[thumbIndex];
                   return (
                     <div
                       key={i}

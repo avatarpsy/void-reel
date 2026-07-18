@@ -684,6 +684,29 @@ export const Timeline: React.FC = () => {
       const oldInPoint = clip.inPoint ?? 0;
       const oldOutPoint = clip.outPoint ?? oldInPoint + clip.duration;
 
+      // Premiere/Resolve trim bounds:
+      //  • never overlap a neighbouring clip on the same track,
+      //  • never extend past the SOURCE media (video/audio; stills have no
+      //    intrinsic end). Previously the right handle could drag past EOF
+      //    (frozen last frame / silent tail) and either handle could plough
+      //    into the neighbour.
+      const ownTrack = tracks.find((t) => t.clips.some((c) => c.id === clipId));
+      const prevEnd = ownTrack
+        ? ownTrack.clips
+            .filter((c) => c.id !== clipId && c.startTime < clip.startTime)
+            .reduce((m, c) => Math.max(m, c.startTime + c.duration), 0)
+        : 0;
+      const nextStart = ownTrack
+        ? ownTrack.clips
+            .filter((c) => c.id !== clipId && c.startTime > clip.startTime)
+            .reduce((m, c) => Math.min(m, c.startTime), Infinity)
+        : Infinity;
+      const trimMedia = useProjectStore.getState().getMediaItem(clip.mediaId);
+      const sourceDur =
+        trimMedia && trimMedia.type !== "image" && (trimMedia.metadata?.duration ?? 0) > 0
+          ? trimMedia.metadata.duration
+          : Infinity;
+
       let updates: {
         startTime?: number;
         duration: number;
@@ -692,18 +715,30 @@ export const Timeline: React.FC = () => {
       };
 
       if (edge === "left") {
-        const trimDelta = newTime - clip.startTime;
+        // Hard stops: previous clip's end, and the media's own start
+        // (startTime - oldInPoint is where source time 0 sits on the
+        // timeline — dragging further left would freeze the first frame).
+        const minTime = Math.max(prevEnd, clip.startTime - oldInPoint);
+        const clampedTime = Math.max(newTime, minTime);
+        const trimDelta = clampedTime - clip.startTime;
         const nextInPoint = Math.max(0, oldInPoint + trimDelta);
         const nextDuration = Math.max(0.1, oldOutPoint - nextInPoint);
 
         updates = {
-          startTime: newTime,
+          startTime: clampedTime,
           inPoint: nextInPoint,
           outPoint: oldOutPoint,
           duration: nextDuration,
         };
       } else {
-        const nextDuration = Math.max(0.1, newTime - clip.startTime);
+        const maxDuration = Math.min(
+          Number.isFinite(nextStart) ? Math.max(0.1, nextStart - clip.startTime) : Infinity,
+          Number.isFinite(sourceDur) ? Math.max(0.1, sourceDur - oldInPoint) : Infinity,
+        );
+        const nextDuration = Math.min(
+          Math.max(0.1, newTime - clip.startTime),
+          maxDuration,
+        );
         const nextOutPoint = oldInPoint + nextDuration;
 
         updates = {
