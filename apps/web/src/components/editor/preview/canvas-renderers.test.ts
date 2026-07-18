@@ -323,12 +323,12 @@ function makeRecordingCtx() {
     createPattern: () => null,
     getImageData: () => ({ data: new Uint8ClampedArray(4) }),
     putImageData: () => {}, setLineDash: () => {},
-    get globalAlpha() { return 1; }, set globalAlpha(_v) {},
-    get globalCompositeOperation() { return gco; }, set globalCompositeOperation(v) { gco = v; },
-    set font(_v) {}, set fillStyle(_v) {}, set strokeStyle(_v) {}, set lineWidth(_v) {},
-    set textAlign(_v) {}, set textBaseline(_v) {}, set filter(_v) {},
-    set shadowColor(_v) {}, set shadowBlur(_v) {}, set shadowOffsetX(_v) {}, set shadowOffsetY(_v) {},
-    set lineJoin(_v) {}, set lineCap(_v) {}, set miterLimit(_v) {}, set letterSpacing(_v) {}, set direction(_v) {},
+    get globalAlpha() { return 1; }, set globalAlpha(_v: any) {},
+    get globalCompositeOperation() { return gco; }, set globalCompositeOperation(v: any) { gco = v; },
+    set font(_v: any) {}, set fillStyle(_v: any) {}, set strokeStyle(_v: any) {}, set lineWidth(_v: any) {},
+    set textAlign(_v: any) {}, set textBaseline(_v: any) {}, set filter(_v: any) {},
+    set shadowColor(_v: any) {}, set shadowBlur(_v: any) {}, set shadowOffsetX(_v: any) {}, set shadowOffsetY(_v: any) {},
+    set lineJoin(_v: any) {}, set lineCap(_v: any) {}, set miterLimit(_v: any) {}, set letterSpacing(_v: any) {}, set direction(_v: any) {},
     canvas: { width: 1920, height: 1080 },
   };
   return { ctx: ctx as unknown as CanvasRenderingContext2D, log };
