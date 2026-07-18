@@ -210,7 +210,7 @@ export const LibraryPanel: React.FC = () => {
   const [rev, setRev] = useState(0);
   // Clicking a card previews it fullscreen; drag adds to the timeline, the +
   // affordance imports it into Media. (Click no longer auto-imports.)
-  const [previewItem, setPreviewItem] = useState<{ url: string; editUrl?: string; kind: PreviewKind; name: string } | null>(null);
+  const [previewItem, setPreviewItem] = useState<{ url: string; editUrl?: string; kind: PreviewKind; name: string; coverUrl?: string } | null>(null);
   // "On this device" — media inside other locally-saved projects.
   const [deviceItems, setDeviceItems] = useState<DeviceItem[]>([]);
   // Collapsed section titles — persisted so the layout the user set survives
@@ -532,6 +532,7 @@ export const LibraryPanel: React.FC = () => {
           editUrl: it.url,
           kind: (isImage ? "image" : isVideo ? "video" : "audio") as PreviewKind,
           name: it.label,
+          coverUrl: it.coverUrl ? srcWithToken(it.coverUrl) : undefined,
         })}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") {
@@ -541,6 +542,7 @@ export const LibraryPanel: React.FC = () => {
               editUrl: it.url,
               kind: (isImage ? "image" : isVideo ? "video" : "audio") as PreviewKind,
               name: it.label,
+              coverUrl: it.coverUrl ? srcWithToken(it.coverUrl) : undefined,
             });
           }
         }}
@@ -867,6 +869,7 @@ export const LibraryPanel: React.FC = () => {
           editUrl={previewItem.editUrl}
           kind={previewItem.kind}
           name={previewItem.name}
+          coverUrl={previewItem.coverUrl}
           onClose={() => setPreviewItem(null)}
         />
       )}

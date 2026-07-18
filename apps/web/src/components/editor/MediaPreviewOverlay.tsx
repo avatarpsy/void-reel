@@ -10,6 +10,8 @@ interface MediaPreviewOverlayProps {
   /** Raw (un-tokenised) URL to open in the image editor; enables the Edit
    *  button for images. Falls back to `url` when omitted. */
   editUrl?: string;
+  /** Cover art for audio (songs/BGM) — shown instead of the music icon. */
+  coverUrl?: string;
   onClose: () => void;
 }
 
@@ -18,7 +20,7 @@ interface MediaPreviewOverlayProps {
  * opens this (it does NOT add the item to the project); items only land on the
  * timeline when dragged there. Backdrop click / Close button / Escape dismiss.
  */
-export function MediaPreviewOverlay({ url, kind, name, editUrl, onClose }: MediaPreviewOverlayProps) {
+export function MediaPreviewOverlay({ url, kind, name, editUrl, coverUrl, onClose }: MediaPreviewOverlayProps) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -76,7 +78,17 @@ export function MediaPreviewOverlay({ url, kind, name, editUrl, onClose }: Media
         )}
         {kind === "audio" && (
           <div className="flex flex-col items-center gap-6 px-14 py-12 rounded-2xl bg-gradient-to-br from-primary/15 to-primary/5 border border-white/10">
-            <Music size={64} className="text-primary drop-shadow" />
+            {coverUrl ? (
+              // Cover art (songs/BGM) — falls back to the music icon on load error.
+              <img
+                src={coverUrl}
+                alt={name || ""}
+                className="w-56 h-56 max-w-[80vw] object-cover rounded-xl shadow-lg border border-white/10"
+                onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+              />
+            ) : (
+              <Music size={64} className="text-primary drop-shadow" />
+            )}
             {name ? <p className="text-sm text-white/80 max-w-xs truncate">{name}</p> : null}
             <audio src={url} controls autoPlay className="w-[360px] max-w-[80vw]" />
           </div>
