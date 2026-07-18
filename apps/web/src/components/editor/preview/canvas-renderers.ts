@@ -1700,6 +1700,131 @@ export const drawFrameWithTransform = (
   ctx.restore();
 };
 
+// ─────────────────────────────────────────────────────────────────────────
+// compositeTracksToCtx — THE single z-order painter.
+//
+// One implementation of the painter's algorithm shared by every preview path
+// (paused/scrub, native playback, multi-track) AND intended to back export.
+// It is PURE PAINTING: the caller pre-resolves every clip's frame (decode +
+// effects, both async) and hands them in via `frameProvider` (synchronous
+// lookup). The caller also owns the clear color, previewScale transform, and
+// the blit — this function only draws already-ready frames onto the ctx.
+//
+// Ordering is the CANONICAL export order (packages/core video-engine): overlay
+// tracks (text/graphics) composite ABOVE pixel tracks (video/image); within a
+// layer, higher track index is further back (drawn first). This makes the
+// preview match the exported MP4 and fixes the "captions show in preview but
+// not in export" class of bugs.
+// ─────────────────────────────────────────────────────────────────────────
+export interface CompositorClip {
+  id: string;
+  mediaId: string;
+  startTime: number;
+  duration: number;
+  inPoint?: number;
+  transform?: ClipTransform;
+  keyframes?: Keyframe[];
+  emphasisAnimation?: EmphasisAnimation;
+  blendMode?: string;
+}
+export interface CompositorTrack {
+  id: string;
+  type: string;
+  hidden?: boolean;
+  clips: CompositorClip[];
+}
+export type FrameProvider = (
+  clip: CompositorClip,
+  mediaTime: number,
+) => ImageBitmap | HTMLVideoElement | HTMLCanvasElement | OffscreenCanvas | null;
+
+export interface CompositeOpts {
+  tracks: CompositorTrack[];
+  time: number; // absolute timeline playhead
+  canvasWidth: number; // PROJECT dims (not previewScale dims)
+  canvasHeight: number;
+  frameProvider: FrameProvider;
+  textClips: TextClip[]; // already time-filtered by the caller
+  shapeClips: GraphicClipUnion[]; // already time-filtered by the caller
+  /** Override source-media time (speed/reverse). Default: inPoint + local. */
+  getSourceMediaTime?: (clip: CompositorClip, clipLocalTime: number) => number;
+}
+
+const overlayRank = (t: string): number => (t === "text" || t === "graphics" ? 1 : 0);
+
+export const compositeTracksToCtx = (
+  ctx: CanvasRenderingContext2D,
+  opts: CompositeOpts,
+): void => {
+  const {
+    tracks, time, canvasWidth, canvasHeight,
+    frameProvider, textClips, shapeClips, getSourceMediaTime,
+  } = opts;
+
+  const renderable = tracks
+    .map((track, originalIndex) => ({ track, originalIndex }))
+    .filter(
+      ({ track }) =>
+        (track.type === "video" ||
+          track.type === "image" ||
+          track.type === "text" ||
+          track.type === "graphics") &&
+        !track.hidden,
+    )
+    .sort((a, b) => {
+      const d = overlayRank(a.track.type) - overlayRank(b.track.type);
+      return d !== 0 ? d : b.originalIndex - a.originalIndex;
+    });
+
+  for (const { track } of renderable) {
+    if (track.type === "video" || track.type === "image") {
+      for (const clip of track.clips) {
+        if (!(time >= clip.startTime && time < clip.startTime + clip.duration)) continue;
+        const clipLocalTime = time - clip.startTime;
+        const mediaTime = getSourceMediaTime
+          ? getSourceMediaTime(clip, clipLocalTime)
+          : (clip.inPoint || 0) + clipLocalTime;
+        const frame = frameProvider(clip, mediaTime);
+        if (!frame) continue;
+        let transform = getAnimatedTransform(
+          (clip.transform as ClipTransform) || DEFAULT_TRANSFORM,
+          clip.keyframes,
+          clipLocalTime,
+        );
+        if (clip.emphasisAnimation && clip.emphasisAnimation.type !== "none") {
+          const e = applyEmphasisAnimation(clip.emphasisAnimation, clipLocalTime);
+          transform = {
+            ...transform,
+            opacity: transform.opacity * e.opacity,
+            scale: {
+              x: transform.scale.x * e.scale * e.scaleX,
+              y: transform.scale.y * e.scale * e.scaleY,
+            },
+            position: {
+              x: transform.position.x + e.offsetX * canvasWidth,
+              y: transform.position.y + e.offsetY * canvasHeight,
+            },
+            rotation: transform.rotation + e.rotation,
+          };
+        }
+        drawFrameWithTransform(ctx, frame, transform, canvasWidth, canvasHeight, clip.blendMode);
+      }
+    } else if (track.type === "graphics") {
+      for (const sc of shapeClips) {
+        if ((sc as { trackId?: string }).trackId === track.id) {
+          renderShapeClipToCanvas(ctx, sc, canvasWidth, canvasHeight, time);
+        }
+      }
+    } else if (track.type === "text") {
+      for (const tc of textClips) {
+        if ((tc as { trackId?: string }).trackId === track.id) {
+          renderTextClipToCanvas(ctx, tc, canvasWidth, canvasHeight, time);
+        }
+      }
+    }
+  }
+};
+
 export const applyEffectsToFrame = async (
   clipId: string,
   frame: ImageBitmap,

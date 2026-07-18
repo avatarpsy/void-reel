@@ -56,6 +56,7 @@ import {
   getActiveShapeClips,
   renderShapeClipToCanvas,
   drawFrameWithTransform,
+  compositeTracksToCtx,
   applyEffectsToFrame,
   setImageLoadCallback,
   getAnimatedTransform,
@@ -1502,146 +1503,37 @@ export const Preview: React.FC = () => {
           shouldClearCanvas = false;
         }
 
-        // Render ALL tracks in layer order using painter's algorithm
-        // Higher index = rendered first (appears behind), Lower index = rendered last (appears on top)
-        const allRenderableTracks = timelineTracks
-          .map((track, idx) => ({ track, originalIndex: idx }))
-          .filter(
-            ({ track }) =>
-              (track.type === "video" ||
-                track.type === "image" ||
-                track.type === "text" ||
-                track.type === "graphics") &&
-              !track.hidden,
-          )
-          .sort((a, b) => b.originalIndex - a.originalIndex);
-
-        for (const { track } of allRenderableTracks) {
-          if (track.type === "video" || track.type === "image") {
-            for (const clip of track.clips) {
-              const clipStart = clip.startTime;
-              const clipEnd = clip.startTime + clip.duration;
-
-              if (time >= clipStart && time < clipEnd) {
-                const frame = await decodeClipFrame(
-                  clip,
-                  time,
-                  canvas.width,
-                  canvas.height,
-                );
-
-                if (frame) {
-                  const clipLocalTime = time - clip.startTime;
-                  let animatedTransform = getAnimatedTransform(
-                    clip.transform as ClipTransform,
-                    clip.keyframes,
-                    clipLocalTime,
-                  );
-
-                  if (
-                    clip.emphasisAnimation &&
-                    clip.emphasisAnimation.type !== "none"
-                  ) {
-                    const emphasisState = applyEmphasisAnimation(
-                      clip.emphasisAnimation,
-                      clipLocalTime,
-                    );
-                    animatedTransform = {
-                      ...animatedTransform,
-                      opacity:
-                        animatedTransform.opacity * emphasisState.opacity,
-                      scale: {
-                        x:
-                          animatedTransform.scale.x *
-                          emphasisState.scale *
-                          emphasisState.scaleX,
-                        y:
-                          animatedTransform.scale.y *
-                          emphasisState.scale *
-                          emphasisState.scaleY,
-                      },
-                      position: {
-                        x:
-                          animatedTransform.position.x +
-                          emphasisState.offsetX * canvas.width,
-                        y:
-                          animatedTransform.position.y +
-                          emphasisState.offsetY * canvas.height,
-                      },
-                      rotation:
-                        animatedTransform.rotation + emphasisState.rotation,
-                    };
-                  }
-
-                  try {
-                    const processedFrame = await applyEffectsToFrame(
-                      clip.id,
-                      frame,
-                    );
-                    if (processedFrame.width > 0 && processedFrame.height > 0) {
-                      drawFrameWithTransform(
-                        ctx,
-                        processedFrame,
-                        animatedTransform,
-                        canvas.width,
-                        canvas.height,
-                        (clip as { blendMode?: string }).blendMode,
-                      );
-                      hasRenderedFrame = true;
-                    } else {
-                      drawFrameWithTransform(
-                        ctx,
-                        frame,
-                        animatedTransform,
-                        canvas.width,
-                        canvas.height,
-                        (clip as { blendMode?: string }).blendMode,
-                      );
-                      hasRenderedFrame = true;
-                    }
-                  } catch {
-                    drawFrameWithTransform(
-                      ctx,
-                      frame,
-                      animatedTransform,
-                      canvas.width,
-                      canvas.height,
-                      (clip as { blendMode?: string }).blendMode,
-                    );
-                    hasRenderedFrame = true;
-                  }
-                }
-              }
-            }
-          } else if (track.type === "graphics") {
-            const trackShapeClips = activeShapeClips.filter(
-              (sc) => sc.trackId === track.id,
-            );
-            for (const shapeClip of trackShapeClips) {
-              renderShapeClipToCanvas(
-                ctx,
-                shapeClip,
-                canvas.width,
-                canvas.height,
-                time,
-              );
-              hasRenderedFrame = true;
-            }
-          } else if (track.type === "text") {
-            const trackTextClips = activeTextClips.filter(
-              (tc) => tc.trackId === track.id,
-            );
-            for (const textClip of trackTextClips) {
-              renderTextClipToCanvas(
-                ctx,
-                textClip,
-                canvas.width,
-                canvas.height,
-                time,
-              );
-              hasRenderedFrame = true;
+        // Decode + effect each active video/image clip into a frame map,
+        // then paint via the ONE shared z-order compositor (same painter as
+        // playback + export). Decode/effects (async) happen here; the shared
+        // fn is pure synchronous painting.
+        const frameMap = new Map<string, ImageBitmap>();
+        for (const track of timelineTracks) {
+          if (track.type !== "video" && track.type !== "image") continue;
+          if (track.hidden) continue;
+          for (const clip of track.clips) {
+            if (!(time >= clip.startTime && time < clip.startTime + clip.duration)) continue;
+            const frame = await decodeClipFrame(clip, time, canvas.width, canvas.height);
+            if (!frame) continue;
+            try {
+              const processed = await applyEffectsToFrame(clip.id, frame);
+              frameMap.set(clip.id, processed.width > 0 && processed.height > 0 ? processed : frame);
+            } catch {
+              frameMap.set(clip.id, frame);
             }
           }
+        }
+        compositeTracksToCtx(ctx, {
+          tracks: timelineTracks,
+          time,
+          canvasWidth: canvas.width,
+          canvasHeight: canvas.height,
+          frameProvider: (clip) => frameMap.get(clip.id) ?? null,
+          textClips: activeTextClips,
+          shapeClips: activeShapeClips,
+        });
+        if (frameMap.size > 0 || activeTextClips.length > 0 || activeShapeClips.length > 0) {
+          hasRenderedFrame = true;
         }
       }
 
@@ -3237,77 +3129,24 @@ export const Preview: React.FC = () => {
             );
             const tracks = timelineTracksRef.current;
 
-            const clipToTrackIndex = new Map<string, number>();
-            tracks.forEach((track, idx) => {
-              if (
-                (track.type === "video" || track.type === "image") &&
-                !track.hidden
-              ) {
-                for (const clip of track.clips) {
-                  clipToTrackIndex.set(clip.id, idx);
-                }
-              }
+            // Paint via the ONE shared z-order compositor. Frames were already
+            // decoded + effected into `validFrames`; hand them in by clip id.
+            // (The shared fn recomputes transform/emphasis from the same clips
+            // with the same inputs → identical to validFrames' baked transform.)
+            const frameByClip = new Map<
+              string,
+              ImageBitmap | HTMLCanvasElement | OffscreenCanvas
+            >();
+            for (const f of validFrames) frameByClip.set(f.clip.id, f.frame);
+            compositeTracksToCtx(ctx, {
+              tracks,
+              time: currentPlayhead,
+              canvasWidth: canvas.width,
+              canvasHeight: canvas.height,
+              frameProvider: (clip) => frameByClip.get(clip.id) ?? null,
+              textClips: activeTextClips,
+              shapeClips: activeShapeClips,
             });
-
-            const allRenderableTracks = tracks
-              .map((track, idx) => ({ track, originalIndex: idx }))
-              .filter(
-                ({ track }) =>
-                  (track.type === "video" ||
-                    track.type === "image" ||
-                    track.type === "text" ||
-                    track.type === "graphics") &&
-                  !track.hidden,
-              )
-              .sort((a, b) => b.originalIndex - a.originalIndex);
-
-            {
-              // (canvas2D compositing — the only path; the always-false WebGPU
-              // branch was removed. Bare block kept to avoid reindenting.)
-              for (const { track, originalIndex } of allRenderableTracks) {
-                if (track.type === "video" || track.type === "image") {
-                  const trackFrames = validFrames.filter(
-                    (f) => clipToTrackIndex.get(f.clip.id) === originalIndex,
-                  );
-                  for (const { clip, transform, frame } of trackFrames) {
-                    drawFrameWithTransform(
-                      ctx,
-                      frame,
-                      transform,
-                      canvas.width,
-                      canvas.height,
-                      (clip as { blendMode?: string }).blendMode,
-                    );
-                  }
-                } else if (track.type === "graphics") {
-                  const trackShapeClips = activeShapeClips.filter(
-                    (sc) => sc.trackId === track.id,
-                  );
-                  for (const shapeClip of trackShapeClips) {
-                    renderShapeClipToCanvas(
-                      ctx,
-                      shapeClip,
-                      canvas.width,
-                      canvas.height,
-                      currentPlayhead,
-                    );
-                  }
-                } else if (track.type === "text") {
-                  const trackTextClips = activeTextClips.filter(
-                    (tc) => tc.trackId === track.id,
-                  );
-                  for (const textClip of trackTextClips) {
-                    renderTextClipToCanvas(
-                      ctx,
-                      textClip,
-                      canvas.width,
-                      canvas.height,
-                      currentPlayhead,
-                    );
-                  }
-                }
-              }
-            }
 
             // Upscale-blit the scaled composite onto the full-res main canvas.
             mainCtx.drawImage(offscreen, 0, 0, canvas.width, canvas.height);
