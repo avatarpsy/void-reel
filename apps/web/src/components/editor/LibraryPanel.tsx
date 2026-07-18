@@ -784,7 +784,10 @@ export const LibraryPanel: React.FC = () => {
               <div key={s.title} className="mb-3">
                 {sectionHeader(s.title, s.items.length)}
                 {!collapsed.has(s.title) && (
-                  <div className="grid grid-cols-2 gap-2 mt-1">
+                  <div
+                    className="grid gap-2 mt-1"
+                    style={{ gridTemplateColumns: "repeat(auto-fill, minmax(0, 150px))" }}
+                  >
                     {s.items.map(renderServerTile)}
                   </div>
                 )}
@@ -794,7 +797,10 @@ export const LibraryPanel: React.FC = () => {
               <div className="mb-3">
                 {sectionHeader("On this device", visibleDeviceItems.length, HardDrive)}
                 {!collapsed.has("On this device") && (
-                  <div className="grid grid-cols-2 gap-2 mt-1">
+                  <div
+                    className="grid gap-2 mt-1"
+                    style={{ gridTemplateColumns: "repeat(auto-fill, minmax(0, 150px))" }}
+                  >
                     {visibleDeviceItems.map(renderDeviceTile)}
                   </div>
                 )}

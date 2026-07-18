@@ -38,7 +38,6 @@ import { AspectRatioMatchDialog } from "./dialogs/AspectRatioMatchDialog";
 import { LibraryPanel } from "./LibraryPanel";
 import { MediaPreviewOverlay, type PreviewKind } from "./MediaPreviewOverlay";
 import { AIGenTab } from "./AIGenTab";
-import { AIMusicSection } from "./AIMusicSection";
 import { toast } from "../../stores/notification-store";
 import { saveFileHandle, saveDirectoryHandle } from "../../services/media-storage";
 import { collectFolder, buildRelinkPlan, type RelinkableItem } from "../../services/media-relink";
@@ -671,9 +670,9 @@ const LoadingIndicator: React.FC<{ message: string }> = ({ message }) => (
 export const AssetsPanel: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTabRaw] = useState<
-    "media" | "library" | "text" | "graphics" | "ai-music" | "ai-gen"
-  >(useUIStore.getState().appMode === "music" ? "ai-music" : "media");
-  const setActiveTab = useCallback((tab: "media" | "library" | "text" | "graphics" | "ai-music" | "ai-gen") => {
+    "media" | "library" | "text" | "graphics" | "ai-gen"
+  >(useUIStore.getState().appMode === "music" ? "library" : "media");
+  const setActiveTab = useCallback((tab: "media" | "library" | "text" | "graphics" | "ai-gen") => {
     setActiveTabRaw(tab);
   }, []);
 
@@ -1361,19 +1360,9 @@ export const AssetsPanel: React.FC = () => {
             <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-t-full shadow-[0_-2px_8px_rgba(99,102,241,0.5)]" />
           )}
         </button>
-        <button
-          onClick={() => setActiveTab("ai-music")}
-          className={`pb-3 transition-all relative ${
-            activeTab === "ai-music"
-              ? "text-text-primary"
-              : "hover:text-text-secondary"
-          }`}
-        >
-          AI Music
-          {activeTab === "ai-music" && (
-            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-t-full shadow-[0_-2px_8px_rgba(99,102,241,0.5)]" />
-          )}
-        </button>
+        {/* "AI Music" tab removed — redundant with the Library tab's Music
+            filter (users/{uid}/music surfaces there too). Music generation
+            lives in the chat agent. */}
         {/* Cloud tab removed: /api/studio/library now unions the automation
             scene tree (users/{uid}/scene_lists/**) into the Library tab, so
             the separate Cloud browser was redundant. The AI tab stays hidden
@@ -1986,15 +1975,6 @@ export const AssetsPanel: React.FC = () => {
                 </button>
               ))}
             </div>
-          </div>
-        </ScrollArea>
-      )}
-
-      {/* AI Music Tab — paginated user-generated tracks from users/{uid}/music */}
-      {activeTab === "ai-music" && (
-        <ScrollArea className="flex-1">
-          <div className="px-5 pb-5">
-            <AIMusicSection />
           </div>
         </ScrollArea>
       )}
