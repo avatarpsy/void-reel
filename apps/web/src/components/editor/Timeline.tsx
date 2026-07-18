@@ -675,10 +675,73 @@ export const Timeline: React.FC = () => {
     [graphicsEngine, allShapeClips],
   );
 
+  // One trim GESTURE = one undoable history entry. The per-mousemove
+  // updates below write the store directly (fast, no history spam); on
+  // release we silently restore the gesture's original geometry and commit
+  // the final values through the ActionExecutor so Ctrl+Z restores the
+  // whole drag in one step (previously trims were not undoable at all).
+  const trimSessionRef = useRef<{
+    clipId: string;
+    orig: { startTime: number; duration: number; inPoint: number; outPoint: number };
+  } | null>(null);
+
+  const handleTrimEnd = useCallback((clipId: string) => {
+    const sess = trimSessionRef.current;
+    trimSessionRef.current = null;
+    if (!sess || sess.clipId !== clipId) return;
+    const store = useProjectStore.getState();
+    const clip = store.project.timeline.tracks.flatMap((t) => t.clips).find((c) => c.id === clipId);
+    if (!clip) return;
+    const finalGeom = {
+      startTime: clip.startTime,
+      duration: clip.duration,
+      inPoint: clip.inPoint ?? 0,
+      outPoint: clip.outPoint ?? (clip.inPoint ?? 0) + clip.duration,
+    };
+    const o = sess.orig;
+    const changed =
+      Math.abs(finalGeom.startTime - o.startTime) > 1e-6 ||
+      Math.abs(finalGeom.duration - o.duration) > 1e-6 ||
+      Math.abs(finalGeom.inPoint - o.inPoint) > 1e-6 ||
+      Math.abs(finalGeom.outPoint - o.outPoint) > 1e-6;
+    if (!changed) return;
+    // Silently restore the pre-gesture geometry (keyframe adjustments made
+    // during the drag stay — they track the final duration), then commit
+    // the final geometry as ONE executor action so the inverse generator
+    // captures the correct "before".
+    useProjectStore.setState((state) => ({
+      project: {
+        ...state.project,
+        timeline: {
+          ...state.project.timeline,
+          tracks: state.project.timeline.tracks.map((track) => ({
+            ...track,
+            clips: track.clips.map((c) => (c.id === clipId ? { ...c, ...o } : c)),
+          })),
+        },
+      },
+    }));
+    void store.trimClip(clipId, finalGeom.inPoint, finalGeom.outPoint, finalGeom.startTime);
+  }, []);
+
   const handleTrimClip = useCallback(
     (clipId: string, edge: "left" | "right", newTime: number) => {
       const clip = tracks.flatMap((t) => t.clips).find((c) => c.id === clipId);
       if (!clip) return;
+
+      // First tick of a new gesture — remember the original geometry for
+      // the single undoable commit in handleTrimEnd.
+      if (!trimSessionRef.current || trimSessionRef.current.clipId !== clipId) {
+        trimSessionRef.current = {
+          clipId,
+          orig: {
+            startTime: clip.startTime,
+            duration: clip.duration,
+            inPoint: clip.inPoint ?? 0,
+            outPoint: clip.outPoint ?? (clip.inPoint ?? 0) + clip.duration,
+          },
+        };
+      }
 
       const oldDuration = clip.duration;
       const oldInPoint = clip.inPoint ?? 0;
@@ -1223,6 +1286,13 @@ export const Timeline: React.FC = () => {
                     track.type === "image" ||
                     track.type === "audio"
                       ? handleTrimClip
+                      : undefined
+                  }
+                  onTrimEnd={
+                    track.type === "video" ||
+                    track.type === "image" ||
+                    track.type === "audio"
+                      ? handleTrimEnd
                       : undefined
                   }
                   onTrimTextClip={handleTrimTextClip}

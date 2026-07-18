@@ -42,6 +42,7 @@ interface TrackLaneProps {
     edge: "left" | "right",
     newTime: number,
   ) => void;
+  onTrimEnd?: (clipId: string) => void;
   onTrimTextClip: (
     clipId: string,
     edge: "left" | "right",
@@ -76,6 +77,7 @@ export const TrackLane: React.FC<TrackLaneProps> = ({
   onMoveTextClip,
   onSnapIndicator,
   onTrimClip,
+  onTrimEnd,
   onTrimTextClip,
   onTrimShapeClip,
   scrollX,
@@ -261,6 +263,7 @@ export const TrackLane: React.FC<TrackLaneProps> = ({
               onMoveClip={onMoveClip}
               onSnapIndicator={onSnapIndicator}
               onTrimClip={onTrimClip}
+              onTrimEnd={onTrimEnd}
             />
           ))}
         {textClips.map((textClip) => (

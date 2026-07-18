@@ -31,6 +31,8 @@ interface ClipComponentProps {
     edge: "left" | "right",
     newTime: number,
   ) => void;
+  /** Fired on trim-handle release — commits the gesture to undo history. */
+  onTrimEnd?: (clipId: string) => void;
 }
 
 const AUTO_SCROLL_THRESHOLD = 80;
@@ -49,6 +51,7 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
   onMoveClip,
   onSnapIndicator,
   onTrimClip,
+  onTrimEnd,
 }) => {
   const { getMediaItem, setMediaWaveform } = useProjectStore();
   const { snapSettings } = useUIStore();
@@ -327,6 +330,8 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
       setIsTrimming(false);
       setTrimEdge(null);
       document.body.style.cursor = "";
+      // Commit the gesture as ONE undoable history entry.
+      onTrimEnd?.(clip.id);
     };
 
     window.addEventListener("mousemove", handleMouseMove);
@@ -336,7 +341,7 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [isTrimming, trimEdge, clip.id, pixelsPerSecond, onTrimClip]);
+  }, [isTrimming, trimEdge, clip.id, pixelsPerSecond, onTrimClip, onTrimEnd]);
 
   // Lazily generate + cache waveform peaks for any audio/video media
   // that arrived without them (remote Voidspace assets, agent-added
@@ -354,7 +359,10 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [mediaItem?.id, mediaItem?.waveformData, mediaItem?.type, setMediaWaveform]);
+    // `!!mediaItem?.blob` matters: an early attempt can fail while the blob
+    // is still hydrating (remote project just loaded); when the blob lands
+    // this retriggers so the real waveform replaces the placeholder line.
+  }, [mediaItem?.id, mediaItem?.waveformData, mediaItem?.type, !!mediaItem?.blob, setMediaWaveform]);
 
   // Trim-accurate waveform window (fractions of the source). The dense
   // canvas render itself is memoized inside <WaveformCanvas>.

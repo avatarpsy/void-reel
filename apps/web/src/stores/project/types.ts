@@ -101,6 +101,7 @@ export interface ProjectState {
     clipId: string,
     inPoint?: number,
     outPoint?: number,
+    startTime?: number,
   ) => Promise<ActionResult>;
   splitClip: (clipId: string, time: number) => Promise<ActionResult>;
   rippleDeleteClip: (clipId: string) => Promise<ActionResult>;

@@ -37,10 +37,15 @@ const MAX_CONCURRENT = 3;
  *  (e.g. several clips referencing the same track). */
 const inFlight = new Map<string, Promise<Float32Array | null>>();
 
-/** mediaIds that already failed to resolve a blob — don't retry on
+/** mediaIds whose last attempt failed, with WHEN — retried after a
+ * cooldown instead of never. A permanent blacklist froze the placeholder
+ * sine for the whole session when the FIRST attempt raced a not-yet-ready
+ * auth token / still-hydrating blob (the "inconsistent waveform" glitch).
+ * Old comment: don't retry on
  *  every re-render (a 401/404/missing source won't fix itself within a
  *  session; the user re-adding the asset mints a fresh id). */
-const failed = new Set<string>();
+const failedAt = new Map<string, number>();
+const FAIL_RETRY_MS = 20_000;
 
 let active = 0;
 const waiters: Array<() => void> = [];
@@ -86,7 +91,10 @@ export function ensureMediaWaveform(
     return Promise.resolve(null);
   }
   if (item.isPlaceholder || item.isPending) return Promise.resolve(null);
-  if (failed.has(item.id)) return Promise.resolve(null);
+  const lastFail = failedAt.get(item.id);
+  if (lastFail && Date.now() - lastFail < FAIL_RETRY_MS) {
+    return Promise.resolve(null);
+  }
 
   const existing = inFlight.get(item.id);
   if (existing) return existing;
@@ -96,7 +104,7 @@ export function ensureMediaWaveform(
     try {
       const blob = await resolveBlob(item);
       if (!blob) {
-        failed.add(item.id);
+        failedAt.set(item.id, Date.now());
         return null;
       }
       const waveform = await getWaveformGenerator().generateWaveform(
@@ -105,10 +113,11 @@ export function ensureMediaWaveform(
         { samplesPerSecond: SAMPLES_PER_SECOND, enableCaching: true },
       );
       const peaks = waveform?.peaks ?? null;
-      if (!peaks) failed.add(item.id);
+      if (!peaks) failedAt.set(item.id, Date.now());
+      else failedAt.delete(item.id);
       return peaks;
     } catch {
-      failed.add(item.id);
+      failedAt.set(item.id, Date.now());
       return null;
     } finally {
       releaseSlot();

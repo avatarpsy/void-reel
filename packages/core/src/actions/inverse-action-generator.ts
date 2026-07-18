@@ -320,6 +320,8 @@ export class InverseActionGenerator {
           clipId: action.params.clipId,
           inPoint: clip.inPoint,
           outPoint: clip.outPoint,
+          // Left-edge trims move the clip — restore its position on undo.
+          startTime: clip.startTime,
         });
       }
 

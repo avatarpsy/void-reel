@@ -1013,7 +1013,21 @@ export async function loadSceneListAsProject(
   if (projectStateRaw && typeof projectStateRaw.json === "string" && projectStateRaw.json) {
     try {
       const parsed = JSON.parse(projectStateRaw.json) as Project;
-      if (parsed && typeof parsed === "object" && parsed.timeline) {
+      // POISONED-BLOB SELF-HEAL. Before the cross-project save guard shipped
+      // (2026-07-18), a project switch could write project A's blob into
+      // project B's scene_list — B then showed A's timeline forever ("wrong
+      // project data"). Every voidspace project id embeds its scene-list id
+      // as the trailing segment; a blob whose id belongs to a DIFFERENT
+      // scene list is corruption, never legitimate. Discard it and rebuild
+      // from this project's own scene tree (the next autosave overwrites
+      // the poison with a correct blob). Do NOT carry its history or
+      // tombstones — they belong to the other project.
+      const blobId = typeof (parsed as any)?.id === "string" ? String((parsed as any).id) : "";
+      if (blobId.startsWith("voidspace") && !blobId.endsWith(sceneListId)) {
+        console.warn(
+          `[voidspace-loader] project_state blob belongs to ANOTHER project (blob id ${blobId} ≠ scene list ${sceneListId}) — discarding poisoned blob, rebuilding from scenes`,
+        );
+      } else if (parsed && typeof parsed === "object" && parsed.timeline) {
         // Empty-blob safety net. If the blob's timeline is completely
         // empty (no tracks AND no media) but the chat doc has scenes,
         // a stale autosave wiped the project state — likely from a

@@ -162,6 +162,7 @@ export interface ProjectState {
     clipId: string,
     inPoint?: number,
     outPoint?: number,
+    startTime?: number,
   ) => Promise<ActionResult>;
   splitClip: (clipId: string, time: number) => Promise<ActionResult>;
   rippleDeleteClip: (clipId: string) => Promise<ActionResult>;
@@ -1545,13 +1546,13 @@ export const useProjectStore = create<ProjectState>()(
         return result;
       },
 
-      trimClip: async (clipId: string, inPoint?: number, outPoint?: number) => {
+      trimClip: async (clipId: string, inPoint?: number, outPoint?: number, startTime?: number) => {
         const { project, actionExecutor } = get();
         const action: Action = {
           type: "clip/trim",
           id: uuidv4(),
           timestamp: Date.now(),
-          params: { clipId, inPoint, outPoint },
+          params: { clipId, inPoint, outPoint, ...(startTime !== undefined ? { startTime } : {}) },
         };
         const result = await actionExecutor.execute(action, project);
         if (result.success) {

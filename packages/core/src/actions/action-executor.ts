@@ -687,20 +687,24 @@ export class ActionExecutor {
           clipId: string;
           inPoint?: number;
           outPoint?: number;
+          // A LEFT-edge trim moves the clip's timeline position too;
+          // without this the undo restored the trim window but left the
+          // clip at the dragged startTime.
+          startTime?: number;
         };
         timeline.tracks = timeline.tracks.map((track: MutableTrack) => ({
           ...track,
           clips: track.clips.map((clip: MutableClip) => {
             if (clip.id === params.clipId) {
               const updates: Partial<MutableClip> = {};
-              if (params.inPoint !== undefined) {
-                updates.inPoint = params.inPoint;
-                updates.duration = clip.outPoint - params.inPoint;
+              const nextIn = params.inPoint !== undefined ? params.inPoint : clip.inPoint;
+              const nextOut = params.outPoint !== undefined ? params.outPoint : clip.outPoint;
+              if (params.inPoint !== undefined) updates.inPoint = params.inPoint;
+              if (params.outPoint !== undefined) updates.outPoint = params.outPoint;
+              if (params.inPoint !== undefined || params.outPoint !== undefined) {
+                updates.duration = Math.max(0.05, nextOut - nextIn);
               }
-              if (params.outPoint !== undefined) {
-                updates.outPoint = params.outPoint;
-                updates.duration = params.outPoint - clip.inPoint;
-              }
+              if (params.startTime !== undefined) updates.startTime = params.startTime;
               return { ...clip, ...updates };
             }
             return clip;
