@@ -14,8 +14,9 @@
  * it lazily from the source asset").
  */
 import type { MediaItem, FilmstripThumbnail } from "@openreel/core";
-import { loadMediaBlobForProject } from "./media-storage";
+import { loadMediaBlobForProject, saveMediaBlob } from "./media-storage";
 import { fetchMediaBlob } from "./voidspace-loader";
+import { useProjectStore } from "../stores/project-store";
 
 const THUMB_COUNT = 10;
 const THUMB_H = 54;
@@ -44,12 +45,17 @@ async function resolveBlob(item: MediaItem, projectId: string): Promise<Blob | n
   if (item.blob instanceof Blob) return item.blob;
   // Project-scoped so a colliding mediaId can't hand us another project's
   // video (which would build a filmstrip of the wrong footage).
-  const persisted = await loadMediaBlobForProject(projectId, item.id).catch(() => null);
-  if (persisted) return persisted;
-  if (item.originalUrl) {
-    return await fetchMediaBlob(item.originalUrl).catch(() => null);
+  let blob = await loadMediaBlobForProject(projectId, item.id).catch(() => null);
+  if (!blob && item.originalUrl) {
+    blob = await fetchMediaBlob(item.originalUrl).catch(() => null);
   }
-  return null;
+  if (blob) {
+    // Cache the bytes back (feeds playback + retriggers effects) instead of
+    // discarding them after building the strip. Same fix as waveform-service.
+    try { useProjectStore.getState().setMediaBlob(item.id, blob); } catch { /* store gone */ }
+    try { if (projectId) void saveMediaBlob(projectId, item.id, blob, (item.metadata ?? {}) as any); } catch { /* best-effort */ }
+  }
+  return blob;
 }
 
 /** Generate (or return existing) filmstrip thumbnails for a video item. */
@@ -62,8 +68,12 @@ export function ensureMediaFilmstrip(
     return Promise.resolve(item.filmstripThumbnails as FilmstripThumbnail[]);
   }
   if (item.isPlaceholder || item.isPending) return Promise.resolve(null);
+  // Bypass the failure cooldown once the bytes are resident (blob hydrated
+  // after a first blob-less attempt) — same fix the waveform service has,
+  // so a remote video's strip isn't stranded for 20s after its blob lands.
+  const hasBytes = item.blob instanceof Blob;
   const lastFail = failedAt.get(item.id);
-  if (lastFail && Date.now() - lastFail < FAIL_RETRY_MS) {
+  if (!hasBytes && lastFail && Date.now() - lastFail < FAIL_RETRY_MS) {
     return Promise.resolve(null);
   }
   const existing = inFlight.get(item.id);

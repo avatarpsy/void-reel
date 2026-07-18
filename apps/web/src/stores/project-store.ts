@@ -117,6 +117,11 @@ export interface ProjectState {
   setMediaWaveform: (mediaId: string, peaks: Float32Array) => void;
   /** Attach lazily-generated filmstrip thumbnails (runtime-only patch). */
   setMediaFilmstrip: (mediaId: string, thumbs: import("@openreel/core").FilmstripThumbnail[]) => void;
+  /** Cache resolved bytes onto a media item (runtime-only patch). */
+  setMediaBlob: (mediaId: string, blob: Blob) => void;
+  /** Correct a media item's recorded duration (and extend a full-take
+   *  audio clip) when decode reveals the stored duration was wrong. */
+  healClipDurationFromMedia: (clipId: string, mediaId: string, realDuration: number) => void;
   /** Add a pending placeholder for a background KieAI task */
   addPlaceholderMedia: (item: MediaItem) => void;
   /** Replace a pending placeholder with the actual result blob */
@@ -1017,6 +1022,91 @@ export const useProjectStore = create<ProjectState>()(
           project: {
             ...project,
             mediaLibrary: { ...project.mediaLibrary, items },
+          },
+        });
+      },
+
+      setMediaBlob: (mediaId: string, blob: Blob) => {
+        const { project } = get();
+        const index = project.mediaLibrary.items.findIndex(
+          (item) => item.id === mediaId,
+        );
+        if (index === -1 || project.mediaLibrary.items[index].blob instanceof Blob) {
+          return; // already has bytes — don't clobber
+        }
+        const items = [...project.mediaLibrary.items];
+        items[index] = { ...items[index], blob };
+        // Runtime-only, no modifiedAt bump (blobs are stripped on save).
+        // Flipping item.blob null→Blob is what retriggers the lazy waveform/
+        // filmstrip effects (their dep arrays watch !!mediaItem.blob) and
+        // feeds playback, instead of every consumer re-fetching the bytes.
+        set({
+          project: {
+            ...project,
+            mediaLibrary: { ...project.mediaLibrary, items },
+          },
+        });
+      },
+
+      healClipDurationFromMedia: (clipId, mediaId, realDuration) => {
+        if (!(realDuration > 0)) return;
+        const { project } = get();
+        const item = project.mediaLibrary.items.find((m) => m.id === mediaId);
+        if (!item || item.type !== "audio") return;
+        let target: any = null;
+        let ownerTrack: any = null;
+        for (const t of project.timeline.tracks) {
+          const c = t.clips.find((cl) => cl.id === clipId);
+          if (c) { target = c; ownerTrack = t; break; }
+        }
+        if (!target || !ownerTrack) return;
+        const recorded = item.metadata?.duration ?? 0;
+        const inP = target.inPoint ?? 0;
+        const outP = target.outPoint ?? inP + target.duration;
+        // Full untrimmed take = starts at source 0 and spans exactly its
+        // (wrong) recorded length. Only then do we auto-extend — a user's
+        // deliberate trim window is left alone.
+        const isFullTake =
+          inP <= 0.05 &&
+          Math.abs(outP - inP - target.duration) < 0.05 &&
+          Math.abs(target.duration - recorded) < 0.3;
+        // Guard against noise: only heal an EGREGIOUS shortfall (e.g. 11s
+        // saved as 1s), never a rounding difference.
+        const tooShort =
+          realDuration > target.duration + 1 && realDuration > target.duration * 1.5;
+        const metaWrong = Math.abs(recorded - realDuration) > 0.5;
+        if (!metaWrong && !(isFullTake && tooShort)) return;
+        // Extend a full take up to the real length, but never past the next
+        // clip on this track (no overlap, no ripple).
+        const nextStart = ownerTrack.clips
+          .filter((c: any) => c.id !== clipId && c.startTime > target.startTime)
+          .reduce((m: number, c: any) => Math.min(m, c.startTime), Infinity);
+        const room = Number.isFinite(nextStart) ? nextStart - target.startTime : realDuration;
+        const newDur =
+          isFullTake && tooShort
+            ? Math.max(target.duration, Math.min(realDuration, room))
+            : target.duration;
+        set({
+          project: {
+            ...project,
+            mediaLibrary: {
+              ...project.mediaLibrary,
+              items: project.mediaLibrary.items.map((m) =>
+                m.id === mediaId
+                  ? { ...m, metadata: { ...m.metadata, duration: realDuration } }
+                  : m,
+              ),
+            },
+            timeline: {
+              ...project.timeline,
+              tracks: project.timeline.tracks.map((t) => ({
+                ...t,
+                clips: t.clips.map((c) =>
+                  c.id === clipId ? { ...c, duration: newDur, outPoint: inP + newDur } : c,
+                ),
+              })),
+            },
+            modifiedAt: Date.now(),
           },
         });
       },

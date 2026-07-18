@@ -1,7 +1,16 @@
 import { getWaveformGenerator } from "@openreel/core";
 import type { MediaItem } from "@openreel/core";
-import { loadMediaBlobForProject } from "./media-storage";
+import { loadMediaBlobForProject, saveMediaBlob } from "./media-storage";
 import { fetchMediaBlob } from "./voidspace-loader";
+import { useProjectStore } from "../stores/project-store";
+
+/** Result of a waveform generation: the peaks plus the media's REAL
+ *  duration (decoded from the audio itself — authoritative over a stale
+ *  metadata.duration). */
+export interface WaveformResult {
+  peaks: Float32Array;
+  duration: number;
+}
 
 /**
  * Lazy, deduped, concurrency-limited waveform peak generation.
@@ -35,7 +44,7 @@ const MAX_CONCURRENT = 3;
 
 /** In-flight jobs keyed by mediaId — collapses duplicate requests
  *  (e.g. several clips referencing the same track). */
-const inFlight = new Map<string, Promise<Float32Array | null>>();
+const inFlight = new Map<string, Promise<WaveformResult | null>>();
 
 /** mediaIds whose last attempt failed, with WHEN — retried after a
  * cooldown instead of never. A permanent blacklist froze the placeholder
@@ -68,15 +77,23 @@ function releaseSlot(): void {
 }
 
 async function resolveBlob(item: MediaItem, projectId: string): Promise<Blob | null> {
-  if (item.blob) return item.blob;
+  if (item.blob instanceof Blob) return item.blob;
   // Project-scoped: never accept another project's blob under a colliding
   // mediaId (that would generate a waveform for the WRONG audio).
-  const persisted = await loadMediaBlobForProject(projectId, item.id).catch(() => null);
-  if (persisted) return persisted;
-  if (item.originalUrl) {
-    return await fetchMediaBlob(item.originalUrl).catch(() => null);
+  let blob = await loadMediaBlobForProject(projectId, item.id).catch(() => null);
+  if (!blob && item.originalUrl) {
+    blob = await fetchMediaBlob(item.originalUrl).catch(() => null);
   }
-  return null;
+  if (blob) {
+    // CACHE THE BYTES BACK. Previously the fetched blob was used for
+    // generation then discarded, so item.blob stayed null forever — the
+    // effect never retriggered and the failure cooldown stranded the
+    // placeholder. Writing it back flips !!item.blob (retrigger), feeds
+    // playback, and persists to IndexedDB (scoped) for next load.
+    try { useProjectStore.getState().setMediaBlob(item.id, blob); } catch { /* store gone */ }
+    try { if (projectId) void saveMediaBlob(projectId, item.id, blob, (item.metadata ?? {}) as any); } catch { /* best-effort */ }
+  }
+  return blob;
 }
 
 /**
@@ -90,9 +107,8 @@ async function resolveBlob(item: MediaItem, projectId: string): Promise<Blob | n
 export function ensureMediaWaveform(
   item: MediaItem | undefined | null,
   projectId = "",
-): Promise<Float32Array | null> {
+): Promise<WaveformResult | null> {
   if (!item) return Promise.resolve(null);
-  if (item.waveformData) return Promise.resolve(item.waveformData);
   if (item.type !== "audio" && item.type !== "video") {
     return Promise.resolve(null);
   }
@@ -110,7 +126,7 @@ export function ensureMediaWaveform(
   const existing = inFlight.get(item.id);
   if (existing) return existing;
 
-  const job = (async (): Promise<Float32Array | null> => {
+  const job = (async (): Promise<WaveformResult | null> => {
     await acquireSlot();
     try {
       const blob = await resolveBlob(item, projectId);
@@ -124,9 +140,9 @@ export function ensureMediaWaveform(
         { samplesPerSecond: SAMPLES_PER_SECOND, enableCaching: true },
       );
       const peaks = waveform?.peaks ?? null;
-      if (!peaks) failedAt.set(item.id, Date.now());
-      else failedAt.delete(item.id);
-      return peaks;
+      if (!peaks) { failedAt.set(item.id, Date.now()); return null; }
+      failedAt.delete(item.id);
+      return { peaks, duration: waveform?.duration ?? 0 };
     } catch {
       failedAt.set(item.id, Date.now());
       return null;

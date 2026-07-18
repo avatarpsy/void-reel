@@ -173,6 +173,31 @@ export function migrateLegacyFallbackMediaIds<T extends Project>(project: T): T 
   } as T;
 }
 
+/**
+ * Lightweight real-duration probe: loads only the audio's metadata via an
+ * <audio> element and reads its true length. Cheap (no full decode), with a
+ * 5s cap. Returns 0 when unavailable so the caller keeps its recorded value.
+ */
+function probeAudioDuration(blob: Blob | null): Promise<number> {
+  return new Promise((resolve) => {
+    if (!blob || typeof document === "undefined") return resolve(0);
+    let settled = false;
+    const el = document.createElement("audio");
+    const obj = URL.createObjectURL(blob);
+    const done = (d: number) => {
+      if (settled) return;
+      settled = true;
+      try { URL.revokeObjectURL(obj); } catch { /* noop */ }
+      resolve(Number.isFinite(d) && d > 0 ? d : 0);
+    };
+    el.preload = "metadata";
+    el.onloadedmetadata = () => done(el.duration);
+    el.onerror = () => done(0);
+    setTimeout(() => done(0), 5000);
+    el.src = obj;
+  });
+}
+
 async function resolveMediaUrl(rawUrl?: string | null): Promise<string | null> {
   if (!rawUrl) return null;
   const url = String(rawUrl).trim();
@@ -1807,13 +1832,23 @@ export async function loadSceneListAsProject(
       // never a shared literal (regens must mint a NEW media id).
       const narMediaId = `media-narration-${scene._docId}-${narration?.id ?? stableHash(narrationUrl)}`;
       const narDurMs = typeof narration?.duration_ms === "number" ? narration.duration_ms : null;
-      const narDuration = narDurMs != null ? narDurMs / 1000 : sceneDuration;
+      let narDuration = narDurMs != null ? narDurMs / 1000 : sceneDuration;
 
       // Fetch the narration blob so the export-time audio engine can decode
       // it. The audio engine's getAudioBuffer() returns null when blob is
       // missing, which silently drops the narration from the rendered MP4
       // (caused the "missing narration" bug at export time).
       const narrationBlob = await fetchMediaBlob(narrationUrl);
+
+      // Probe the REAL audio length from the decoded blob. `duration_ms` is
+      // sometimes wrong in Firestore (a regen produced a longer take but the
+      // field kept the old value, or a pipeline bug) — which showed an 11s
+      // narration as a 1s clip. The decoded length is authoritative; use it
+      // when it materially exceeds the recorded value.
+      const probedNarDur = await probeAudioDuration(narrationBlob);
+      if (probedNarDur > 0 && probedNarDur > narDuration + 0.5) {
+        narDuration = probedNarDur;
+      }
 
       mediaItems.push({
         id: narMediaId,

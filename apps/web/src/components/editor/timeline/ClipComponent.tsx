@@ -355,8 +355,14 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
     if (mediaItem.type !== "audio" && mediaItem.type !== "video") return;
     let cancelled = false;
     const projectId = useProjectStore.getState().project.id;
-    void ensureMediaWaveform(mediaItem, projectId).then((peaks) => {
-      if (!cancelled && peaks) setMediaWaveform(mediaItem.id, peaks);
+    void ensureMediaWaveform(mediaItem, projectId).then((res) => {
+      if (cancelled || !res) return;
+      setMediaWaveform(mediaItem.id, res.peaks);
+      // The decoder also gave us the REAL audio length — heal a clip whose
+      // stored duration was wrong (e.g. an 11s narration saved as 1s).
+      if (res.duration > 0) {
+        useProjectStore.getState().healClipDurationFromMedia(clip.id, mediaItem.id, res.duration);
+      }
     });
     return () => {
       cancelled = true;
@@ -364,7 +370,7 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
     // `!!mediaItem?.blob` matters: an early attempt can fail while the blob
     // is still hydrating (remote project just loaded); when the blob lands
     // this retriggers so the real waveform replaces the placeholder line.
-  }, [mediaItem?.id, mediaItem?.waveformData, mediaItem?.type, !!mediaItem?.blob, setMediaWaveform]);
+  }, [mediaItem?.id, mediaItem?.waveformData, mediaItem?.type, !!mediaItem?.blob, clip.id, setMediaWaveform]);
 
   // Lazily generate filmstrip thumbnails for VIDEO media that arrived
   // without them (remote scene videos) — otherwise the clip falls back to
@@ -405,6 +411,7 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
       : 1;
 
   const thumbnailCount = Math.max(1, Math.floor(width / 60));
+  const hasFilmstrip = (mediaItem?.filmstripThumbnails?.length ?? 0) > 0;
   const clipName = mediaItem?.name || clip.mediaId.slice(0, 8);
 
   const isInteracting = isDragging || isTrimming;
@@ -437,66 +444,50 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
             pointerEvents: isDragging ? 'none' : 'auto',
           }}
         >
-      {isVideo &&
-        (mediaItem?.filmstripThumbnails?.length || mediaItem?.thumbnailUrl) && (
-          <div className="absolute inset-0 flex pointer-events-none">
-            {mediaItem?.filmstripThumbnails &&
-            mediaItem.filmstripThumbnails.length > 0
-              ? Array.from({ length: thumbnailCount }).map((_, i) => {
-                  // MEDIA-TIME anchored (Premiere/Resolve behaviour): each
-                  // tile shows the frame at inPoint + fraction·duration,
-                  // matched to the nearest generated thumbnail timestamp.
-                  // The old mapping spread the ENTIRE thumbnail set across
-                  // the clip's current pixel width, so trimming re-stretched
-                  // the same frames (the "shrinking instead of trimming"
-                  // complaint) — it never read inPoint/outPoint at all.
-                  const strip = mediaItem.filmstripThumbnails!;
-                  const frac = thumbnailCount > 1 ? i / (thumbnailCount - 1) : 0;
-                  const mediaT = (clip.inPoint || 0) + frac * clip.duration;
-                  let thumbIndex = 0;
-                  let bestDist = Infinity;
-                  for (let k = 0; k < strip.length; k++) {
-                    const d = Math.abs(strip[k].timestamp - mediaT);
-                    if (d < bestDist) {
-                      bestDist = d;
-                      thumbIndex = k;
-                    } else if (strip[k].timestamp > mediaT) {
-                      break; // sorted by timestamp — distance only grows now
-                    }
-                  }
-                  const thumb = strip[thumbIndex];
-                  return (
-                    <div
-                      key={i}
-                      className="flex-1 h-full bg-cover bg-center opacity-70"
-                      style={{
-                        backgroundImage: `url(${thumb.url})`,
-                        borderRight:
-                          i < thumbnailCount - 1
-                            ? "1px solid rgba(0,0,0,0.2)"
-                            : "none",
-                      }}
-                    />
-                  );
-                })
-              : Array.from({ length: thumbnailCount }).map((_, i) => (
-                  <div
-                    key={i}
-                    className="flex-1 h-full bg-cover bg-center opacity-60"
-                    style={{
-                      backgroundImage: `url(${mediaItem.thumbnailUrl})`,
-                      borderRight:
-                        i < thumbnailCount - 1
-                          ? "1px solid rgba(0,0,0,0.2)"
-                          : "none",
-                    }}
-                  />
-                ))}
-          </div>
-        )}
+      {/* Real filmstrip only. Each tile shows the frame at
+          inPoint + fraction·duration (media-time anchored, Premiere/Resolve
+          behaviour), matched to the nearest generated thumbnail timestamp —
+          so trimming reveals/hides frames instead of rescaling. */}
+      {isVideo && hasFilmstrip && (
+        <div className="absolute inset-0 flex pointer-events-none">
+          {Array.from({ length: thumbnailCount }).map((_, i) => {
+            const strip = mediaItem!.filmstripThumbnails!;
+            const frac = thumbnailCount > 1 ? i / (thumbnailCount - 1) : 0;
+            const mediaT = (clip.inPoint || 0) + frac * clip.duration;
+            let thumbIndex = 0;
+            let bestDist = Infinity;
+            for (let k = 0; k < strip.length; k++) {
+              const d = Math.abs(strip[k].timestamp - mediaT);
+              if (d < bestDist) {
+                bestDist = d;
+                thumbIndex = k;
+              } else if (strip[k].timestamp > mediaT) {
+                break; // sorted by timestamp — distance only grows now
+              }
+            }
+            const thumb = strip[thumbIndex];
+            return (
+              <div
+                key={i}
+                className="flex-1 h-full bg-cover bg-center opacity-70"
+                style={{
+                  backgroundImage: `url(${thumb.url})`,
+                  borderRight:
+                    i < thumbnailCount - 1 ? "1px solid rgba(0,0,0,0.2)" : "none",
+                }}
+              />
+            );
+          })}
+        </div>
+      )}
 
-      {isVideo && !mediaItem?.thumbnailUrl && (
-        <div className="absolute inset-0 bg-gradient-to-r from-primary/20 to-primary/10 pointer-events-none" />
+      {/* No real filmstrip yet (remote scene video, strip still generating) —
+          a clean flat gradient. Deliberately NOT a stretched poster: tiling
+          one poster with bg-cover rescaled it as the clip width changed and
+          read as a confusing ZOOM on trim. The lazy generator fills the real
+          strip in a moment. */}
+      {isVideo && !hasFilmstrip && (
+        <div className="absolute inset-0 bg-gradient-to-r from-primary/15 to-primary/5 pointer-events-none" />
       )}
 
       {isImage && (
