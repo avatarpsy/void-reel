@@ -106,6 +106,23 @@ if (typeof window !== "undefined" && typeof navigator !== "undefined") {
   }
 }
 
+// DEV/TEST-ONLY: expose the Zustand stores on window so headless tests
+// (Playwright) can seed a project + clips and exercise timeline interactions
+// like marquee selection that depend on REAL layout (getBoundingClientRect) —
+// something jsdom cannot provide. Guarded by import.meta.env.DEV, so it is
+// tree-shaken out of the production /studio/ bundle entirely.
+if (import.meta.env.DEV && typeof window !== "undefined") {
+  void Promise.all([
+    import("./stores/project-store"),
+    import("./stores/ui-store"),
+  ]).then(([proj, ui]) => {
+    (window as unknown as { __test?: unknown }).__test = {
+      project: proj.useProjectStore,
+      ui: ui.useUIStore,
+    };
+  });
+}
+
 const root = document.getElementById("root")!;
 
 ReactDOM.createRoot(root).render(

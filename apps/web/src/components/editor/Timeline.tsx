@@ -153,6 +153,11 @@ export const Timeline: React.FC = () => {
     currentX: number;
     currentY: number;
   } | null>(null);
+  // A marquee drag (mousedown→drag→mouseup) also emits a trailing `click` on the
+  // timeline background, whose handler (handleBackgroundClick) clears the
+  // selection — so the box would select clips and then instantly deselect them.
+  // Set this on a real drag so the very next background click is ignored.
+  const suppressNextBgClickRef = React.useRef(false);
 
   const timelineDuration = useMemo(() => {
     let maxEnd = 0;
@@ -373,6 +378,13 @@ export const Timeline: React.FC = () => {
   ]);
 
   const handleBackgroundClick = useCallback(() => {
+    // Swallow the click that trails a marquee drag — otherwise it would clear
+    // the selection the box just made. A genuine empty click (no drag) leaves
+    // the flag false and still deselects.
+    if (suppressNextBgClickRef.current) {
+      suppressNextBgClickRef.current = false;
+      return;
+    }
     clearSelection();
   }, [clearSelection]);
 
@@ -383,6 +395,10 @@ export const Timeline: React.FC = () => {
 
       const rect = tracksRef.current?.getBoundingClientRect();
       if (!rect) return;
+
+      // Fresh gesture — clear any stale suppress flag left by a prior drag that
+      // ended without a trailing background click (e.g. released off-timeline).
+      suppressNextBgClickRef.current = false;
 
       // Convert viewport coordinates to timeline coordinates by accounting for scroll position
       const x = e.clientX - rect.left + scrollX;
@@ -425,12 +441,22 @@ export const Timeline: React.FC = () => {
       return;
     }
 
+    // If the pointer actually moved, this was a drag (not a click) — swallow the
+    // trailing background `click` so it doesn't clear what we're about to select.
+    const dragDist = Math.max(
+      Math.abs(selectionBox.currentX - selectionBox.startX),
+      Math.abs(selectionBox.currentY - selectionBox.startY),
+    );
+    if (dragDist > 3) suppressNextBgClickRef.current = true;
+
     // Intersect the marquee with each clip's ACTUAL rendered rect. Doing it in
     // viewport coordinates (getBoundingClientRect) is bulletproof — it needs no
     // assumptions about track heights, keyframe lanes, gaps, ruler offset, or
     // scroll, all of which the old content-coordinate math got subtly wrong
     // (why the box selected nothing across tracks). selectionBox.startX/Y are
     // CONTENT coords, so map them back to the viewport via tracksRef + scroll.
+    // Any overlap (even 1px) counts — the AABB test below is a strict overlap,
+    // not containment, so a clip the box merely grazes is still selected.
     const container = tracksRef.current;
     const selectedItems: { type: "clip"; id: string; trackId: string }[] = [];
     if (container) {

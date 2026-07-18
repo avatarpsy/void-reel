@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect } from "react";
+import React, { useRef, useState, useEffect, useMemo } from "react";
 import { Image } from "lucide-react";
 import type { Clip, Track } from "@openreel/core";
 import { useProjectStore } from "../../../stores/project-store";
@@ -429,6 +429,46 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
 
   const isInteracting = isDragging || isTrimming;
 
+  // Filmstrip tiles — FIXED-WIDTH (Premiere/Resolve behaviour). Memoised so it
+  // recomputes ONLY when the geometry that actually changes the frames does
+  // (inPoint / width / zoom / the strip), not on every unrelated re-render
+  // (playhead ticks, selection, hover). The per-tile nearest-thumbnail search
+  // is O(tiles × strip), so recomputing it on every render was the "expensive"
+  // churn the user saw while trimming.
+  //
+  // While a drag/trim is IN PROGRESS we FREEZE the strip (return the last
+  // committed tiles) instead of re-tiling on every mousemove — the clip box
+  // still resizes live via CSS, but the frames stop thrashing. On release
+  // (isInteracting → false) it recomputes once and re-anchors.
+  const frozenFilmstripRef = useRef<{ url: string }[] | null>(null);
+  const filmstripTiles = useMemo(() => {
+    if (!isVideo || !hasFilmstrip) return [] as { url: string }[];
+    if (isInteracting && frozenFilmstripRef.current) {
+      return frozenFilmstripRef.current; // frozen during drag — skip the work
+    }
+    const strip = mediaItem!.filmstripThumbnails!;
+    const TILE_W = 64;
+    const pxPerSec = pixelsPerSecond || 1;
+    const count = Math.max(1, Math.ceil(width / TILE_W));
+    const tiles: { url: string }[] = [];
+    for (let i = 0; i < count; i++) {
+      const mediaT = (clip.inPoint || 0) + (i * TILE_W) / pxPerSec;
+      let thumbIndex = 0;
+      let bestDist = Infinity;
+      for (let k = 0; k < strip.length; k++) {
+        const d = Math.abs(strip[k].timestamp - mediaT);
+        if (d < bestDist) {
+          bestDist = d;
+          thumbIndex = k;
+        } else if (strip[k].timestamp > mediaT) break;
+      }
+      tiles.push({ url: strip[thumbIndex].url });
+    }
+    frozenFilmstripRef.current = tiles;
+    return tiles;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isVideo, hasFilmstrip, isInteracting, clip.inPoint, width, pixelsPerSecond, mediaItem?.filmstripThumbnails]);
+
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
@@ -466,34 +506,17 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
           trim — trimming just reveals/hides tiles at the edges and re-anchors
           the frames. (The old flex-1 tiles filled the clip width, so every
           frame rescaled as the clip resized = the "zoom" on trim.) */}
-      {isVideo && hasFilmstrip && (() => {
-        const strip = mediaItem!.filmstripThumbnails!;
-        const TILE_W = 64;
-        const count = Math.max(1, Math.ceil(width / TILE_W));
-        const pxPerSec = pixelsPerSecond || 1;
-        return (
-          <div className="absolute inset-0 flex pointer-events-none overflow-hidden">
-            {Array.from({ length: count }).map((_, i) => {
-              const mediaT = (clip.inPoint || 0) + (i * TILE_W) / pxPerSec;
-              let thumbIndex = 0;
-              let bestDist = Infinity;
-              for (let k = 0; k < strip.length; k++) {
-                const d = Math.abs(strip[k].timestamp - mediaT);
-                if (d < bestDist) { bestDist = d; thumbIndex = k; }
-                else if (strip[k].timestamp > mediaT) break;
-              }
-              const thumb = strip[thumbIndex];
-              return (
-                <div
-                  key={i}
-                  className="h-full flex-none bg-cover bg-center opacity-70"
-                  style={{ width: `${TILE_W}px`, backgroundImage: `url(${thumb.url})` }}
-                />
-              );
-            })}
-          </div>
-        );
-      })()}
+      {isVideo && hasFilmstrip && filmstripTiles.length > 0 && (
+        <div className="absolute inset-0 flex pointer-events-none overflow-hidden">
+          {filmstripTiles.map((tile, i) => (
+            <div
+              key={i}
+              className="h-full flex-none bg-cover bg-center opacity-70"
+              style={{ width: "64px", backgroundImage: `url(${tile.url})` }}
+            />
+          ))}
+        </div>
+      )}
 
       {/* No real filmstrip yet (remote scene video, strip still generating) —
           a clean flat gradient. Deliberately NOT a stretched poster: tiling
