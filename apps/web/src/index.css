@@ -105,6 +105,11 @@
   * {
     @apply border-border;
   }
+
+  /* Horizontal chip rows (e.g. Library mood filters) scroll without a
+     visible scrollbar for a cleaner look. */
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
 }
 
 body {

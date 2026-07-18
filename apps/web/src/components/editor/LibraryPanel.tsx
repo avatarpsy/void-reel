@@ -194,6 +194,10 @@ export const LibraryPanel: React.FC = () => {
   const [type, setType] = useState<LibType>("all");
   const [query, setQuery] = useState("");
   const [debounced, setDebounced] = useState("");
+  // Secondary mood filter (music) — the server returns the distinct moods
+  // available for the current type/search so we can render them as chips.
+  const [mood, setMood] = useState("");
+  const [moods, setMoods] = useState<Array<{ label: string; count: number }>>([]);
   const [items, setItems] = useState<LibItem[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -256,7 +260,7 @@ export const LibraryPanel: React.FC = () => {
 
   const load = useCallback(async (offset = 0, force = false) => {
     const seq = ++reqSeq.current;
-    const cacheKey = `${type}::${debounced}`;
+    const cacheKey = `${type}::${debounced}::${mood}`;
     if (offset === 0) {
       setError(null);
       // Show the last result for this filter INSTANTLY, then revalidate. Only
@@ -272,6 +276,7 @@ export const LibraryPanel: React.FC = () => {
         outputDir: resolveOutputDir(),
         type,
         q: debounced,
+        ...(mood ? { mood } : {}),
         limit: String(PAGE_SIZE),
         offset: String(offset),
         ...(force ? { refresh: "1" } : {}),
@@ -286,6 +291,7 @@ export const LibraryPanel: React.FC = () => {
       const nextTotal = typeof j.total === "number" ? j.total : 0;
       setItems((prev) => (offset === 0 ? page : [...prev, ...page]));
       setTotal(nextTotal);
+      if (offset === 0 && Array.isArray(j.moods)) setMoods(j.moods);
       if (offset === 0) libClientCache.set(cacheKey, { items: page, total: nextTotal, at: Date.now() });
     } catch (e: any) {
       // Keep any stale-but-shown results; only surface an error with nothing to show.
@@ -295,7 +301,7 @@ export const LibraryPanel: React.FC = () => {
     } finally {
       if (seq === reqSeq.current) { setLoading(false); setLoadingMore(false); }
     }
-  }, [type, debounced]);
+  }, [type, debounced, mood]);
 
   useEffect(() => { void load(0); }, [load]);
 
@@ -747,11 +753,11 @@ export const LibraryPanel: React.FC = () => {
       </div>
 
       {/* Type filter pills */}
-      <div className="px-5 mb-3 flex flex-wrap gap-1.5">
+      <div className="px-5 mb-2 flex flex-wrap gap-1.5">
         {TYPE_PILLS.map(({ id, label, Icon }) => (
           <button
             key={id}
-            onClick={() => setType(id)}
+            onClick={() => { setType(id); setMood(""); }}
             className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-medium border transition-colors ${
               type === id
                 ? "bg-primary/15 border-primary text-primary"
@@ -763,6 +769,41 @@ export const LibraryPanel: React.FC = () => {
           </button>
         ))}
       </div>
+
+      {/* Mood chips — a secondary filter for music so a big catalogue is easy
+          to browse by feel. Only shown when Music is active and the server
+          surfaced moods. Horizontally scrollable so it never wraps huge. */}
+      {type === "music" && moods.length > 0 && (
+        <div className="px-5 mb-3 flex gap-1.5 overflow-x-auto no-scrollbar pb-0.5">
+          <button
+            onClick={() => setMood("")}
+            className={`shrink-0 px-2.5 py-1 rounded-full text-[11px] font-medium border transition-colors ${
+              !mood
+                ? "bg-accent/15 border-accent text-accent"
+                : "bg-background-tertiary border-border text-text-secondary hover:border-text-muted"
+            }`}
+          >
+            All moods
+          </button>
+          {moods.map((m) => {
+            const active = mood.toLowerCase() === m.label.toLowerCase();
+            return (
+              <button
+                key={m.label}
+                onClick={() => setMood(active ? "" : m.label)}
+                title={`${m.count} track${m.count === 1 ? "" : "s"}`}
+                className={`shrink-0 px-2.5 py-1 rounded-full text-[11px] font-medium border capitalize transition-colors ${
+                  active
+                    ? "bg-accent/15 border-accent text-accent"
+                    : "bg-background-tertiary border-border text-text-secondary hover:border-text-muted"
+                }`}
+              >
+                {m.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {/* Grid */}
       <div className="flex-1 overflow-y-auto px-5 pb-5 min-h-0">
