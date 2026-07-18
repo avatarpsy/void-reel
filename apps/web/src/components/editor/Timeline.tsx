@@ -592,61 +592,166 @@ export const Timeline: React.FC = () => {
   );
 
   const { moveClip } = useProjectStore();
+
+  // A move GESTURE (single clip OR a marquee-selected group) = ONE undoable
+  // step. Like trims, the per-mousemove updates write direct/engine state (fast,
+  // no history spam); on release (handleMoveEnd) we register a SINGLE
+  // clip/applyState entry (before→after) so Ctrl+Z restores the whole move —
+  // media clips AND captions (text) together. Cross-track moves still go
+  // through the executor's clip/move because it can change tracks (applyState
+  // replaces state in place and can't).
+  const moveSessionRef = useRef<{
+    anchorId: string;
+    before: Map<string, { kind: "clip" | "text" | "shape"; state: any }>;
+    executorCommitted: Set<string>;
+  } | null>(null);
+
+  // Locate a movable by id across the three collections (media clips live in
+  // track.clips; captions in the title engine; graphics in the graphics engine).
+  const findMovable = useCallback(
+    (id: string): { kind: "clip" | "text" | "shape"; clip: any } | null => {
+      for (const t of tracks) {
+        const c = t.clips.find((x) => x.id === id);
+        if (c) return { kind: "clip", clip: c };
+      }
+      const tc = allTextClips.find((x) => x.id === id);
+      if (tc) return { kind: "text", clip: tc };
+      const sc = allShapeClips.find((x) => x.id === id);
+      if (sc) return { kind: "shape", clip: sc };
+      return null;
+    },
+    [tracks, allTextClips, allShapeClips],
+  );
+
+  // Set one movable's absolute startTime (direct — no history), routing by kind.
+  const setMovableStart = useCallback(
+    (id: string, kind: "clip" | "text" | "shape", startTime: number) => {
+      const st = Math.max(0, startTime);
+      if (kind === "text") {
+        titleEngine?.updateTextClip(id, { startTime: st });
+        useProjectStore.setState((s) => ({ project: { ...s.project, modifiedAt: Date.now() } }));
+      } else if (kind === "shape") {
+        const gc = allShapeClips.find((c) => c.id === id);
+        if (gc && graphicsEngine) {
+          if (gc.type === "sticker" || gc.type === "emoji") graphicsEngine.updateStickerClip(id, { startTime: st });
+          else if (gc.type === "svg") graphicsEngine.updateSVGClip(id, { startTime: st });
+          else graphicsEngine.updateShapeClip(id, { startTime: st });
+        }
+        useProjectStore.setState((s) => ({ project: { ...s.project, modifiedAt: Date.now() } }));
+      } else {
+        useProjectStore.setState((s) => ({
+          project: {
+            ...s.project,
+            timeline: {
+              ...s.project.timeline,
+              tracks: s.project.timeline.tracks.map((t) => ({
+                ...t,
+                clips: t.clips.map((c) => (c.id === id ? { ...c, startTime: st } : c)),
+              })),
+            },
+            modifiedAt: Date.now(),
+          },
+        }));
+      }
+    },
+    [titleEngine, graphicsEngine, allShapeClips],
+  );
+
   const handleMoveClip = useCallback(
     async (clipId: string, newStartTime: number, targetTrackId?: string) => {
-      // MULTI-SELECT MOVE (Premiere-style): if the dragged clip is part of a
-      // multi-selection, shift EVERY selected clip by the same time delta so
-      // they move together as a group. (Before, only the dragged clip moved.)
-      // Cross-track group moves are left to the single-clip path; this handles
-      // the common same-track time-shift of N clips.
       const sel = getSelectedClipIds();
-      if (!targetTrackId && sel.length > 1 && sel.includes(clipId)) {
-        useProjectStore.setState((state) => {
-          const tl = state.project.timeline;
-          const dragged = tl.tracks.flatMap((t) => t.clips).find((c) => c.id === clipId);
-          if (!dragged) return {} as any;
-          const delta = newStartTime - dragged.startTime;
-          if (Math.abs(delta) < 1e-6) return {} as any;
-          const selSet = new Set(sel);
-          return {
-            project: {
-              ...state.project,
-              timeline: {
-                ...tl,
-                tracks: tl.tracks.map((t) => ({
-                  ...t,
-                  clips: t.clips.map((c) =>
-                    selSet.has(c.id)
-                      ? { ...c, startTime: Math.max(0, c.startTime + delta) }
-                      : c,
-                  ),
-                })),
-              },
-              modifiedAt: Date.now(),
-            },
-          };
-        });
+      const isGroup = sel.length > 1 && sel.includes(clipId);
+      const movingIds = isGroup ? sel : [clipId];
+
+      // Begin a gesture — snapshot BEFORE states of everything that will move.
+      if (!moveSessionRef.current || moveSessionRef.current.anchorId !== clipId) {
+        const before = new Map<string, { kind: "clip" | "text" | "shape"; state: any }>();
+        for (const id of movingIds) {
+          const m = findMovable(id);
+          if (m) before.set(id, { kind: m.kind, state: JSON.parse(JSON.stringify(m.clip)) });
+        }
+        moveSessionRef.current = { anchorId: clipId, before, executorCommitted: new Set() };
+      }
+      const session = moveSessionRef.current;
+
+      // Cross-track move (release only, single dragged media clip): the executor
+      // handles it — it can change tracks and records its own undo. Restore the
+      // clip's pre-gesture position first so the executor captures a true before.
+      if (targetTrackId) {
+        const b = session.before.get(clipId);
+        if (b && b.kind === "clip") setMovableStart(clipId, "clip", b.state.startTime);
+        await moveClip(clipId, newStartTime, targetTrackId);
+        session.executorCommitted.add(clipId);
         return;
       }
 
-      const graphicClip = allShapeClips.find((sc) => sc.id === clipId);
-      if (graphicClip && graphicsEngine) {
-        if (graphicClip.type === "sticker" || graphicClip.type === "emoji") {
-          graphicsEngine.updateStickerClip(clipId, { startTime: newStartTime });
-        } else if (graphicClip.type === "svg") {
-          graphicsEngine.updateSVGClip(clipId, { startTime: newStartTime });
-        } else {
-          graphicsEngine.updateShapeClip(clipId, { startTime: newStartTime });
-        }
-        useProjectStore.setState((state) => ({
-          project: { ...state.project, modifiedAt: Date.now() },
-        }));
-      } else {
-        await moveClip(clipId, newStartTime, targetTrackId);
+      // Same-track shift: move the WHOLE group rigidly by the anchor's delta.
+      const anchor = session.before.get(clipId);
+      if (!anchor) return;
+      let delta = newStartTime - anchor.state.startTime;
+      // Clamp so the earliest clip in the group never crosses 0 (stays rigid).
+      let minStart = Infinity;
+      for (const [, v] of session.before) minStart = Math.min(minStart, v.state.startTime);
+      if (minStart + delta < 0) delta = -minStart;
+      for (const [id, v] of session.before) {
+        if (session.executorCommitted.has(id)) continue;
+        setMovableStart(id, v.kind, v.state.startTime + delta);
       }
     },
-    [moveClip, allShapeClips, graphicsEngine, getSelectedClipIds],
+    [getSelectedClipIds, findMovable, setMovableStart, moveClip],
   );
+
+  // Commit the move gesture as ONE undoable clip/applyState entry (media +
+  // captions). Registered on any mouseup (see effect below) so it fires whether
+  // the anchor was a media clip, a caption, or a graphic.
+  const handleMoveEnd = useCallback(() => {
+    const session = moveSessionRef.current;
+    moveSessionRef.current = null;
+    if (!session) return;
+    const freshTracks = useProjectStore.getState().project.timeline.tracks;
+    const freshText: any[] = titleEngine?.getAllTextClips?.() ?? [];
+    const clips: Array<{ clipId: string; state: any }> = [];
+    const textClips: Array<{ clipId: string; state: any }> = [];
+    const invClips: Array<{ clipId: string; state: any }> = [];
+    const invTextClips: Array<{ clipId: string; state: any }> = [];
+    for (const [id, b] of session.before) {
+      if (session.executorCommitted.has(id)) continue; // already an executor entry
+      if (b.kind === "shape") continue; // graphics aren't executor-reachable
+      let after: any = null;
+      if (b.kind === "text") after = freshText.find((t) => t?.id === id);
+      else
+        for (const t of freshTracks) {
+          const c = t.clips.find((x) => x.id === id);
+          if (c) { after = c; break; }
+        }
+      if (!after) continue;
+      const a = JSON.parse(JSON.stringify(after));
+      if (JSON.stringify(a) === JSON.stringify(b.state)) continue; // didn't move
+      (b.kind === "text" ? textClips : clips).push({ clipId: id, state: a });
+      (b.kind === "text" ? invTextClips : invClips).push({ clipId: id, state: b.state });
+    }
+    if (clips.length > 0 || textClips.length > 0) {
+      const now = Date.now();
+      const label = clips.length + textClips.length > 1 ? "Move clips" : "Move clip";
+      (useProjectStore.getState() as any).actionHistory.push(
+        { id: `move-${now.toString(36)}`, type: "clip/applyState", timestamp: now, params: { label, clips, textClips } },
+        { id: `move-inv-${now.toString(36)}`, type: "clip/applyState", timestamp: now, params: { label, clips: invClips, textClips: invTextClips } },
+      );
+      useProjectStore.setState((s) => ({ project: { ...s.project, modifiedAt: Date.now() } }));
+    }
+  }, [titleEngine]);
+
+  // Commit the move gesture on release. Deferred a tick so a cross-track move's
+  // async executor commit (handleMoveClip → moveClip) settles first, and so all
+  // synchronous mouseup handlers run before we snapshot the final positions.
+  // Fires for any anchor type (media clip, caption, graphic).
+  useEffect(() => {
+    const onUp = () => {
+      if (moveSessionRef.current) setTimeout(() => handleMoveEnd(), 0);
+    };
+    window.addEventListener("mouseup", onUp);
+    return () => window.removeEventListener("mouseup", onUp);
+  }, [handleMoveEnd]);
 
   const [snapIndicatorTime, setSnapIndicatorTime] = React.useState<
     number | null
@@ -760,23 +865,10 @@ export const Timeline: React.FC = () => {
     [titleEngine, allTextClips, snapTrimEdge],
   );
 
-  const handleMoveTextClip = useCallback(
-    (clipId: string, newStartTime: number) => {
-      if (!titleEngine) return;
-
-      const textClip = allTextClips.find((tc) => tc.id === clipId);
-      if (!textClip) return;
-
-      titleEngine.updateTextClip(clipId, {
-        startTime: Math.max(0, newStartTime),
-      });
-
-      useProjectStore.setState((state) => ({
-        project: { ...state.project, modifiedAt: Date.now() },
-      }));
-    },
-    [titleEngine, allTextClips],
-  );
+  // Captions move through the SAME unified handler as media/graphics, so a
+  // marquee group that includes captions shifts them together and the whole
+  // gesture lands in one undo entry (see handleMoveClip / handleMoveEnd).
+  const handleMoveTextClip = handleMoveClip;
 
   const handleTrimShapeClip = useCallback(
     (clipId: string, edge: "left" | "right", rawNewTime: number) => {

@@ -155,6 +155,20 @@ export class ActionHistory {
     this.autoGroupWindow = ms;
   }
 
+  /** Timestamp of the newest undoable entry (null if none). Used to interleave
+   *  this stack with the store's separate clip-creation undo stack in the right
+   *  temporal order. */
+  peekUndoTimestamp(): number | null {
+    const e = this.undoStack[this.undoStack.length - 1];
+    return e ? e.timestamp : null;
+  }
+
+  /** Timestamp of the entry that a redo would re-apply (null if none). */
+  peekRedoTimestamp(): number | null {
+    const e = this.redoStack[this.redoStack.length - 1];
+    return e ? e.timestamp : null;
+  }
+
   undo(): Action | null {
     const entry = this.undoStack.pop();
     if (entry) {

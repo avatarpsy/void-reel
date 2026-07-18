@@ -2628,12 +2628,23 @@ export const useProjectStore = create<ProjectState>()(
 
       // Undo/Redo
       undo: async () => {
-        const { project, actionExecutor, clipUndoStack, clipRedoStack } = get();
+        const { project, actionExecutor, actionHistory, clipUndoStack, clipRedoStack } = get();
 
         // Dual-stack undo/redo system: clipUndoStack handles graphics/text/svg/sticker clips created outside the main timeline
-        // This prevents those creations from being mixed with ActionHistory which handles timeline operations
-        // Check clip undo stack first (higher priority than global action history)
-        if (clipUndoStack.length > 0) {
+        // This prevents those creations from being mixed with ActionHistory which handles timeline operations.
+        // TEMPORAL INTERLEAVE: take the clip-creation stack only when it is at
+        // least as recent as the newest ActionHistory entry (moves/trims/etc.).
+        // Otherwise a move made AFTER creating a caption would be shadowed —
+        // Ctrl+Z would delete the caption instead of undoing the move. Defensive:
+        // if either timestamp is missing, keep the legacy "clip stack first".
+        const clipUndoTop = clipUndoStack[clipUndoStack.length - 1];
+        const execUndoTs = actionHistory.peekUndoTimestamp();
+        const takeClipUndo =
+          clipUndoStack.length > 0 &&
+          (execUndoTs == null ||
+            clipUndoTop?.timestamp == null ||
+            clipUndoTop.timestamp >= execUndoTs);
+        if (takeClipUndo) {
           const entry = clipUndoStack[clipUndoStack.length - 1];
           let deleted = false;
 
@@ -2754,11 +2765,21 @@ export const useProjectStore = create<ProjectState>()(
       },
 
       redo: async () => {
-        const { project, actionExecutor, clipUndoStack, clipRedoStack } = get();
+        const { project, actionExecutor, actionHistory, clipUndoStack, clipRedoStack } = get();
 
-        // Inverse of undo: restore clip from redo stack by recreating it with saved clipData
-        // Check clip redo stack first (graphics/text/svg/sticker clips previously undone)
-        if (clipRedoStack.length > 0) {
+        // Inverse of undo: restore clip from redo stack by recreating it with saved clipData.
+        // TEMPORAL INTERLEAVE (mirror of undo): redo re-applies undone actions
+        // OLDEST-first, so take the clip-redo stack only when its top is at least
+        // as OLD as the ActionHistory redo top. Defensive fallback to legacy
+        // "clip stack first" when a timestamp is missing.
+        const clipRedoTop = clipRedoStack[clipRedoStack.length - 1];
+        const execRedoTs = actionHistory.peekRedoTimestamp();
+        const takeClipRedo =
+          clipRedoStack.length > 0 &&
+          (execRedoTs == null ||
+            clipRedoTop?.timestamp == null ||
+            clipRedoTop.timestamp <= execRedoTs);
+        if (takeClipRedo) {
           const entry = clipRedoStack[clipRedoStack.length - 1];
           let restored = false;
           let newTrackId: string | undefined;
@@ -3149,6 +3170,7 @@ export const useProjectStore = create<ProjectState>()(
           clipId: textClip.id,
           trackId,
           clipData: { ...textClip }, // Store full clip data for redo reconstruction
+          timestamp: Date.now(),
         };
 
         set({
@@ -3686,6 +3708,7 @@ export const useProjectStore = create<ProjectState>()(
           clipId: shapeClip.id,
           trackId,
           clipData: { ...shapeClip }, // Store full clip data for redo reconstruction
+          timestamp: Date.now(),
         };
 
         // Trigger re-render by updating project state
@@ -3833,6 +3856,7 @@ export const useProjectStore = create<ProjectState>()(
             clipId: svgClip.id,
             trackId,
             clipData: { ...svgClip }, // Store full SVG clip including svgContent for redo
+            timestamp: Date.now(),
           };
 
           // Trigger re-render by updating project state

@@ -41,6 +41,9 @@ export interface ClipHistoryEntry {
   clipData: ShapeClip | TextClip | SVGClip | StickerClip;
   hadEmptyTrackUndo?: boolean;
   trackType?: "video" | "audio" | "image" | "text" | "graphics";
+  /** When this creation was recorded — lets undo/redo interleave this stack
+   *  with the ActionHistory (moves/trims/etc.) in true temporal order. */
+  timestamp?: number;
 }
 
 export interface ProjectState {
