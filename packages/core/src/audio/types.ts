@@ -44,6 +44,15 @@ export interface AudioClipRenderInfo {
   readonly reversed?: boolean;
   /** Zero-based index of the audio track within the source media file to use. */
   readonly audioTrackIndex?: number;
+  /**
+   * Volume automation breakpoints (from the clip's native "volume"
+   * keyframes; time = CLIP-local seconds from the clip's own start,
+   * value = gain). Rendered as linear gain ramps so exports match the
+   * preview's volume line.
+   */
+  readonly automationVolume?: ReadonlyArray<{ time: number; value: number }>;
+  /** How far into the clip the render range starts (clip-local seconds). */
+  readonly clipTimeOffset?: number;
 }
 
 export interface AudioChannelState {

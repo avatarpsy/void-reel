@@ -340,6 +340,14 @@ export class AudioEngine {
       speed: (clip as any).speed || 1,
       reversed: (clip as any).reversed || false,
       audioTrackIndex: clip.audioTrackIndex,
+      // The volume line (native "volume" keyframes) — without this the
+      // export rendered flat clip.volume and the preview's automation was
+      // silently missing from the final MP4.
+      automationVolume: (clip.keyframes ?? [])
+        .filter((k) => k.property === "volume" && typeof k.value === "number" && Number.isFinite(k.value as number))
+        .map((k) => ({ time: k.time, value: k.value as number }))
+        .sort((a, b) => a.time - b.time),
+      clipTimeOffset: offsetInClip,
     };
   }
 
@@ -647,16 +655,72 @@ export class AudioEngine {
     startTime: number,
   ): void {
     const { fadeIn, fadeOut, duration, volume } = clipInfo;
+    const points = (clipInfo.automationVolume ?? []).filter(
+      (p) => Number.isFinite(p.time) && Number.isFinite(p.value),
+    );
 
-    if (fadeIn && fadeIn > 0) {
-      gainNode.gain.setValueAtTime(0, startTime);
-      gainNode.gain.linearRampToValueAtTime(volume, startTime + fadeIn);
+    if (points.length === 0) {
+      // No volume automation — legacy static gain + fades, unchanged.
+      if (fadeIn && fadeIn > 0) {
+        gainNode.gain.setValueAtTime(0, startTime);
+        gainNode.gain.linearRampToValueAtTime(volume, startTime + fadeIn);
+      }
+      if (fadeOut && fadeOut > 0) {
+        const fadeOutStart = startTime + duration - fadeOut;
+        gainNode.gain.setValueAtTime(volume, fadeOutStart);
+        gainNode.gain.linearRampToValueAtTime(0, startTime + duration);
+      }
+      return;
     }
 
-    if (fadeOut && fadeOut > 0) {
-      const fadeOutStart = startTime + duration - fadeOut;
-      gainNode.gain.setValueAtTime(volume, fadeOutStart);
-      gainNode.gain.linearRampToValueAtTime(0, startTime + duration);
+    // Volume line present → render the automation × fade envelope as linear
+    // ramps, mirroring the realtime graph's applyClipGainEnvelope so the
+    // export sounds exactly like the preview. Automation times are
+    // CLIP-local; the rendered segment may start mid-clip (clipTimeOffset).
+    const offset = clipInfo.clipTimeOffset ?? 0;
+    const base = Number.isFinite(volume) ? volume : 1;
+    const clamp = (v: number) => (Number.isFinite(v) ? Math.max(0, Math.min(4, v)) : base);
+    const autoAt = (clipLocalT: number): number => {
+      if (clipLocalT <= points[0].time) return points[0].value;
+      const last = points[points.length - 1];
+      if (clipLocalT >= last.time) return last.value;
+      for (let i = 0; i < points.length - 1; i++) {
+        const a = points[i];
+        const b = points[i + 1];
+        if (clipLocalT >= a.time && clipLocalT <= b.time) {
+          const span = Math.max(1e-6, b.time - a.time);
+          return a.value + (b.value - a.value) * ((clipLocalT - a.time) / span);
+        }
+      }
+      return base;
+    };
+    const fi = Math.max(0, fadeIn ?? 0);
+    const fo = Math.max(0, fadeOut ?? 0);
+    const fadeAt = (t: number): number => {
+      let g = 1;
+      if (fi > 0 && t < fi) g *= t / fi;
+      if (fo > 0 && t > duration - fo) g *= Math.max(0, (duration - t) / fo);
+      return g;
+    };
+    const gainAt = (t: number) => clamp(autoAt(t + offset) * fadeAt(t));
+
+    const bset = new Set<number>([0, duration]);
+    if (fi > 0) bset.add(Math.min(duration, fi));
+    if (fo > 0) bset.add(Math.max(0, duration - fo));
+    for (const p of points) {
+      const t = p.time - offset;
+      if (t > 0 && t < duration) bset.add(t);
+    }
+    const breaks = Array.from(bset).sort((a, b) => a - b);
+    try {
+      gainNode.gain.setValueAtTime(gainAt(0), startTime);
+      for (const tb of breaks) {
+        if (tb <= 0) continue;
+        gainNode.gain.linearRampToValueAtTime(gainAt(tb), startTime + tb);
+      }
+    } catch {
+      // A bad breakpoint must never abort the render — fall back to flat.
+      gainNode.gain.value = clamp(base);
     }
   }
 

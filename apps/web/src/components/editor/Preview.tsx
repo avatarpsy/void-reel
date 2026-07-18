@@ -1232,6 +1232,17 @@ export const Preview: React.FC = () => {
               pan: 0,
               effects: enabledEffects,
               speed: audioClip.speed ?? 1,
+              // Volume keyframes + fades so scrub/paused audio matches
+              // playback (this path used to drop the volume envelope).
+              automationVolume: (audioClipData?.keyframes ?? [])
+                .filter((k) => k.property === "volume")
+                .map((k) => ({
+                  time: k.time,
+                  value: typeof k.value === "number" ? k.value : 1,
+                }))
+                .sort((a, b) => a.time - b.time),
+              fadeIn: audioClipData?.fade?.fadeIn,
+              fadeOut: audioClipData?.fade?.fadeOut,
             });
           }
         }
@@ -1363,6 +1374,22 @@ export const Preview: React.FC = () => {
     },
     [],
   );
+
+  // LIVE volume: while playing, re-apply gain to already-scheduled sources
+  // whenever the project changes (volume-line drag, clip volume, fades).
+  // scheduleClip snapshots gain once, so without this an edit mid-playback
+  // is inaudible until the next play.
+  useEffect(() => {
+    if (!isPlaying) return;
+    const graph = audioGraphRef.current;
+    if (!graph || typeof (graph as any).updateClipGain !== "function") return;
+    try {
+      const t = getMasterClock().currentTime;
+      for (const s of getAudioClipsForScheduler(t)) {
+        (graph as any).updateClipGain(s);
+      }
+    } catch { /* best-effort live update */ }
+  }, [isPlaying, project.modifiedAt, getAudioClipsForScheduler]);
 
   /**
    * Decode a single frame from a clip at a specific time using native video element
@@ -2165,42 +2192,13 @@ export const Preview: React.FC = () => {
       await audioGraph.resume();
       audioGraph.seekTo(startPosition);
       await masterClock.play();
-      audioGraph.startScheduler(() => {
-        const tracksWithAudio = timelineTracksRef.current.filter(
-          (t) => (t.type === "audio" || t.type === "video") && !t.hidden,
-        );
-        const schedules: AudioClipSchedule[] = [];
-        for (const track of tracksWithAudio) {
-          for (const audioClip of track.clips) {
-            const mediaItem = getMediaItem(audioClip.mediaId);
-            const hasAudio =
-              mediaItem?.type === "audio" ||
-              (mediaItem?.type === "video" &&
-                mediaItem?.metadata?.channels &&
-                mediaItem.metadata.channels > 0);
-            if (!hasAudio) continue;
-
-            const audioBuffer = audioBufferCacheRef.current.get(
-              getAudioBufferCacheKey(audioClip.mediaId, audioClip.audioTrackIndex),
-            );
-            if (audioBuffer) {
-              schedules.push({
-                clipId: audioClip.id,
-                trackId: track.id,
-                audioBuffer,
-                startTime: audioClip.startTime,
-                endTime: audioClip.startTime + audioClip.duration,
-                mediaOffset: audioClip.inPoint || 0,
-                volume: 1,
-                pan: 0,
-                effects: [],
-                speed: audioClip.speed ?? 1,
-              });
-            }
-          }
-        }
-        return schedules;
-      });
+      // ONE schedule builder for every playback path. This inline builder
+      // used to hardcode volume:1 and drop volume keyframes + fades — so on
+      // the native fast path (any plain video clip) the timeline's volume
+      // line was silently ignored, live AND after pause+replay.
+      // getAudioClipsForScheduler reads clip.volume, the native "volume"
+      // keyframes, fades, audio effects, and honors track mute.
+      audioGraph.startScheduler(getAudioClipsForScheduler);
 
       let isActive = true;
       let rafId: number | null = null;

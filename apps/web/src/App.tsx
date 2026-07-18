@@ -455,6 +455,10 @@ function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
     const toInvalidate = [
       ...upgradedMediaById.keys(),
       ...[...updatedClips.keys()].map((clipId) => currentClipById.get(clipId)!.mediaId),
+      // Also the NEW media ids the clips now point at — a stale decoded
+      // buffer under the new id (e.g. re-selected earlier take) would
+      // otherwise keep playing the old audio.
+      ...[...updatedClips.values()].map((c) => c.mediaId),
     ];
     playbackController?.invalidateAudioForMedia(toInvalidate[Symbol.iterator]());
   }

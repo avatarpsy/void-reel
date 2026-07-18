@@ -36,6 +36,10 @@ export interface TrackConfig {
 interface ScheduledSource {
   clipId: string;
   source: AudioBufferSourceNode;
+  // The clip's gain node, kept so a LIVE volume edit (dragging the
+  // timeline volume line mid-playback) can re-apply gain to an
+  // already-playing source — scheduleClip only snapshots gain once.
+  gain: GainNode;
   startedAt: number;
   duration: number;
 }
@@ -569,6 +573,7 @@ export class RealtimeAudioGraph {
     const scheduled: ScheduledSource = {
       clipId: schedule.clipId,
       source,
+      gain: clipGain,
       startedAt: schedule.startTime,
       duration,
     };
@@ -666,6 +671,40 @@ export class RealtimeAudioGraph {
       // Never let a bad envelope abort scheduling of later clips.
       gain.value = clamp(base);
     }
+  }
+
+  /**
+   * Re-apply gain (static or envelope) to an ALREADY-SCHEDULED clip — the
+   * live path for editing the timeline volume line / clip volume / fades
+   * DURING playback. scheduleClip snapshots gain once at schedule time;
+   * without this, volume edits are inaudible until the next play.
+   */
+  updateClipGain(schedule: AudioClipSchedule): boolean {
+    let updated = false;
+    for (const [, sources] of this.scheduledSources) {
+      for (const s of sources) {
+        if (s.clipId !== schedule.clipId) continue;
+        const contextStart =
+          this.audioContext.currentTime +
+          schedule.startTime -
+          this.masterClock.currentTime;
+        const duration = schedule.endTime - schedule.startTime;
+        const hasEnvelope =
+          (schedule.automationVolume && schedule.automationVolume.length > 0) ||
+          !!schedule.fadeIn ||
+          !!schedule.fadeOut;
+        try {
+          if (hasEnvelope) {
+            this.applyClipGainEnvelope(s.gain.gain, schedule, contextStart, duration);
+          } else {
+            s.gain.gain.cancelScheduledValues(this.audioContext.currentTime);
+            s.gain.gain.value = Number.isFinite(schedule.volume) ? schedule.volume : 1;
+          }
+          updated = true;
+        } catch { /* keep playing with the previous gain */ }
+      }
+    }
+    return updated;
   }
 
   scheduleClips(schedules: AudioClipSchedule[]): void {

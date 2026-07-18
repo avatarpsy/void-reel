@@ -1684,7 +1684,15 @@ export async function loadSceneListAsProject(
       // uuidv4()s would mint a fresh id on every Firestore tick which
       // (a) breaks selection mid-edit and (b) makes additive media-
       // library merges duplicate the same scene's video / narration.
-      const mediaId = `media-video-${scene._docId}-${primaryVideo?.id ?? "fallback"}`;
+      // Per-take suffix. When the videos-subcollection record can't be
+      // matched (the media mirror rewrites scene.video_url to the durable
+      // URL without touching the record, so the URL lookup misses), fall
+      // back to a HASH OF THE URL — never a shared literal. The old
+      // "fallback" literal made every take mint the SAME mediaId, so
+      // applyAdditiveMerge saw no change and a regenerated take stayed
+      // INVISIBLE on the timeline (the "replace on timeline not working"
+      // bug). A URL-derived suffix changes whenever the take changes.
+      const mediaId = `media-video-${scene._docId}-${primaryVideo?.id ?? stableHash(videoUrl)}`;
       mediaItems.push({
         id: mediaId,
         name: `Scene ${scene.scene_number} · Video`,
@@ -1730,7 +1738,9 @@ export async function loadSceneListAsProject(
 
     // ── Narration clip ──
     if (narrationUrl) {
-      const narMediaId = `media-narration-${scene._docId}-${narration?.id ?? "fallback"}`;
+      // Same per-take rule as the video media id above: URL-hash fallback,
+      // never a shared literal (regens must mint a NEW media id).
+      const narMediaId = `media-narration-${scene._docId}-${narration?.id ?? stableHash(narrationUrl)}`;
       const narDurMs = typeof narration?.duration_ms === "number" ? narration.duration_ms : null;
       const narDuration = narDurMs != null ? narDurMs / 1000 : sceneDuration;
 
