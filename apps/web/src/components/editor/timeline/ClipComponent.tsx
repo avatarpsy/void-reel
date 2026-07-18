@@ -5,6 +5,7 @@ import { useProjectStore } from "../../../stores/project-store";
 import { useUIStore } from "../../../stores/ui-store";
 import { useTimelineStore } from "../../../stores/timeline-store";
 import { ensureMediaWaveform } from "../../../services/waveform-service";
+import { ensureMediaFilmstrip } from "../../../services/filmstrip-service";
 import { calculateSnap, getClipStyle } from "./utils";
 import { WaveformCanvas } from "./WaveformCanvas";
 import { VolumeAutomationOverlay } from "./VolumeAutomationOverlay";
@@ -53,7 +54,7 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
   onTrimClip,
   onTrimEnd,
 }) => {
-  const { getMediaItem, setMediaWaveform } = useProjectStore();
+  const { getMediaItem, setMediaWaveform, setMediaFilmstrip } = useProjectStore();
   const { snapSettings } = useUIStore();
   const { playheadPosition } = useTimelineStore();
   const mediaItem = getMediaItem(clip.mediaId);
@@ -363,6 +364,24 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
     // is still hydrating (remote project just loaded); when the blob lands
     // this retriggers so the real waveform replaces the placeholder line.
   }, [mediaItem?.id, mediaItem?.waveformData, mediaItem?.type, !!mediaItem?.blob, setMediaWaveform]);
+
+  // Lazily generate filmstrip thumbnails for VIDEO media that arrived
+  // without them (remote scene videos) — otherwise the clip falls back to
+  // a single tiled poster that stretches on trim instead of revealing
+  // frames anchored to media time.
+  useEffect(() => {
+    if (!mediaItem || mediaItem.type !== "video") return;
+    if ((mediaItem.filmstripThumbnails?.length ?? 0) > 0) return;
+    let cancelled = false;
+    void ensureMediaFilmstrip(mediaItem).then((thumbs) => {
+      if (!cancelled && thumbs && thumbs.length > 0) {
+        setMediaFilmstrip(mediaItem.id, thumbs);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [mediaItem?.id, mediaItem?.filmstripThumbnails, mediaItem?.type, !!mediaItem?.blob, setMediaFilmstrip]);
 
   // Trim-accurate waveform window (fractions of the source). The dense
   // canvas render itself is memoized inside <WaveformCanvas>.

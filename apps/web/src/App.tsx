@@ -859,6 +859,21 @@ function App() {
             // captions were drawn via the subtitle-canvas-renderer —
             // those are no longer used and would double-render on top
             // of the new TextClips if anything started honoring them.
+            // Recovered IndexedDB saves can carry legacy '-fallback' media
+            // ids whose blobs COLLIDE across projects in IndexedDB (scene
+            // numbers repeat in every automation project) — the "wrong
+            // video plays in every project" corruption. Re-key them before
+            // anything hydrates blobs by id.
+            try {
+              const { migrateLegacyFallbackMediaIds } = await import("./services/voidspace-loader");
+              const beforeMig = useProjectStore.getState().project;
+              const migrated = migrateLegacyFallbackMediaIds(beforeMig);
+              if (migrated !== beforeMig) {
+                useProjectStore.setState({ project: migrated });
+              }
+            } catch (e) {
+              console.warn("[Voidspace] media-id migration on recovery failed:", e);
+            }
             const titleEngine = useEngineStore.getState().getTitleEngine();
             try {
               const cur = useProjectStore.getState().project;

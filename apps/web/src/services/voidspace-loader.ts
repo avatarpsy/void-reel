@@ -124,6 +124,55 @@ function stableHash(input: string): string {
   return (h >>> 0).toString(36);
 }
 
+/**
+ * Cross-project media-id collision heal. Legacy scene media ids used a
+ * shared "-fallback" suffix (media-video-{sceneNo}-fallback) whenever the
+ * per-take record couldn't be matched — and scene numbers repeat in EVERY
+ * automation project, while the IndexedDB blob store is keyed by media id
+ * GLOBALLY (per origin, not per project). Result: project B's clip
+ * hydrated project A's video bytes from IndexedDB — "every project shows
+ * the same Scene 1/2 video", and "paused frame is right (poster URL) but
+ * playback is wrong (decodes the collided blob)". Re-key those items to
+ * the URL-hash scheme the rebuild now mints and repoint their clips. The
+ * new ids miss IndexedDB → bytes refetch from the item's OWN originalUrl →
+ * correct per-project media, waveforms and filmstrips.
+ */
+export function migrateLegacyFallbackMediaIds<T extends Project>(project: T): T {
+  const items = project.mediaLibrary?.items ?? [];
+  const remap = new Map<string, string>();
+  for (const m of items as any[]) {
+    const match = /^media-(video|narration)-(.+)-fallback$/.exec(String(m?.id || ""));
+    if (!match) continue;
+    const url = typeof m?.originalUrl === "string" ? m.originalUrl : "";
+    if (!url) continue; // nothing unique to key on — leave untouched
+    remap.set(m.id, `media-${match[1]}-${match[2]}-${stableHash(url)}`);
+  }
+  if (remap.size === 0) return project;
+  console.warn(
+    `[voidspace-loader] migrating ${remap.size} legacy '-fallback' media id(s) — cross-project blob-collision heal`,
+  );
+  return {
+    ...project,
+    mediaLibrary: {
+      ...project.mediaLibrary,
+      items: (items as any[]).map((m: any) => {
+        const next = remap.get(m.id);
+        // Drop any in-memory blob too — it may already be the collided bytes.
+        return next ? { ...m, id: next, blob: null } : m;
+      }),
+    },
+    timeline: {
+      ...project.timeline,
+      tracks: (project.timeline?.tracks ?? []).map((t: any) => ({
+        ...t,
+        clips: (t.clips ?? []).map((c: any) =>
+          remap.has(c.mediaId) ? { ...c, mediaId: remap.get(c.mediaId)! } : c,
+        ),
+      })),
+    },
+  } as T;
+}
+
 async function resolveMediaUrl(rawUrl?: string | null): Promise<string | null> {
   if (!rawUrl) return null;
   const url = String(rawUrl).trim();
@@ -1259,7 +1308,9 @@ export async function loadSceneListAsProject(
           }
 
           console.log(`[voidspace-loader] Using project_state blob (${projectStateRaw.json.length} bytes${projectStateRaw.history ? `, +${projectStateRaw.history.length}b history` : ""})`);
-          return parsed;
+          // Heal legacy '-fallback' media ids (cross-project IndexedDB
+          // blob collisions) before the blob enters the store.
+          return migrateLegacyFallbackMediaIds(parsed);
         }
       } else {
         console.warn("[voidspace-loader] project_state blob malformed, falling back to per-scene bootstrap");

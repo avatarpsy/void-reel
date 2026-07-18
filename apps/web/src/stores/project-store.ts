@@ -115,6 +115,8 @@ export interface ProjectState {
    *  rendering without persisting peaks into the project blob, and must
    *  NOT bump modifiedAt (no autosave churn). */
   setMediaWaveform: (mediaId: string, peaks: Float32Array) => void;
+  /** Attach lazily-generated filmstrip thumbnails (runtime-only patch). */
+  setMediaFilmstrip: (mediaId: string, thumbs: import("@openreel/core").FilmstripThumbnail[]) => void;
   /** Add a pending placeholder for a background KieAI task */
   addPlaceholderMedia: (item: MediaItem) => void;
   /** Replace a pending placeholder with the actual result blob */
@@ -1011,6 +1013,30 @@ export const useProjectStore = create<ProjectState>()(
         items[index] = { ...items[index], waveformData: peaks };
         // No modifiedAt bump: waveformData is runtime-only (stripped by
         // the serializer) so patching it must not trigger an autosave.
+        set({
+          project: {
+            ...project,
+            mediaLibrary: { ...project.mediaLibrary, items },
+          },
+        });
+      },
+
+      setMediaFilmstrip: (mediaId, thumbs) => {
+        const { project } = get();
+        const index = project.mediaLibrary.items.findIndex(
+          (item) => item.id === mediaId,
+        );
+        if (
+          index === -1 ||
+          (project.mediaLibrary.items[index].filmstripThumbnails?.length ?? 0) > 0
+        ) {
+          return;
+        }
+        const items = [...project.mediaLibrary.items];
+        items[index] = { ...items[index], filmstripThumbnails: thumbs };
+        // Mirrors setMediaWaveform: runtime-only patch, no modifiedAt bump
+        // (blob: thumb URLs are session-scoped; recovery strips dead ones
+        // and this regenerates lazily).
         set({
           project: {
             ...project,
