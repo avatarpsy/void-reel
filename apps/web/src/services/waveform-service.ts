@@ -1,6 +1,6 @@
 import { getWaveformGenerator } from "@openreel/core";
 import type { MediaItem } from "@openreel/core";
-import { loadMediaBlob } from "./media-storage";
+import { loadMediaBlobForProject } from "./media-storage";
 import { fetchMediaBlob } from "./voidspace-loader";
 
 /**
@@ -67,9 +67,11 @@ function releaseSlot(): void {
   }
 }
 
-async function resolveBlob(item: MediaItem): Promise<Blob | null> {
+async function resolveBlob(item: MediaItem, projectId: string): Promise<Blob | null> {
   if (item.blob) return item.blob;
-  const persisted = await loadMediaBlob(item.id).catch(() => null);
+  // Project-scoped: never accept another project's blob under a colliding
+  // mediaId (that would generate a waveform for the WRONG audio).
+  const persisted = await loadMediaBlobForProject(projectId, item.id).catch(() => null);
   if (persisted) return persisted;
   if (item.originalUrl) {
     return await fetchMediaBlob(item.originalUrl).catch(() => null);
@@ -81,9 +83,13 @@ async function resolveBlob(item: MediaItem): Promise<Blob | null> {
  * Ensure peaks exist for an audio/video media item. Resolves to the
  * peaks Float32Array (also cached on disk), or null if the media has no
  * audio / no resolvable source. Safe to call repeatedly — deduped.
+ *
+ * projectId scopes both the blob load and the waveform cache so two
+ * projects sharing a mediaId can't cross-contaminate.
  */
 export function ensureMediaWaveform(
   item: MediaItem | undefined | null,
+  projectId = "",
 ): Promise<Float32Array | null> {
   if (!item) return Promise.resolve(null);
   if (item.waveformData) return Promise.resolve(item.waveformData);
@@ -91,8 +97,13 @@ export function ensureMediaWaveform(
     return Promise.resolve(null);
   }
   if (item.isPlaceholder || item.isPending) return Promise.resolve(null);
+  // Cooldown suppresses retries after a failure — BUT if the bytes are now
+  // resident (blob hydrated after the first, blob-less attempt), bypass it.
+  // Otherwise the placeholder sine stuck for the whole 20s window even
+  // though the audio had arrived (the "waveform never appears" report).
+  const hasBytes = item.blob instanceof Blob;
   const lastFail = failedAt.get(item.id);
-  if (lastFail && Date.now() - lastFail < FAIL_RETRY_MS) {
+  if (!hasBytes && lastFail && Date.now() - lastFail < FAIL_RETRY_MS) {
     return Promise.resolve(null);
   }
 
@@ -102,14 +113,14 @@ export function ensureMediaWaveform(
   const job = (async (): Promise<Float32Array | null> => {
     await acquireSlot();
     try {
-      const blob = await resolveBlob(item);
+      const blob = await resolveBlob(item, projectId);
       if (!blob) {
         failedAt.set(item.id, Date.now());
         return null;
       }
       const waveform = await getWaveformGenerator().generateWaveform(
         blob,
-        item.id,
+        projectId ? `${projectId}::${item.id}` : item.id,
         { samplesPerSecond: SAMPLES_PER_SECOND, enableCaching: true },
       );
       const peaks = waveform?.peaks ?? null;

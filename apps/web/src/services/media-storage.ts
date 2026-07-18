@@ -24,6 +24,37 @@ export async function loadMediaBlob(mediaId: string): Promise<Blob | null> {
   return record?.blob || null;
 }
 
+/**
+ * Load a blob but REJECT it if it belongs to a different project.
+ *
+ * The IndexedDB MEDIA store is keyed by mediaId GLOBALLY (keyPath "id"),
+ * yet scene media ids (`media-video-{sceneDocId}-…`, `media-narration-…`)
+ * REPEAT across automation projects — scene doc ids are the same 1,2,3… in
+ * every project. So `loadMediaBlob(id)` returns whichever project wrote
+ * that id LAST: project B's timeline would decode project A's video bytes.
+ * That is the "every project shows the same Scene 1/2 video" corruption,
+ * and why a PAUSED frame (drawn from this project's own originalUrl/poster)
+ * looked right while PLAYBACK (the collided IndexedDB blob) was wrong.
+ *
+ * Each record carries the projectId it was saved under, so we can detect
+ * the collision: a foreign projectId means stale, cross-project bytes —
+ * return null so the caller refetches this project's OWN originalUrl.
+ */
+export async function loadMediaBlobForProject(
+  projectId: string,
+  mediaId: string,
+): Promise<Blob | null> {
+  const record = await storage.loadMedia(mediaId);
+  if (!record?.blob) return null;
+  if (record.projectId && projectId && record.projectId !== projectId) {
+    console.warn(
+      `[media-storage] cross-project blob collision for ${mediaId}: stored under project ${record.projectId}, current is ${projectId} — ignoring stale bytes, refetching own source`,
+    );
+    return null;
+  }
+  return record.blob;
+}
+
 export async function loadMediaRecord(
   mediaId: string,
 ): Promise<MediaRecord | null> {

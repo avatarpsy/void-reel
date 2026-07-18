@@ -354,7 +354,8 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
     if (mediaItem.waveformData) return;
     if (mediaItem.type !== "audio" && mediaItem.type !== "video") return;
     let cancelled = false;
-    void ensureMediaWaveform(mediaItem).then((peaks) => {
+    const projectId = useProjectStore.getState().project.id;
+    void ensureMediaWaveform(mediaItem, projectId).then((peaks) => {
       if (!cancelled && peaks) setMediaWaveform(mediaItem.id, peaks);
     });
     return () => {
@@ -373,7 +374,8 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
     if (!mediaItem || mediaItem.type !== "video") return;
     if ((mediaItem.filmstripThumbnails?.length ?? 0) > 0) return;
     let cancelled = false;
-    void ensureMediaFilmstrip(mediaItem).then((thumbs) => {
+    const projectId = useProjectStore.getState().project.id;
+    void ensureMediaFilmstrip(mediaItem, projectId).then((thumbs) => {
       if (!cancelled && thumbs && thumbs.length > 0) {
         setMediaFilmstrip(mediaItem.id, thumbs);
       }

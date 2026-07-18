@@ -14,7 +14,7 @@
  * it lazily from the source asset").
  */
 import type { MediaItem, FilmstripThumbnail } from "@openreel/core";
-import { loadMediaBlob } from "./media-storage";
+import { loadMediaBlobForProject } from "./media-storage";
 import { fetchMediaBlob } from "./voidspace-loader";
 
 const THUMB_COUNT = 10;
@@ -40,9 +40,11 @@ function releaseSlot(): void {
   else active--;
 }
 
-async function resolveBlob(item: MediaItem): Promise<Blob | null> {
+async function resolveBlob(item: MediaItem, projectId: string): Promise<Blob | null> {
   if (item.blob instanceof Blob) return item.blob;
-  const persisted = await loadMediaBlob(item.id).catch(() => null);
+  // Project-scoped so a colliding mediaId can't hand us another project's
+  // video (which would build a filmstrip of the wrong footage).
+  const persisted = await loadMediaBlobForProject(projectId, item.id).catch(() => null);
   if (persisted) return persisted;
   if (item.originalUrl) {
     return await fetchMediaBlob(item.originalUrl).catch(() => null);
@@ -53,6 +55,7 @@ async function resolveBlob(item: MediaItem): Promise<Blob | null> {
 /** Generate (or return existing) filmstrip thumbnails for a video item. */
 export function ensureMediaFilmstrip(
   item: MediaItem | null | undefined,
+  projectId = "",
 ): Promise<FilmstripThumbnail[] | null> {
   if (!item || item.type !== "video") return Promise.resolve(null);
   if (item.filmstripThumbnails && item.filmstripThumbnails.length > 0) {
@@ -70,7 +73,7 @@ export function ensureMediaFilmstrip(
     await acquireSlot();
     let objectUrl: string | null = null;
     try {
-      const blob = await resolveBlob(item);
+      const blob = await resolveBlob(item, projectId);
       if (!blob) {
         failedAt.set(item.id, Date.now());
         return null;

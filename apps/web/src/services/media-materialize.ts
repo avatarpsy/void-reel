@@ -16,7 +16,7 @@
  * skipped by the same "reachable" test the materialize-media RPC uses.
  */
 import { useProjectStore } from "../stores/project-store";
-import { loadMediaBlob } from "./media-storage";
+import { loadMediaBlobForProject } from "./media-storage";
 import { saveMediaToDisk } from "./recording-save";
 
 let sweepInFlight = false;
@@ -67,7 +67,7 @@ export async function sweepMaterializeTimelineMedia(): Promise<void> {
       if (attempted.has(item.id)) continue;
       attempted.add(item.id);
       try {
-        const blob = (item.blob instanceof Blob ? item.blob : null) ?? await loadMediaBlob(item.id);
+        const blob = (item.blob instanceof Blob ? item.blob : null) ?? await loadMediaBlobForProject(project.id, item.id);
         if (!blob) continue; // no bytes on this machine — nothing to upload
         const ext = guessExt(item.name, blob.type, (item as any).type);
         const saved = await saveMediaToDisk(blob, item.name || "timeline-media", ext, kindFor((item as any).type));

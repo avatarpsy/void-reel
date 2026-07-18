@@ -21,7 +21,7 @@ import {
   subscribeSceneListAsProject,
 } from "./services/voidspace-loader";
 import { autoSaveManager } from "./services/auto-save";
-import { loadMediaBlob, saveMediaBlob } from "./services/media-storage";
+import { loadMediaBlobForProject, saveMediaBlob } from "./services/media-storage";
 import {
   buildLegacyVoidspaceProjectId,
   buildUserScopedVoidspaceProjectId,
@@ -520,7 +520,9 @@ async function hydrateLibraryMediaBlobs(): Promise<void> {
       // 1. Ensure we have the bytes: existing blob → IndexedDB → disk originalUrl.
       let blob: Blob | null = item.blob instanceof Blob ? item.blob : null;
       if (!blob) {
-        try { blob = await loadMediaBlob(item.id); } catch { /* miss */ }
+        // Project-scoped load: a blob cached under this mediaId by ANOTHER
+        // project (scene ids collide) is rejected so we refetch our own.
+        try { blob = await loadMediaBlobForProject(proj.id, item.id); } catch { /* miss */ }
       }
       if (!blob && item.originalUrl) {
         try {
@@ -1783,7 +1785,7 @@ function App() {
                 reply({ type: "voidspace:media-materialized", requestId: msg.requestId, ok: true, url: existing, durationSec: item.duration ?? null, alreadyUploaded: true });
                 break;
               }
-              const blob = await loadMediaBlob(mediaId);
+              const blob = await loadMediaBlobForProject(useProjectStore.getState().project.id, mediaId);
               if (!blob) {
                 reply({ type: "voidspace:error", requestId: msg.requestId, error: "media bytes not found in local storage" });
                 break;
