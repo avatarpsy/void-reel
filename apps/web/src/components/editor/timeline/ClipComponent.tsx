@@ -351,7 +351,9 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
   // and is not mode-gated, so waveforms show in video mode too.
   useEffect(() => {
     if (!mediaItem) return;
-    if (mediaItem.waveformData) return;
+    // Only treat a NON-EMPTY waveform as "done" — a zero-length array (a past
+    // failed decode) must not block regeneration.
+    if ((mediaItem.waveformData?.length ?? 0) > 0) return;
     if (mediaItem.type !== "audio" && mediaItem.type !== "video") return;
     let cancelled = false;
     const projectId = useProjectStore.getState().project.id;

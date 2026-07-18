@@ -97,6 +97,50 @@ async function resolveBlob(item: MediaItem, projectId: string): Promise<Blob | n
 }
 
 /**
+ * Decode an audio blob with Web Audio and reduce it to abs-peak samples at
+ * `samplesPerSecond`. Robust for any browser-playable audio format — the
+ * reliable path for narration/music/SFX. Returns null on failure so the
+ * caller can fall back to the mediabunny generator.
+ */
+async function peaksViaWebAudio(
+  blob: Blob,
+  samplesPerSecond: number,
+): Promise<{ peaks: Float32Array; duration: number } | null> {
+  try {
+    const AC: typeof AudioContext | undefined =
+      (window as any).AudioContext || (window as any).webkitAudioContext;
+    if (!AC) return null;
+    const buf = await blob.arrayBuffer();
+    const ac = new AC();
+    let audio: AudioBuffer;
+    try {
+      // slice(0) — decodeAudioData detaches the buffer; keep the original intact.
+      audio = await ac.decodeAudioData(buf.slice(0));
+    } finally {
+      try { await ac.close(); } catch { /* already closed */ }
+    }
+    const duration = audio.duration;
+    const ch = audio.getChannelData(0);
+    const total = Math.max(1, Math.ceil(duration * samplesPerSecond));
+    const per = Math.max(1, Math.floor(ch.length / total));
+    const peaks = new Float32Array(total);
+    for (let i = 0; i < total; i++) {
+      const start = i * per;
+      const end = Math.min(ch.length, start + per);
+      let peak = 0;
+      for (let j = start; j < end; j++) {
+        const a = Math.abs(ch[j]);
+        if (a > peak) peak = a;
+      }
+      peaks[i] = peak;
+    }
+    return { peaks, duration };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Ensure peaks exist for an audio/video media item. Resolves to the
  * peaks Float32Array (also cached on disk), or null if the media has no
  * audio / no resolvable source. Safe to call repeatedly — deduped.
@@ -126,6 +170,7 @@ export function ensureMediaWaveform(
   const existing = inFlight.get(item.id);
   if (existing) return existing;
 
+  const isAudio = item.type === "audio";
   const job = (async (): Promise<WaveformResult | null> => {
     await acquireSlot();
     try {
@@ -134,15 +179,35 @@ export function ensureMediaWaveform(
         failedAt.set(item.id, Date.now());
         return null;
       }
-      const waveform = await getWaveformGenerator().generateWaveform(
-        blob,
-        projectId ? `${projectId}::${item.id}` : item.id,
-        { samplesPerSecond: SAMPLES_PER_SECOND, enableCaching: true },
-      );
-      const peaks = waveform?.peaks ?? null;
-      if (!peaks) { failedAt.set(item.id, Date.now()); return null; }
+      let peaks: Float32Array | null = null;
+      let duration = 0;
+
+      // AUDIO (narration/music/sfx): decode via Web Audio decodeAudioData —
+      // it reliably decodes any browser-playable audio (mp3/wav/etc.) and
+      // gives the true length, whereas mediabunny's WebCodecs path returned
+      // EMPTY peaks for some narration mp3s (which then stuck as a permanent
+      // placeholder). mediabunny stays the fallback + the VIDEO path.
+      if (isAudio) {
+        const wa = await peaksViaWebAudio(blob, SAMPLES_PER_SECOND);
+        if (wa && wa.peaks.length > 0) { peaks = wa.peaks; duration = wa.duration; }
+      }
+      if (!peaks || peaks.length === 0) {
+        const waveform = await getWaveformGenerator().generateWaveform(
+          blob,
+          projectId ? `${projectId}::${item.id}` : item.id,
+          { samplesPerSecond: SAMPLES_PER_SECOND, enableCaching: true },
+        );
+        if (waveform?.peaks && waveform.peaks.length > 0) {
+          peaks = waveform.peaks;
+          duration = waveform.duration ?? 0;
+        }
+      }
+      // EMPTY peaks are a FAILURE, not success — an empty Float32Array is
+      // truthy, so the old `if (!peaks)` let it through and the timeline
+      // cached a zero-length waveform that never regenerated.
+      if (!peaks || peaks.length === 0) { failedAt.set(item.id, Date.now()); return null; }
       failedAt.delete(item.id);
-      return { peaks, duration: waveform?.duration ?? 0 };
+      return { peaks, duration };
     } catch {
       failedAt.set(item.id, Date.now());
       return null;

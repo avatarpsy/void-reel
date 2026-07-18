@@ -1008,10 +1008,11 @@ export const useProjectStore = create<ProjectState>()(
 
       setMediaWaveform: (mediaId: string, peaks: Float32Array) => {
         const { project } = get();
+        if (!peaks || peaks.length === 0) return; // never cache an empty waveform
         const index = project.mediaLibrary.items.findIndex(
           (item) => item.id === mediaId,
         );
-        if (index === -1 || project.mediaLibrary.items[index].waveformData) {
+        if (index === -1 || (project.mediaLibrary.items[index].waveformData?.length ?? 0) > 0) {
           return;
         }
         const items = [...project.mediaLibrary.items];
