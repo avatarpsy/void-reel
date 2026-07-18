@@ -113,108 +113,6 @@ const decodeImageFittedToCanvas = async (
 };
 
 
-interface GPULayer {
-  bitmap: ImageBitmap;
-  transform: ClipTransform;
-}
-
-const renderFrameWithGPU = async (
-  renderer: Renderer,
-  frame: ImageBitmap,
-  transform: ClipTransform,
-  _canvasWidth: number,
-  _canvasHeight: number,
-): Promise<ImageBitmap | null> => {
-  try {
-    const device = renderer.getDevice();
-    if (!device) {
-      return null;
-    }
-
-    renderer.beginFrame();
-
-    const texture = renderer.createTextureFromImage(frame);
-
-    const gpuTransform = {
-      position: transform.position,
-      scale: transform.scale,
-      rotation: transform.rotation,
-      anchor: transform.anchor,
-      opacity: transform.opacity,
-      borderRadius: transform.borderRadius,
-    };
-
-    renderer.renderLayer({
-      texture,
-      transform: gpuTransform,
-      effects: [],
-      opacity: transform.opacity,
-      borderRadius: transform.borderRadius || 0,
-    });
-
-    const result = await renderer.endFrame();
-    renderer.releaseTexture(texture);
-
-    return result;
-  } catch {
-    return null;
-  }
-};
-
-const renderAllLayersWithGPU = async (
-  renderer: Renderer,
-  layers: GPULayer[],
-  _canvasWidth: number,
-  _canvasHeight: number,
-): Promise<ImageBitmap | null> => {
-  try {
-    const device = renderer.getDevice();
-
-    if (!device || layers.length === 0) {
-      return null;
-    }
-
-    renderer.beginFrame();
-
-    const textures: ReturnType<typeof renderer.createTextureFromImage>[] = [];
-
-    for (let i = 0; i < layers.length; i++) {
-      const layer = layers[i];
-
-      const texture = renderer.createTextureFromImage(layer.bitmap);
-      textures.push(texture);
-
-      const gpuTransform = {
-        position: layer.transform.position,
-        scale: layer.transform.scale,
-        rotation: layer.transform.rotation,
-        anchor: layer.transform.anchor,
-        opacity: layer.transform.opacity,
-        borderRadius: layer.transform.borderRadius,
-      };
-
-      renderer.renderLayer({
-        texture,
-        transform: gpuTransform,
-        effects: [],
-        opacity: layer.transform.opacity,
-        borderRadius: layer.transform.borderRadius || 0,
-      });
-    }
-
-    const result = await renderer.endFrame();
-
-    for (const texture of textures) {
-      renderer.releaseTexture(texture);
-    }
-
-    return result;
-  } catch (e) {
-    console.error("[renderAllLayersWithGPU] Error:", e);
-    return null;
-  }
-};
-
 interface ClipWithPlaceholder {
   isPlaceholder?: boolean;
 }
@@ -2338,18 +2236,57 @@ export const Preview: React.FC = () => {
 
         const { video } = cached;
 
-        if (currentClipId !== clip.id) {
-          currentClipId = clip.id;
-          if (video.paused) {
-            video.play().catch(() => {});
-          }
-        }
-
         const clipLocalTime = currentPlayhead - clip.startTime;
         const targetMediaTime = (clip.inPoint || 0) + clipLocalTime;
+
+        if (currentClipId !== clip.id) {
+          currentClipId = clip.id;
+          // Pause every OTHER scene video so only ONE decoder runs at a time.
+          // Previously outgoing clips kept decoding for the whole timeline →
+          // escalating GPU/CPU contention → growing drift → constant re-seeks
+          // → progressively worse glitching. (RC3)
+          for (const [mid, c] of videoCache) {
+            if (mid !== clip.mediaId && !c.video.paused) {
+              try { c.video.pause(); } catch { /* noop */ }
+            }
+          }
+          // Seek the incoming clip to its in-point so its first drawn frame is
+          // correct (the readiness guard below skips drawing until the seek
+          // resolves, so no stale frame leaks).
+          if (Math.abs(video.currentTime - targetMediaTime) > 0.15) {
+            try { video.currentTime = targetMediaTime; } catch { /* noop */ }
+          }
+          if (video.paused) video.play().catch(() => {});
+        }
+
+        // Ongoing drift correction — LOOSE. Hard-seeking on every >0.1s drift
+        // (the old value) fought the element's own decode clock every frame,
+        // and each seek blanks/stales the frame. Only correct a real
+        // divergence, and never seek while a seek is already in flight. (RC2)
         const drift = Math.abs(video.currentTime - targetMediaTime);
-        if (drift > 0.1) {
-          video.currentTime = targetMediaTime;
+        if (drift > 0.4 && !video.seeking) {
+          try { video.currentTime = targetMediaTime; } catch { /* noop */ }
+        }
+
+        // READINESS GUARD (RC1): drawing a <video> that isn't decode-ready
+        // (mid-seek, or only HAVE_METADATA at a fresh boundary) is a silent
+        // no-op → the black fillRect below is what showed = black flashes +
+        // random stale frames. If it's not ready, DON'T repaint — leave the
+        // last good composite on screen (paused frame / previous frame),
+        // advance the playhead, and try again next frame. Also means unready
+        // frames are never captured into the RAM cache (they'd bake in).
+        const videoReady =
+          video.readyState >= 2 /* HAVE_CURRENT_DATA */ &&
+          !video.seeking &&
+          video.videoWidth > 0;
+        if (!videoReady) {
+          const nowP = performance.now();
+          if (nowP - lastPlayheadUpdateRef.current >= PLAYHEAD_UPDATE_THROTTLE_MS) {
+            lastPlayheadUpdateRef.current = nowP;
+            setPlayheadPosition(currentPlayhead);
+          }
+          rafId = requestAnimationFrame(() => { drawFrame(); });
+          return;
         }
 
         const latestClip = (() => {
@@ -2601,434 +2538,6 @@ export const Preview: React.FC = () => {
       });
 
       return results.sort((a, b) => a.trackIndex - b.trackIndex);
-    };
-
-    const findClipAtTime = (time: number) => {
-      const results = findAllClipsAtTime(time);
-      return results.length > 0 ? results[0] : null;
-    };
-
-    const startPlaybackForClip = async (
-      clip: (typeof timelineTracksRef.current)[0]["clips"][0],
-      _track: (typeof timelineTracksRef.current)[0],
-      timelinePosition: number,
-    ) => {
-      try {
-        const mediaItem = getMediaItem(clip.mediaId);
-        const mediaBlob = await resolveMediaBlob(mediaItem);
-        if (!mediaBlob) {
-          const clipEndTime = clip.startTime + clip.duration;
-          const nextResult = findClipAtTime(clipEndTime);
-          if (nextResult && clipEndTime < actualEndTime && isActive) {
-            startPlaybackForClip(
-              nextResult.clip,
-              nextResult.track,
-              clipEndTime,
-            );
-          } else {
-            pause();
-          }
-          return;
-        }
-
-        try {
-          const mediabunny = await import("mediabunny");
-          const { Input, ALL_FORMATS, BlobSource, CanvasSink } = mediabunny;
-
-          const input = new Input({
-            source: new BlobSource(mediaBlob),
-            formats: ALL_FORMATS,
-          });
-
-          const videoTrack = await input.getPrimaryVideoTrack();
-          if (!videoTrack || !isActive) {
-            input[Symbol.dispose]?.();
-            return;
-          }
-
-          const canDecode = await videoTrack.canDecode();
-          if (!canDecode || !isActive) {
-            input[Symbol.dispose]?.();
-            return;
-          }
-
-          // Ensure canvas has valid dimensions BEFORE creating CanvasSink
-          if (canvas.width === 0 || canvas.height === 0) {
-            console.warn(
-              "[Preview] Canvas has zero dimensions, setting from project settings",
-            );
-            canvas.width = settings.width;
-            canvas.height = settings.height;
-          }
-
-          // Validate final canvas dimensions
-          const sinkWidth = canvas.width || settings.width;
-          const sinkHeight = canvas.height || settings.height;
-
-          if (sinkWidth === 0 || sinkHeight === 0) {
-            console.error(
-              "[Preview] Cannot create CanvasSink with zero dimensions",
-            );
-            input[Symbol.dispose]?.();
-            pause();
-            return;
-          }
-
-          // Performance: cap preview decode resolution during real-time playback.
-          // This keeps editor preview responsive while preserving export quality.
-          const PREVIEW_MAX_DIMENSION = 960;
-          const scale = Math.min(
-            1,
-            PREVIEW_MAX_DIMENSION / Math.max(sinkWidth, sinkHeight),
-          );
-          const previewWidth = Math.max(2, Math.round(sinkWidth * scale));
-          const previewHeight = Math.max(2, Math.round(sinkHeight * scale));
-
-          const sink = new CanvasSink(videoTrack, {
-            width: previewWidth,
-            height: previewHeight,
-            fit: "contain",
-            poolSize: getAdaptivePoolSize(previewWidth, previewHeight),
-          });
-
-          const speedEngine = getSpeedEngine();
-          const clipLocalTime = Math.max(0, timelinePosition - clip.startTime);
-
-          let currentSpeed = speedEngine.getClipSpeed(clip.id);
-          let isReverse = speedEngine.isReverse(clip.id);
-          let speedSourceClip = clip.id;
-
-          // If video clip has default speed, check for linked audio clip's speed
-          if (currentSpeed === 1 && !isReverse) {
-            const tracks = timelineTracksRef.current;
-            const audioTracks = tracks.filter((t) => t.type === "audio");
-
-            for (const audioTrack of audioTracks) {
-              for (const audioClip of audioTrack.clips) {
-                if (
-                  audioClip.mediaId === clip.mediaId &&
-                  Math.abs(audioClip.startTime - clip.startTime) < 0.01
-                ) {
-                  const linkedSpeed = speedEngine.getClipSpeed(audioClip.id);
-                  const linkedReverse = speedEngine.isReverse(audioClip.id);
-
-                  if (linkedSpeed !== 1 || linkedReverse) {
-                    currentSpeed = linkedSpeed;
-                    isReverse = linkedReverse;
-                    speedSourceClip = audioClip.id;
-                    break;
-                  }
-                }
-              }
-              if (currentSpeed !== 1 || isReverse) break;
-            }
-          }
-
-          const adjustedLocalTime = speedEngine.getSourceTimeAtPlaybackTime(
-            speedSourceClip,
-            clipLocalTime,
-          );
-          const mediaStartTime = (clip.inPoint || 0) + adjustedLocalTime;
-
-          const mediaEndTime = Math.min(
-            clip.outPoint || (clip.inPoint || 0) + clip.duration,
-            (await videoTrack.computeDuration()) || Infinity,
-          );
-
-          await setupAudioFromAudioTrack(timelinePosition);
-
-          const ctx = canvas.getContext("2d");
-          if (!ctx) {
-            console.error("[Preview] Failed to get 2D context from canvas");
-            input[Symbol.dispose]?.();
-            return;
-          }
-
-          const frameDuration = 1000 / 30;
-
-          let currentMediaTime = mediaStartTime;
-          let currentPlayheadTime = timelinePosition;
-          let lastFrameTimestamp = performance.now();
-          let frameCount = 0;
-
-          const processNextFrame = async () => {
-            if (!isActive) {
-              input[Symbol.dispose]?.();
-              return;
-            }
-
-            try {
-              if (currentMediaTime >= mediaEndTime) {
-                input[Symbol.dispose]?.();
-                cleanupAudioResources();
-                const _range = ramCacheRef.current.getCachedRange();
-                setRamCacheCount(_range.length);
-                setRamCacheState(_range, Math.ceil(actualEndTime * 30));
-
-                const clipEndTime = clip.startTime + clip.duration;
-                const nextResult = findClipAtTime(clipEndTime);
-
-                if (nextResult && clipEndTime < actualEndTime && isActive) {
-                  setPlayheadPosition(clipEndTime);
-                  startPlaybackForClip(
-                    nextResult.clip,
-                    nextResult.track,
-                    clipEndTime,
-                  );
-                } else if (!isScrubbingRef.current) {
-                  setPlayheadPosition(0);
-                  startPositionRef.current = 0;
-                  pause();
-                }
-                return;
-              }
-
-              // ── RAM cache: hit path ──
-              const _fps = 1000 / frameDuration;
-              const _fn = Math.round(currentPlayheadTime * _fps);
-              ramCacheRef.current.setAnchor(_fn);
-              const _cached = ramCacheRef.current.get(_fn);
-              if (_fn % 60 === 0) console.debug('[RAM Preview]', _cached ? 'HIT' : 'MISS', 'frame:', _fn, 'version:', ramCacheRef.current.currentVersion, 'stats:', ramCacheRef.current.getStats());
-              if (_cached) {
-                ctx.drawImage(_cached, 0, 0, canvas.width, canvas.height);
-                const _nowPh = performance.now();
-                if (_nowPh - lastPlayheadUpdateRef.current >= PLAYHEAD_UPDATE_THROTTLE_MS) {
-                  lastPlayheadUpdateRef.current = _nowPh;
-                  setPlayheadPosition(currentPlayheadTime);
-                }
-                frameTotalCountRef.current++;
-                const _elapsed = _nowPh - lastFrameTimestamp;
-                lastFrameTimestamp = _nowPh;
-                const _target = frameDuration / rateRef.current;
-                currentPlayheadTime += frameDuration / 1000;
-                currentMediaTime += (frameDuration / 1000) * currentSpeed;
-                const _delay = Math.max(0, _target - _elapsed);
-                if (isActive) {
-                  if (_delay > 0) setTimeout(() => { if (isActive) animationRef.current = requestAnimationFrame(processNextFrame); }, _delay);
-                  else animationRef.current = requestAnimationFrame(processNextFrame);
-                }
-                return;
-              }
-
-              const frameResult = await (
-                sink as {
-                  getCanvas: (time: number) => Promise<{
-                    canvas: HTMLCanvasElement | OffscreenCanvas;
-                    timestamp: number;
-                    duration: number;
-                  } | null>;
-                }
-              ).getCanvas(currentMediaTime);
-
-              frameCount++;
-
-              if (!frameResult || !frameResult.canvas) {
-                console.warn("[Preview] No frame at time", currentMediaTime);
-                const skipTime = frameDuration / 1000;
-                currentPlayheadTime += skipTime;
-                currentMediaTime += skipTime * currentSpeed;
-                if (isActive) {
-                  animationRef.current =
-                    requestAnimationFrame(processNextFrame);
-                }
-                return;
-              }
-
-              const { canvas: frameCanvas, duration } = frameResult;
-
-              const frameWidth = "width" in frameCanvas ? frameCanvas.width : 0;
-              const frameHeight =
-                "height" in frameCanvas ? frameCanvas.height : 0;
-              if (frameWidth === 0 || frameHeight === 0) {
-                console.warn("[Preview] Frame has zero dimensions, skipping");
-                const skipTime = frameDuration / 1000;
-                currentPlayheadTime += skipTime;
-                currentMediaTime += skipTime * currentSpeed;
-                if (isActive) {
-                  animationRef.current =
-                    requestAnimationFrame(processNextFrame);
-                }
-                return;
-              }
-
-              const currentPlayhead = currentPlayheadTime;
-
-              if (currentPlayhead >= actualEndTime) {
-                if (!isScrubbingRef.current) {
-                  setPlayheadPosition(0);
-                  startPositionRef.current = 0;
-                  pause();
-                }
-                input[Symbol.dispose]?.();
-                return;
-              }
-
-              const clipLocalTime = currentPlayhead - clip.startTime;
-              let transform = getAnimatedTransform(
-                (clip.transform as ClipTransform) || DEFAULT_TRANSFORM,
-                clip.keyframes,
-                clipLocalTime,
-              );
-
-              if (
-                clip.emphasisAnimation &&
-                clip.emphasisAnimation.type !== "none"
-              ) {
-                const emphasisState = applyEmphasisAnimation(
-                  clip.emphasisAnimation,
-                  clipLocalTime,
-                );
-                transform = {
-                  ...transform,
-                  opacity: transform.opacity * emphasisState.opacity,
-                  scale: {
-                    x:
-                      transform.scale.x *
-                      emphasisState.scale *
-                      emphasisState.scaleX,
-                    y:
-                      transform.scale.y *
-                      emphasisState.scale *
-                      emphasisState.scaleY,
-                  },
-                  position: {
-                    x:
-                      transform.position.x +
-                      emphasisState.offsetX * canvas.width,
-                    y:
-                      transform.position.y +
-                      emphasisState.offsetY * canvas.height,
-                  },
-                  rotation: transform.rotation + emphasisState.rotation,
-                };
-              }
-
-              let processedFrame:
-                | ImageBitmap
-                | HTMLCanvasElement
-                | OffscreenCanvas = frameCanvas;
-              try {
-                const frameBitmap = await createImageBitmap(frameCanvas);
-                // Inspector/agent effects live in the EffectsBridge maps,
-                // NOT clip.effects — consult both or playback silently
-                // skips every applied look.
-                const hasEffects = (clip.effects && clip.effects.length > 0)
-                  || (() => { try { return getEffectsBridge().hasClipEffects(clip.id); } catch { return false; } })();
-                processedFrame = hasEffects
-                  ? await applyEffectsToFrame(clip.id, frameBitmap)
-                  : frameBitmap;
-              } catch {}
-
-              const useGPU =
-                rendererRef.current && rendererRef.current.type === "webgpu";
-
-              if (useGPU && processedFrame instanceof ImageBitmap) {
-                const gpuResult = await renderFrameWithGPU(
-                  rendererRef.current!,
-                  processedFrame,
-                  transform,
-                  canvas.width,
-                  canvas.height,
-                );
-                if (gpuResult) {
-                  ctx.clearRect(0, 0, canvas.width, canvas.height);
-                  ctx.drawImage(gpuResult, 0, 0);
-                  gpuResult.close();
-                } else {
-                  ctx.fillStyle = "#000000";
-                  ctx.fillRect(0, 0, canvas.width, canvas.height);
-                  drawFrameWithTransform(
-                    ctx,
-                    processedFrame,
-                    transform,
-                    canvas.width,
-                    canvas.height,
-                  );
-                }
-              } else {
-                ctx.fillStyle = "#000000";
-                ctx.fillRect(0, 0, canvas.width, canvas.height);
-                drawFrameWithTransform(
-                  ctx,
-                  processedFrame,
-                  transform,
-                  canvas.width,
-                  canvas.height,
-                );
-              }
-
-              // ── RAM cache: store (sync capture, async bitmap) ──
-              try {
-                const _id = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                const _totalF = Math.ceil(actualEndTime * 30);
-                createImageBitmap(_id).then((bmp) => {
-                  ramCacheRef.current.set(_fn, bmp);
-                  if (_fn % 30 === 0) {
-                    const range = ramCacheRef.current.getCachedRange();
-                    setRamCacheState(range, _totalF);
-                    setRamCacheCount(range.length);
-                  }
-                }).catch(() => {});
-              } catch {}
-
-              const nowPh = performance.now();
-              if (nowPh - lastPlayheadUpdateRef.current >= PLAYHEAD_UPDATE_THROTTLE_MS) {
-                lastPlayheadUpdateRef.current = nowPh;
-                setPlayheadPosition(currentPlayhead);
-              }
-
-              const now = performance.now();
-              const elapsed = now - lastFrameTimestamp;
-              const actualFrameDuration =
-                duration > 0 ? duration * 1000 : frameDuration;
-              const targetTime = actualFrameDuration / rateRef.current;
-
-              // Adaptive quality: track frame drops for auto mode
-              frameTotalCountRef.current++;
-              if (elapsed > targetTime * 1.5) {
-                frameDropCountRef.current++;
-              }
-
-              const normalTimeAdvance = actualFrameDuration / 1000;
-              const mediaTimeAdvance = normalTimeAdvance * currentSpeed;
-              currentPlayheadTime += normalTimeAdvance;
-              currentMediaTime += mediaTimeAdvance;
-
-              const delay = Math.max(0, targetTime - elapsed);
-              lastFrameTimestamp = now;
-
-              if (isActive) {
-                if (delay > 0) {
-                  setTimeout(() => {
-                    if (isActive) {
-                      animationRef.current =
-                        requestAnimationFrame(processNextFrame);
-                    }
-                  }, delay);
-                } else {
-                  animationRef.current =
-                    requestAnimationFrame(processNextFrame);
-                }
-              }
-            } catch (error) {
-              console.error("[Preview] Frame error:", error);
-              input[Symbol.dispose]?.();
-              pause();
-            }
-          };
-
-          animationRef.current = requestAnimationFrame(processNextFrame);
-        } catch (error) {
-          console.error("[Preview] MediaBunny setup error:", error);
-          pause();
-        }
-      } catch (outerError) {
-        console.error(
-          "[Preview] startPlaybackForClip outer error:",
-          outerError,
-        );
-        pause();
-      }
     };
 
     const initClipResources = async (
@@ -3615,6 +3124,13 @@ export const Preview: React.FC = () => {
                 };
 
                 try {
+                  // Await the real decoded frame (no artificial timeout). An
+                  // earlier 50ms race abandoned slow decodes and returned a
+                  // STALE held frame, which made one blend layer visibly FREEZE
+                  // while the other advanced. Awaiting keeps both layers in
+                  // sync (frame-correct); a genuinely hung decode is still
+                  // caught by the frame watchdog. Real smoothness comes from
+                  // read-ahead buffering (planned), not from dropping frames.
                   const frameResult = await (
                     resources.sink as {
                       getCanvas: (time: number) => Promise<{
@@ -3687,10 +3203,22 @@ export const Preview: React.FC = () => {
 
           const validFrames = [...imageClipFrames, ...validVideoFrames];
 
+          // COMPLETENESS GATE — the fix for the blend BLACKOUT. Every active
+          // video layer must have a frame (fresh or its own held one) before
+          // we paint. If a layer is still missing (decode not ready / warming),
+          // painting would clear to black and composite only the ready layers —
+          // so a blend layer would composite against BLACK (the blackout) and
+          // that bad frame would get cached. Instead we HOLD the last COMPLETE
+          // composite and retry next frame. Text/shape-only frames (no video
+          // layers expected) are always "complete".
+          const expectedVideoLayers = videoClipPromises.length;
+          const composeComplete = validVideoFrames.length >= expectedVideoLayers;
+
           if (
-            validFrames.length > 0 ||
-            currentTextClips.length > 0 ||
-            currentShapeClips.length > 0
+            composeComplete &&
+            (validFrames.length > 0 ||
+              currentTextClips.length > 0 ||
+              currentShapeClips.length > 0)
           ) {
             // Composite in PROJECT coordinates into the scaled offscreen —
             // every renderer keeps receiving canvas.width/height while the
@@ -3733,141 +3261,9 @@ export const Preview: React.FC = () => {
               )
               .sort((a, b) => b.originalIndex - a.originalIndex);
 
-            // Per-clip blend (AE screen/add/multiply/…) only exists on the
-            // canvas 2D path (globalCompositeOperation). When any visible
-            // clip carries a non-normal blend, composite the whole frame on
-            // canvas so layers blend against each other in true z-order.
-            const hasBlend = validFrames.some(
-              (f) => (f.clip as { blendMode?: string }).blendMode &&
-                (f.clip as { blendMode?: string }).blendMode !== "normal",
-            );
-            const useGPU =
-              rendererRef.current && rendererRef.current.type === "webgpu" && !hasBlend;
-
-            if (useGPU) {
-              const gpuLayers: GPULayer[] = [];
-              const tempBitmaps: ImageBitmap[] = [];
-
-              for (const { track, originalIndex } of allRenderableTracks) {
-                if (track.type === "video") {
-                  const trackFrames = validFrames.filter(
-                    (f) => clipToTrackIndex.get(f.clip.id) === originalIndex,
-                  );
-                  for (const { transform, frame } of trackFrames) {
-                    if (frame instanceof ImageBitmap) {
-                      gpuLayers.push({
-                        bitmap: frame,
-                        transform,
-                      });
-                    }
-                  }
-                } else if (track.type === "image") {
-                  const trackFrames = validFrames.filter(
-                    (f) => clipToTrackIndex.get(f.clip.id) === originalIndex,
-                  );
-                  for (const { transform, frame } of trackFrames) {
-                    drawFrameWithTransform(
-                      ctx,
-                      frame,
-                      transform,
-                      canvas.width,
-                      canvas.height,
-                    );
-                  }
-                } else if (track.type === "graphics") {
-                  const trackShapeClips = activeShapeClips.filter(
-                    (sc) => sc.trackId === track.id,
-                  );
-                  for (const shapeClip of trackShapeClips) {
-                    const offscreen = new OffscreenCanvas(
-                      canvas.width,
-                      canvas.height,
-                    );
-                    const offCtx = offscreen.getContext("2d");
-                    if (offCtx) {
-                      renderShapeClipToCanvas(
-                        offCtx as unknown as CanvasRenderingContext2D,
-                        shapeClip,
-                        canvas.width,
-                        canvas.height,
-                        currentPlayhead,
-                      );
-                      const bitmap = await createImageBitmap(offscreen);
-                      tempBitmaps.push(bitmap);
-                      gpuLayers.push({
-                        bitmap,
-                        transform: {
-                          ...DEFAULT_TRANSFORM,
-                          opacity: 1,
-                          scale: { x: 1, y: 1 },
-                          position: { x: 0, y: 0 },
-                          anchor: { x: 0, y: 0 },
-                        },
-                      });
-                    }
-                  }
-                } else if (track.type === "text") {
-                  const trackTextClips = activeTextClips.filter(
-                    (tc) => tc.trackId === track.id,
-                  );
-                  for (const textClip of trackTextClips) {
-                    const offscreen = new OffscreenCanvas(
-                      canvas.width,
-                      canvas.height,
-                    );
-                    const offCtx = offscreen.getContext("2d");
-                    if (offCtx) {
-                      renderTextClipToCanvas(
-                        offCtx as unknown as CanvasRenderingContext2D,
-                        textClip,
-                        canvas.width,
-                        canvas.height,
-                        currentPlayhead,
-                      );
-                      const bitmap = await createImageBitmap(offscreen);
-                      tempBitmaps.push(bitmap);
-                      gpuLayers.push({
-                        bitmap,
-                        transform: {
-                          ...DEFAULT_TRANSFORM,
-                          opacity: 1,
-                          scale: { x: 1, y: 1 },
-                          position: { x: 0, y: 0 },
-                          anchor: { x: 0, y: 0 },
-                        },
-                      });
-                    }
-                  }
-                }
-              }
-
-              if (gpuLayers.length > 0) {
-                const gpuResult = await renderAllLayersWithGPU(
-                  rendererRef.current!,
-                  gpuLayers,
-                  canvas.width,
-                  canvas.height,
-                );
-                if (gpuResult) {
-                  ctx.drawImage(gpuResult, 0, 0);
-                  gpuResult.close();
-                } else {
-                  for (const layer of gpuLayers) {
-                    drawFrameWithTransform(
-                      ctx,
-                      layer.bitmap,
-                      layer.transform,
-                      canvas.width,
-                      canvas.height,
-                    );
-                  }
-                }
-              }
-
-              for (const bitmap of tempBitmaps) {
-                bitmap.close();
-              }
-            } else {
+            {
+              // (canvas2D compositing — the only path; the always-false WebGPU
+              // branch was removed. Bare block kept to avoid reindenting.)
               for (const { track, originalIndex } of allRenderableTracks) {
                 if (track.type === "video" || track.type === "image") {
                   const trackFrames = validFrames.filter(
@@ -4058,6 +3454,28 @@ export const Preview: React.FC = () => {
       return nextStart;
     };
 
+    // ────────────────────────────────────────────────────────────────────
+    // TWO PLAYBACK PATHS — this is deliberate; don't "unify" them blindly.
+    //
+    //  • NATIVE (startNativeVideoPlayback): the fast path for the COMMON case
+    //    — a single sequence of plain video clips (+ optional image bg + text
+    //    /shape overlays). Uses hardware <video> decode straight to the
+    //    canvas, one decoder active at a time. Cheap + smooth. NO effects,
+    //    blend modes, overlapping video layers, or speed changes.
+    //
+    //  • MULTI-TRACK (startMultiTrackPlayback / processMultiTrackFrame): the
+    //    full COMPOSITOR. Decodes every layer via mediabunny CanvasSink and
+    //    composites in z-order. Handles what native can't: simultaneous video
+    //    layers (overlaps), blend modes, clip.effects / EffectsBridge looks,
+    //    image emphasis, and speed/reverse. This is also the seam where
+    //    NESTED track-group rendering will plug in later (see the z-order loop
+    //    in processMultiTrackFrame).
+    //
+    // canUseNativeVideoPlayback() below is the AUTHORITATIVE gate: it returns
+    // canUse:false (→ multi-track) the moment any of those complex features is
+    // present. So native is a strict optimization of the simple case, not a
+    // parallel implementation to keep in sync feature-for-feature.
+    // ────────────────────────────────────────────────────────────────────
     const startPlayback = async () => {
       const nativeCheck = canUseNativeVideoPlayback(playbackStartPosition);
 

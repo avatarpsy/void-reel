@@ -243,7 +243,6 @@ export function Toolbar() {
     setActiveTool,
     togglePanelCollapsed,
     toggleInspectorCollapsed,
-    setCurrentView,
     openExportDialog,
     toggleShortcutsPanel,
     setPublishCarouselOpen,
@@ -272,17 +271,21 @@ export function Toolbar() {
 
   return (
     <div className="h-12 bg-card border-b border-border flex items-center px-3 gap-2">
-      <button
-        onClick={() => setCurrentView('welcome')}
+      {/* Back to the Voidspace Studio projects hub, landing on the Images tab —
+          same destination as the welcome screen's "My Projects" link. A real
+          <a> (not a view switch) so middle-click / open-in-new-tab work; the
+          current project is safe because useAutoSave persists it to IndexedDB. */}
+      <a
+        href="/studio/projects?tab=images"
         className="p-1.5 rounded-lg hover:bg-accent transition-colors"
-        title="Home"
+        title="My Projects"
       >
         <img
           src={`${import.meta.env.BASE_URL}images/logo.png`}
           alt="Voidspace"
           className="w-6 h-6 hover:scale-110 transition-transform"
         />
-      </button>
+      </a>
 
       <div className="w-px h-6 bg-border mx-1" />
 

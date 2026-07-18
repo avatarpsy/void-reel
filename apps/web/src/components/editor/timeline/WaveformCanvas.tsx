@@ -114,7 +114,14 @@ export const WaveformCanvas: React.FC<WaveformCanvasProps> = ({
     ro.observe(parent);
     return () => {
       ro.disconnect();
-      if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+      if (rafRef.current != null) {
+        cancelAnimationFrame(rafRef.current);
+        // MUST reset — otherwise the next effect run's schedule() sees a
+        // stale non-null id, early-returns, and draw() never runs again.
+        // That froze the backing store mid-trim while the width:100% canvas
+        // CSS-stretched it → "waveform scales instead of cropping".
+        rafRef.current = null;
+      }
     };
   }, [peaks, startFrac, endFrac, color]);
 

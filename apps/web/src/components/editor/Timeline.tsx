@@ -425,50 +425,41 @@ export const Timeline: React.FC = () => {
       return;
     }
 
-    // Convert pixel coordinates to timeline time using current zoom level
-    const minX = Math.min(selectionBox.startX, selectionBox.currentX);
-    const maxX = Math.max(selectionBox.startX, selectionBox.currentX);
-    const minTime = minX / pixelsPerSecond;
-    const maxTime = maxX / pixelsPerSecond;
-
-    let currentY = 0;
+    // Intersect the marquee with each clip's ACTUAL rendered rect. Doing it in
+    // viewport coordinates (getBoundingClientRect) is bulletproof — it needs no
+    // assumptions about track heights, keyframe lanes, gaps, ruler offset, or
+    // scroll, all of which the old content-coordinate math got subtly wrong
+    // (why the box selected nothing across tracks). selectionBox.startX/Y are
+    // CONTENT coords, so map them back to the viewport via tracksRef + scroll.
+    const container = tracksRef.current;
     const selectedItems: { type: "clip"; id: string; trackId: string }[] = [];
-
-    // Iterate through tracks to find which are overlapped by selection box
-    for (const track of tracks) {
-      const trackH = getEffectiveTrackHeight(track);
-      const trackMinY = currentY;
-      const trackMaxY = currentY + trackH;
-
-      const minY = Math.min(selectionBox.startY, selectionBox.currentY);
-      const maxY = Math.max(selectionBox.startY, selectionBox.currentY);
-
-      // Check if selection box vertically overlaps this track
-      const trackOverlaps = minY < trackMaxY && maxY > trackMinY;
-
-      if (trackOverlaps) {
-        for (const clip of track.clips) {
-          const clipStart = clip.startTime;
-          const clipEnd = clip.startTime + clip.duration;
-
-          // Check if selection box time range overlaps clip time range
-          const clipOverlaps = minTime < clipEnd && maxTime > clipStart;
-
-          if (clipOverlaps) {
-            selectedItems.push({
-              type: "clip",
-              id: clip.id,
-              trackId: track.id,
-            });
+    if (container) {
+      const cr = container.getBoundingClientRect();
+      const toViewX = (cx: number) => cx + cr.left - scrollX;
+      const toViewY = (cy: number) => cy + cr.top - scrollY;
+      const bx1 = toViewX(Math.min(selectionBox.startX, selectionBox.currentX));
+      const bx2 = toViewX(Math.max(selectionBox.startX, selectionBox.currentX));
+      const by1 = toViewY(Math.min(selectionBox.startY, selectionBox.currentY));
+      const by2 = toViewY(Math.max(selectionBox.startY, selectionBox.currentY));
+      const seen = new Set<string>();
+      container.querySelectorAll<HTMLElement>("[data-clip-id]").forEach((el) => {
+        const r = el.getBoundingClientRect();
+        // AABB overlap in viewport space.
+        if (bx1 < r.right && bx2 > r.left && by1 < r.bottom && by2 > r.top) {
+          const id = el.getAttribute("data-clip-id");
+          const trackId = el.getAttribute("data-track-id") || "";
+          if (id && !seen.has(id)) {
+            seen.add(id);
+            selectedItems.push({ type: "clip", id, trackId });
           }
         }
-      }
-
-      currentY += trackH;
+      });
     }
 
     if (selectedItems.length > 0) {
       selectMultiple(selectedItems);
+    } else {
+      clearSelection();
     }
 
     setIsBoxSelecting(false);
@@ -476,10 +467,10 @@ export const Timeline: React.FC = () => {
   }, [
     isBoxSelecting,
     selectionBox,
-    pixelsPerSecond,
-    tracks,
-    getEffectiveTrackHeight,
+    scrollX,
+    scrollY,
     selectMultiple,
+    clearSelection,
   ]);
 
   useEffect(() => {
@@ -536,6 +527,41 @@ export const Timeline: React.FC = () => {
   const { moveClip } = useProjectStore();
   const handleMoveClip = useCallback(
     async (clipId: string, newStartTime: number, targetTrackId?: string) => {
+      // MULTI-SELECT MOVE (Premiere-style): if the dragged clip is part of a
+      // multi-selection, shift EVERY selected clip by the same time delta so
+      // they move together as a group. (Before, only the dragged clip moved.)
+      // Cross-track group moves are left to the single-clip path; this handles
+      // the common same-track time-shift of N clips.
+      const sel = getSelectedClipIds();
+      if (!targetTrackId && sel.length > 1 && sel.includes(clipId)) {
+        useProjectStore.setState((state) => {
+          const tl = state.project.timeline;
+          const dragged = tl.tracks.flatMap((t) => t.clips).find((c) => c.id === clipId);
+          if (!dragged) return {} as any;
+          const delta = newStartTime - dragged.startTime;
+          if (Math.abs(delta) < 1e-6) return {} as any;
+          const selSet = new Set(sel);
+          return {
+            project: {
+              ...state.project,
+              timeline: {
+                ...tl,
+                tracks: tl.tracks.map((t) => ({
+                  ...t,
+                  clips: t.clips.map((c) =>
+                    selSet.has(c.id)
+                      ? { ...c, startTime: Math.max(0, c.startTime + delta) }
+                      : c,
+                  ),
+                })),
+              },
+              modifiedAt: Date.now(),
+            },
+          };
+        });
+        return;
+      }
+
       const graphicClip = allShapeClips.find((sc) => sc.id === clipId);
       if (graphicClip && graphicsEngine) {
         if (graphicClip.type === "sticker" || graphicClip.type === "emoji") {
@@ -552,7 +578,7 @@ export const Timeline: React.FC = () => {
         await moveClip(clipId, newStartTime, targetTrackId);
       }
     },
-    [moveClip, allShapeClips, graphicsEngine],
+    [moveClip, allShapeClips, graphicsEngine, getSelectedClipIds],
   );
 
   const [snapIndicatorTime, setSnapIndicatorTime] = React.useState<
@@ -1343,12 +1369,14 @@ export const Timeline: React.FC = () => {
                 <div
                   className="absolute border-2 border-primary bg-primary/10 pointer-events-none z-40"
                   style={{
-                    left:
-                      Math.min(selectionBox.startX, selectionBox.currentX) -
-                      scrollX,
-                    top:
-                      Math.min(selectionBox.startY, selectionBox.currentY) -
-                      scrollY,
+                    // startX/startY are CONTENT coords (already include scroll).
+                    // This box is absolutely positioned INSIDE the scrolling
+                    // content, so it scrolls with it — use the content coords
+                    // directly. Subtracting scroll here double-compensated and
+                    // offset the box by the scroll amount (why it started in the
+                    // wrong place once the timeline was scrolled).
+                    left: Math.min(selectionBox.startX, selectionBox.currentX),
+                    top: Math.min(selectionBox.startY, selectionBox.currentY),
                     width: Math.abs(
                       selectionBox.currentX - selectionBox.startX,
                     ),

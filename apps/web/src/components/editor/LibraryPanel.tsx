@@ -1,9 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Search, Loader2, Plus, Check, Film, Music2, Image as ImageIcon, AudioLines, Mic, Pencil, HardDrive, RefreshCw, ChevronDown, ChevronRight, Download } from "lucide-react";
+import { Search, Loader2, Plus, Check, Film, Music2, Image as ImageIcon, AudioLines, Mic, Pencil, HardDrive, RefreshCw, ChevronDown, ChevronRight, Download, Settings2, X } from "lucide-react";
 import { useVoidspaceStore } from "../../stores/voidspace-store";
 import { useProjectStore } from "../../stores/project-store";
 import { saveMediaBlob, loadMediaBlob } from "../../services/media-storage";
-import { fetchLibraryBlob } from "../../services/library-drop";
 import { checkForRecovery, recoverProject } from "../../services/auto-save";
 import { MediaPreviewOverlay, type PreviewKind } from "./MediaPreviewOverlay";
 
@@ -50,6 +49,8 @@ interface LibItem {
   artist?: string;
   prompt?: string;
   coverUrl?: string;
+  mood?: string;
+  sceneNumber?: number;
 }
 
 /** A media item found in another project saved on THIS device (IndexedDB). */
@@ -108,6 +109,17 @@ function fmtBytes(n: number): string {
   if (!n) return "";
   if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** Which items can have their metadata edited (rename / prompt / mood), routed
+ *  by /api/studio/library-item to the item's own source:
+ *    gm|song|umusic  → user generations (Firestore)
+ *    scene-vid|img|narr|sfx → scene subcollection docs
+ *    local:          → the local-disk manifest entry
+ *  Only scene-list-level field items (scene-ff / scene-*url / scene-music) and
+ *  device-tab items aren't individually writable, so they get no gear. */
+function isEditableItem(it: LibItem): boolean {
+  return /^(gm|song|umusic|local|scene-vid|scene-img|scene-narr|scene-sfx):/.test(it.id);
 }
 
 /** Human tag for where an item came from — makes the grid scannable. */
@@ -211,6 +223,8 @@ export const LibraryPanel: React.FC = () => {
   // Clicking a card previews it fullscreen; drag adds to the timeline, the +
   // affordance imports it into Media. (Click no longer auto-imports.)
   const [previewItem, setPreviewItem] = useState<{ url: string; editUrl?: string; kind: PreviewKind; name: string; coverUrl?: string } | null>(null);
+  // Item whose metadata is being edited (rename / prompt / mood).
+  const [editItem, setEditItem] = useState<LibItem | null>(null);
   // "On this device" — media inside other locally-saved projects.
   const [deviceItems, setDeviceItems] = useState<DeviceItem[]>([]);
   // Collapsed section titles — persisted so the layout the user set survives
@@ -267,7 +281,10 @@ export const LibraryPanel: React.FC = () => {
       // block with the spinner when we have nothing cached to show.
       const cached = libClientCache.get(cacheKey);
       if (cached) { setItems(cached.items); setTotal(cached.total); setLoading(false); }
-      else { setLoading(true); }
+      // No cache for this filter → CLEAR the previous filter's items now so the
+      // grid doesn't keep showing (e.g.) video tiles after switching to Music
+      // while the fetch is in flight. Shows the spinner instead — instant, clean.
+      else { setItems([]); setTotal(0); setLoading(true); }
     } else { setLoadingMore(true); }
     try {
       const token = await useVoidspaceStore.getState().getIdToken();
@@ -433,26 +450,6 @@ export const LibraryPanel: React.FC = () => {
     saveMediaBlob(proj.id, actionId, blob, {} as any).catch(() => {});
   }, []);
 
-  const addToProject = useCallback(async (it: LibItem) => {
-    if (importedUrls.has(it.url)) return; // already in this project
-    setAddingId(it.id);
-    try {
-      // local-asset URLs are auth-stamped by the main.tsx fetch hook; absolute
-      // cloud URLs (Firestore-sourced items) fall back to the media-proxy.
-      const blob = await fetchLibraryBlob(it.url);
-      if (!blob) throw new Error("fetch failed");
-      const extGuess = it.kind === "image" ? "jpg" : (it.type === "video" ? "mp4" : "mp3");
-      const fname = `${(it.label || it.kind).replace(/[^a-z0-9._-]+/gi, "-").slice(0, 48) || it.kind}.${extGuess}`;
-      const file = new File([blob], fname, { type: blob.type || "application/octet-stream" });
-      const result = await importMedia(file);
-      if (result.success && result.actionId) tagImported(result.actionId, it.url, blob);
-    } catch (e) {
-      console.warn("[library] add-to-project failed:", e);
-    } finally {
-      setAddingId(null);
-    }
-  }, [importMedia, importedUrls, tagImported]);
-
   const deviceBlobUrl = useCallback(async (d: DeviceItem): Promise<string | null> => {
     if (d.objectUrl) return d.objectUrl;
     const blob = await loadMediaBlob(d.mediaId).catch(() => null);
@@ -607,18 +604,19 @@ export const LibraryPanel: React.FC = () => {
               <Pencil size={12} />
             </button>
           )}
-          {/* add-to-Media affordance — explicit (click previews instead) */}
-          <button
-            type="button"
-            disabled={added || addingId === it.id}
-            onClick={(e) => { e.stopPropagation(); if (!added && addingId !== it.id) void addToProject(it); }}
-            title={added ? "In this project's Media" : "Add to Media"}
-            className={`absolute top-1.5 right-1.5 w-6 h-6 rounded-full flex items-center justify-center shadow ${
-              added ? "bg-primary text-white" : "bg-black/55 text-white opacity-0 group-hover:opacity-100 hover:bg-black/80"
-            } transition-opacity`}
-          >
-            {addingId === it.id ? <Loader2 size={13} className="animate-spin" /> : added ? <Check size={13} /> : <Plus size={13} />}
-          </button>
+          {/* Edit metadata (rename / prompt / mood) — replaces the old
+              "add to Media" +; items are still added by dragging onto the
+              timeline. Only user-owned generations are editable. */}
+          {isEditableItem(it) && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); setEditItem(it); }}
+              title="Edit name & metadata"
+              className="absolute top-1.5 right-1.5 w-6 h-6 rounded-full flex items-center justify-center shadow bg-black/55 text-white opacity-0 group-hover:opacity-100 hover:bg-black/80 transition-opacity"
+            >
+              <Settings2 size={12} />
+            </button>
+          )}
           {/* download with embedded metadata (title/artist/prompt/cover) */}
           <button
             type="button"
@@ -873,6 +871,119 @@ export const LibraryPanel: React.FC = () => {
           onClose={() => setPreviewItem(null)}
         />
       )}
+      {editItem && (
+        <LibraryItemEditor
+          item={editItem}
+          onClose={() => setEditItem(null)}
+          onSaved={() => { setEditItem(null); void load(0, true); }}
+        />
+      )}
+    </div>
+  );
+};
+
+/**
+ * Small modal to rename a Library item + refine its prompt/mood — the metadata
+ * that drives search + agent findability. Persists to the item's own source
+ * via /api/studio/library-item, then triggers a forced Library refresh.
+ */
+const LibraryItemEditor: React.FC<{
+  item: LibItem;
+  onClose: () => void;
+  onSaved: () => void;
+}> = ({ item, onClose, onSaved }) => {
+  const [title, setTitle] = useState(item.title || item.label || "");
+  const [prompt, setPrompt] = useState(item.prompt || "");
+  const [mood, setMood] = useState(item.mood || "");
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const save = async () => {
+    setSaving(true);
+    setErr(null);
+    try {
+      const token = await useVoidspaceStore.getState().getIdToken();
+      const res = await fetch(`${apiBase()}/api/studio/library-item`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ id: item.id, title, prompt, mood }),
+      });
+      if (!res.ok) throw new Error(`save ${res.status}`);
+      onSaved();
+    } catch (e: any) {
+      setErr(e?.message ?? "Failed to save");
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 backdrop-blur-sm p-6"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md rounded-xl bg-background-secondary border border-border shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+          <h3 className="text-sm font-semibold text-text-primary">Edit media details</h3>
+          <button type="button" onClick={onClose} className="text-text-muted hover:text-text-primary transition-colors">
+            <X size={16} />
+          </button>
+        </div>
+        <div className="px-4 py-4 space-y-3">
+          <label className="block">
+            <span className="text-[11px] font-medium text-text-secondary">Name</span>
+            <input
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="Give this a clear name"
+              className="mt-1 w-full px-3 py-2 rounded-lg bg-background-tertiary border border-border text-sm text-text-primary placeholder:text-text-muted focus:border-primary focus:outline-none"
+            />
+          </label>
+          <label className="block">
+            <span className="text-[11px] font-medium text-text-secondary">Prompt / description</span>
+            <textarea
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              rows={3}
+              placeholder="What is this? (helps you + the agent find it)"
+              className="mt-1 w-full px-3 py-2 rounded-lg bg-background-tertiary border border-border text-sm text-text-primary placeholder:text-text-muted focus:border-primary focus:outline-none resize-none"
+            />
+          </label>
+          <label className="block">
+            <span className="text-[11px] font-medium text-text-secondary">Mood / style</span>
+            <input
+              value={mood}
+              onChange={(e) => setMood(e.target.value)}
+              placeholder="e.g. calm, energetic, cinematic"
+              className="mt-1 w-full px-3 py-2 rounded-lg bg-background-tertiary border border-border text-sm text-text-primary placeholder:text-text-muted focus:border-primary focus:outline-none"
+            />
+          </label>
+          {err ? <p className="text-[11px] text-error">{err}</p> : null}
+        </div>
+        <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-border">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-3 py-1.5 rounded-lg text-sm text-text-secondary hover:text-text-primary transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={saving}
+            onClick={() => void save()}
+            className="px-4 py-1.5 rounded-lg text-sm font-medium bg-primary text-white hover:bg-primary/90 disabled:opacity-60 transition-colors inline-flex items-center gap-1.5"
+          >
+            {saving ? <Loader2 size={13} className="animate-spin" /> : null}
+            Save
+          </button>
+        </div>
+      </div>
     </div>
   );
 };

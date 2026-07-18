@@ -14,12 +14,13 @@
  * it lazily from the source asset").
  */
 import type { MediaItem, FilmstripThumbnail } from "@openreel/core";
+import { getMediaEngine } from "@openreel/core";
 import { loadMediaBlobForProject, saveMediaBlob } from "./media-storage";
 import { fetchMediaBlob } from "./voidspace-loader";
 import { useProjectStore } from "../stores/project-store";
 
 const THUMB_COUNT = 10;
-const THUMB_H = 54;
+const THUMB_W = 96; // thumbnail width px (mediabunny derives height by aspect)
 const FAIL_RETRY_MS = 20_000;
 const MAX_CONCURRENT = 2;
 
@@ -81,52 +82,27 @@ export function ensureMediaFilmstrip(
 
   const job = (async (): Promise<FilmstripThumbnail[] | null> => {
     await acquireSlot();
-    let objectUrl: string | null = null;
     try {
       const blob = await resolveBlob(item, projectId);
       if (!blob) {
         failedAt.set(item.id, Date.now());
         return null;
       }
-      objectUrl = URL.createObjectURL(blob);
-      const video = document.createElement("video");
-      video.muted = true;
-      video.preload = "auto";
-      video.src = objectUrl;
-      await new Promise<void>((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error("metadata timeout")), 15000);
-        video.onloadedmetadata = () => { clearTimeout(t); resolve(); };
-        video.onerror = () => { clearTimeout(t); reject(new Error("video load error")); };
-      });
-      const duration = Number.isFinite(video.duration) ? video.duration : 0;
-      if (duration <= 0 || !video.videoWidth) {
-        failedAt.set(item.id, Date.now());
-        return null;
-      }
-      const aspect = video.videoWidth / Math.max(1, video.videoHeight);
-      const w = Math.max(2, Math.round(THUMB_H * aspect));
-      const canvas = document.createElement("canvas");
-      canvas.width = w;
-      canvas.height = THUMB_H;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) {
-        failedAt.set(item.id, Date.now());
-        return null;
-      }
+      // Decode via mediabunny's CanvasSink — the SAME proven decoder the
+      // import, waveform and playback paths use. The old raw <video> seek
+      // loop failed silently on remote/AI MP4s (Infinity/NaN video.duration,
+      // seeks that never fire `seeked`, drawImage before HAVE_CURRENT_DATA)
+      // → no thumbnails → the flat gradient the user saw.
+      const durHint = (item.metadata?.duration && item.metadata.duration > 0)
+        ? item.metadata.duration
+        : 8; // count is derived from this; frames past EOF just return null
+      const interval = Math.max(0.4, durHint / THUMB_COUNT);
+      const results = await getMediaEngine().generateFilmstripThumbnails(
+        blob, durHint, THUMB_W, interval,
+      );
       const thumbs: FilmstripThumbnail[] = [];
-      for (let i = 0; i < THUMB_COUNT; i++) {
-        const t = (duration * (i + 0.5)) / THUMB_COUNT;
-        await new Promise<void>((resolve, reject) => {
-          const to = setTimeout(() => reject(new Error("seek timeout")), 8000);
-          video.onseeked = () => { clearTimeout(to); resolve(); };
-          video.onerror = () => { clearTimeout(to); reject(new Error("seek error")); };
-          video.currentTime = Math.min(Math.max(0, t), Math.max(0, duration - 0.05));
-        });
-        ctx.drawImage(video, 0, 0, w, THUMB_H);
-        const tile: Blob | null = await new Promise((resolve) =>
-          canvas.toBlob((b) => resolve(b), "image/jpeg", 0.6),
-        );
-        if (tile) thumbs.push({ timestamp: t, url: URL.createObjectURL(tile) });
+      for (const r of results) {
+        if (r?.dataUrl) thumbs.push({ timestamp: r.timestamp, url: r.dataUrl });
       }
       if (thumbs.length === 0) {
         failedAt.set(item.id, Date.now());
@@ -138,7 +114,6 @@ export function ensureMediaFilmstrip(
       failedAt.set(item.id, Date.now());
       return null;
     } finally {
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
       releaseSlot();
     }
   })();

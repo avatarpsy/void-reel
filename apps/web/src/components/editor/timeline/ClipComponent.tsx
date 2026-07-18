@@ -402,17 +402,28 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
   // Voidspace/AI assets, and the old `|| 0` guard then collapsed the window
   // to [0,1]: the WHOLE file stretched across the clip, so trimming looked
   // like the waveform was SHRINKING instead of being cropped.
-  const sourceDuration =
-    (wavePeaks && wavePeaks.length > 0 ? wavePeaks.length / 100 : 0) ||
-    (mediaItem?.metadata?.duration || 0) ||
-    (clip.outPoint || 0);
+  // The window denominator MUST be the MAX of all duration signals — never
+  // smaller than the trimmable numerator (clip.outPoint). For VIDEO,
+  // peaks.length/100 (the decoded audio-track length) can be SHORTER than
+  // clip.outPoint (which is the storyboard sceneDuration, never healed for
+  // video the way audio is), so a plain `peaksDur || metadata` denominator
+  // let waveEndFrac exceed 1 → WaveformCanvas clamps it to 1 → the window
+  // FREEZES while the clip width shrinks on trim → the whole waveform
+  // rescales ("stretch as a whole") instead of cropping. Taking the max
+  // guarantees waveEndFrac ≤ 1, so the window always tracks the trim. Audio
+  // is unaffected (heal makes all three equal).
+  const peaksDur = wavePeaks && wavePeaks.length > 0 ? wavePeaks.length / 100 : 0;
+  const sourceDuration = Math.max(
+    peaksDur,
+    mediaItem?.metadata?.duration || 0,
+    clip.outPoint || 0,
+  );
   const waveStartFrac = sourceDuration > 0 ? clip.inPoint / sourceDuration : 0;
   const waveEndFrac =
     sourceDuration > 0 && clip.outPoint > 0
       ? clip.outPoint / sourceDuration
       : 1;
 
-  const thumbnailCount = Math.max(1, Math.floor(width / 60));
   const hasFilmstrip = (mediaItem?.filmstripThumbnails?.length ?? 0) > 0;
   const clipName = mediaItem?.name || clip.mediaId.slice(0, 8);
 
@@ -423,9 +434,11 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
       <ContextMenuTrigger asChild>
         <div
           ref={clipRef}
+          data-clip-id={clip.id}
+          data-track-id={track.id}
           onClick={handleClick}
           onMouseDown={handleMouseDown}
-          className={`group absolute top-1 bottom-1 rounded-lg overflow-hidden shadow-sm ${
+          className={`clip-component group absolute top-1 bottom-1 rounded-lg overflow-hidden shadow-sm ${
             isDragging
               ? `cursor-grabbing z-50 ${isInvalidDrop ? "opacity-50 ring-2 ring-red-500 border-red-500" : "opacity-90 shadow-xl"}`
               : "cursor-grab"
@@ -446,42 +459,41 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
             pointerEvents: isDragging ? 'none' : 'auto',
           }}
         >
-      {/* Real filmstrip only. Each tile shows the frame at
-          inPoint + fraction·duration (media-time anchored, Premiere/Resolve
-          behaviour), matched to the nearest generated thumbnail timestamp —
-          so trimming reveals/hides frames instead of rescaling. */}
-      {isVideo && hasFilmstrip && (
-        <div className="absolute inset-0 flex pointer-events-none">
-          {Array.from({ length: thumbnailCount }).map((_, i) => {
-            const strip = mediaItem!.filmstripThumbnails!;
-            const frac = thumbnailCount > 1 ? i / (thumbnailCount - 1) : 0;
-            const mediaT = (clip.inPoint || 0) + frac * clip.duration;
-            let thumbIndex = 0;
-            let bestDist = Infinity;
-            for (let k = 0; k < strip.length; k++) {
-              const d = Math.abs(strip[k].timestamp - mediaT);
-              if (d < bestDist) {
-                bestDist = d;
-                thumbIndex = k;
-              } else if (strip[k].timestamp > mediaT) {
-                break; // sorted by timestamp — distance only grows now
+      {/* Real filmstrip — FIXED-WIDTH tiles (Premiere/Resolve behaviour). Each
+          tile is a constant FILMSTRIP_TILE_W px wide and shows the frame at the
+          media time under its left edge (inPoint + xpx/pixelsPerSecond). Because
+          the tile width never changes, bg-cover never rescales the frame on
+          trim — trimming just reveals/hides tiles at the edges and re-anchors
+          the frames. (The old flex-1 tiles filled the clip width, so every
+          frame rescaled as the clip resized = the "zoom" on trim.) */}
+      {isVideo && hasFilmstrip && (() => {
+        const strip = mediaItem!.filmstripThumbnails!;
+        const TILE_W = 64;
+        const count = Math.max(1, Math.ceil(width / TILE_W));
+        const pxPerSec = pixelsPerSecond || 1;
+        return (
+          <div className="absolute inset-0 flex pointer-events-none overflow-hidden">
+            {Array.from({ length: count }).map((_, i) => {
+              const mediaT = (clip.inPoint || 0) + (i * TILE_W) / pxPerSec;
+              let thumbIndex = 0;
+              let bestDist = Infinity;
+              for (let k = 0; k < strip.length; k++) {
+                const d = Math.abs(strip[k].timestamp - mediaT);
+                if (d < bestDist) { bestDist = d; thumbIndex = k; }
+                else if (strip[k].timestamp > mediaT) break;
               }
-            }
-            const thumb = strip[thumbIndex];
-            return (
-              <div
-                key={i}
-                className="flex-1 h-full bg-cover bg-center opacity-70"
-                style={{
-                  backgroundImage: `url(${thumb.url})`,
-                  borderRight:
-                    i < thumbnailCount - 1 ? "1px solid rgba(0,0,0,0.2)" : "none",
-                }}
-              />
-            );
-          })}
-        </div>
-      )}
+              const thumb = strip[thumbIndex];
+              return (
+                <div
+                  key={i}
+                  className="h-full flex-none bg-cover bg-center opacity-70"
+                  style={{ width: `${TILE_W}px`, backgroundImage: `url(${thumb.url})` }}
+                />
+              );
+            })}
+          </div>
+        );
+      })()}
 
       {/* No real filmstrip yet (remote scene video, strip still generating) —
           a clean flat gradient. Deliberately NOT a stretched poster: tiling
