@@ -10,6 +10,7 @@ import { useUIStore } from "../../../stores/ui-store";
 
 interface TextClipComponentProps {
   textClip: TextClip;
+  trackId: string;
   pixelsPerSecond: number;
   isSelected: boolean;
   onSelect: (clipId: string, addToSelection: boolean) => void;
@@ -19,6 +20,7 @@ interface TextClipComponentProps {
 
 export const TextClipComponent: React.FC<TextClipComponentProps> = ({
   textClip,
+  trackId,
   pixelsPerSecond,
   isSelected,
   onSelect,
@@ -166,9 +168,12 @@ export const TextClipComponent: React.FC<TextClipComponentProps> = ({
       <ContextMenuTrigger asChild>
         <div
           ref={clipRef}
+          data-clip-id={textClip.id}
+          data-track-id={trackId}
+          data-clip-kind="text-clip"
           onClick={handleClick}
           onMouseDown={handleMouseDown}
-          className={`absolute top-1 bottom-1 rounded-lg overflow-hidden cursor-grab group ${
+          className={`clip-component absolute top-1 bottom-1 rounded-lg overflow-hidden cursor-grab group ${
             isDragging ? "cursor-grabbing opacity-75" : ""
           } ${
             isSelected

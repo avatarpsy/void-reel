@@ -270,6 +270,7 @@ export const TrackLane: React.FC<TrackLaneProps> = ({
           <TextClipComponent
             key={textClip.id}
             textClip={textClip}
+            trackId={track.id}
             pixelsPerSecond={pixelsPerSecond}
             isSelected={selectedClipIds.includes(textClip.id)}
             onSelect={onSelectClip}
@@ -281,6 +282,7 @@ export const TrackLane: React.FC<TrackLaneProps> = ({
           <ShapeClipComponent
             key={shapeClip.id}
             shapeClip={shapeClip}
+            trackId={track.id}
             pixelsPerSecond={pixelsPerSecond}
             isSelected={selectedClipIds.includes(shapeClip.id)}
             onSelect={onSelectClip}

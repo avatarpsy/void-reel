@@ -12,6 +12,7 @@ type GraphicClipUnion = ShapeClip | SVGClip | StickerClip;
 
 interface ShapeClipComponentProps {
   shapeClip: GraphicClipUnion;
+  trackId: string;
   pixelsPerSecond: number;
   isSelected: boolean;
   onSelect: (clipId: string, addToSelection: boolean) => void;
@@ -21,6 +22,7 @@ interface ShapeClipComponentProps {
 
 export const ShapeClipComponent: React.FC<ShapeClipComponentProps> = ({
   shapeClip,
+  trackId,
   pixelsPerSecond,
   isSelected,
   onSelect,
@@ -181,9 +183,12 @@ export const ShapeClipComponent: React.FC<ShapeClipComponentProps> = ({
       <ContextMenuTrigger asChild>
         <div
           ref={clipRef}
+          data-clip-id={shapeClip.id}
+          data-track-id={trackId}
+          data-clip-kind="shape-clip"
           onClick={handleClick}
           onMouseDown={handleMouseDown}
-          className={`absolute top-1 bottom-1 rounded-lg overflow-hidden cursor-grab group ${
+          className={`clip-component absolute top-1 bottom-1 rounded-lg overflow-hidden cursor-grab group ${
             isDragging ? "cursor-grabbing opacity-75" : ""
           } ${
             isSelected

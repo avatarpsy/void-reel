@@ -115,10 +115,12 @@ if (import.meta.env.DEV && typeof window !== "undefined") {
   void Promise.all([
     import("./stores/project-store"),
     import("./stores/ui-store"),
-  ]).then(([proj, ui]) => {
+    import("./stores/timeline-store"),
+  ]).then(([proj, ui, timeline]) => {
     (window as unknown as { __test?: unknown }).__test = {
       project: proj.useProjectStore,
       ui: ui.useUIStore,
+      timeline: timeline.useTimelineStore,
     };
   });
 }

@@ -95,6 +95,7 @@ export const Timeline: React.FC = () => {
     setViewportDimensions,
     zoomIn,
     zoomOut,
+    setZoom,
     trackHeight,
     setTrackHeight,
     setTrackHeightById,
@@ -458,7 +459,11 @@ export const Timeline: React.FC = () => {
     // Any overlap (even 1px) counts — the AABB test below is a strict overlap,
     // not containment, so a clip the box merely grazes is still selected.
     const container = tracksRef.current;
-    const selectedItems: { type: "clip"; id: string; trackId: string }[] = [];
+    const selectedItems: {
+      type: "clip" | "text-clip" | "shape-clip";
+      id: string;
+      trackId: string;
+    }[] = [];
     if (container) {
       const cr = container.getBoundingClientRect();
       const toViewX = (cx: number) => cx + cr.left - scrollX;
@@ -474,9 +479,17 @@ export const Timeline: React.FC = () => {
         if (bx1 < r.right && bx2 > r.left && by1 < r.bottom && by2 > r.top) {
           const id = el.getAttribute("data-clip-id");
           const trackId = el.getAttribute("data-track-id") || "";
+          // Captions (text-clip) and graphics (shape-clip) carry a kind so the
+          // selection gets the right type — the store keys highlight, move and
+          // delete off it. Regular media clips default to "clip".
+          const kind =
+            (el.getAttribute("data-clip-kind") as
+              | "text-clip"
+              | "shape-clip"
+              | null) || "clip";
           if (id && !seen.has(id)) {
             seen.add(id);
-            selectedItems.push({ type: "clip", id, trackId });
+            selectedItems.push({ type: kind, id, trackId });
           }
         }
       });
@@ -506,6 +519,34 @@ export const Timeline: React.FC = () => {
     document.addEventListener("mouseup", handleMouseUp);
     return () => document.removeEventListener("mouseup", handleMouseUp);
   }, [isBoxSelecting, handleBoxSelectionEnd]);
+
+  // Ctrl/⌘ + mouse-wheel = zoom the timeline (same as the +/- buttons), zooming
+  // around the cursor so the time under the pointer stays put — like Premiere.
+  // Trackpad pinch also arrives as ctrlKey wheel events, so pinch-zoom works
+  // too. Attached natively with { passive:false } because React's synthetic
+  // onWheel is passive and can't preventDefault the browser's page zoom.
+  useEffect(() => {
+    const el = tracksRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return; // plain scroll is untouched
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const cursorX = e.clientX - rect.left; // px into the scrolling content
+      const { pixelsPerSecond: curPps, scrollX: curScrollX } =
+        useTimelineStore.getState();
+      const timeAtCursor = (curScrollX + cursorX) / (curPps || 1);
+      // wheel up → zoom in, down → zoom out; exp keeps it smooth + symmetric.
+      const factor = Math.exp(-e.deltaY * 0.0015);
+      setZoom(curPps * factor);
+      // Re-anchor scroll so the same time stays under the cursor (setZoom clamps,
+      // so read back the applied value). onScroll syncs the store from scrollLeft.
+      const appliedPps = useTimelineStore.getState().pixelsPerSecond;
+      el.scrollLeft = Math.max(0, timeAtCursor * appliedPps - cursorX);
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [setZoom]);
 
   const handleDropMedia = useCallback(
     async (trackId: string, mediaId: string, startTime: number) => {
@@ -611,16 +652,77 @@ export const Timeline: React.FC = () => {
     number | null
   >(null);
 
+  // The snap line is only meaningful mid-drag. Clear it on any mouseup so it
+  // never lingers — trims on captions/graphics have no explicit trim-end hook.
+  useEffect(() => {
+    const clear = () => setSnapIndicatorTime(null);
+    document.addEventListener("mouseup", clear);
+    return () => document.removeEventListener("mouseup", clear);
+  }, []);
+
   const handleSnapIndicator = useCallback((time: number | null) => {
     setSnapIndicatorTime(time);
   }, []);
 
+  // Premiere-style trim snapping: snap the dragged edge to the nearest clip
+  // start/end on ANY track — video / audio / narration / image AND captions
+  // (text) + graphics (shape) — or the playhead, within the snap threshold.
+  // NOTE captions/graphics do NOT live in track.clips (the title/graphics
+  // engines own them), so calculateSnap can't see them — we gather edges from
+  // allTextClips / allShapeClips explicitly. Grid snapping is intentionally OFF
+  // for trims so a handle locks onto real content edges, not every whole second.
+  // Drives the yellow snap line while engaged; returns the (maybe) snapped time.
+  const snapTrimEdge = useCallback(
+    (clipId: string, rawTime: number): number => {
+      if (!snapSettings.enabled || !snapSettings.snapToClips) {
+        setSnapIndicatorTime(null);
+        return rawTime;
+      }
+      const threshold = snapSettings.snapThreshold / (pixelsPerSecond || 1);
+      const edges: number[] = [];
+      const pushEdges = (
+        items: { id: string; startTime: number; duration: number }[],
+      ) => {
+        for (const c of items) {
+          if (c.id === clipId) continue; // never snap a clip to its own edge
+          edges.push(c.startTime, c.startTime + c.duration);
+        }
+      };
+      for (const t of tracks) pushEdges(t.clips);
+      pushEdges(allTextClips); // captions
+      pushEdges(allShapeClips); // graphics
+      if (snapSettings.snapToPlayhead) edges.push(playheadPosition);
+
+      let best: number | null = null;
+      let bestDist = threshold;
+      for (const e of edges) {
+        const d = Math.abs(e - rawTime);
+        if (d <= bestDist) {
+          bestDist = d;
+          best = e;
+        }
+      }
+      setSnapIndicatorTime(best);
+      return best ?? rawTime;
+    },
+    [
+      tracks,
+      allTextClips,
+      allShapeClips,
+      playheadPosition,
+      snapSettings,
+      pixelsPerSecond,
+    ],
+  );
+
   const handleTrimTextClip = useCallback(
-    (clipId: string, edge: "left" | "right", newTime: number) => {
+    (clipId: string, edge: "left" | "right", rawNewTime: number) => {
       if (!titleEngine) return;
 
       const textClip = allTextClips.find((tc) => tc.id === clipId);
       if (!textClip) return;
+
+      const newTime = snapTrimEdge(clipId, rawNewTime);
 
       const oldDuration = textClip.duration;
       const newDuration =
@@ -655,7 +757,7 @@ export const Timeline: React.FC = () => {
         project: { ...state.project, modifiedAt: Date.now() },
       }));
     },
-    [titleEngine, allTextClips],
+    [titleEngine, allTextClips, snapTrimEdge],
   );
 
   const handleMoveTextClip = useCallback(
@@ -677,12 +779,13 @@ export const Timeline: React.FC = () => {
   );
 
   const handleTrimShapeClip = useCallback(
-    (clipId: string, edge: "left" | "right", newTime: number) => {
+    (clipId: string, edge: "left" | "right", rawNewTime: number) => {
       if (!graphicsEngine) return;
 
       const graphicClip = allShapeClips.find((sc) => sc.id === clipId);
       if (!graphicClip) return;
 
+      const newTime = snapTrimEdge(clipId, rawNewTime);
       const oldDuration = graphicClip.duration;
       const newDuration =
         edge === "left"
@@ -724,7 +827,7 @@ export const Timeline: React.FC = () => {
         project: { ...state.project, modifiedAt: Date.now() },
       }));
     },
-    [graphicsEngine, allShapeClips],
+    [graphicsEngine, allShapeClips, snapTrimEdge],
   );
 
   // One trim GESTURE = one undoable history entry. The per-mousemove
@@ -738,6 +841,7 @@ export const Timeline: React.FC = () => {
   } | null>(null);
 
   const handleTrimEnd = useCallback((clipId: string) => {
+    setSnapIndicatorTime(null); // clear the snap line when the gesture ends
     const sess = trimSessionRef.current;
     trimSessionRef.current = null;
     if (!sess || sess.clipId !== clipId) return;
@@ -777,9 +881,12 @@ export const Timeline: React.FC = () => {
   }, []);
 
   const handleTrimClip = useCallback(
-    (clipId: string, edge: "left" | "right", newTime: number) => {
+    (clipId: string, edge: "left" | "right", rawNewTime: number) => {
       const clip = tracks.flatMap((t) => t.clips).find((c) => c.id === clipId);
       if (!clip) return;
+
+      // Snap the dragged edge to nearby clip edges / playhead across all tracks.
+      const newTime = snapTrimEdge(clipId, rawNewTime);
 
       // First tick of a new gesture — remember the original geometry for
       // the single undoable commit in handleTrimEnd.
@@ -890,7 +997,7 @@ export const Timeline: React.FC = () => {
         },
       }));
     },
-    [tracks],
+    [tracks, snapTrimEdge],
   );
 
   const visualOrderTracks = useMemo(() => tracks, [tracks]);

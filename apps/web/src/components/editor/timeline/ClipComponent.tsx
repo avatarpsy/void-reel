@@ -429,30 +429,37 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
 
   const isInteracting = isDragging || isTrimming;
 
-  // Filmstrip tiles — FIXED-WIDTH (Premiere/Resolve behaviour). Memoised so it
-  // recomputes ONLY when the geometry that actually changes the frames does
-  // (inPoint / width / zoom / the strip), not on every unrelated re-render
-  // (playhead ticks, selection, hover). The per-tile nearest-thumbnail search
-  // is O(tiles × strip), so recomputing it on every render was the "expensive"
-  // churn the user saw while trimming.
-  //
-  // While a drag/trim is IN PROGRESS we FREEZE the strip (return the last
-  // committed tiles) instead of re-tiling on every mousemove — the clip box
-  // still resizes live via CSS, but the frames stop thrashing. On release
-  // (isInteracting → false) it recomputes once and re-anchors.
-  const frozenFilmstripRef = useRef<{ url: string }[] | null>(null);
-  const filmstripTiles = useMemo(() => {
-    if (!isVideo || !hasFilmstrip) return [] as { url: string }[];
-    if (isInteracting && frozenFilmstripRef.current) {
-      return frozenFilmstripRef.current; // frozen during drag — skip the work
-    }
+  // Filmstrip — a SOURCE-ANCHORED band, not per-clip-window tiles. Each tile is
+  // a fixed 64px cell whose frame is the source time at that band position
+  // (tileIndex·64 / pxPerSec, in SOURCE coordinates spanning [0, sourceDur]).
+  // The band is rendered ONCE (memoised on the strip + zoom, NOT on trim state)
+  // and positioned inside the clip's overflow-hidden box via translateX(
+  // -inPoint·pps). Because a LEFT trim moves startTime and inPoint by the SAME
+  // delta (see handleTrimClip), clipLeft(startTime·pps) + bandOffset(-inPoint·
+  // pps) = (startTime−inPoint)·pps is INVARIANT — so frames never slide under a
+  // left trim; the clip's left edge just advances and clips earlier frames. A
+  // RIGHT trim changes neither startTime nor inPoint, so the band is untouched
+  // and the right edge clips later frames. Left and right are now identical:
+  // trimming reveals/hides frames at the moving edge, it never re-tiles or
+  // slides them — and it's pure CSS during the drag (no per-frame recompute).
+  const filmstripBand = useMemo(() => {
+    if (!isVideo || !hasFilmstrip) return { tiles: [] as { url: string }[], width: 0 };
     const strip = mediaItem!.filmstripThumbnails!;
     const TILE_W = 64;
     const pxPerSec = pixelsPerSecond || 1;
-    const count = Math.max(1, Math.ceil(width / TILE_W));
+    // Full source span so BOTH edges always have frames to reveal. Falls back to
+    // the clip's own out-point when the media duration is unknown (rare for
+    // video). The strip only has N thumbnails, so cap the cell count — extra
+    // cells would just repeat the last thumbnail.
+    const sourceDur =
+      (mediaItem?.metadata?.duration ?? 0) > 0
+        ? mediaItem!.metadata!.duration
+        : (clip.outPoint || clip.duration || 1);
+    const rawCount = Math.ceil((sourceDur * pxPerSec) / TILE_W);
+    const count = Math.max(1, Math.min(rawCount, 600));
     const tiles: { url: string }[] = [];
     for (let i = 0; i < count; i++) {
-      const mediaT = (clip.inPoint || 0) + (i * TILE_W) / pxPerSec;
+      const mediaT = (i * TILE_W) / pxPerSec; // ABSOLUTE source time
       let thumbIndex = 0;
       let bestDist = Infinity;
       for (let k = 0; k < strip.length; k++) {
@@ -464,10 +471,11 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
       }
       tiles.push({ url: strip[thumbIndex].url });
     }
-    frozenFilmstripRef.current = tiles;
-    return tiles;
+    return { tiles, width: count * TILE_W };
+    // Deliberately NOT keyed on inPoint / startTime / width — the band is fixed
+    // in source space; trimming only moves the CSS window over it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isVideo, hasFilmstrip, isInteracting, clip.inPoint, width, pixelsPerSecond, mediaItem?.filmstripThumbnails]);
+  }, [isVideo, hasFilmstrip, pixelsPerSecond, mediaItem?.filmstripThumbnails, mediaItem?.metadata?.duration]);
 
   return (
     <ContextMenu>
@@ -506,15 +514,25 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
           trim — trimming just reveals/hides tiles at the edges and re-anchors
           the frames. (The old flex-1 tiles filled the clip width, so every
           frame rescaled as the clip resized = the "zoom" on trim.) */}
-      {isVideo && hasFilmstrip && filmstripTiles.length > 0 && (
-        <div className="absolute inset-0 flex pointer-events-none overflow-hidden">
-          {filmstripTiles.map((tile, i) => (
-            <div
-              key={i}
-              className="h-full flex-none bg-cover bg-center opacity-70"
-              style={{ width: "64px", backgroundImage: `url(${tile.url})` }}
-            />
-          ))}
+      {isVideo && hasFilmstrip && filmstripBand.tiles.length > 0 && (
+        <div className="absolute inset-0 overflow-hidden pointer-events-none">
+          {/* Band offset so source-time inPoint sits at the clip's left edge.
+              (startTime−inPoint) is trim-invariant, so frames stay put. */}
+          <div
+            className="absolute top-0 bottom-0 flex"
+            style={{
+              width: `${filmstripBand.width}px`,
+              transform: `translateX(${-(clip.inPoint || 0) * pixelsPerSecond}px)`,
+            }}
+          >
+            {filmstripBand.tiles.map((tile, i) => (
+              <div
+                key={i}
+                className="h-full flex-none bg-cover bg-center opacity-70"
+                style={{ width: "64px", backgroundImage: `url(${tile.url})` }}
+              />
+            ))}
+          </div>
         </div>
       )}
 
