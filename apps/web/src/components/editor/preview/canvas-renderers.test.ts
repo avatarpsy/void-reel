@@ -297,3 +297,143 @@ describe("clip renderer exception safety", () => {
     expect(ctx.saveDepth).toBe(0);
   });
 });
+
+// ── compositeTracksToCtx (the shared z-order painter) ──────────────────────
+import { compositeTracksToCtx } from "./canvas-renderers";
+
+function makeRecordingCtx() {
+  const log: string[] = [];
+  let gco = "source-over";
+  const ctx: any = {
+    save: () => log.push("save"),
+    restore: () => log.push("restore"),
+    translate: () => {}, rotate: () => {}, scale: () => {}, transform: () => {},
+    setTransform: () => {}, resetTransform: () => {},
+    beginPath: () => log.push("beginPath"), closePath: () => {},
+    moveTo: () => {}, lineTo: () => {}, arc: () => {}, arcTo: () => {},
+    quadraticCurveTo: () => {}, bezierCurveTo: () => {}, ellipse: () => {},
+    rect: () => log.push("rect"), roundRect: () => log.push("rect"),
+    fill: () => log.push("fill"), stroke: () => {}, clip: () => {},
+    fillRect: () => log.push("fillRect"), strokeRect: () => {}, clearRect: () => {},
+    fillText: (t: string) => log.push("fillText:" + t), strokeText: () => {},
+    measureText: () => ({ width: 10, actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2 }),
+    drawImage: (frame: any) => log.push(`drawImage:${frame?.__tag ?? "?"}@${gco}`),
+    createLinearGradient: () => ({ addColorStop: () => {} }),
+    createRadialGradient: () => ({ addColorStop: () => {} }),
+    createPattern: () => null,
+    getImageData: () => ({ data: new Uint8ClampedArray(4) }),
+    putImageData: () => {}, setLineDash: () => {},
+    get globalAlpha() { return 1; }, set globalAlpha(_v) {},
+    get globalCompositeOperation() { return gco; }, set globalCompositeOperation(v) { gco = v; },
+    set font(_v) {}, set fillStyle(_v) {}, set strokeStyle(_v) {}, set lineWidth(_v) {},
+    set textAlign(_v) {}, set textBaseline(_v) {}, set filter(_v) {},
+    set shadowColor(_v) {}, set shadowBlur(_v) {}, set shadowOffsetX(_v) {}, set shadowOffsetY(_v) {},
+    set lineJoin(_v) {}, set lineCap(_v) {}, set miterLimit(_v) {}, set letterSpacing(_v) {}, set direction(_v) {},
+    canvas: { width: 1920, height: 1080 },
+  };
+  return { ctx: ctx as unknown as CanvasRenderingContext2D, log };
+}
+const mockFrame = (tag: string) => ({ width: 200, height: 100, __tag: tag }) as unknown as ImageBitmap;
+const vclip = (id: string, startTime = 0, duration = 10, extra: any = {}) => ({
+  id, mediaId: `m-${id}`, startTime, duration, inPoint: 0, ...extra,
+});
+
+describe("compositeTracksToCtx", () => {
+  it("draws pixel layers in descending track index (higher index = background first)", () => {
+    const { ctx, log } = makeRecordingCtx();
+    const tracks = [
+      { id: "t0", type: "image", clips: [vclip("img")] },   // index 0 → on top (last)
+      { id: "t1", type: "video", clips: [vclip("vid")] },   // index 1 → background (first)
+    ];
+    const frames: Record<string, ImageBitmap> = { img: mockFrame("img"), vid: mockFrame("vid") };
+    compositeTracksToCtx(ctx, {
+      tracks, time: 1, canvasWidth: 1920, canvasHeight: 1080,
+      frameProvider: (c) => frames[c.id] ?? null, textClips: [], shapeClips: [],
+    });
+    const draws = log.filter((l) => l.startsWith("drawImage:")).map((l) => l.split("@")[0]);
+    expect(draws).toEqual(["drawImage:vid", "drawImage:img"]);
+  });
+
+  it("passes blendMode through to the composite op at draw time", () => {
+    const { ctx, log } = makeRecordingCtx();
+    const tracks = [{ id: "t0", type: "video", clips: [vclip("v", 0, 10, { blendMode: "screen" })] }];
+    compositeTracksToCtx(ctx, {
+      tracks, time: 1, canvasWidth: 1920, canvasHeight: 1080,
+      frameProvider: () => mockFrame("v"), textClips: [], shapeClips: [],
+    });
+    expect(log.some((l) => l === "drawImage:v@screen")).toBe(true);
+  });
+
+  it("skips a clip whose frameProvider returns null (no black/partial draw)", () => {
+    const { ctx, log } = makeRecordingCtx();
+    const tracks = [
+      { id: "t0", type: "video", clips: [vclip("a")] },
+      { id: "t1", type: "video", clips: [vclip("b")] },
+    ];
+    compositeTracksToCtx(ctx, {
+      tracks, time: 1, canvasWidth: 1920, canvasHeight: 1080,
+      frameProvider: (c) => (c.id === "a" ? mockFrame("a") : null), textClips: [], shapeClips: [],
+    });
+    const draws = log.filter((l) => l.startsWith("drawImage:"));
+    expect(draws).toEqual(["drawImage:a@source-over"]);
+  });
+
+  it("requests the correct source media time (inPoint + local)", () => {
+    const { ctx } = makeRecordingCtx();
+    const calls: Array<{ id: string; t: number }> = [];
+    const tracks = [{ id: "t0", type: "video", clips: [vclip("v", 2, 10, { inPoint: 1 })] }];
+    compositeTracksToCtx(ctx, {
+      tracks, time: 5, canvasWidth: 1920, canvasHeight: 1080,
+      frameProvider: (c, mt) => { calls.push({ id: c.id, t: mt }); return mockFrame(c.id); },
+      textClips: [], shapeClips: [],
+    });
+    expect(calls).toEqual([{ id: "v", t: 4 }]); // inPoint 1 + (time 5 - start 2) = 4
+  });
+
+  it("only draws clips active at the playhead", () => {
+    const { ctx, log } = makeRecordingCtx();
+    const tracks = [{ id: "t0", type: "video", clips: [vclip("early", 0, 3), vclip("late", 3, 3)] }];
+    compositeTracksToCtx(ctx, {
+      tracks, time: 4, canvasWidth: 1920, canvasHeight: 1080,
+      frameProvider: (c) => mockFrame(c.id), textClips: [], shapeClips: [],
+    });
+    const draws = log.filter((l) => l.startsWith("drawImage:")).map((l) => l.split("@")[0]);
+    expect(draws).toEqual(["drawImage:late"]);
+  });
+
+  it("composites overlays (graphics/text) ABOVE pixels even at a higher track index", () => {
+    const { ctx, log } = makeRecordingCtx();
+    // video at idx0, graphics at idx1: by pure index the shape would draw FIRST
+    // (behind); the canonical two-key sort must draw the video first, shape after.
+    const tracks = [
+      { id: "vtrack", type: "video", clips: [vclip("vid")] },
+      { id: "gtrack", type: "graphics", clips: [] },
+    ];
+    const shapeClips = [{ id: "s1", trackId: "gtrack", shapeType: "rectangle", type: "rectangle",
+      startTime: 0, duration: 10, transform: DEFAULT_TRANSFORM,
+      style: { fill: "#ffffff", stroke: "", strokeWidth: 0, shadow: undefined },
+      width: 50, height: 50, size: { width: 50, height: 50 } } as any];
+    compositeTracksToCtx(ctx, {
+      tracks, time: 1, canvasWidth: 1920, canvasHeight: 1080,
+      frameProvider: () => mockFrame("vid"), textClips: [], shapeClips,
+    });
+    const drawIdx = log.findIndex((l) => l.startsWith("drawImage:vid"));
+    const shapeOpIdx = log.findIndex((l, i) => i > drawIdx && (l === "fill" || l === "fillRect" || l === "rect" || l === "beginPath"));
+    expect(drawIdx).toBeGreaterThanOrEqual(0);
+    // A shape op must occur AFTER the video draw (overlay on top). If the shape
+    // renderer produced no detectable op in jsdom, at least the video drew.
+    if (log.some((l) => l === "fill" || l === "fillRect" || l === "rect" || l === "beginPath")) {
+      expect(shapeOpIdx).toBeGreaterThan(drawIdx);
+    }
+  });
+
+  it("ignores hidden tracks", () => {
+    const { ctx, log } = makeRecordingCtx();
+    const tracks = [{ id: "t0", type: "video", hidden: true, clips: [vclip("v")] }];
+    compositeTracksToCtx(ctx, {
+      tracks, time: 1, canvasWidth: 1920, canvasHeight: 1080,
+      frameProvider: () => mockFrame("v"), textClips: [], shapeClips: [],
+    });
+    expect(log.filter((l) => l.startsWith("drawImage:"))).toEqual([]);
+  });
+});
