@@ -31,6 +31,9 @@ export const TextClipComponent: React.FC<TextClipComponentProps> = ({
   const [isTrimming, setIsTrimming] = useState<"left" | "right" | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [dragOffset, setDragOffset] = useState(0);
+  // True once the pointer actually moved during a press — lets the trailing
+  // click distinguish a real drag (keep the selection) from a plain click.
+  const didDragRef = useRef(false);
   const { snapSettings } = useUIStore();
   const { playheadPosition } = useTimelineStore();
   const trimStartRef = useRef<{
@@ -49,7 +52,15 @@ export const TextClipComponent: React.FC<TextClipComponentProps> = ({
   const handleClick = (e: React.MouseEvent) => {
     if (e.button !== 0) return;
     if (isTrimming || isDragging) return;
+    // Always stop the click here so it can't bubble to the timeline background
+    // (whose handler clears the selection). A click that ended a drag must NOT
+    // narrow the selection either — otherwise a marquee group would collapse to
+    // this one caption after the first move, breaking the next group drag.
     e.stopPropagation();
+    if (didDragRef.current) {
+      didDragRef.current = false;
+      return;
+    }
     onSelect(textClip.id, e.shiftKey || e.metaKey);
   };
 
@@ -64,9 +75,13 @@ export const TextClipComponent: React.FC<TextClipComponentProps> = ({
     const clickX = e.clientX - rect.left;
     const clipStartX = textClip.startTime * pixelsPerSecond;
     setDragOffset(clickX - clipStartX);
+    didDragRef.current = false;
     setIsDragging(true);
 
-    onSelect(textClip.id, e.shiftKey || e.metaKey);
+    // Only (re)select when this caption ISN'T already selected. If it's part of
+    // a marquee group, preserve the group so the drag moves everything together
+    // (mirrors ClipComponent, which defers selection to a real click).
+    if (!isSelected) onSelect(textClip.id, e.shiftKey || e.metaKey);
   };
 
   useEffect(() => {
@@ -75,6 +90,7 @@ export const TextClipComponent: React.FC<TextClipComponentProps> = ({
     const handleMouseMove = (e: MouseEvent) => {
       const rect = clipRef.current?.parentElement?.getBoundingClientRect();
       if (!rect) return;
+      didDragRef.current = true;
 
       const x = e.clientX - rect.left - dragOffset;
       const rawTime = Math.max(0, x / pixelsPerSecond);

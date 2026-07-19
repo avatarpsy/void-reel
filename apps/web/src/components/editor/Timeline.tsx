@@ -629,7 +629,16 @@ export const Timeline: React.FC = () => {
       const st = Math.max(0, startTime);
       if (kind === "text") {
         titleEngine?.updateTextClip(id, { startTime: st });
-        useProjectStore.setState((s) => ({ project: { ...s.project, modifiedAt: Date.now() } }));
+        // Sync engine → project.textClips (the persisted load SSOT) so a moved
+        // caption survives save/reload — without this it reverts to its old
+        // position on load. Mirrors updateTextTransform etc.
+        useProjectStore.setState((s) => ({
+          project: {
+            ...s.project,
+            textClips: titleEngine?.getAllTextClips() ?? s.project.textClips,
+            modifiedAt: Date.now(),
+          },
+        }));
       } else if (kind === "shape") {
         const gc = allShapeClips.find((c) => c.id === id);
         if (gc && graphicsEngine) {
@@ -744,10 +753,23 @@ export const Timeline: React.FC = () => {
   // Commit the move gesture on release. Deferred a tick so a cross-track move's
   // async executor commit (handleMoveClip → moveClip) settles first, and so all
   // synchronous mouseup handlers run before we snapshot the final positions.
-  // Fires for any anchor type (media clip, caption, graphic).
+  // Fires for any anchor type (media clip, caption, graphic). Also suppresses the
+  // trailing background click SYNCHRONOUSLY (before it fires): a dragged clip has
+  // pointer-events:none, so the post-drag click lands on the timeline background
+  // and would clearSelection — collapsing the group so the NEXT drag moves only
+  // one clip. Suppressing it keeps the marquee group selected across drags.
   useEffect(() => {
     const onUp = () => {
-      if (moveSessionRef.current) setTimeout(() => handleMoveEnd(), 0);
+      if (moveSessionRef.current) {
+        suppressNextBgClickRef.current = true;
+        // The trailing click fires before this macrotask, so clearing here can't
+        // pre-empt it — but it guarantees the flag never lingers if no bg-click
+        // followed (e.g. the click landed on the clip instead of the canvas).
+        setTimeout(() => {
+          suppressNextBgClickRef.current = false;
+          handleMoveEnd();
+        }, 0);
+      }
     };
     window.addEventListener("mouseup", onUp);
     return () => window.removeEventListener("mouseup", onUp);
