@@ -249,6 +249,11 @@ export const LibraryPanel: React.FC = () => {
   const [mediaToken, setMediaToken] = useState<string>("");
   const reqSeq = useRef(0);
   const deviceObjectUrls = useRef<string[]>([]);
+  // The FIRST load after the editor opens force-refreshes the server union
+  // cache (?refresh=1) so a render the user just made — a fresh local-disk
+  // write the 90s union cache hasn't picked up yet — shows immediately instead
+  // of after the TTL. Subsequent filter/search changes reuse the cache.
+  const forcedInitialLoad = useRef(false);
 
   const srcWithToken = useCallback((url: string) => {
     // Absolute cloud URLs (Firestore-sourced) and blob/data URLs need no
@@ -320,7 +325,14 @@ export const LibraryPanel: React.FC = () => {
     }
   }, [type, debounced, mood]);
 
-  useEffect(() => { void load(0); }, [load]);
+  useEffect(() => {
+    // Force ONCE on the initial mount (freshly opened editor) so just-rendered
+    // clips are visible; after that, reactive reloads (filter/search) reuse the
+    // union cache to avoid re-running the heavy scene scan every keystroke.
+    const force = !forcedInitialLoad.current;
+    forcedInitialLoad.current = true;
+    void load(0, force);
+  }, [load]);
 
   // ── "On this device": scan other locally-saved projects' media ──────────
   const loadDevice = useCallback(async () => {
@@ -388,11 +400,29 @@ export const LibraryPanel: React.FC = () => {
         // edited pixels and freshly saved copies show up immediately.
         void caches.delete(THUMB_CACHE).catch(() => {});
         setRev((r) => r + 1);
-        void load(0);
+        void load(0, true);
       };
     } catch { /* BroadcastChannel unsupported — manual refresh still works */ }
     return () => { try { bc?.close(); } catch { /* noop */ } };
   }, [load]);
+
+  // ── New studio media (a HyperFrames render the agent/pipeline just made on
+  //    the desktop) → force-refresh so it appears in the Library live, without
+  //    waiting on the 90s server union cache or a manual refresh. The chat /
+  //    pipeline broadcasts on this channel the moment a render lands on disk.
+  useEffect(() => {
+    let bc: BroadcastChannel | null = null;
+    try {
+      bc = new BroadcastChannel("voidspace-library");
+      bc.onmessage = (ev: MessageEvent) => {
+        const t = ev?.data?.type;
+        if (t !== "library-updated" && t !== "render-complete") return;
+        void load(0, true);   // refresh=1 busts the server union cache
+        void loadDevice();
+      };
+    } catch { /* BroadcastChannel unsupported — mount-force + manual still work */ }
+    return () => { try { bc?.close(); } catch { /* noop */ } };
+  }, [load, loadDevice]);
 
   // Download WITH embedded metadata: routes through /api/studio/download,
   // which losslessly remuxes the file with Title/Artist/Comment(prompt) tags
