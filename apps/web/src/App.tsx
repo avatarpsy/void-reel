@@ -2605,7 +2605,24 @@ function App() {
               reply({ type: "voidspace:error", requestId: msg.requestId, error: "clipId required" });
               break;
             }
-            const r = await useProjectStore.getState().removeClip(clipId);
+            // Captions are text clips that live in the title engine, NOT in
+            // timeline.tracks[].clips — removeClip is a silent no-op for them.
+            // Dispatch exactly like keyboard Delete (useKeyboardShortcuts
+            // handleDelete) so the agent's remove_clip deletes a caption through
+            // the SAME store action the Inspector / context menu / Delete key
+            // use (which also keeps project.textClips in sync). Without this the
+            // agent got "clip not found" for caption ids and re-read stale state.
+            const _store = useProjectStore.getState();
+            if (typeof _store.getTextClip === "function" && _store.getTextClip(clipId)) {
+              const deleted = _store.deleteTextClip(clipId);
+              if (!deleted) {
+                reply({ type: "voidspace:error", requestId: msg.requestId, error: "TEXT_CLIP_NOT_FOUND: caption could not be deleted" });
+                break;
+              }
+              reply({ type: "voidspace:clip-removed", requestId: msg.requestId, clipId, ok: true, kind: "caption" });
+              break;
+            }
+            const r = await _store.removeClip(clipId);
             if (!r.success) {
               // r.error is an ActionError object { code, message, details? }.
               // Pass the .message string (with the code prefixed) so the
