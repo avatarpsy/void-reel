@@ -145,6 +145,13 @@ export class ActionExecutor {
         actionId: action.id,
       };
     } catch (error) {
+      // FOUNDATION FIX (F4): an apply that throws partway (e.g. the clip/applyState
+      // loop mutates timeline clips, then a text-clip engine call fails) must not
+      // leave a half-mutated project. Roll the JSON-safe mutable containers back
+      // to the pre-apply snapshot. history.push() never ran (it is after apply in
+      // the try), so the undo stack is already clean — only project state needs
+      // restoring. Blob-safe: see rollbackFromSnapshot.
+      this.rollbackFromSnapshot(project, projectSnapshot as Project);
       return {
         success: false,
         error: {
@@ -154,6 +161,29 @@ export class ActionExecutor {
         },
       };
     }
+  }
+
+  /**
+   * Restore the JSON-safe, in-place-mutated containers from a pre-apply snapshot
+   * (F4 atomicity). `mediaLibrary` is intentionally NOT restored: media actions
+   * are atomic single-array reassignments (never a partial state), and the
+   * library holds runtime blobs a JSON snapshot cannot preserve — restoring it
+   * would zero out playable media on any rollback.
+   *
+   * Edge: a text/* action that mutated the live TitleEngine before throwing
+   * leaves the engine out of sync with the restored project.textClips; text
+   * actions are single engine calls so this is rare, and the store re-hydrates
+   * captions from project.textClips on the next load.
+   */
+  private rollbackFromSnapshot(project: Project, snapshot: Project): void {
+    const p = project as unknown as Record<string, unknown>;
+    const s = snapshot as unknown as Record<string, unknown>;
+    p.timeline = s.timeline;
+    p.textClips = s.textClips;
+    p.settings = s.settings;
+    p.name = s.name;
+    p.deletedTracks = s.deletedTracks;
+    p.modifiedAt = s.modifiedAt;
   }
 
   async executeMany(

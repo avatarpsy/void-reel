@@ -181,6 +181,40 @@ describe("FOUNDATION AUDIT — expected failures until Phase F", () => {
     expect(project.timeline.tracks[0].clips).toHaveLength(0);
   });
 
+  it("F4: a mid-apply throw rolls back to the pre-apply state (atomicity)", async () => {
+    const project = makeProject([makeClip("c1", { volume: 1 })]);
+    // An engine whose update throws — clip/applyState processes its `clips`
+    // (mutating the timeline) BEFORE its `textClips` (which hits the engine),
+    // so without rollback the timeline is left partially mutated.
+    const throwingEngine = {
+      getTextClip: () => undefined,
+      getAllTextClips: () => [],
+      loadTextClips: () => {},
+      updateTextClip: () => {
+        throw new Error("engine boom");
+      },
+      deleteTextClip: () => false,
+    };
+    const executor = new ActionExecutor(new ActionHistory(), {
+      getTitleEngine: () => throwingEngine as never,
+    });
+
+    const before = JSON.stringify(project.timeline);
+    const res = await executor.execute(
+      act("clip/applyState", {
+        label: "batch edit",
+        clips: [{ clipId: "c1", state: { ...makeClip("c1"), volume: 0.2 } }],
+        textClips: [{ clipId: "t1", state: { id: "t1", text: "x" } }],
+      }),
+      project,
+    );
+
+    expect(res.success).toBe(false);
+    // Timeline was mutated (c1.volume 1 → 0.2) then rolled back to volume 1.
+    expect(JSON.stringify(project.timeline)).toBe(before);
+    expect(project.timeline.tracks[0].clips[0].volume).toBe(1);
+  });
+
   it("F6: a seeded id generator makes the action stream reproducible", async () => {
     const run = async () => {
       const project = makeProject();
