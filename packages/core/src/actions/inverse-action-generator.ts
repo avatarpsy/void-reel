@@ -286,6 +286,41 @@ export class InverseActionGenerator {
   ): Action | null {
     const timeline = projectBefore.timeline;
 
+    // FOUNDATION FIX (F11): clip/slip, clip/slide, clip/roll and
+    // clip/trimToPlayhead have apply handlers in the executor but were NOT in
+    // the ClipAction union nor this switch — so generate() returned null and
+    // the op was silently NON-UNDOABLE (a broken Ctrl+Z on any advanced trim).
+    // Capture the full prior state of every clip the op can touch and restore
+    // it via clip/applyState (robust to the executor's clamps, which a naive
+    // inverse-delta would not reverse). Redo replays the forward op.
+    const ADVANCED_TRIM = new Set([
+      "clip/slip",
+      "clip/slide",
+      "clip/roll",
+      "clip/trimToPlayhead",
+    ]);
+    if (ADVANCED_TRIM.has((action as { type: string }).type)) {
+      const p = action.params as Record<string, unknown>;
+      const affectedIds = [
+        "clipId",
+        "prevClipId",
+        "nextClipId",
+        "leftClipId",
+        "rightClipId",
+      ]
+        .map((k) => p[k])
+        .filter((v): v is string => typeof v === "string");
+      const clips = affectedIds
+        .map((id) => this.findClip(timeline, id))
+        .filter((c): c is Clip => c !== null)
+        .map((c) => ({ clipId: c.id, state: this.cloneClip(c) }));
+      if (clips.length === 0) return null;
+      return this.createInverseAction(action, "clip/applyState", {
+        label: "Undo trim",
+        clips,
+      });
+    }
+
     switch (action.type) {
       case "clip/add":
         return this.createInverseAction(action, "clip/remove", {
@@ -651,25 +686,12 @@ export class InverseActionGenerator {
   }
 
   private cloneClip(clip: Clip): Record<string, unknown> {
-    return {
-      id: clip.id,
-      mediaId: clip.mediaId,
-      trackId: clip.trackId,
-      startTime: clip.startTime,
-      duration: clip.duration,
-      inPoint: clip.inPoint,
-      outPoint: clip.outPoint,
-      effects: clip.effects.map((e) => ({ ...e, params: { ...e.params } })),
-      transform: { ...clip.transform },
-      volume: clip.volume,
-      fade: clip.fade ? { ...clip.fade } : undefined,
-      automation: clip.automation
-        ? {
-            volume: clip.automation.volume?.map((p) => ({ ...p })),
-            pan: clip.automation.pan?.map((p) => ({ ...p })),
-          }
-        : undefined,
-      keyframes: clip.keyframes.map((kf) => ({ ...kf })),
-    };
+    // FOUNDATION FIX (F3): the previous hand-picked clone silently DROPPED
+    // audioEffects, blendMode, blendOpacity, muted, speed, reversed,
+    // emphasisAnimation and audioTrackIndex — so undo of a delete/split/ripple
+    // restored a clip stripped of those fields. A full structural clone copies
+    // every field; Clip is JSON-safe (no blobs/functions/Dates live on a clip —
+    // those are on MediaItem), so this is complete and lossless.
+    return JSON.parse(JSON.stringify(clip)) as Record<string, unknown>;
   }
 }

@@ -37,6 +37,7 @@ import type { UpdateTextClipOptions } from "../text/title-engine";
 import { ActionValidator } from "./action-validator";
 import { ActionHistory } from "./action-history";
 import { InverseActionGenerator } from "./inverse-action-generator";
+import { createIdGenerator, type IdGenerator } from "./id-generator";
 
 /**
  * Minimal interface the executor needs to apply text/* actions. The
@@ -68,6 +69,9 @@ export interface ActionExecutorOptions {
    *  executor is constructed — common in the editor where the engine
    *  initialises after the project store. */
   getTitleEngine?: () => TitleEngineAdapter | null;
+  /** Injectable id source (F1/F6). Omit for the collision-free runtime
+   *  default; tests pass a seeded generator for determinism. */
+  idGenerator?: IdGenerator;
 }
 
 export class ActionExecutor {
@@ -76,12 +80,34 @@ export class ActionExecutor {
   private inverseGenerator: InverseActionGenerator;
   private lastAddedIds: Map<string, string> = new Map();
   private getTitleEngine: () => TitleEngineAdapter | null;
+  private ids: IdGenerator;
 
   constructor(history?: ActionHistory, options?: ActionExecutorOptions) {
     this.validator = new ActionValidator();
     this.history = history || new ActionHistory();
     this.inverseGenerator = new InverseActionGenerator();
     this.getTitleEngine = options?.getTitleEngine ?? (() => null);
+    this.ids = options?.idGenerator ?? createIdGenerator();
+  }
+
+  /** Mint (or reuse) the id for an add action and record it so (a) the inverse
+   *  resolves to THIS action's real id — not a single-slot "last added" — and
+   *  (b) a redo re-applies with the SAME id. `params.__addedId` persists on the
+   *  action (and in serialized history), so re-apply is stable. */
+  private mintAddId(
+    domain: string,
+    params: Record<string, unknown>,
+    preferredKey?: string,
+  ): string {
+    const preset =
+      (preferredKey && typeof params[preferredKey] === "string"
+        ? (params[preferredKey] as string)
+        : undefined) ??
+      (typeof params.__addedId === "string" ? (params.__addedId as string) : undefined);
+    const id = preset ?? this.ids(domain);
+    params.__addedId = id;
+    this.lastAddedIds.set(domain, id);
+    return id;
   }
 
   async execute(action: Action, project: Project): Promise<ActionResult> {
@@ -104,7 +130,15 @@ export class ActionExecutor {
     );
     try {
       await this.applyAction(action as TimelineAction, project);
-      this.history.push(action, inverseAction);
+      // FOUNDATION FIX (F2): resolve the inverse's add-sentinel NOW, using the
+      // id applyAction just minted (available in lastAddedIds), so this history
+      // entry carries its OWN real target id. Resolving lazily at undo time used
+      // a single-slot map that returned the LAST added id for every inverse in a
+      // group → undoing N adds removed the last clip N times, orphaning the rest.
+      const resolvedInverse = inverseAction
+        ? this.resolveSpecialMarkers(inverseAction)
+        : null;
+      this.history.push(action, resolvedInverse);
 
       return {
         success: true,
@@ -224,7 +258,11 @@ export class ActionExecutor {
     const params = { ...action.params } as Record<string, unknown>;
 
     for (const [key, value] of Object.entries(params)) {
-      if (value === "__LAST_ADDED__") {
+      // `__LAST_ADDED__` (clip/track/effect/transition/subtitle) and
+      // `__LAST_IMPORTED__` (media/import) both resolve to the id just minted
+      // for this action's domain. The media sentinel was previously never
+      // resolved here, so media/import undo silently no-op'd.
+      if (value === "__LAST_ADDED__" || value === "__LAST_IMPORTED__") {
         const lastId = this.lastAddedIds.get(action.type.split("/")[0]);
         if (lastId) {
           params[key] = lastId;
@@ -357,7 +395,7 @@ export class ActionExecutor {
       case "media/import": {
         const params = action.params as { file: File };
         const newMediaItem = {
-          id: `media-${Date.now()}`,
+          id: this.mintAddId("media", action.params as Record<string, unknown>),
           name: params.file.name,
           type: this.inferMediaType(params.file),
           fileHandle: null,
@@ -376,7 +414,6 @@ export class ActionExecutor {
           waveformData: null,
         };
         mediaLibrary.items = [...mediaLibrary.items, newMediaItem];
-        this.lastAddedIds.set("media", newMediaItem.id);
         break;
       }
 
@@ -436,7 +473,7 @@ export class ActionExecutor {
             (t: MutableTrack) => t.type === params.trackType,
           ).length + 1;
         const newTrack: MutableTrack = {
-          id: params.trackId ?? `track-${Date.now()}`,
+          id: this.mintAddId("track", action.params as Record<string, unknown>, "trackId"),
           type: params.trackType as Track["type"],
           name: `${trackNames[params.trackType] || params.trackType} ${trackCount}`,
           clips: [],
@@ -457,7 +494,6 @@ export class ActionExecutor {
           newTrack,
           ...timeline.tracks.slice(position),
         ];
-        this.lastAddedIds.set("track", newTrack.id);
         break;
       }
 
@@ -606,7 +642,7 @@ export class ActionExecutor {
               }
             : baseTransform;
           const newClip = {
-            id: `clip-${Date.now()}`,
+            id: this.mintAddId("clip", action.params as Record<string, unknown>),
             mediaId: params.mediaId,
             trackId: params.trackId,
             startTime: params.startTime,
@@ -624,7 +660,6 @@ export class ActionExecutor {
               : {}),
           };
           track.clips = [...track.clips, newClip];
-          this.lastAddedIds.set("clip", newClip.id);
         }
         break;
       }
@@ -728,7 +763,7 @@ export class ActionExecutor {
 
           const clip2 = {
             ...clip,
-            id: `clip-${Date.now()}`,
+            id: this.mintAddId("clip", action.params as Record<string, unknown>),
             startTime: splitTime,
             duration: clip.duration - splitOffset,
             inPoint: clip.inPoint + splitOffset,
@@ -740,8 +775,6 @@ export class ActionExecutor {
               c.id === params.clipId ? [clip1, clip2] : [c],
             ),
           }));
-
-          this.lastAddedIds.set("clip", clip2.id);
         }
         break;
       }
@@ -951,7 +984,7 @@ export class ActionExecutor {
           params?: Record<string, unknown>;
         };
         const newEffect = {
-          id: `effect-${Date.now()}`,
+          id: this.mintAddId("effect", action.params as Record<string, unknown>),
           type: params.effectType,
           params: params.params || {},
           enabled: true,
@@ -965,7 +998,6 @@ export class ActionExecutor {
               : clip,
           ),
         }));
-        this.lastAddedIds.set("effect", newEffect.id);
         break;
       }
 
@@ -1092,15 +1124,11 @@ export class ActionExecutor {
           property: string;
           value: unknown;
         };
-        // Same id-collision lesson as transition/add: a wrapper that adds
-        // many keyframes in a tight loop (e.g. fade-in/out across N clips =
-        // 4*N keyframes/ms) needs jitter or every keyframe in the same
-        // millisecond shares an id and the keyframe-engine reads back the
-        // wrong value.
+        // Collision-free + deterministic id via the central factory (F1/F6);
+        // this replaces the old Date.now()+Math.random() jitter that was added
+        // to stop same-millisecond keyframe ids colliding.
         const newKeyframe = {
-          id: `keyframe-${Date.now().toString(36)}-${Math.random()
-            .toString(36)
-            .slice(2, 11)}`,
+          id: this.mintAddId("keyframe", action.params as Record<string, unknown>),
           time: params.time,
           property: params.property,
           value: params.value,
@@ -1115,7 +1143,6 @@ export class ActionExecutor {
               : clip,
           ),
         }));
-        this.lastAddedIds.set("keyframe", newKeyframe.id);
         break;
       }
 
@@ -1203,19 +1230,14 @@ export class ActionExecutor {
             (t: MutableTrack) => t.id === clipA.trackId,
           );
           if (track) {
-            // ID must include random jitter. Without it, a tight loop of
-            // transition/add actions (e.g. agent applying transitions to N
-            // adjacent clip pairs in <1ms) all land in the same Date.now()
-            // tick and collide on id. Duplicate ids corrupt the bridge's
-            // Map<id, transition> on register, and the renderer then draws
-            // a broken/black frame for the entire video while still setting
-            // hasRenderedFrame=true (so the fallback clip render never
-            // runs) — i.e. the whole preview goes black until the dupes are
-            // stripped from the saved blob.
+            // Collision-free + deterministic id via the central factory
+            // (F1/F6). The old Date.now()+Math.random() jitter existed because
+            // a tight loop of transition/add (agent adding crossfades to N
+            // adjacent pairs in <1ms) collided on id → duplicate transition ids
+            // corrupt the bridge's Map<id> and the whole preview goes black.
+            // The factory's monotonic counter makes collisions impossible.
             const newTransition: Transition = {
-              id: `transition-${Date.now().toString(36)}-${Math.random()
-                .toString(36)
-                .slice(2, 11)}`,
+              id: this.mintAddId("transition", action.params as Record<string, unknown>),
               clipAId: params.clipAId,
               clipBId: params.clipBId,
               type: params.transitionType,
@@ -1223,7 +1245,6 @@ export class ActionExecutor {
               params: {},
             };
             track.transitions = [...(track.transitions || []), newTransition];
-            this.lastAddedIds.set("transition", newTransition.id);
           }
         }
         break;
@@ -1386,13 +1407,12 @@ export class ActionExecutor {
           endTime: number;
         };
         const newSubtitle = {
-          id: `subtitle-${Date.now()}`,
+          id: this.mintAddId("subtitle", action.params as Record<string, unknown>),
           text: params.text,
           startTime: params.startTime,
           endTime: params.endTime,
         };
         timeline.subtitles = [...(timeline.subtitles || []), newSubtitle];
-        this.lastAddedIds.set("subtitle", newSubtitle.id);
         break;
       }
 
@@ -1462,7 +1482,8 @@ export class ActionExecutor {
           const text = match[4].trim();
 
           newSubtitles.push({
-            id: `subtitle-${Date.now()}-${match[1]}`,
+            // Collision-free ids (F1); bulk import → factory per row.
+            id: this.ids("subtitle"),
             text,
             startTime,
             endTime,
