@@ -234,4 +234,49 @@ describe("FOUNDATION AUDIT — expected failures until Phase F", () => {
     expect(a.clip).toBe("clip-t-0");
     expect(a.sub).toBe("subtitle-t-1");
   });
+
+  it("F10: setMaxHistorySize remaps snapshot indices when trimming", () => {
+    const h = new ActionHistory();
+    for (let i = 0; i < 5; i++) {
+      h.push({ type: "clip/move", id: `a${i}`, timestamp: 0, params: {} } as Action, null);
+    }
+    const snap = h.createSnapshot("mark");
+    expect(snap.stackIndex).toBe(5);
+    h.setMaxHistorySize(2); // trims the 3 oldest
+    expect(h.getUndoStackSize()).toBe(2);
+    expect(h.getSnapshots()[0].stackIndex).toBe(2); // 5 - 3
+  });
+
+  it("F8-subtitle: undo of setStyle restores each subtitle's own prior style", async () => {
+    const project = {
+      id: "p",
+      name: "t",
+      createdAt: 0,
+      modifiedAt: 0,
+      settings: { width: 1920, height: 1080, frameRate: 30, sampleRate: 48000, channels: 2 },
+      mediaLibrary: { items: [] },
+      timeline: {
+        duration: 0,
+        tracks: [],
+        subtitles: [
+          { id: "s1", text: "a", startTime: 0, endTime: 1, style: { color: "red" } },
+          { id: "s2", text: "b", startTime: 1, endTime: 2, style: { color: "blue" } },
+        ],
+      },
+      textClips: [],
+    } as unknown as Project;
+    const executor = new ActionExecutor(new ActionHistory());
+
+    await executor.execute(act("subtitle/setStyle", { style: { color: "green" } }), project);
+    expect(
+      project.timeline.subtitles.every((s: any) => s.style?.color === "green"),
+    ).toBe(true);
+
+    await executor.undo(project);
+    const byId: Record<string, string> = Object.fromEntries(
+      project.timeline.subtitles.map((s: any) => [s.id, s.style?.color]),
+    );
+    expect(byId.s1).toBe("red");
+    expect(byId.s2).toBe("blue");
+  });
 });

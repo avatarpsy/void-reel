@@ -410,9 +410,19 @@ export class ActionHistory {
 
   setMaxHistorySize(size: number): void {
     this.maxHistorySize = size;
-    // Trim if necessary
+    // Trim if necessary. FOUNDATION FIX (F10): shift() removes the OLDEST
+    // entries, so every snapshot's stackIndex must slide down by the number
+    // trimmed (mirrors push()'s trim) — otherwise snapshot bookmarks point at
+    // the wrong position after a shrink.
+    let shifted = 0;
     while (this.undoStack.length > this.maxHistorySize) {
       this.undoStack.shift();
+      shifted++;
+    }
+    if (shifted > 0) {
+      this.snapshots = this.snapshots
+        .map((s) => ({ ...s, stackIndex: s.stackIndex - shifted }))
+        .filter((s) => s.stackIndex >= 0);
     }
   }
 }

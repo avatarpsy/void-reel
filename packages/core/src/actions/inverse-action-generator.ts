@@ -629,9 +629,11 @@ export class InverseActionGenerator {
       }
 
       case "subtitle/setStyle": {
-        const firstSubtitle = timeline.subtitles[0];
-        return this.createInverseAction(action, "subtitle/setStyle", {
-          style: firstSubtitle?.style ?? null,
+        // FOUNDATION FIX (F8-subtitle): apply homogenizes EVERY subtitle to one
+        // style, so capturing only subtitles[0].style loses each subtitle's own
+        // prior style on undo. Restore the full prior array (styles intact).
+        return this.createInverseAction(action, "subtitle/restoreAll", {
+          subtitles: timeline.subtitles.map((s) => ({ ...s })),
         });
       }
     }
