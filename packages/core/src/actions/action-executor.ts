@@ -38,6 +38,7 @@ import { ActionValidator } from "./action-validator";
 import { ActionHistory } from "./action-history";
 import { InverseActionGenerator } from "./inverse-action-generator";
 import { createIdGenerator, type IdGenerator } from "./id-generator";
+import { createSerialQueue, type EnqueueFn } from "../utils/serial-queue";
 
 /**
  * Minimal interface the executor needs to apply text/* actions. The
@@ -81,6 +82,11 @@ export class ActionExecutor {
   private lastAddedIds: Map<string, string> = new Map();
   private getTitleEngine: () => TitleEngineAdapter | null;
   private ids: IdGenerator;
+  // FOUNDATION FIX (F5): serialize execute/undo/redo so concurrent callers (the
+  // agent issues edits in parallel) can't interleave — each mutation completes
+  // and commits to history before the next reads state. One queue per executor
+  // instance; the editor store holds a single instance for the live project.
+  private queue: EnqueueFn = createSerialQueue();
 
   constructor(history?: ActionHistory, options?: ActionExecutorOptions) {
     this.validator = new ActionValidator();
@@ -110,7 +116,14 @@ export class ActionExecutor {
     return id;
   }
 
-  async execute(action: Action, project: Project): Promise<ActionResult> {
+  execute(action: Action, project: Project): Promise<ActionResult> {
+    return this.queue(() => this.executeInternal(action, project));
+  }
+
+  private async executeInternal(
+    action: Action,
+    project: Project,
+  ): Promise<ActionResult> {
     const validationResult = this.validator.validate(action, project);
 
     if (!validationResult.valid) {
@@ -203,7 +216,11 @@ export class ActionExecutor {
     return results;
   }
 
-  async undo(project: Project): Promise<ActionResult> {
+  undo(project: Project): Promise<ActionResult> {
+    return this.queue(() => this.undoInternal(project));
+  }
+
+  private async undoInternal(project: Project): Promise<ActionResult> {
     if (!this.history.canUndo()) {
       return {
         success: false,
@@ -242,7 +259,11 @@ export class ActionExecutor {
     }
   }
 
-  async redo(project: Project): Promise<ActionResult> {
+  redo(project: Project): Promise<ActionResult> {
+    return this.queue(() => this.redoInternal(project));
+  }
+
+  private async redoInternal(project: Project): Promise<ActionResult> {
     if (!this.history.canRedo()) {
       return {
         success: false,

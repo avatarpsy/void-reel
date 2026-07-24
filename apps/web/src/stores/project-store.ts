@@ -1251,23 +1251,18 @@ export const useProjectStore = create<ProjectState>()(
       ) => {
         const { project, actionExecutor } = get();
 
-        // IMPORTANT: Deep clone the project BEFORE mutation
-        const projectCopy = structuredClone(project);
-
+        // FOUNDATION FIX (F5): apply in place (no pre-clone) so concurrent
+        // callers can't clone the same stale base and drop one another's edit;
+        // the executor serializes execute() and F4 rolls back on failure.
         const action: Action = {
           type: "track/add",
           id: uuidv4(),
           timestamp: Date.now(),
           params: { trackType, position },
         };
-        const result = await actionExecutor.execute(action, projectCopy);
+        const result = await actionExecutor.execute(action, project);
         if (result.success) {
-          const finalProject: Project = {
-            ...projectCopy,
-            modifiedAt: Date.now(),
-          };
-
-          set({ project: finalProject });
+          set({ project: { ...project, modifiedAt: Date.now() } });
         }
         return result;
       },
@@ -1405,11 +1400,9 @@ export const useProjectStore = create<ProjectState>()(
       ) => {
         const { project, actionExecutor } = get();
 
-        // IMPORTANT: Deep clone the project BEFORE mutation
-        // actionExecutor mutates the project directly, so we need a fresh copy
-        // to ensure Zustand detects the state change
-        const projectCopy = structuredClone(project);
-
+        // FOUNDATION FIX (F5): apply in place (no pre-clone) so concurrent adds
+        // can't clone the same stale base and drop one another's clip; the
+        // executor serializes execute() and F4 rolls back on failure.
         const action: Action = {
           type: "clip/add",
           id: uuidv4(),
@@ -1429,15 +1422,10 @@ export const useProjectStore = create<ProjectState>()(
           },
         };
 
-        const result = await actionExecutor.execute(action, projectCopy);
+        const result = await actionExecutor.execute(action, project);
 
         if (result.success) {
-          const finalProject: Project = {
-            ...projectCopy,
-            modifiedAt: Date.now(),
-          };
-
-          set({ project: finalProject });
+          set({ project: { ...project, modifiedAt: Date.now() } });
         }
         return result;
       },

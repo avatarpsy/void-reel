@@ -2828,9 +2828,60 @@ function App() {
               );
               const ctx = { project, store: useProjectStore.getState() as unknown as Record<string, unknown> };
               const results: Array<{ clipId: string; ok: boolean; note?: string; error?: string }> = [];
-              for (const t of targets) {
-                const r = await surface.apply(t, args.config, ctx);
-                results.push({ clipId: t.id, ok: r.ok, note: r.note, error: r.error });
+              let threw: unknown = null;
+              try {
+                for (const t of targets) {
+                  const r = await surface.apply(t, args.config, ctx);
+                  results.push({ clipId: t.id, ok: r.ok, note: r.note, error: r.error });
+                }
+              } catch (e) {
+                threw = e;
+              }
+              // FOUNDATION FIX (F8): inspector batch is ALL-OR-NOTHING. The
+              // surfaces mutate via direct store setters, so a throw or a single
+              // ok:false on target k of N leaves the earlier targets mutated with
+              // no history entry (torn, un-undoable state). Restore every target
+              // to its captured before-state, register NO history entry, and fail.
+              if (threw || results.some((r) => !r.ok)) {
+                const engRb = useEngineStore.getState().getTitleEngine();
+                const timelineClipIds = new Set<string>();
+                for (const tr of project.timeline?.tracks ?? []) {
+                  for (const c of tr.clips ?? []) timelineClipIds.add(c.id);
+                }
+                // Restore timeline clips to their before-state (single store write).
+                useProjectStore.setState((s: any) => ({
+                  project: {
+                    ...s.project,
+                    timeline: {
+                      ...s.project.timeline,
+                      tracks: (s.project.timeline?.tracks ?? []).map((tr: any) => ({
+                        ...tr,
+                        clips: (tr.clips ?? []).map((c: any) =>
+                          beforeStates.has(c.id) ? beforeStates.get(c.id) : c,
+                        ),
+                      })),
+                    },
+                    modifiedAt: Date.now(),
+                  },
+                }));
+                // Restore text-clip targets via the engine (not on the timeline).
+                if (engRb) {
+                  for (const t of targets as any[]) {
+                    if (!timelineClipIds.has(t.id) && beforeStates.has(t.id)) {
+                      try { engRb.updateTextClip(t.id, beforeStates.get(t.id) as never); } catch { /* best-effort */ }
+                    }
+                  }
+                }
+                const firstErr = threw
+                  ? (threw instanceof Error ? threw.message : String(threw))
+                  : results.find((r) => !r.ok)?.error ?? "unknown";
+                const failedN = threw ? results.length : results.filter((r) => !r.ok).length;
+                reply({
+                  type: "voidspace:error",
+                  requestId: args.requestId,
+                  error: `inspector batch rolled back (${failedN}/${targets.length} failed): ${firstErr}`,
+                });
+                break;
               }
               const okCount = results.filter((r) => r.ok).length;
               // Register the mutation on the UNDO stack (Ctrl+Z / History
