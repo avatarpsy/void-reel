@@ -1149,10 +1149,21 @@ export async function loadSceneListAsProject(
         try {
           const firestoreScenes = await fetchScenes(userId, sceneListId);
           const firestoreVideoSceneIds: string[] = [];
+          // Narration counts too. This probe used to look at `video_url` ONLY,
+          // so a scene that gained a NARRATION but no new video left the blob
+          // looking fresh: the per-scene rebuild was skipped and the voiceover
+          // never reached the timeline. The audio existed everywhere else — on
+          // disk, in Firestore, and the to-do read "done (media verified)" — so
+          // the only place it was missing was the one that matters.
+          const firestoreNarrationSceneIds: string[] = [];
           for (const s of firestoreScenes) {
             const vu = (s as any).video_url;
             if (typeof vu === "string" && vu) {
               firestoreVideoSceneIds.push(s._docId);
+            }
+            const nu = (s as any).narration_url;
+            if (typeof nu === "string" && nu) {
+              firestoreNarrationSceneIds.push(s._docId);
             }
           }
           firestoreVideoSceneCount = firestoreVideoSceneIds.length;
@@ -1166,21 +1177,34 @@ export async function loadSceneListAsProject(
           // checking startsWith on the blob's media library is
           // unambiguous.
           const mediaItems = parsed.mediaLibrary?.items ?? [];
-          const mediaIds: string[] = [];
-          for (const m of mediaItems as Array<{ id?: string }>) {
-            if (typeof m?.id === "string" && m.id.startsWith("media-video-")) {
-              mediaIds.push(m.id);
+          const idsWithPrefix = (prefix: string): string[] => {
+            const out: string[] = [];
+            for (const m of mediaItems as Array<{ id?: string }>) {
+              if (typeof m?.id === "string" && m.id.startsWith(prefix)) out.push(m.id);
             }
-          }
-          const blobCoveredSceneIds = new Set<string>();
-          for (const sceneId of firestoreVideoSceneIds) {
-            const prefix = `media-video-${sceneId}-`;
-            if (mediaIds.some((mid) => mid.startsWith(prefix))) {
-              blobCoveredSceneIds.add(sceneId);
+            return out;
+          };
+          // Same prefix-matching rule for both kinds (see the note above about
+          // why startsWith beats a regex here).
+          const countCovered = (sceneIds: string[], kind: string): number => {
+            const ids = idsWithPrefix(`media-${kind}-`);
+            let n = 0;
+            for (const sceneId of sceneIds) {
+              if (ids.some((mid) => mid.startsWith(`media-${kind}-${sceneId}-`))) n += 1;
             }
+            return n;
+          };
+          blobVideoSceneCount = countCovered(firestoreVideoSceneIds, "video");
+          const blobNarrationSceneCount = countCovered(firestoreNarrationSceneIds, "narration");
+          const missingVideos = firestoreVideoSceneCount - blobVideoSceneCount;
+          const missingNarrations =
+            firestoreNarrationSceneIds.length - blobNarrationSceneCount;
+          staleBlobMissing = Math.max(0, missingVideos) + Math.max(0, missingNarrations);
+          if (missingNarrations > 0) {
+            console.warn(
+              `[voidspace-loader] blob is missing ${missingNarrations} scene narration(s) — rebuilding so the voiceover reaches the timeline.`,
+            );
           }
-          blobVideoSceneCount = blobCoveredSceneIds.size;
-          staleBlobMissing = firestoreVideoSceneCount - blobVideoSceneCount;
         } catch (e) {
           // If the staleness probe fails, fall back to the existing
           // behaviour (return blob). The live subscription will retry
