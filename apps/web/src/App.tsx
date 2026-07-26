@@ -21,6 +21,7 @@ import {
   subscribeSceneListAsProject,
 } from "./services/voidspace-loader";
 import { autoSaveManager } from "./services/auto-save";
+import { freshTrackInsertIndex } from "./services/track-order";
 import { loadMediaBlobForProject, saveMediaBlob } from "./services/media-storage";
 import {
   buildLegacyVoidspaceProjectId,
@@ -410,15 +411,25 @@ function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
   const knownTrackIds = new Set(mergedTracks.map((t) => t.id));
   for (const tr of fresh.timeline.tracks) {
     if (knownTrackIds.has(tr.id)) continue;
+    let incoming = tr;
     if (tombById.has(tr.id)) {
       // The user deleted this track. Only re-materialize it if the rebuild
       // carries clips that did NOT exist at deletion time (fresh
       // generations) — and even then, without the deleted clips.
       const survivors = tr.clips.filter((c) => !tombClipIds.has(c.id));
-      if (survivors.length > 0) mergedTracks.push({ ...tr, clips: survivors });
-      continue;
+      if (survivors.length === 0) continue;
+      incoming = { ...tr, clips: survivors };
     }
-    mergedTracks.push(tr);
+    // Insert where the FRESH project intends, not at the end — track order is
+    // z-order, and appending would drop an overlay behind the footage on every
+    // project that already has a saved timeline. See freshTrackInsertIndex.
+    const at = freshTrackInsertIndex(
+      mergedTracks.map((t) => t.id),
+      fresh.timeline.tracks.map((t) => t.id),
+      tr.id,
+    );
+    mergedTracks.splice(at, 0, incoming);
+    knownTrackIds.add(tr.id);
   }
 
   const mergedMediaItems = current.mediaLibrary.items.map(

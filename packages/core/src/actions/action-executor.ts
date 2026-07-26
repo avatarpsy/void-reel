@@ -535,10 +535,30 @@ export class ActionExecutor {
           solo: false,
         };
 
+        // Where a new track lands, when the caller didn't say.
+        //
+        // Track order is z-order: pixel tracks are painted by DESCENDING index,
+        // so a LOWER index sits on TOP. Appending therefore put every new video
+        // track at the BOTTOM of the stack — add an alpha overlay (a lower
+        // third, a callout) to a new video track and it rendered BEHIND the
+        // footage, invisible, with nothing to indicate why.
+        //
+        // So a new video/image track stacks ABOVE the existing ones of its
+        // type, which is also what every NLE does (V2 sits over V1). Audio and
+        // overlay-layer tracks (text/graphics) have no z-order to get wrong —
+        // text/graphics always composite above pixels regardless of index — so
+        // they keep appending.
+        const stacksOnTop =
+          params.trackType === "video" || params.trackType === "image";
+        const firstOfType = timeline.tracks.findIndex(
+          (t: MutableTrack) => t.type === params.trackType,
+        );
         const position =
           params.position !== undefined
             ? params.position
-            : timeline.tracks.length;
+            : stacksOnTop && firstOfType >= 0
+              ? firstOfType
+              : timeline.tracks.length;
 
         timeline.tracks = [
           ...timeline.tracks.slice(0, position),

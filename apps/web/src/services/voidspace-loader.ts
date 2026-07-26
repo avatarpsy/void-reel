@@ -1440,6 +1440,10 @@ export async function loadSceneListAsProject(
   // 4) Build media library + timeline
   const mediaItems: MediaItem[] = [];
   const videoTrackClips: Clip[] = [];
+  // Stills for scenes that have no moving picture at all. An ordinary clip on
+  // an ordinary track — the point is the user SEES it in the timeline and can
+  // move, trim or delete it, rather than it being missing entirely.
+  const imageTrackClips: Clip[] = [];
   const narrationTrackClips: Clip[] = [];
   const sfxTrackClips: Clip[] = [];
   const musicTrackClips: Clip[] = [];
@@ -1822,6 +1826,32 @@ export async function loadSceneListAsProject(
         audioEffects: [],
         transform: makeDefaultTransform(),
         volume: primaryVideo?.has_embedded_audio ? 1 : 0,
+        keyframes: [],
+      });
+    }
+
+    // ── Still clip (scenes with no moving picture) ──
+    // An image-only scene used to contribute NOTHING to the timeline: the still
+    // appeared in the Assets panel and the video track simply had a hole where
+    // the scene should be. The user saw a gap and no way to tell what belonged
+    // there. Placing it as a real clip keeps the timeline a truthful picture of
+    // the video. Only when there is no video — a first frame that merely backs
+    // an existing clip is already represented by that clip.
+    if (!videoUrl && imageUrl) {
+      const stillMediaId = `media-frame-${scene._docId}-${primaryImage?.id ?? stableHash(imageUrl)}`;
+      imageTrackClips.push({
+        id: `clip-image-${scene._docId}`,
+        mediaId: stillMediaId,
+        trackId: "track-image",
+        startTime: currentTime,
+        duration: sceneDuration,
+        // A still has no source timeline to seek: it holds for the whole slot.
+        inPoint: 0,
+        outPoint: sceneDuration,
+        effects: [],
+        audioEffects: [],
+        transform: makeDefaultTransform(),
+        volume: 0,
         keyframes: [],
       });
     }
@@ -2304,6 +2334,15 @@ export async function loadSceneListAsProject(
     });
   }
 
+  // ORDER MATTERS, and it is the opposite of what it looks like. The shared
+  // z-order painter (compositeTracksToCtx) sorts pixel tracks by
+  // `b.originalIndex - a.originalIndex`, so the HIGHEST index is painted FIRST
+  // — i.e. furthest back. A LOWER index sits on TOP.
+  //
+  // Hence image AFTER video: a still never covers a moving clip if the two ever
+  // overlap. Overlays are not derived here at all — an overlay is just an alpha
+  // video the user or agent drops on its own video track, which stacks above
+  // automatically (see the track/add stacking rule).
   tracks.push({
     id: "track-video",
     type: "video",
@@ -2315,6 +2354,20 @@ export async function loadSceneListAsProject(
     muted: false,
     solo: false,
   });
+
+  if (imageTrackClips.length > 0) {
+    tracks.push({
+      id: "track-image",
+      type: "image",
+      name: "Images",
+      clips: imageTrackClips,
+      transitions: [],
+      locked: false,
+      hidden: false,
+      muted: false,
+      solo: false,
+    });
+  }
 
   // Only add narration track if it has clips (matches Flutter — no empty tracks)
   if (narrationTrackClips.length > 0) {
