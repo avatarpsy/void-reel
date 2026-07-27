@@ -68,7 +68,11 @@ export const Transport: React.FC = () => {
           same instant in a different format a few pixels away. Total duration
           stays, quiet and to the right: knowing how long the edit runs is
           worth one small label, and it is not the same fact as the playhead. */}
-      <div className="ml-2 font-mono text-xs tabular-nums tracking-wider flex items-baseline gap-1.5">
+      {/* In flow, not absolute. Floating it out of flow made the clock able to
+          ride over the settings cluster on a narrow bar — the group must
+          occupy the width it actually needs so the layout can keep everything
+          apart. tabular-nums keeps the digits from jittering as they count. */}
+      <div className="ml-2 font-mono text-xs tabular-nums tracking-wider flex items-baseline gap-1.5 whitespace-nowrap">
         <span className="text-primary">{formatClock(playheadPosition)}</span>
         <span className="text-text-tertiary text-[10px]">/ {formatClock(duration)}</span>
       </div>

@@ -53,7 +53,6 @@ import {
   getTrackInfo,
   getKeyframeLaneHeight,
 } from "./timeline/index";
-import { Transport } from "./Transport";
 
 /**
  * Zoom slider mapping — LOGARITHMIC on purpose.
@@ -1340,9 +1339,11 @@ export const Timeline: React.FC = () => {
           </Popover>
         </div>
 
-        <div className="bg-background-tertiary px-3 py-1 rounded-lg border border-primary/20 shadow-[0_0_12px_rgba(34,197,94,0.12)]">
-          <Transport />
-        </div>
+        {/* The transport moved to the player's own control row, where playback
+            controls belong. It lived here only because a timeline drag could
+            swallow that row; the row now has a floor, so the workaround is no
+            longer needed — and this toolbar is edit tools + zoom, one purpose
+            per end, with nothing stranded in the middle. */}
 
         {/* Zoom, as one continuous control.
             The track-height toggle is gone — tracks are compact by default and

@@ -143,6 +143,23 @@ const useEngineInitialization = () => {
 /**
  * Main Editor Interface Component
  */
+/**
+ * Space the timeline may never take, in px.
+ *
+ * The timeline can climb until only the player's CONTROL ROW is left above it —
+ * never past it. That row carries the transport, so letting the drag swallow it
+ * took play/pause and the clock off screen, which is why the transport used to
+ * live on the timeline toolbar instead of with the picture it drives.
+ *
+ * Spelled out rather than written as one number because each part is a real
+ * measurement that can drift: an unaccounted 1px border here is a visible
+ * overlap between the control row and the timeline.
+ */
+const TOP_TOOLBAR_H = 64;   // h-16
+const GRIP_H = 8;           // h-2 resize grip
+const PLAYER_CONTROLS_H = 49; // h-12 row + its 1px top border
+const MIN_CHROME_ABOVE_TIMELINE = TOP_TOOLBAR_H + GRIP_H + PLAYER_CONTROLS_H;
+
 export const EditorInterface: React.FC = () => {
   const { initialized, initializing, initError, initStatus } =
     useEngineInitialization();
@@ -250,8 +267,13 @@ export const EditorInterface: React.FC = () => {
   // consistent resize model: the grip always adjusts this height.
   useEffect(() => {
     if (typeof window === "undefined") return;
+    // Minimize takes the video area to nothing but stops at the same floor the
+    // drag does, so the control row (and the transport on it) survives either
+    // route. Two ways to resize must not disagree about what "minimum" means.
     setTimelineHeight(
-      previewCollapsed ? Math.max(320, window.innerHeight - 300) : 320,
+      previewCollapsed
+        ? Math.max(320, window.innerHeight - MIN_CHROME_ABOVE_TIMELINE)
+        : 320,
     );
   }, [previewCollapsed]);
 
@@ -267,13 +289,7 @@ export const EditorInterface: React.FC = () => {
       if (!isDraggingRef.current) return;
 
       const newHeight = window.innerHeight - e.clientY;
-      // Let the timeline climb all the way to just under the top toolbar
-      // (toolbar h-16 = 64px + the 8px grip = 72px). The old percentage
-      // caps sat below the collapsed default, so the grip snapped down on
-      // first grab and got "stuck in the middle". Capping at the toolbar
-      // edge lets the timeline go fully to the top; the workspace
-      // (assets / mixer / inspector) shrinks above it like a normal NLE.
-      const maxHeight = window.innerHeight - 72;
+      const maxHeight = window.innerHeight - MIN_CHROME_ABOVE_TIMELINE;
       setTimelineHeight(Math.max(200, Math.min(newHeight, maxHeight)));
     };
 

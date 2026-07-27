@@ -44,6 +44,7 @@ import {
 } from "@openreel/core";
 import { useEngineStore } from "../../stores/engine-store";
 import { useSettingsStore } from "../../stores/settings-store";
+import { Transport } from "./Transport";
 import {
   type HandlePosition,
   type InteractionMode,
@@ -4657,9 +4658,21 @@ export const Preview: React.FC = () => {
       )}
 
       {/* Video Area */}
+      {/* min-h-0 is load-bearing. A flex item defaults to min-height:auto, so
+          this would not shrink below the 450px stage inside it — dragging the
+          timeline up squeezed the column but the video area held its size and
+          pushed the control row (with the transport) off the bottom. With the
+          floor removed, the stage collapses toward nothing and the control row,
+          which never shrinks, stays on screen. */}
+      {/* min-h-0 lets this shrink below its content; the padding is HORIZONTAL
+          only because vertical padding would not shrink with it. Flex reduces a
+          item's content box, never its padding — so `p-4` left an immovable
+          32px here, which pushed the control row down into the timeline and
+          produced exactly the overlap it looked like. The stage is centred, so
+          it keeps its breathing room from the free space rather than padding. */}
       <div
-        className={`flex-1 relative flex items-center justify-center bg-background-secondary/30 transition-all duration-300 ${
-          isFullscreen ? "p-0" : "p-4"
+        className={`flex-1 min-h-0 overflow-hidden relative flex items-center justify-center bg-background-secondary/30 transition-all duration-300 ${
+          isFullscreen ? "px-0" : "px-4"
         } ${zoomLevel > 1 ? "overflow-auto" : ""}`}
         onMouseMove={interactionMode !== "none" ? handleMouseMove : undefined}
         onMouseUp={handleMouseUp}
@@ -5075,9 +5088,15 @@ export const Preview: React.FC = () => {
             : "z-20 bg-background-secondary"
         }`}
       >
-        {/* Controls row (transport moved to the timeline toolbar) */}
-        <div className="h-12 px-6 flex items-center justify-between">
-        <div className="flex items-center gap-2">
+        {/* Controls row. The transport sits HERE, with the picture it drives,
+            and is centred absolutely rather than as a flex child — the badge on
+            the left and the settings cluster on the right are different widths,
+            so a plain justify-between would park play/pause off-centre and it
+            would drift every time a badge appeared or a label changed length.
+            The row survives any timeline resize (see EditorInterface's floor),
+            so playback controls never leave the screen. */}
+        <div className="h-12 shrink-0 px-6 grid grid-cols-[minmax(0,1fr)_auto_minmax(max-content,1fr)] items-center gap-3">
+        <div className="flex items-center gap-2 min-w-0 overflow-hidden">
           {/* The playhead time lives on the TRANSPORT, next to the controls
               that move it. It was printed here as well, so the same number sat
               in two toolbars a few pixels apart — and the two used different
@@ -5096,7 +5115,23 @@ export const Preview: React.FC = () => {
           )}
         </div>
 
-        <div className="flex gap-2 items-center">
+        {/* Centre column. `auto` width means the transport takes exactly the
+            room it needs and the two 1fr columns split what is left equally —
+            so it is geometrically centred no matter how wide the badge or the
+            settings cluster get, and the three columns can never overlap the
+            way an absolutely-placed element could.
+            The right track is minmax(max-content,1fr), not a plain 1fr: equal
+            columns meant the settings cluster could never be wider than the
+            near-empty badge column, and one pixel of shortfall wrapped
+            "Prerender" and "RAM 4G" onto a second line inside a 48px row. It
+            now keeps its natural width and the left column gives up the
+            difference, so the transport drifts off dead-centre on a narrow
+            window instead of the controls breaking. */}
+        <div className="flex items-center justify-center">
+          <Transport />
+        </div>
+
+        <div className="flex gap-2 items-center justify-end whitespace-nowrap">
           <button
             onClick={() => setIsMuted(!isMuted)}
             className={`p-2 rounded-lg hover:bg-background-elevated transition-colors ${
@@ -5314,7 +5349,9 @@ export const Preview: React.FC = () => {
             )}
           </div>
 
-          <div className="w-px h-4 bg-border mx-2" />
+          {/* No mx-* here: the flex row already supplies gap-2 on both sides,
+              and the extra margin was 16px the cluster could not spare. */}
+          <div className="w-px h-4 bg-border shrink-0" />
           {/* ONE expand control, and it does the obvious thing: real
               fullscreen. There were two buttons here — a monitor icon for
               fullscreen and an expand icon for an in-app "maximize" — sitting
