@@ -1,8 +1,6 @@
 import React, { useCallback, useMemo, useState } from "react";
 import {
   Search,
-  Maximize2,
-  X,
   Image as ImageIcon,
   Film,
   Music,
@@ -24,6 +22,7 @@ import {
   List,
   Link2,
   FolderInput,
+  Home,
 } from "lucide-react";
 import {
   BACKGROUND_PRESETS,
@@ -42,7 +41,6 @@ import { toast } from "../../stores/notification-store";
 import { saveFileHandle, saveDirectoryHandle } from "../../services/media-storage";
 import { collectFolder, buildRelinkPlan, type RelinkableItem } from "../../services/media-relink";
 import {
-  IconButton,
   Input,
   ScrollArea,
   ContextMenu,
@@ -693,6 +691,26 @@ export const AssetsPanel: React.FC = () => {
   const [adobePath, setAdobePath] = useState("");
   const [adobeBusy, setAdobeBusy] = useState(false);
   const [adobeStatus, setAdobeStatus] = useState("");
+  // "Open my Voidspace folder". A browser cannot open a native file window, and
+  // the website runs in a container, so neither can reach the user's desktop —
+  // only the Voidspace desktop app can. The request therefore goes to the
+  // device, and a failure has to SAY so rather than appear to do nothing.
+  const [folderBusy, setFolderBusy] = useState(false);
+  const [folderError, setFolderError] = useState("");
+  async function openVoidspaceFolder() {
+    if (folderBusy) return;
+    setFolderBusy(true);
+    setFolderError("");
+    try {
+      const { openVoidspaceFolder: openIt } = await import("../../services/open-folder");
+      const r = await openIt();
+      if (!r.ok) setFolderError(r.error || "Couldn't open the folder");
+    } catch (e: any) {
+      setFolderError(e?.message ?? String(e));
+    } finally {
+      setFolderBusy(false);
+    }
+  }
   // Clicking a Media tile opens a fullscreen preview (consistent with the
   // Library/Voidspace tabs); it never auto-adds — drag onto the timeline to use.
   const [previewMediaItem, setPreviewMediaItem] = useState<MediaItem | null>(null);
@@ -733,17 +751,9 @@ export const AssetsPanel: React.FC = () => {
   // User-resizable panel width (persisted via panels.mediaLibrary.width;
   // the drag handle lives in EditorInterface as a flex sibling).
   const assetsWidth = useUIStore((s) => s.panels.mediaLibrary.width ?? 320);
-  const setPanelWidth = useUIStore((s) => s.setPanelWidth);
   // Header expand button: toggle the Assets panel between its normal width
   // and a wide preset so the user can see more columns of media at once
   // (complements the drag handle). 320 is the default; 560 is "expanded".
-  const EXPANDED_W = 560;
-  const DEFAULT_W = 320;
-  const toggleExpandAssets = useCallback(() => {
-    const cur = useUIStore.getState().panels.mediaLibrary.width ?? DEFAULT_W;
-    setPanelWidth("mediaLibrary", cur >= EXPANDED_W ? DEFAULT_W : EXPANDED_W);
-  }, [setPanelWidth]);
-
   const runAdobeImport = useCallback(async () => {
     const path = adobePath.trim();
     if (!path || adobeBusy) return;
@@ -1237,15 +1247,16 @@ export const AssetsPanel: React.FC = () => {
               → label-activation dispatches the synthetic click on the
               input → file picker opens. */}
           <button
-            onClick={() => setAdobeOpen((v) => !v)}
-            title="Import an Adobe project folder (After Effects / Premiere) — media is copied into your LOCAL Voidspace storage, never the cloud"
-            className={`inline-flex items-center justify-center h-6 w-6 rounded-md transition-colors cursor-pointer ${
-              adobeOpen
-                ? "text-primary bg-primary/10"
+            onClick={() => void openVoidspaceFolder()}
+            disabled={folderBusy}
+            title={folderError || "Open your Voidspace folder on this computer"}
+            className={`inline-flex items-center justify-center h-6 w-6 rounded-md transition-colors cursor-pointer disabled:opacity-40 ${
+              folderError
+                ? "text-red-400 hover:bg-background-elevated"
                 : "text-text-secondary hover:text-text-primary hover:bg-background-elevated"
             }`}
           >
-            <FolderInput size={14} />
+            <Home size={14} />
           </button>
           {isEmbedded ? (
             <button
@@ -1266,12 +1277,8 @@ export const AssetsPanel: React.FC = () => {
               <Plus size={14} />
             </label>
           )}
-          <IconButton
-            icon={Maximize2}
-            title={assetsWidth >= EXPANDED_W ? "Shrink panel" : "Expand panel — more columns"}
-            onClick={toggleExpandAssets}
-          />
-          <IconButton icon={X} title="Close panel" />
+          {/* Expand / close removed — the panel is a fixed part of the editor
+              layout and both buttons only ever got in the way. */}
         </div>
       </div>
 

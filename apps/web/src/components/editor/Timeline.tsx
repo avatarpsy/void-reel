@@ -9,7 +9,6 @@ import {
   Undo2,
   Redo2,
   Layers,
-  Maximize2,
   Film,
   Music,
   Image,
@@ -23,12 +22,12 @@ import {
   ChevronDown as ChevronDownIcon,
   Magnet,
   Info,
-  Rows3,
-  Rows2,
+  ZoomIn,
 } from "lucide-react";
 import { useProjectStore } from "../../stores/project-store";
-import { useTimelineStore } from "../../stores/timeline-store";
+import { useTimelineStore, ZOOM_PRESETS } from "../../stores/timeline-store";
 import { useUIStore } from "../../stores/ui-store";
+
 import { resolveDroppedMediaId } from "../../services/library-drop";
 import { toast } from "../../stores/notification-store";
 import { useEngineStore } from "../../stores/engine-store";
@@ -55,6 +54,27 @@ import {
   getKeyframeLaneHeight,
 } from "./timeline/index";
 import { Transport } from "./Transport";
+
+/**
+ * Zoom slider mapping — LOGARITHMIC on purpose.
+ *
+ * Zoom runs 10 → 500 px/s, a 50x range, and the store's own zoomIn/zoomOut
+ * step by a constant FACTOR (1.5x) rather than a constant amount. A linear
+ * slider over that range would spend three quarters of its travel between 200
+ * and 500 px/s, where the difference is barely visible, and cram every useful
+ * working zoom into the first few pixels. Mapping through log space makes one
+ * millimetre of travel mean the same proportional change everywhere.
+ */
+const zoomToSlider = (pps: number): number => {
+  const { MIN, MAX } = ZOOM_PRESETS;
+  const clamped = Math.max(MIN, Math.min(MAX, pps));
+  return Math.round((Math.log(clamped / MIN) / Math.log(MAX / MIN)) * 100);
+};
+const sliderToZoom = (v: number): number => {
+  const { MIN, MAX } = ZOOM_PRESETS;
+  const t = Math.max(0, Math.min(100, v)) / 100;
+  return MIN * Math.pow(MAX / MIN, t);
+};
 
 export const Timeline: React.FC = () => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -93,11 +113,7 @@ export const Timeline: React.FC = () => {
     setScrollX,
     setScrollY,
     setViewportDimensions,
-    zoomIn,
-    zoomOut,
     setZoom,
-    trackHeight,
-    setTrackHeight,
     setTrackHeightById,
     getTrackHeight,
     isTrackExpanded,
@@ -1328,51 +1344,30 @@ export const Timeline: React.FC = () => {
           <Transport />
         </div>
 
-        <div className="flex items-center gap-2">
-          <div className="flex items-center bg-background-tertiary rounded-lg border border-border overflow-hidden">
-            <button
-              onClick={() => { setTrackHeight(80); useTimelineStore.setState({ trackHeights: {} }); }}
-              className={`w-8 h-8 flex items-center justify-center transition-colors border-r border-border ${
-                trackHeight >= 60
-                  ? "text-primary bg-primary/10"
-                  : "text-text-secondary hover:text-text-primary hover:bg-background-elevated"
-              }`}
-              title="Large tracks"
-            >
-              <Rows3 size={14} />
-            </button>
-            <button
-              onClick={() => { setTrackHeight(50); useTimelineStore.setState({ trackHeights: {} }); }}
-              className={`w-8 h-8 flex items-center justify-center transition-colors ${
-                trackHeight < 60
-                  ? "text-primary bg-primary/10"
-                  : "text-text-secondary hover:text-text-primary hover:bg-background-elevated"
-              }`}
-              title="Small tracks"
-            >
-              <Rows2 size={14} />
-            </button>
-          </div>
-          <div className="flex items-center bg-background-tertiary rounded-lg border border-border overflow-hidden">
-            <button
-              onClick={zoomOut}
-              className="w-8 h-8 flex items-center justify-center text-text-secondary hover:text-text-primary hover:bg-background-elevated transition-colors border-r border-border"
-              title="Zoom out"
-            >
-              <span className="text-base font-medium">−</span>
-            </button>
-            <span className="text-[11px] w-14 text-center font-mono text-text-secondary tabular-nums">
-              {Math.round(pixelsPerSecond)}px/s
-            </span>
-            <button
-              onClick={zoomIn}
-              className="w-8 h-8 flex items-center justify-center text-text-secondary hover:text-text-primary hover:bg-background-elevated transition-colors border-l border-border"
-              title="Zoom in"
-            >
-              <span className="text-base font-medium">+</span>
-            </button>
-          </div>
-          <IconButton icon={Maximize2} title="Maximize timeline" />
+        {/* Zoom, as one continuous control.
+            The track-height toggle is gone — tracks are compact by default and
+            any track can still be dragged taller individually, so a global
+            two-state switch was a permanent fixture for a one-off preference.
+            "Maximize timeline" is gone too: it duplicated the panel drag
+            handle. What remains is the only control needed continuously. */}
+        {/* Just the slider. A single magnifier glyph anchors what it does
+            without bringing back the −/+ pair this replaced; the exact px/s
+            lives in the tooltip, where a number nobody reads mid-edit belongs.
+            14px glyph and a 1.5 gap match the LAYERS / SNAP / INFO buttons at
+            the other end, so the toolbar keeps one rhythm across its width. */}
+        <div className="flex items-center gap-1.5 text-text-muted">
+          <ZoomIn size={14} className="shrink-0" />
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={1}
+            value={zoomToSlider(pixelsPerSecond)}
+            onChange={(e) => setZoom(sliderToZoom(Number(e.target.value)))}
+            title={`Timeline zoom — ${Math.round(pixelsPerSecond)} px/s`}
+            aria-label="Timeline zoom"
+            className="timeline-zoom-slider w-28 cursor-pointer"
+          />
         </div>
       </div>
 

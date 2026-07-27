@@ -159,3 +159,62 @@ textarea:focus {
 button {
   cursor: pointer;
 }
+
+/* ── Timeline zoom slider ──────────────────────────────────────────────────
+   A range input inherits the global `input` rule above (border, padding,
+   tertiary background), which on a slider renders as a boxed-in control that
+   looks nothing like the rest of the toolbar. Reset it and draw a thin track
+   with a small primary thumb instead — the same visual weight as the icon
+   buttons beside it, so the strip reads as one row of controls. */
+.timeline-zoom-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  border: none;
+  padding: 0;
+  height: 14px;          /* hit area — the visible track is drawn below */
+  outline: none;
+}
+.timeline-zoom-slider:focus {
+  border-color: transparent;
+  box-shadow: none;
+}
+.timeline-zoom-slider::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 999px;
+  background: rgb(var(--color-border));
+}
+.timeline-zoom-slider::-moz-range-track {
+  height: 3px;
+  border-radius: 999px;
+  background: rgb(var(--color-border));
+}
+.timeline-zoom-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 11px;
+  height: 11px;
+  margin-top: -4px;      /* centre the thumb on a 3px track */
+  border-radius: 50%;
+  background: rgb(var(--color-primary));
+  border: none;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+.timeline-zoom-slider::-moz-range-thumb {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: rgb(var(--color-primary));
+  border: none;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+.timeline-zoom-slider:hover::-webkit-slider-thumb,
+.timeline-zoom-slider:active::-webkit-slider-thumb {
+  transform: scale(1.18);
+  box-shadow: 0 0 0 4px rgb(var(--color-primary) / 0.18);
+}
+.timeline-zoom-slider:hover::-moz-range-thumb,
+.timeline-zoom-slider:active::-moz-range-thumb {
+  transform: scale(1.18);
+  box-shadow: 0 0 0 4px rgb(var(--color-primary) / 0.18);
+}

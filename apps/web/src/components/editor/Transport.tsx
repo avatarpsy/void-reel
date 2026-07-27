@@ -2,7 +2,17 @@ import React from "react";
 import { Play, Pause, SkipBack, SkipForward, ChevronFirst, ChevronLast } from "lucide-react";
 import { useTimelineStore } from "../../stores/timeline-store";
 import { useProjectStore } from "../../stores/project-store";
-import { formatTimecode } from "./timeline/utils";
+/** HH:MM:SS. Deliberately not the frame-accurate timecode: this is the
+ *  at-a-glance clock, and a trailing frame counter that changes 30 times a
+ *  second reads as noise rather than information. */
+const formatClock = (seconds: number): string => {
+  const s = Math.max(0, Math.floor(seconds || 0));
+  const hh = Math.floor(s / 3600);
+  const mm = Math.floor((s % 3600) / 60);
+  const ss = s % 60;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(hh)}:${pad(mm)}:${pad(ss)}`;
+};
 
 /**
  * Store-backed playback transport, docked on the timeline toolbar.
@@ -22,7 +32,6 @@ export const Transport: React.FC = () => {
   const seekToStart = useTimelineStore((s) => s.seekToStart);
   const seekToEnd = useTimelineStore((s) => s.seekToEnd);
   const duration = useProjectStore((s) => s.project.timeline.duration) || 0;
-  const frameRate = useProjectStore((s) => s.project.settings.frameRate) || 30;
   const isPlaying = playbackState === "playing";
 
   const btn =
@@ -53,10 +62,15 @@ export const Transport: React.FC = () => {
       <button className={btn} onClick={() => seekToEnd(duration)} title="Go to end (End)">
         <ChevronLast size={16} />
       </button>
-      <div className="ml-2 font-mono text-xs tabular-nums tracking-wider flex items-center gap-1">
-        <span className="text-primary">{formatTimecode(playheadPosition, frameRate)}</span>
-        <span className="text-text-tertiary">/</span>
-        <span className="text-text-secondary">{formatTimecode(duration, frameRate)}</span>
+      {/* The ONE clock in the editor, sitting with the controls that move it.
+          Plain HH:MM:SS — the frame field was the fourth pair of digits in a
+          number most people read at a glance, and the preview bar printed the
+          same instant in a different format a few pixels away. Total duration
+          stays, quiet and to the right: knowing how long the edit runs is
+          worth one small label, and it is not the same fact as the playhead. */}
+      <div className="ml-2 font-mono text-xs tabular-nums tracking-wider flex items-baseline gap-1.5">
+        <span className="text-primary">{formatClock(playheadPosition)}</span>
+        <span className="text-text-tertiary text-[10px]">/ {formatClock(duration)}</span>
       </div>
     </div>
   );

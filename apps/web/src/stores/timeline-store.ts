@@ -85,7 +85,11 @@ export const useTimelineStore = create<TimelineState>()(
 
     viewportWidth: 800,
     viewportHeight: 400,
-    trackHeight: 80,
+    // Compact by default. Tall tracks pushed a 4-track project past the
+    // viewport before a single clip was placed; the small size fits more of
+    // the edit on screen, which is what the timeline is for. Per-track heights
+    // (trackHeights) and the drag-resize handle still let any track grow.
+    trackHeight: 50,
     trackHeights: {},
 
     loopEnabled: false,

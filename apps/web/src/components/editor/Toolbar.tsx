@@ -23,8 +23,6 @@ import {
   Save,
   Minimize2,
   Maximize2,
-  SlidersHorizontal,
-  MonitorPlay,
 } from "lucide-react";
 import { useProjectStore } from "../../stores/project-store";
 import { useUIStore } from "../../stores/ui-store";
@@ -90,8 +88,6 @@ export const Toolbar: React.FC = () => {
     setExportState: setGlobalExportState,
     keyframeEditorOpen,
     toggleKeyframeEditor,
-    panels,
-    togglePanel,
     previewCollapsed,
     togglePreviewCollapsed,
     centerView,
@@ -1155,11 +1151,17 @@ export const Toolbar: React.FC = () => {
                   : "hover:bg-background-elevated text-text-secondary hover:text-text-primary"
               }`}
             >
-              {showMixerCenter ? <MonitorPlay size={16} /> : <SlidersHorizontal size={16} />}
+              {/* The icon STAYS the music icon. It used to flip to a video-player
+                  glyph once the mixer was up, which read as "this button is now
+                  a video player" rather than "this is the mixer, and it is on" —
+                  every neighbouring toggle keeps its own icon and shows state
+                  through the active highlight. Clicking swaps the CENTRE
+                  (player ⇄ mixer); the button itself does not change identity. */}
+              <Music size={16} />
             </button>
           </TooltipTrigger>
           <TooltipContent>
-            <p>{showMixerCenter ? "Show video player" : "Show audio mixer"}</p>
+            <p>{showMixerCenter ? "Show video player" : "Audio mixer"}</p>
           </TooltipContent>
         </Tooltip>
 
@@ -1215,25 +1217,9 @@ export const Toolbar: React.FC = () => {
           </TooltipContent>
         </Tooltip>
 
-        {!showMixerCenter && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                onClick={() => togglePanel("audioMixer")}
-                className={`p-2 rounded-lg transition-colors ${
-                  panels.audioMixer?.visible
-                    ? "bg-primary/20 text-primary"
-                    : "hover:bg-background-elevated text-text-secondary hover:text-text-primary"
-                }`}
-              >
-                <Music size={16} />
-              </button>
-            </TooltipTrigger>
-            <TooltipContent>
-              <p>Audio Mixer – track volume and master level</p>
-            </TooltipContent>
-          </Tooltip>
-        )}
+        {/* The second audio-mixer entry point (a docked panel) is gone — two
+            buttons for the same feature, one of which only appeared when the
+            other was off. The centre toggle above is the single way in. */}
 
         <Tooltip>
           <TooltipTrigger asChild>

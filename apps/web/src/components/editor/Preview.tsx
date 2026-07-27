@@ -8,7 +8,6 @@ import React, {
 import {
   Volume2,
   VolumeX,
-  Monitor,
   Maximize2,
   Minimize2,
   Move,
@@ -225,7 +224,6 @@ export const Preview: React.FC = () => {
   const [isRenderBridgeReady, setIsRenderBridgeReady] = useState(false);
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
   const [rendererType, setRendererType] = useState<string>("none");
-  const [isMaximized, setIsMaximized] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [zoomLevel, setZoomLevel] = useState(1);
   const [showZoomMenu, setShowZoomMenu] = useState(false);
@@ -4579,11 +4577,6 @@ export const Preview: React.FC = () => {
     }
   }, []);
 
-  const handleMaximize = useCallback(() => {
-    setZoomLevel(1);
-    setIsMaximized((prev) => !prev);
-  }, []);
-
   useEffect(() => {
     const handleFullscreenChange = () => {
       setIsFullscreen(!!document.fullscreenElement);
@@ -4666,7 +4659,7 @@ export const Preview: React.FC = () => {
       {/* Video Area */}
       <div
         className={`flex-1 relative flex items-center justify-center bg-background-secondary/30 transition-all duration-300 ${
-          isMaximized || isFullscreen ? "p-0" : "p-4"
+          isFullscreen ? "p-0" : "p-4"
         } ${zoomLevel > 1 ? "overflow-auto" : ""}`}
         onMouseMove={interactionMode !== "none" ? handleMouseMove : undefined}
         onMouseUp={handleMouseUp}
@@ -4674,15 +4667,25 @@ export const Preview: React.FC = () => {
         <div
           ref={overlayRef}
           className={`relative bg-black overflow-hidden transition-all duration-300 ${
-            isMaximized || isFullscreen
+            isFullscreen
               ? "rounded-none ring-0 shadow-none"
               : "shadow-2xl rounded-xl ring-1 ring-border shadow-[0_0_50px_rgba(0,0,0,0.5)]"
           }`}
           style={
-            isMaximized || isFullscreen
+            isFullscreen
               ? {
-                  width: "100%",
-                  height: "100%",
+                  // Fit the PROJECT's shape inside the screen, letterboxing
+                  // whichever axis is spare. This used to be 100% x 100%, which
+                  // on a landscape monitor handed a 9:16 project a 16:9 element
+                  // box — the frame was then squeezed into the wrong shape and
+                  // the sides of the picture were lost.
+                  //
+                  // Each axis is the smaller of "all the room there is" and
+                  // "what the other axis allows at this aspect", so the box is
+                  // always exactly the project's ratio and never overflows.
+                  // The flex parent centres it.
+                  width: `min(100%, calc(100vh * ${settings.width} / ${settings.height}))`,
+                  height: `min(100%, calc(100vw * ${settings.height} / ${settings.width}))`,
                   maxWidth: "none",
                 }
               : {
@@ -5067,7 +5070,7 @@ export const Preview: React.FC = () => {
       {/* Player Controls with integrated Scrub Bar */}
       <div
         className={`border-t border-border transition-all duration-300 ${
-          isMaximized || isFullscreen
+          isFullscreen
             ? "absolute bottom-0 left-0 right-0 z-50 bg-background-secondary backdrop-blur-sm"
             : "z-20 bg-background-secondary"
         }`}
@@ -5075,10 +5078,10 @@ export const Preview: React.FC = () => {
         {/* Controls row (transport moved to the timeline toolbar) */}
         <div className="h-12 px-6 flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <div className="font-mono text-text-primary tabular-nums text-sm w-24 tracking-wider">
-            {formatTime(playheadPosition)}
-          </div>
-
+          {/* The playhead time lives on the TRANSPORT, next to the controls
+              that move it. It was printed here as well, so the same number sat
+              in two toolbars a few pixels apart — and the two used different
+              formats, which made them read as two different values. */}
           {rendererType !== "none" && (
             <span
               className={`text-[10px] px-1.5 py-0.5 rounded ${
@@ -5312,27 +5315,21 @@ export const Preview: React.FC = () => {
           </div>
 
           <div className="w-px h-4 bg-border mx-2" />
+          {/* ONE expand control, and it does the obvious thing: real
+              fullscreen. There were two buttons here — a monitor icon for
+              fullscreen and an expand icon for an in-app "maximize" — sitting
+              side by side with near-identical meaning, so the expand arrows
+              (the one people reach for) gave the lesser of the two. */}
           <button
             onClick={handleFullscreen}
-            title={isFullscreen ? "Exit Full Screen" : "Full Screen"}
+            title={isFullscreen ? "Exit full screen (Esc)" : "Full screen"}
             className={`p-2 rounded-lg transition-colors ${
               isFullscreen
                 ? "text-primary bg-primary/20"
                 : "text-text-secondary hover:text-text-primary hover:bg-background-elevated"
             }`}
           >
-            <Monitor size={16} />
-          </button>
-          <button
-            onClick={handleMaximize}
-            title={isMaximized ? "Restore Size" : "Maximize Preview"}
-            className={`p-2 rounded-lg transition-colors ${
-              isMaximized
-                ? "text-primary bg-primary/20"
-                : "text-text-secondary hover:text-text-primary hover:bg-background-elevated"
-            }`}
-          >
-            {isMaximized ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+            {isFullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
           </button>
         </div>
         </div>
