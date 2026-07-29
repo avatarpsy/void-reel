@@ -21,10 +21,13 @@ import {
   type FrameRate,
   type WebcamResolution,
   type RecordingMode,
+  type WebcamAspect,
+  WEBCAM_ASPECTS,
 } from "../../services/screen-recorder";
 import { RecordingControls } from "./RecordingControls";
 import { Teleprompter } from "./Teleprompter";
 import { ensureWhisperModel } from "../../services/teleprompter-asr";
+import { toast } from "../../stores/notification-store";
 import {
   Dialog,
   DialogContent,
@@ -121,6 +124,36 @@ export const ScreenRecorder: React.FC<ScreenRecorderProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, projectAspect]);
 
+  /** "16:9", "9:16", … for the "Match project" row, so the default is legible. */
+  const projectAspectLabel = (() => {
+    const near = WEBCAM_ASPECTS.find(
+      (a) => a.ratio !== null && Math.abs(a.ratio - projectAspect) <= 0.02 * a.ratio,
+    );
+    if (near) return near.value;
+    return `${projectAspect.toFixed(2)}:1`;
+  })();
+
+  // Re-acquire the preview when the chosen shape or quality changes, so what
+  // the user sees is what the take will be. The measured mode is cached per
+  // camera+aspect+tier, so a repeat selection costs one getUserMedia, not a
+  // full re-probe.
+  const webcamAspect = options.webcam.aspect ?? "project";
+  const webcamRes = options.webcam.resolution;
+  /** The shape the take will be — drives the preview frame. */
+  const previewAspect =
+    WEBCAM_ASPECTS.find((a) => a.value === webcamAspect)?.ratio ?? projectAspect;
+  const didMountRef = useRef(false);
+  useEffect(() => {
+    if (!didMountRef.current) {
+      didMountRef.current = true;
+      return;
+    }
+    if (!isOpen) return;
+    const m = options.mode ?? "screen";
+    if (m === "camera" || m === "both") void startPreview(m);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [webcamAspect, webcamRes]);
+
   // Belt-and-suspenders: make sure the on-device Whisper model is being fetched
   // (silently, in the background) by the time the Record dialog opens with the
   // teleprompter on. Idempotent + shares the browser cache, so it never causes a
@@ -195,6 +228,34 @@ export const ScreenRecorder: React.FC<ScreenRecorderProps> = ({
   const handleStopRecording = async () => {
     const result = await stopRecording();
     if (result) {
+      // A camera can report a healthy track while delivering almost no frames
+      // (a bad capture geometry does exactly this). The file then looks fine —
+      // right size, audio intact — and only reveals itself as a static image
+      // when the user plays it back, by which point the take is gone. Catch it
+      // here, while they can still just record again.
+      const cap = result.capture;
+      if (cap && cap.frames !== null && cap.durationSec > 2) {
+        const fps = cap.frames / cap.durationSec;
+        if (fps < 5) {
+          toast.error(
+            "That take didn't record properly",
+            `Your camera only delivered ${fps.toFixed(1)} frames per second at ${cap.width}×${cap.height}, ` +
+              "so the video would play back as a still image. Try a different camera resolution in the record settings.",
+          );
+          onClose();
+          return;
+        }
+      }
+      // We record at the PROJECT's aspect by default. If the camera had no mode
+      // at that aspect it could sustain, say so plainly — the user should know
+      // the clip will be framed by the compositor rather than shot that way.
+      if (cap && cap.matchedAspect === false && cap.width && cap.height) {
+        toast.info(
+          "Recorded at your camera's own shape",
+          `Your camera couldn't run at this project's aspect ratio, so the take is ${cap.width}×${cap.height}. ` +
+            "It'll be fitted to the project frame on the timeline.",
+        );
+      }
       onRecordingComplete(result.screenBlob, result.webcamBlob, result.mode);
       onClose();
     }
@@ -489,28 +550,59 @@ export const ScreenRecorder: React.FC<ScreenRecorderProps> = ({
             )}
 
             <div className="flex gap-4 items-end">
-              <div className="flex-1">
-                <label className="block text-xs text-text-muted mb-2">
-                  Webcam Resolution
-                </label>
-                <Select
-                  value={options.webcam.resolution}
-                  onValueChange={(v) => setWebcamOption("resolution", v as WebcamResolution)}
-                >
-                  <SelectTrigger className="w-full bg-background-tertiary border-border text-text-primary">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent className="bg-background-secondary border-border">
-                    {WEBCAM_RESOLUTION_OPTIONS.map((opt) => (
-                      <SelectItem key={opt.value} value={opt.value}>
-                        {opt.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+              <div className="flex-1 space-y-3">
+                <div>
+                  <label className="block text-xs text-text-muted mb-2">
+                    Shape
+                  </label>
+                  <Select
+                    value={options.webcam.aspect ?? "project"}
+                    onValueChange={(v) => setWebcamOption("aspect", v as WebcamAspect)}
+                  >
+                    <SelectTrigger className="w-full bg-background-tertiary border-border text-text-primary">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent className="bg-background-secondary border-border">
+                      {WEBCAM_ASPECTS.map((opt) => (
+                        <SelectItem key={opt.value} value={opt.value}>
+                          {opt.value === "project" ? `${opt.label} (${projectAspectLabel})` : opt.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <label className="block text-xs text-text-muted mb-2">
+                    Webcam Resolution
+                  </label>
+                  <Select
+                    value={options.webcam.resolution}
+                    onValueChange={(v) => setWebcamOption("resolution", v as WebcamResolution)}
+                  >
+                    <SelectTrigger className="w-full bg-background-tertiary border-border text-text-primary">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent className="bg-background-secondary border-border">
+                      {WEBCAM_RESOLUTION_OPTIONS.map((opt) => (
+                        <SelectItem key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
               </div>
 
-              <div className="w-40 h-28 bg-background-tertiary rounded-lg overflow-hidden border border-border flex items-center justify-center">
+              {/* Framed to the shape the take will actually be, so the user is
+                  previewing their composition and not a 16:9 crop of it. */}
+              <div
+                className="bg-background-tertiary rounded-lg overflow-hidden border border-border flex items-center justify-center flex-shrink-0"
+                style={
+                  previewAspect >= 1
+                    ? { width: 160, height: Math.round(160 / previewAspect) }
+                    : { height: 160, width: Math.round(160 * previewAspect) }
+                }
+              >
                 {previewStream ? (
                   <video
                     ref={webcamVideoRef}

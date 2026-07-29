@@ -2708,6 +2708,95 @@ function App() {
             }
             break;
           }
+          case "voidspace:cut-ranges": {
+            // Cut MANY [startSec, endSec] TIMELINE regions out of one clip in a
+            // single pass. This is what transcript-driven editing needs: the
+            // agent decides what to remove from the words, and every cut lands
+            // atomically here.
+            //
+            // Two reasons this is not just a loop over remove-range on the
+            // agent's side:
+            //  • ORDERING — each ripple-delete shifts everything after it left,
+            //    so ranges MUST execute back-to-front or every later range is
+            //    silently off by the total already removed. Doing it here means
+            //    the agent can hand us ranges in reading order and be right.
+            //  • UNDO — one action group, so a 12-cut clean-up is ONE Ctrl+Z
+            //    for the user instead of twelve.
+            const { clipId, ranges } = msg as any;
+            if (!clipId || !Array.isArray(ranges) || ranges.length === 0) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: "clipId + non-empty ranges required" });
+              break;
+            }
+            const trackOfC = (cid: string) =>
+              useProjectStore.getState().project.timeline.tracks.find((t: any) => t.clips.some((c: any) => c.id === cid));
+            const tr0 = trackOfC(clipId);
+            if (!tr0) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: "clip not found" });
+              break;
+            }
+            const trkId = (tr0 as any).id;
+            const live = () =>
+              (useProjectStore.getState().project.timeline.tracks.find((t: any) => t.id === trkId)?.clips ?? []) as any[];
+
+            // Normalise: drop junk, sort ascending, merge overlaps/touching so
+            // two overlapping instructions can't double-cut, then reverse.
+            const clean = (ranges as any[])
+              .map((r) => ({ start: Number(r.startSec), end: Number(r.endSec) }))
+              .filter((r) => Number.isFinite(r.start) && Number.isFinite(r.end) && r.end > r.start + 0.02)
+              .sort((a, b) => a.start - b.start);
+            const merged: { start: number; end: number }[] = [];
+            for (const r of clean) {
+              const last = merged[merged.length - 1];
+              if (last && r.start <= last.end + 0.02) last.end = Math.max(last.end, r.end);
+              else merged.push({ ...r });
+            }
+            if (merged.length === 0) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: "no valid ranges after validation" });
+              break;
+            }
+
+            const history = (useProjectStore.getState() as any).actionHistory;
+            history?.beginGroup?.("Cut ranges");
+            const applied: { start: number; end: number }[] = [];
+            const failed: { start: number; end: number; reason: string }[] = [];
+            try {
+              // Back-to-front: a later cut can't disturb an earlier one's times.
+              for (let i = merged.length - 1; i >= 0; i--) {
+                const { start, end } = merged[i];
+                try {
+                  const cEnd = live().find((c) => c.startTime < end - 0.01 && c.startTime + c.duration > end + 0.01);
+                  if (cEnd) await useProjectStore.getState().splitClip(cEnd.id, end);
+                  const cStart = live().find((c) => c.startTime < start - 0.01 && c.startTime + c.duration > start + 0.01);
+                  if (cStart) await useProjectStore.getState().splitClip(cStart.id, start);
+                  const mid = live().find(
+                    (c) => Math.abs(c.startTime - start) < 0.1 && Math.abs(c.startTime + c.duration - end) < 0.15,
+                  );
+                  if (!mid) {
+                    failed.push({ start, end, reason: "could not isolate the range" });
+                    continue;
+                  }
+                  await useProjectStore.getState().rippleDeleteClip(mid.id);
+                  applied.push({ start, end });
+                } catch (e: any) {
+                  failed.push({ start, end, reason: e?.message ?? "cut failed" });
+                }
+              }
+            } finally {
+              history?.endGroup?.();
+            }
+            const removedSec = applied.reduce((s, r) => s + (r.end - r.start), 0);
+            reply({
+              type: "voidspace:ack",
+              requestId: msg.requestId,
+              op: "cut-ranges",
+              ok: applied.length > 0,
+              cutsApplied: applied.length,
+              cutsFailed: failed.length,
+              removedSec: Math.round(removedSec * 100) / 100,
+              failures: failed,
+            });
+            break;
+          }
           case "voidspace:move-clip": {
             const { clipId, startTime, trackId } = msg as any;
             if (!clipId || typeof startTime !== "number") {

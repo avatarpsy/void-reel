@@ -3,7 +3,7 @@ import {
   screenRecorderService,
   ScreenRecorderService,
   DEFAULT_RECORDING_OPTIONS,
-  webcamDimsForAspect,
+  acquireHealthyWebcam,
   type RecordingOptions,
   type RecordingStatus,
   type RecordingResult,
@@ -122,27 +122,29 @@ export const useRecorderStore = create<RecorderState>((set, get) => {
         options.audio.microphone || mode === "camera" || mode === "both" || mode === "audio";
       if (!wantsVideo && !wantsAudio) return;
       try {
-        // Match the live preview to the project aspect too, so what the user
-        // frames is what gets recorded (see webcamDimsForAspect).
-        const dims = webcamDimsForAspect(options.webcam.resolution, options.targetAspect);
-        const videoConstraint: MediaTrackConstraints = {
-          width: { ideal: dims.width },
-          height: { ideal: dims.height },
-          aspectRatio: { ideal: dims.aspect },
-          frameRate: { ideal: options.video.frameRate },
-          ...(options.videoDeviceId
-            ? { deviceId: { exact: options.videoDeviceId } }
-            : { facingMode: "user" }),
-        };
-        const constraints: MediaStreamConstraints = {
-          video: wantsVideo ? videoConstraint : false,
-          audio: wantsAudio
-            ? options.audioDeviceId
-              ? { deviceId: { exact: options.audioDeviceId } }
-              : true
-            : false,
-        };
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        // The preview must go through the SAME measured selection as the real
+        // capture (acquireHealthyWebcam), or it stops predicting the take — and
+        // worse, a preview stuck on a 0.7 fps mode is exactly what "the video
+        // was extremely laggy while recording" looked like. The picture on
+        // screen was the problem, not the encoder.
+        let stream: MediaStream;
+        if (wantsVideo) {
+          const picked = await acquireHealthyWebcam(options);
+          if (!picked) throw new Error("Could not open the camera");
+          stream = picked.stream;
+          if (wantsAudio) {
+            // Video came from the measured pass; add the mic alongside it.
+            const mic = await navigator.mediaDevices.getUserMedia({
+              audio: options.audioDeviceId ? { deviceId: { exact: options.audioDeviceId } } : true,
+            });
+            mic.getAudioTracks().forEach((t) => stream.addTrack(t));
+          }
+        } else {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: false,
+            audio: options.audioDeviceId ? { deviceId: { exact: options.audioDeviceId } } : true,
+          });
+        }
         set({ previewStream: stream, error: null });
         // Labels are only available once permission is granted — refresh now.
         const { mics, cameras } = await ScreenRecorderService.listMediaDevices();

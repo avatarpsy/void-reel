@@ -203,9 +203,14 @@ const REANCHOR_SCORE = 2.6; // higher bar — a global jump must be unambiguous
 const REANCHOR_MATCHED = 3;
 const REANCHOR_STRONG = 2;
 const REANCHOR_MIN_DISTANCE = 3; // closer than this → the local path handles it
-const LOOKAHEAD_CAP_WORDS = 3; // speculative creep never exceeds this
-const LOOKAHEAD_RATE_FACTOR = 0.85; // creep at ~85% of measured speaking rate
-const LOOKAHEAD_MAX_SECONDS = 2; // stop creeping when speech goes quiet
+// ── Voice-paced drift between recognizer ticks ──────────────────────────────
+// Recognition is EXPENSIVE (a Whisper encode contends with the live video
+// preview + the MediaRecorder encoder), so we run it a few seconds apart and
+// carry the scroll in between by pacing it to the speaker's MEASURED rate,
+// advanced ONLY by time the mic actually heard voice. Each recognizer result
+// re-anchors the drift, so error never accumulates.
+const DRIFT_RATE_FACTOR = 0.9; // pace just under the measured rate — correction pulls forward, never back
+const DRIFT_MAX_WORDS = 24; // ~8-10s of speech: bridges a slow tick, still can't run away
 
 export class SpeechTracker {
   private index: ScriptIndex;
@@ -316,15 +321,19 @@ export class SpeechTracker {
   }
 
   /**
-   * The read position the scroll should target at time `now`: the confirmed
-   * word plus a speculative creep at ~85% of the measured speaking rate (capped
-   * at +3 words, and stopping once speech has been quiet ~2s) so the highlight
-   * tracks the word being spoken NOW — but never runs away.
+   * The read position the scroll should target: the last speech-CONFIRMED word
+   * plus a drift paced at ~90% of the measured speaking rate.
+   *
+   * `voicedSecSinceMatch` is the time the mic actually heard VOICE since that
+   * confirmation — not wall-clock. That is what keeps the core invariant
+   * (scroll ⇔ speech) true: pause and the drift freezes, because no voiced time
+   * accrues. Each new recognizer result resets the drift to zero, so this is a
+   * bounded interpolation between accurate anchors, never dead reckoning.
    */
-  targetAt(now: number, maxIndex: number): number {
+  targetAt(voicedSecSinceMatch: number, maxIndex: number): number {
     if (!this.hasSpoken) return 0;
-    const sinceMatch = Math.min(LOOKAHEAD_MAX_SECONDS, Math.max(0, (now - this.lastMatchTs) / 1000));
-    const lookahead = Math.min(LOOKAHEAD_CAP_WORDS, this.rate * LOOKAHEAD_RATE_FACTOR * sinceMatch);
-    return Math.min(maxIndex, this.confirmed + lookahead);
+    const voiced = Math.max(0, voicedSecSinceMatch);
+    const drift = Math.min(DRIFT_MAX_WORDS, this.rate * DRIFT_RATE_FACTOR * voiced);
+    return Math.min(maxIndex, this.confirmed + drift);
   }
 }

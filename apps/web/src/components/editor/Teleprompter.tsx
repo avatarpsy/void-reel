@@ -22,15 +22,28 @@ import { buildScriptIndex, SpeechTracker, type ScriptIndex } from "../../service
  * the portal a `position:fixed` panel can get trapped behind the player when an
  * ancestor has a transform.
  *
- * Scroll model (speech-PRIMARY):
- *   • When on-device Whisper is LISTENING, the scroll FOLLOWS your voice — it
- *     advances to the word you just spoke and HOLDS when you pause. It never
- *     runs ahead of you. (The recorder owns the mic, so Web Speech gets no audio
- *     on Chrome; we tap the recorder's live mic track and run whisper-base.en on
- *     the trailing few seconds ~once a second, fuzzily aligning to the script.)
+ * Scroll model (speech-PRIMARY, voice-PACED):
+ *   • On-device Whisper re-transcribes the trailing few seconds every ~3 s and
+ *     the aligner ANCHORS the read position to the word you actually just said.
+ *     (The recorder owns the mic, so Web Speech gets no audio on Chrome; we tap
+ *     the recorder's live mic track — see teleprompter-asr.ts.)
+ *   • BETWEEN anchors the scroll keeps moving, paced to your MEASURED speaking
+ *     rate and advanced only by time the mic actually heard voice. Pause and it
+ *     freezes; resume and it continues. This is what makes it feel continuous
+ *     instead of the stall-then-jump of anchoring alone — and it's why we can
+ *     afford to recognise every ~3 s instead of every second, which is what was
+ *     stealing frames from the live preview.
  *   • FALLBACK: if the model is still warming, the mic is unavailable, or speech
- *     tracking is unsupported, a gentle time-based crawl at the chosen speed
- *     carries the scroll so the prompter still works.
+ *     tracking is unsupported, a gentle crawl at the chosen speed carries the
+ *     scroll so the prompter still works — gated on voice energy wherever we
+ *     have any, so silence never scrolls.
+ *
+ * Rendering is deliberately NOT React state. The active word moves a few times a
+ * second; re-rendering the whole script (hundreds of <span>s, each with a fresh
+ * style object and a fresh ref callback) at that rate is a main-thread stall
+ * during a recording. The RAF loop repaints only the spans that actually
+ * changed, and the scroll target is recomputed on index change rather than
+ * every frame (reading offsetTop forces layout).
  *
  * Positioning: by default the panel overlays the player ([data-tour='preview'])
  * exactly. The user can DRAG the header to reposition it and drag the corner to
@@ -74,6 +87,18 @@ const OPACITY_MAX = 0.95;
 // Stop/Pause always stay reachable above the prompter, and ABOVE the inline
 // webcam self-view (z-40 inside the player) so the script is never behind the shot.
 const OVERLAY_Z = 2147482000;
+// Word colours, applied imperatively by the RAF loop (see the header note).
+const COL_PAST = "rgba(241,244,255,0.34)";
+const COL_NOW = "#ffffff";
+const COL_AHEAD = "rgba(241,244,255,0.86)";
+/** `localStorage.voidspace.teleprompter.debug = "1"` → trace alignment decisions. */
+const TP_DEBUG = (() => {
+  try {
+    return typeof localStorage !== "undefined" && localStorage.getItem("voidspace.teleprompter.debug") === "1";
+  } catch {
+    return false;
+  }
+})();
 
 function normalizeWord(w: string): string {
   return w.toLowerCase().replace(/[^a-z0-9']/g, "");
@@ -132,7 +157,6 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
   onClose,
 }) => {
   const [settings, setSettings] = useState<PrompterSettings>(loadSettings);
-  const [currentIndex, setCurrentIndex] = useState(0);
   const [paused, setPaused] = useState(false);
   const [rect, setRect] = useState<Box | null>(measurePlayerRect);
   const [asrStatus, setAsrStatus] = useState<AsrStatus>("idle");
@@ -146,10 +170,15 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
   speedRef.current = settings.speed;
   const activeRef = useRef(active);
   activeRef.current = active && !paused;
-  const currentIndexRef = useRef(0);
-  currentIndexRef.current = currentIndex;
+  // Last word index actually PAINTED into the DOM (-1 = nothing painted yet).
+  const paintedIdxRef = useRef(-1);
   const asrStatusRef = useRef<AsrStatus>("idle");
   asrStatusRef.current = asrStatus;
+  // Seconds of VOICED audio since the last confirmed alignment. This — not
+  // wall-clock — paces the drift between recognizer results, so a pause holds
+  // the script exactly where it is.
+  const voicedSinceMatchRef = useRef(0);
+  const lastMatchSeenRef = useRef(0);
   // Voice activity from the mic tap (RMS gate) + accumulated speaking time
   // without a single confirmed match. If the user is audibly SPEAKING but
   // recognition produces nothing for a while, recognition is broken on this
@@ -210,6 +239,13 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
     if (!tracker) return;
     const ev = tracker.feed(words, performance.now(), Math.round(readPosRef.current));
     if (ev.kind === "reanchor") readPosRef.current = ev.pos;
+    if (TP_DEBUG) {
+      console.info(
+        `[teleprompter] align ${ev.kind}` +
+          (ev.kind === "miss" ? "" : ` → word ${(ev as any).pos}`) +
+          ` | tail: ${words.join(" ")}`,
+      );
+    }
   }, []);
 
   // ── On-device Whisper (English) — the PRIMARY driver when listening ──────
@@ -269,6 +305,31 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
     };
   }, [active, onRecognized]);
 
+  // ── Repaint only the spans that changed ─────────────────────────────────
+  // Called from the RAF loop when the active word moves. Touching two or three
+  // elements per step keeps this off React's render path entirely; a re-render
+  // of the full script at speaking cadence is a visible hitch while recording.
+  const paintIndex = useCallback((idx: number) => {
+    const prev = paintedIdxRef.current;
+    if (prev === idx) return;
+    const refs = wordRefs.current;
+    const lo = prev < 0 ? idx : Math.min(prev, idx);
+    const hi = prev < 0 ? idx : Math.max(prev, idx);
+    for (let i = lo; i <= hi; i++) {
+      const el = refs[i];
+      if (!el) continue;
+      el.style.color = i < idx ? COL_PAST : i === idx ? COL_NOW : COL_AHEAD;
+    }
+    paintedIdxRef.current = idx;
+    // Recompute the scroll target HERE, not every frame: offsetTop forces a
+    // layout flush, and the target only changes when the word changes.
+    const container = scrollRef.current;
+    const el = refs[idx];
+    if (container && el) {
+      targetScrollRef.current = Math.max(0, el.offsetTop - container.clientHeight * READ_LINE);
+    }
+  }, []);
+
   // ── Unified scroll loop: speech-follow (primary) + crawl (fallback) ──────
   useEffect(() => {
     let raf = 0;
@@ -280,6 +341,16 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
       if (activeRef.current && tokens.length > 0) {
         const listening = asrStatusRef.current === "listening";
         const tracker = trackerRef.current;
+
+        // Accrue voiced time since the last anchor; a fresh anchor resets it.
+        if (tracker) {
+          if (tracker.lastMatchAtMs !== lastMatchSeenRef.current) {
+            lastMatchSeenRef.current = tracker.lastMatchAtMs;
+            voicedSinceMatchRef.current = 0;
+          } else if (voiceActiveRef.current) {
+            voicedSinceMatchRef.current += dt;
+          }
+        }
 
         // ── Recognition health ──
         // Accumulate time the user is audibly SPEAKING while recognition
@@ -306,11 +377,12 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
         const followVoice = listening && tracker?.hasSpoken && !syncLostRef.current;
         const noSpeechSignal = asrStatusRef.current === "unsupported" || asrStatusRef.current === "idle";
         if (followVoice && tracker) {
-          // FOLLOW your voice. The tracker's target = last confirmed word plus
-          // a speculative creep at ~85% of your measured speaking rate (capped
-          // +3 words) so the highlight tracks the word you're saying NOW — but
-          // never runs away. When you pause, the target stops and readPos HOLDS.
-          const tgt = tracker.targetAt(now, tokens.length - 1);
+          // FOLLOW your voice: the last CONFIRMED word plus a drift paced to
+          // your measured speaking rate, advanced only by voiced time. Each
+          // recognizer result re-anchors it, so this is interpolation between
+          // accurate points, not dead reckoning. Pause → no voiced time accrues
+          // → the target stops and readPos HOLDS.
+          const tgt = tracker.targetAt(voicedSinceMatchRef.current, tokens.length - 1);
           if (tgt > readPosRef.current) {
             readPosRef.current += (tgt - readPosRef.current) * Math.min(1, dt * 5);
             if (tgt - readPosRef.current < 0.05) readPosRef.current = tgt;
@@ -335,14 +407,13 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
         }
       }
 
+      // Paint + retarget only when the active word actually moves.
       const idx = Math.max(0, Math.min(tokens.length - 1, Math.round(readPosRef.current)));
-      if (idx !== currentIndexRef.current) setCurrentIndex(idx);
+      if (idx !== paintedIdxRef.current) paintIndex(idx);
 
-      // Recompute the scroll target from the active word's position.
+      // Ease the scroll toward the cached target. No layout read per frame.
       const container = scrollRef.current;
-      const el = wordRefs.current[idx];
-      if (container && el) {
-        targetScrollRef.current = Math.max(0, el.offsetTop - container.clientHeight * READ_LINE);
+      if (container) {
         const cur = container.scrollTop;
         const delta = targetScrollRef.current - cur;
         if (Math.abs(delta) > 0.5) container.scrollTop = cur + delta * 0.12;
@@ -351,22 +422,32 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [tokens.length]);
+  }, [tokens.length, paintIndex]);
 
-  // Reset to the top whenever a new take begins.
+  // Reset to the top whenever a new take begins, or the script is edited.
   useEffect(() => {
     if (active) {
       readPosRef.current = 0;
       trackerRef.current?.reset(speedRef.current);
       voiceActiveRef.current = false;
       voicedNoMatchMsRef.current = 0;
+      voicedSinceMatchRef.current = 0;
+      lastMatchSeenRef.current = 0;
       setSyncLost(false);
-      setCurrentIndex(0);
       setPaused(false);
       targetScrollRef.current = 0;
+      // Force a full repaint on the next frame (spans render in the "ahead"
+      // colour, so only the new active word needs touching).
+      paintedIdxRef.current = -1;
       if (scrollRef.current) scrollRef.current.scrollTop = 0;
     }
   }, [active]);
+
+  // A new script replaces every span, so any painted state is stale.
+  useEffect(() => {
+    wordRefs.current.length = tokens.length;
+    paintedIdxRef.current = -1;
+  }, [tokens]);
 
   const bumpFont = (delta: number) =>
     setSettings((s) => ({ ...s, fontSize: Math.max(20, Math.min(96, s.fontSize + delta)) }));
@@ -579,20 +660,12 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
               textShadow: "0 2px 12px rgba(0,0,0,0.6)",
             }}
           >
+            {/* Static style object + no per-index state: these spans mount once
+                per script and are then recoloured imperatively by the RAF loop
+                (paintIndex). Putting the active word in React state re-rendered
+                every span several times a second — a real stall mid-recording. */}
             {tokens.map((t, i) => (
-              <span
-                key={i}
-                ref={(el) => (wordRefs.current[i] = el)}
-                style={{
-                  color:
-                    i < currentIndex
-                      ? "rgba(241,244,255,0.34)"
-                      : i === currentIndex
-                        ? "#ffffff"
-                        : "rgba(241,244,255,0.86)",
-                  transition: "color 120ms linear",
-                }}
-              >
+              <span key={i} ref={(el) => (wordRefs.current[i] = el)} style={WORD_STYLE}>
                 {t.display}{" "}
               </span>
             ))}
@@ -626,6 +699,13 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
   // truly floats above the inline webcam self-view.
   if (typeof document === "undefined") return node;
   return createPortal(node, document.body);
+};
+
+// Shared by every word span — a single frozen object, so React sees a stable
+// prop and never re-creates inline styles for hundreds of nodes.
+const WORD_STYLE: React.CSSProperties = {
+  color: COL_AHEAD,
+  transition: "color 120ms linear",
 };
 
 const ctrlBtn: React.CSSProperties = {

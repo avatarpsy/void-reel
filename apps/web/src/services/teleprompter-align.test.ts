@@ -124,23 +124,36 @@ describe("SpeechTracker — voice follow", () => {
     expect(t.confirmedPos).toBeLessThan(20);
   });
 
-  it("targetAt creeps between ticks but caps and then holds on silence", () => {
+  it("targetAt drifts with VOICED time, holds through silence, and stays bounded", () => {
     const t = new SpeechTracker(INDEX, 3);
     t.feed(tailAt(10), 1000);
     const confirmed = t.confirmedPos;
-    const soon = t.targetAt(1300, WORDS.length - 1); // 0.3s after the match
-    expect(soon).toBeGreaterThan(confirmed);
-    expect(soon).toBeLessThanOrEqual(confirmed + 3);
-    // Long silence: creep caps at +3 and stays there — it never runs away.
-    const late = t.targetAt(20000, WORDS.length - 1);
-    expect(late).toBeLessThanOrEqual(confirmed + 3);
-    expect(t.targetAt(30000, WORDS.length - 1)).toBe(late);
+
+    // Silence after the anchor accrues no voiced time → the target must HOLD
+    // exactly on the confirmed word. This is the core invariant: scroll ⇔ speech.
+    expect(t.targetAt(0, WORDS.length - 1)).toBe(confirmed);
+
+    // 1s of VOICE at ~3 w/s advances roughly a rate-proportional amount, and
+    // always slightly under the true rate so it can't outrun the speaker.
+    const after1s = t.targetAt(1, WORDS.length - 1);
+    expect(after1s).toBeGreaterThan(confirmed);
+    expect(after1s).toBeLessThan(confirmed + 3);
+
+    // Drift must bridge a slow recognizer tick — several seconds of speech has
+    // to keep moving, not freeze at a tiny cap (the old +3 clamp is what made
+    // the prompter stall between ticks).
+    expect(t.targetAt(3, WORDS.length - 1)).toBeGreaterThan(confirmed + 6);
+
+    // …but a recognizer that has gone silent for a long time must not run away.
+    const runaway = t.targetAt(600, WORDS.length - 1);
+    expect(runaway).toBeLessThanOrEqual(confirmed + 24);
+    expect(t.targetAt(6000, WORDS.length - 1)).toBe(runaway);
   });
 
   it("is silent-start safe: target stays at 0 until the first real match", () => {
     const t = new SpeechTracker(INDEX, 2.3);
     expect(t.hasSpoken).toBe(false);
-    expect(t.targetAt(5000, WORDS.length - 1)).toBe(0);
+    expect(t.targetAt(5, WORDS.length - 1)).toBe(0);
   });
 
   it("locks on in ONE tick when the reader starts mid-script", () => {

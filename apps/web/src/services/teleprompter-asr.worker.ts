@@ -46,6 +46,19 @@ function getAsr(): Promise<any> {
     if (env.useBrowserCache !== undefined) env.useBrowserCache = true;
     try {
       env.backends.onnx.wasm.proxy = false; // we ARE the worker
+      // /studio is crossOriginIsolated, so onnxruntime would default to one
+      // WASM thread PER CORE. That is the right choice for a batch transcribe
+      // and the WRONG one here: we run DURING a recording, alongside the live
+      // preview and the video encoder, and taking every core makes the take
+      // stutter. Keep inference parallel, but leave the machine some room.
+      // Threaded WASM needs SharedArrayBuffer, which needs cross-origin
+      // isolation. Dev (and any non-isolated host) has none — forcing a thread
+      // count there can fail session creation outright, so ask for threads ONLY
+      // when they're actually available.
+      const isolated = typeof crossOriginIsolated !== "undefined" && crossOriginIsolated;
+      env.backends.onnx.wasm.numThreads = isolated
+        ? Math.max(1, Math.min(4, Math.floor((navigator.hardwareConcurrency || 4) / 2)))
+        : 1;
     } catch {
       /* shape varies by version */
     }
@@ -108,11 +121,22 @@ self.onmessage = async (e: MessageEvent) => {
     const t0 = performance.now();
     try {
       const asr = await getAsr();
-      const out: any = await asr(pcm, { chunk_length_s: 30, stride_length_s: 5 });
+      // No chunk_length_s / stride_length_s here on purpose. Those switch
+      // transformers.js into its long-form CHUNKED path (overlap bookkeeping +
+      // timestamp stitching) — necessary for the site's minutes-long dictation
+      // pass, pure overhead for our ≤6 s window, which is a single sub-30 s
+      // frame by construction. Same model, same weights, less work per tick.
+      const out: any = await asr(pcm);
       const text = (typeof out?.text === "string" ? out.text : "").trim();
       postMessage({ type: "result", text, inferMs: Math.round(performance.now() - t0) });
-    } catch {
-      /* transient — next window recovers */
+    } catch (e) {
+      // NEVER swallow this. A bare catch here is indistinguishable from "the
+      // user said nothing": the prompter shows a green "Following your voice"
+      // over a pipeline that is failing on every single window, and the script
+      // just sits there. Surface it so the controller can report the truth.
+      const message = String((e as any)?.message ?? e);
+      console.error("[teleprompter-worker] inference failed:", message);
+      postMessage({ type: "inferError", message });
     } finally {
       busy = false;
     }
