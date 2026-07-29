@@ -207,8 +207,22 @@ async function resolveMediaUrl(rawUrl?: string | null): Promise<string | null> {
     return resolvedUrlCache.get(url)!;
   }
 
-  // Already a browser-usable URL
-  if (/^https?:\/\//i.test(url) || /^blob:/i.test(url) || /^data:/i.test(url)) {
+  // Already a browser-usable URL.
+  //
+  // SAME-ORIGIN PATHS COUNT. HyperFrames renders on the desktop app and nothing
+  // auto-uploads to cloud storage, so a graphic scene's media is served by this
+  // app as an absolute path:
+  //   /api/studio/local-asset?projectId=…&kind=render&filename=…
+  // That is directly loadable by the browser, but it used to fall through to the
+  // Firebase branch below, which treated the whole path+query as a STORAGE KEY
+  // and 403'd ("User does not have permission to access 'api/studio/local-asset?…'").
+  // Every locally-rendered clip did that on every project load — a failed
+  // network round-trip each, before falling back to the raw value anyway.
+  //
+  // Protocol-relative ("//host/…") is excluded deliberately: it is cross-origin
+  // and not something this app produces.
+  const isSameOriginPath = url.startsWith('/') && !url.startsWith('//');
+  if (/^https?:\/\//i.test(url) || /^blob:/i.test(url) || /^data:/i.test(url) || isSameOriginPath) {
     resolvedUrlCache.set(url, url);
     return url;
   }
