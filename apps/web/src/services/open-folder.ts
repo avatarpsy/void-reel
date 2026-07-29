@@ -28,16 +28,30 @@ function apiBase(): string {
 
 export interface OpenFolderResult {
   ok: boolean;
-  /** Absolute path the desktop opened, when it reported one. */
+  /**
+   * The destination path. Present on success AND — when the server knows it —
+   * on failure, so the caller can show the user where to look when the desktop
+   * app isn't there to open it for them.
+   */
   path?: string;
   error?: string;
 }
 
-/**
- * @param subPath Optional folder INSIDE the Voidspace root (e.g. a project id).
- *                Omit to open the root itself.
- */
-export async function openVoidspaceFolder(subPath?: string): Promise<OpenFolderResult> {
+export interface OpenFolderOptions {
+  /** A folder INSIDE the Voidspace root (e.g. a project id). */
+  subPath?: string;
+  /**
+   * "library" opens the MEDIA LIBRARY instead of the Voidspace root. It lives
+   * outside that root (usually on a bigger drive), so it can't be addressed by
+   * subPath; the server resolves its absolute path from its own configuration.
+   */
+  target?: "voidspace" | "library";
+}
+
+export async function openVoidspaceFolder(
+  opts: OpenFolderOptions | string = {},
+): Promise<OpenFolderResult> {
+  const { subPath, target } = typeof opts === "string" ? { subPath: opts, target: undefined } : opts;
   const vs = useVoidspaceStore.getState();
   const token = await vs.getIdToken?.();
   if (!token) return { ok: false, error: "Not signed in." };
@@ -46,12 +60,16 @@ export async function openVoidspaceFolder(subPath?: string): Promise<OpenFolderR
     const res = await fetch(`${apiBase()}/api/studio/open-folder`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify(subPath ? { subPath } : {}),
+      body: JSON.stringify({
+        ...(subPath ? { subPath } : {}),
+        ...(target === "library" ? { target: "library" } : {}),
+      }),
     });
     const body = await res.json().catch(() => ({} as any));
     if (!res.ok || body?.ok === false) {
       return {
         ok: false,
+        path: body?.path,
         error: body?.error || body?.statusMessage
           || (res.status === 502
             ? "The Voidspace desktop app isn't reachable — start it and try again."

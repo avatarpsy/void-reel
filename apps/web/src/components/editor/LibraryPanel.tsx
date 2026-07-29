@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Search, Loader2, Plus, Check, Film, Music2, Image as ImageIcon, AudioLines, Mic, Pencil, HardDrive, RefreshCw, ChevronDown, ChevronRight, Download, Settings2, X } from "lucide-react";
+import { Search, Loader2, Plus, Check, Film, Music2, Image as ImageIcon, AudioLines, Mic, Pencil, HardDrive, Cloud, Lock, Upload, RefreshCw, ChevronDown, ChevronRight, Download, Settings2, FolderOpen, X } from "lucide-react";
 import { useVoidspaceStore } from "../../stores/voidspace-store";
 import { useProjectStore } from "../../stores/project-store";
+import { toast } from "../../stores/notification-store";
 import { saveMediaBlob, loadMediaBlob } from "../../services/media-storage";
 import { checkForRecovery, recoverProject } from "../../services/auto-save";
 import { MediaPreviewOverlay, type PreviewKind } from "./MediaPreviewOverlay";
@@ -33,6 +34,51 @@ import { MediaPreviewOverlay, type PreviewKind } from "./MediaPreviewOverlay";
  */
 
 type LibType = "all" | "video" | "image" | "music" | "sfx" | "voice";
+
+/**
+ * WHERE the assets come from. A SCOPE, deliberately not a fourth tab.
+ *
+ * A "Cloud" tab used to exist here and was removed as redundant once
+ * /api/studio/library began unioning the automation scene tree. Re-adding a tab
+ * per source would repeat that mistake: the user does not think "which library?",
+ * they think "my stuff" vs "the stock stuff". Same activity, different source —
+ * which is a filter, not a tab.
+ *
+ *   mine   — the user's own assets: generated media, renders, uploads.
+ *            /api/studio/library (unions cloud + local-disk manifests).
+ *   stock  — the shared reusable library: sfx, vfx, music, footage, stills, 3D,
+ *            LUTs, fonts. /api/media-library/search. Local-first: it reads a
+ *            folder on the machine RUNNING THE SERVER, so on a local install it
+ *            is the user's own on-disk collection. Empty (available:false) when
+ *            no library is present, and the panel says so rather than erroring.
+ *   device — media inside other projects saved in THIS browser (IndexedDB).
+ *            Promoted from a buried section to a first-class scope so locally
+ *            imported assets are never invisible.
+ */
+type LibScope = "generated" | "myfiles" | "licensed" | "device";
+
+/**
+ * WHERE the assets come from. A scope, not a tab (a "Cloud" tab existed here and
+ * was removed as redundant; per-source tabs repeat that mistake).
+ *
+ * The names have to state the CONTENTS, because the previous set —
+ * "Mine / Licensed / This device" — told the user nothing and, worse, "Licensed"
+ * was serving the WHOLE local library: the user's personal photos appeared under
+ * a licence heading with a padlock on them.
+ *
+ * Ownership cannot separate those two: the CLI ingest records everything it writes
+ * as `owner: operator`, so the split is by PROVENANCE (license.type), filtered
+ * server-side via ?provenance=.
+ */
+const SCOPE_PILLS: { id: LibScope; label: string; hint: string }[] = [
+  { id: "generated", label: "Generated", hint: "AI generations and renders from your projects" },
+  { id: "myfiles",   label: "My files",  hint: "Your own media imported into the library" },
+  { id: "licensed",  label: "Licensed",  hint: "Purchased packs — private to you, kept on this machine" },
+  { id: "device",    label: "This browser", hint: "Media in other projects saved in this browser" },
+];
+
+/** Which scopes read the shared media library (vs the generations store / IndexedDB). */
+const LIBRARY_SCOPES: LibScope[] = ["myfiles", "licensed"];
 
 interface LibItem {
   id: string;
@@ -75,6 +121,29 @@ const TYPE_PILLS: { id: LibType; label: string; Icon: typeof Film }[] = [
   { id: "sfx", label: "SFX", Icon: AudioLines },
   { id: "voice", label: "Voice", Icon: Mic },
 ];
+
+/** Type pill → media-library `kind` group. The stock library uses richer kinds
+ *  (`audio-sfx`, `visual-vfx`, …) and accepts a group prefix, so this keeps ONE
+ *  type filter driving both scopes instead of showing the user two vocabularies. */
+const LIB_KIND_FOR_TYPE: Record<LibType, string> = {
+  all: "all",
+  video: "visual",
+  image: "visual-image",
+  music: "audio-music",
+  sfx: "audio-sfx",
+  voice: "audio-voice",
+};
+
+/** Stock `kind` → the coarse type the rest of this panel (icons, drag payloads,
+ *  preview routing) already understands. */
+function libTypeOf(kind: string): string {
+  if (kind === "visual-image" || kind === "visual-hdri" || kind === "visual-vector") return "image";
+  if (kind === "visual-video" || kind === "visual-vfx") return "video";
+  if (kind === "audio-music") return "music";
+  if (kind === "audio-voice") return "voice";
+  if (kind.startsWith("audio-")) return "sfx";
+  return "video";
+}
 
 const PAGE_SIZE = 120;
 const THUMB_CACHE = "voidspace-library-thumbs-v1";
@@ -127,6 +196,11 @@ function sourceTag(projectId: string): string {
   if (projectId === "chat-images") return "Chat";
   if (projectId === "generated-media") return "Agent";
   if (projectId === "user-music") return "Music";
+  // Stock items carry a sentinel projectId because they belong to no project.
+  // Returning "" (rather than letting the sentinel through) keeps `__stock__`
+  // out of the tile subtitle — the scope pill already says where you are, so a
+  // per-tile source tag would be redundant even if it were pretty.
+  if (projectId === "__stock__") return "";
   return projectId.length > 14 ? `${projectId.slice(0, 12)}…` : projectId;
 }
 
@@ -203,6 +277,73 @@ const CachedThumb: React.FC<{ src: string; alt: string; rev: number; className?:
 };
 
 export const LibraryPanel: React.FC = () => {
+  // Persisted: the scope a user works in is a preference, and losing it on every
+  // reload is the kind of small friction that makes a tool feel unfinished.
+  const [scope, setScopeRaw] = useState<LibScope>(() => {
+    try {
+      const s = localStorage.getItem("voidspace.library.scope");
+      // Migrate the old names so a returning user is not dropped on a scope that
+      // no longer exists (which would render an empty panel).
+      const migrated = s === "mine" ? "generated" : s === "stock" ? "licensed" : s;
+      if (migrated === "generated" || migrated === "myfiles"
+          || migrated === "licensed" || migrated === "device") return migrated;
+    } catch { /* fresh default */ }
+    return "generated";
+  });
+  const setScope = useCallback((s: LibScope) => {
+    setScopeRaw(s);
+    try { localStorage.setItem("voidspace.library.scope", s); } catch { /* ignore */ }
+  }, []);
+  // Upload state. `uploading` is a count so several files at once show one
+  // honest "3 uploading" rather than flickering between names.
+  const [uploading, setUploading] = useState(0);
+  const [uploadMsg, setUploadMsg] = useState<string | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  /** Whether a media library exists on the server at all (available:false). */
+  const [libraryAvailable, setLibraryAvailable] = useState<boolean | null>(null);
+  /** Where the library resolved to on the serving machine — /search always
+   *  reports it, so we can show it and offer to open it. */
+  const [libraryRoot, setLibraryRoot] = useState<string>("");
+  const [openingFolder, setOpeningFolder] = useState(false);
+
+  /**
+   * Reveal the media-library folder in the OS file manager.
+   *
+   * A browser tab cannot open a folder, and the server may be a container whose
+   * filesystem isn't the user's — only the desktop app can. When it isn't
+   * running we still know WHERE the library is (the search endpoint reports it),
+   * so the fallback copies that path and shows it. Anything is better than a
+   * button that appears to do nothing, which is how this read before.
+   */
+  async function openLibraryFolder() {
+    if (openingFolder) return;
+    setOpeningFolder(true);
+    try {
+      const { openVoidspaceFolder } = await import("../../services/open-folder");
+      const r = await openVoidspaceFolder({ target: "library" });
+      if (r.ok) {
+        toast.success("Opened your library folder", r.path || libraryRoot || undefined);
+        return;
+      }
+      const path = r.path || libraryRoot;
+      if (path) {
+        let copied = false;
+        try { await navigator.clipboard.writeText(path); copied = true; } catch { /* blocked */ }
+        toast.info(
+          copied ? "Library path copied" : "Your library folder",
+          `${path}\n\n${r.error || ""}`.trim(),
+        );
+      } else {
+        toast.error("Couldn't open the library folder", r.error || undefined);
+      }
+    } catch (e: any) {
+      toast.error("Couldn't open the library folder", e?.message ?? String(e));
+    } finally {
+      setOpeningFolder(false);
+    }
+  }
   const [type, setType] = useState<LibType>("all");
   const [query, setQuery] = useState("");
   const [debounced, setDebounced] = useState("");
@@ -279,7 +420,10 @@ export const LibraryPanel: React.FC = () => {
 
   const load = useCallback(async (offset = 0, force = false) => {
     const seq = ++reqSeq.current;
-    const cacheKey = `${type}::${debounced}::${mood}`;
+    // Scope is part of the cache key. Without it, switching Mine↔Stock would
+    // show the other scope's tiles from cache — the exact "wrong stuff flashes
+    // up" glitch the stale-while-revalidate cache exists to avoid.
+    const cacheKey = `${scope}::${type}::${debounced}::${mood}`;
     if (offset === 0) {
       setError(null);
       // Show the last result for this filter INSTANTLY, then revalidate. Only
@@ -294,6 +438,57 @@ export const LibraryPanel: React.FC = () => {
     try {
       const token = await useVoidspaceStore.getState().getIdToken();
       if (token) setMediaToken(token);
+
+      // ── STOCK: the shared reusable library, a different API with a different
+      // item shape. Mapped onto LibItem here so every downstream renderer,
+      // drag handler and importer keeps working untouched.
+      if (LIBRARY_SCOPES.includes(scope)) {
+        const sq = new URLSearchParams({
+          kind: LIB_KIND_FOR_TYPE[type] ?? "all",
+          // The split that stops personal photos appearing under "Licensed".
+          provenance: scope === "licensed" ? "licensed" : "own",
+          q: debounced,
+          limit: String(PAGE_SIZE),
+          offset: String(offset),
+          facets: "0",              // panel has no facet UI; skip the computation
+        });
+        const sres = await fetch(`${apiBase()}/api/media-library/search?${sq.toString()}`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        if (!sres.ok) throw new Error(`stock ${sres.status}`);
+        const sj = await sres.json();
+        if (seq !== reqSeq.current) return;
+        setLibraryAvailable(sj.available !== false);
+        setLibraryRoot(typeof sj?.location?.root === "string" ? sj.location.root : "");
+        const page: LibItem[] = (Array.isArray(sj.items) ? sj.items : []).map((a: any) => ({
+          id: a.id,
+          type: libTypeOf(a.kind),
+          kind: a.kind,
+          // Prefer the REAL filename. The slug is a sanitised derivative, so a
+          // photo called "IMG_2043.jpg" became "img-2043" and a file called "3.png"
+          // became the tile label "3" — meaningless in a grid. originalName is what
+          // the user recognises.
+          label: a.originalName || a.slug || a.id,
+          url: a.url,
+          // hasRasterPreview=false (audio, 3D, fonts) means thumbUrl would return
+          // a placeholder SVG. Leaving it undefined lets the existing kind-icon
+          // fallback render instead, which reads as intentional rather than broken.
+          thumbnailUrl: a.hasRasterPreview ? a.thumbUrl : undefined,
+          bytes: a.bytes ?? 0,
+          createdAt: a.addedAt || "",
+          projectId: "__stock__",
+          prompt: Array.isArray(a.tags) ? a.tags.slice(0, 6).join(", ") : undefined,
+        }));
+        const nextTotal = typeof sj.total === "number" ? sj.total : page.length;
+        setItems((prev) => (offset === 0 ? page : [...prev, ...page]));
+        setTotal(nextTotal);
+        if (offset === 0) {
+          setMoods([]);
+          libClientCache.set(cacheKey, { items: page, total: nextTotal, at: Date.now() });
+        }
+        return;
+      }
+
       const qs = new URLSearchParams({
         outputDir: resolveOutputDir(),
         type,
@@ -323,7 +518,66 @@ export const LibraryPanel: React.FC = () => {
     } finally {
       if (seq === reqSeq.current) { setLoading(false); setLoadingMore(false); }
     }
-  }, [type, debounced, mood]);
+  }, [scope, type, debounced, mood]);
+
+  /**
+   * Upload files into the library.
+   *
+   * Uploads land PRIVATE to the uploader (the server enforces this) and appear in
+   * the "Mine" scope. Deliberately switches scope on success: a file that uploads
+   * while you are looking at "Licensed" would otherwise vanish into a tab you are
+   * not on, which reads as a failed upload.
+   *
+   * Files are sent one at a time rather than in one request — a single failure in
+   * a batch of ten should not lose the other nine, and per-file progress is the
+   * only honest thing to show.
+   */
+  const uploadFiles = useCallback(async (files: File[]) => {
+    if (!files.length) return;
+    setUploadMsg(null);
+    setUploading(files.length);
+    let ok = 0, deduped = 0;
+    const failures: string[] = [];
+    try {
+      const token = await useVoidspaceStore.getState().getIdToken();
+      for (const f of files) {
+        try {
+          const fd = new FormData();
+          fd.append("file", f, f.name);
+          const res = await fetch(`${apiBase()}/api/media-library/upload`, {
+            method: "POST",
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
+            body: fd,
+          });
+          const j = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            // Surface the server's reason (unsupported type, no library, too big)
+            // rather than a generic failure the user cannot act on.
+            failures.push(`${f.name}: ${j?.statusMessage || j?.message || `HTTP ${res.status}`}`);
+          } else if (j?.deduped) { deduped++; ok++; }
+          else ok++;
+        } catch (e: any) {
+          failures.push(`${f.name}: ${e?.message ?? "upload failed"}`);
+        } finally {
+          setUploading((n) => Math.max(0, n - 1));
+        }
+      }
+    } finally {
+      setUploading(0);
+    }
+
+    const parts: string[] = [];
+    if (ok) parts.push(`${ok} added${deduped ? ` (${deduped} already in library)` : ""}`);
+    if (failures.length) parts.push(`${failures.length} failed`);
+    setUploadMsg(parts.join(" · ") + (failures.length ? ` — ${failures[0]}` : ""));
+
+    if (ok) {
+      setScope("myfiles");       // where the upload actually lands
+      libClientCache.clear();    // the SWR cache would otherwise hide it
+      await load(0, true);
+    }
+  }, [load, setScope]);
+
 
   useEffect(() => {
     // Force ONCE on the initial mount (freshly opened editor) so just-rendered
@@ -511,25 +765,42 @@ export const LibraryPanel: React.FC = () => {
 
   // Device items whose bytes already exist in the server library are noise.
   const serverUrls = useMemo(() => new Set(items.map((i) => i.url)), [items]);
+  // Device items belong to the "This device" scope ONLY. They used to append to
+  // every view; showing browser-local copies underneath server results made it
+  // impossible to tell what was actually stored where.
   const visibleDeviceItems = useMemo(() => {
+    if (scope !== "device") return [];
     const q = debounced.toLowerCase();
     return deviceItems.filter((d) =>
       (type === "all" || d.type === type)
       && (!d.originalUrl || !serverUrls.has(d.originalUrl))
       && (!q || d.label.toLowerCase().includes(q) || d.projectName.toLowerCase().includes(q)),
     );
-  }, [deviceItems, type, debounced, serverUrls]);
+  }, [scope, deviceItems, type, debounced, serverUrls]);
+
+  /** Server-sourced items for the current scope. Empty on "This device", whose
+   *  content comes entirely from IndexedDB. */
+  const visibleItems = useMemo(() => (scope === "device" ? [] : items), [scope, items]);
 
   const sections = useMemo(() => {
+    // Stock has no meaningful per-item timestamp (it is an ingested catalogue,
+    // not a timeline of the user's work), so recency buckets would put 12,000
+    // assets under a single "Older" header. One flat grid is the honest layout.
+    if (LIBRARY_SCOPES.includes(scope)) {
+      // An ingested catalogue has no meaningful per-item recency, so date buckets
+      // would file everything under "Older". One flat grid is the honest layout.
+      const title = scope === "licensed" ? "Licensed" : "My files";
+      return visibleItems.length ? [{ title, items: visibleItems }] : [];
+    }
     const by = new Map<string, LibItem[]>();
-    for (const it of items) {
+    for (const it of visibleItems) {
       const b = bucketOf(it.createdAt);
       const arr = by.get(b) ?? [];
       arr.push(it);
       by.set(b, arr);
     }
     return BUCKET_ORDER.filter((b) => (by.get(b) ?? []).length > 0).map((b) => ({ title: b, items: by.get(b)! }));
-  }, [items]);
+  }, [scope, visibleItems]);
 
   const renderServerTile = (it: LibItem) => {
     const added = importedUrls.has(it.url);
@@ -538,6 +809,19 @@ export const LibraryPanel: React.FC = () => {
     const videoFailed = failedVideos.has(it.id);
     const thumbSrc = it.thumbnailUrl || it.url;
     const fullThumbSrc = /^https?:/i.test(thumbSrc) ? thumbSrc : `${apiBase()}${thumbSrc}`;
+    // WHERE this asset physically lives, derived from the URL shape rather than a
+    // new API field: an absolute http(s) URL is in cloud storage, a relative
+    // /api/studio/local-asset path is served off this machine's disk.
+    //
+    // Shown because it changes what the user can rely on: a local-only asset is
+    // not available in another browser or on another device, and that is worth
+    // knowing BEFORE building a project around it. Stock is always local, so the
+    // badge would be noise on every tile there — hence `mine` only.
+    const isCloud = /^https?:/i.test(it.url);
+    const showStorageBadge = scope === "generated";
+    // Same slot, same styling — licensed tiles carry a lock instead of Cloud/Local.
+    // One badge vocabulary across the panel; no extra chrome.
+    const showLicenseBadge = scope === "licensed";
     return (
       <div
         key={it.id}
@@ -578,6 +862,28 @@ export const LibraryPanel: React.FC = () => {
           added ? "border-primary/60" : "border-border hover:border-primary/60"
         } bg-background-tertiary`}
       >
+        {showLicenseBadge && (
+          <div
+            className="absolute top-1 left-1 z-10 flex items-center gap-0.5 px-1.5 py-0.5 rounded
+                       bg-black/65 backdrop-blur-sm text-[9px] font-medium text-white/90 pointer-events-none"
+            title="Licensed to you — stays on this machine, never uploaded or shared"
+          >
+            <Lock size={9} />
+            Licensed
+          </div>
+        )}
+        {showStorageBadge && (
+          <div
+            className="absolute top-1 left-1 z-10 flex items-center gap-0.5 px-1.5 py-0.5 rounded
+                       bg-black/65 backdrop-blur-sm text-[9px] font-medium text-white/90 pointer-events-none"
+            title={isCloud
+              ? "In cloud storage — available on any device"
+              : "On this machine only — not available on your other devices"}
+          >
+            {isCloud ? <Cloud size={9} /> : <HardDrive size={9} />}
+            {isCloud ? "Cloud" : "Local"}
+          </div>
+        )}
         <div className="aspect-video bg-background-elevated flex items-center justify-center overflow-hidden">
           {isImage ? (
             <CachedThumb src={fullThumbSrc} alt={it.label} rev={rev} />
@@ -660,7 +966,10 @@ export const LibraryPanel: React.FC = () => {
         <div className="px-2 py-1.5">
           <p className="text-[11px] text-text-primary truncate">{it.label}</p>
           <p className="text-[10px] text-text-muted truncate">
-            {it.type}{it.bytes ? ` · ${fmtBytes(it.bytes)}` : ""} · {sourceTag(it.projectId)}
+            {/* Separator is conditional: stock items have no source tag, and a
+                hardcoded " · " left a dangling dot on every stock tile. */}
+            {it.type}{it.bytes ? ` · ${fmtBytes(it.bytes)}` : ""}
+            {sourceTag(it.projectId) ? ` · ${sourceTag(it.projectId)}` : ""}
           </p>
         </div>
       </div>
@@ -760,6 +1069,35 @@ export const LibraryPanel: React.FC = () => {
 
   return (
     <div className="flex flex-col h-full min-h-0">
+      {/* Scope — WHERE assets come from. Above the type pills because it is the
+          coarser choice: pick the shelf, then narrow by kind. Full-width
+          segmented control so it reads as "one of these three", not as tags. */}
+      <div className="px-5 mb-2">
+        <div
+          role="tablist"
+          aria-label="Library scope"
+          className="flex p-0.5 gap-0.5 bg-background-tertiary border border-border rounded-lg"
+        >
+          {SCOPE_PILLS.map(({ id, label, hint }) => (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              aria-selected={scope === id}
+              onClick={() => setScope(id)}
+              title={hint}
+              className={`flex-1 px-2 py-1.5 rounded-md text-[11px] font-medium transition-colors ${
+                scope === id
+                  ? "bg-primary/15 text-primary"
+                  : "text-text-secondary hover:text-text-primary"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* Search + refresh */}
       <div className="px-5 mb-3 flex items-center gap-2">
         <div className="relative flex-1">
@@ -768,10 +1106,40 @@ export const LibraryPanel: React.FC = () => {
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search your generations…"
+            placeholder={
+              scope === "licensed" ? "Search licensed sfx, music, footage…"
+                : scope === "myfiles" ? "Search your files…"
+                  : scope === "device" ? "Search media in this browser…"
+                    : "Search your generations…"
+            }
             className="w-full pl-9 pr-3 text-xs bg-background-tertiary border border-border rounded-md text-text-primary h-9 focus:outline-none focus:border-primary"
           />
         </div>
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={uploading > 0}
+          title="Add files to your library — they stay private to you"
+          className="h-9 px-2.5 flex items-center gap-1.5 rounded-md border border-border text-[11px] font-medium
+                     text-text-secondary hover:text-text-primary hover:border-text-muted transition-colors disabled:opacity-50"
+        >
+          {uploading > 0
+            ? <><Loader2 size={13} className="animate-spin" />{uploading}</>
+            : <><Upload size={13} />Add</>}
+        </button>
+        {/* Reveal the library folder itself. Only the desktop app can open a
+            window on the user's machine, so when it isn't running this falls
+            back to handing over the path (copied + shown) instead of appearing
+            to do nothing. */}
+        <button
+          type="button"
+          disabled={openingFolder}
+          onClick={() => void openLibraryFolder()}
+          title={libraryRoot ? `Open the library folder\n${libraryRoot}` : "Open the library folder on this machine"}
+          className="w-9 h-9 flex items-center justify-center rounded-md border border-border text-text-secondary hover:text-text-primary hover:border-text-muted transition-colors disabled:opacity-40"
+        >
+          {openingFolder ? <Loader2 size={13} className="animate-spin" /> : <FolderOpen size={13} />}
+        </button>
         <button
           type="button"
           onClick={() => { void caches.delete(THUMB_CACHE).catch(() => {}); setRev((r) => r + 1); void load(0, true); void loadDevice(); }}
@@ -835,19 +1203,103 @@ export const LibraryPanel: React.FC = () => {
         </div>
       )}
 
-      {/* Grid */}
-      <div className="flex-1 overflow-y-auto px-5 pb-5 min-h-0">
+      {/* Hidden picker driven by the Add button. `multiple` because people add a
+          folder's worth of sfx at once, not one file. */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          const files = Array.from(e.target.files ?? []);
+          e.target.value = "";          // allow re-picking the same file
+          void uploadFiles(files);
+        }}
+      />
+
+      {/* Result line. Stays until the next upload so a failure reason can be read
+          — a toast that vanishes is useless for "why did that fail?". */}
+      {uploadMsg && (
+        <div className="px-5 pb-2 flex items-start gap-2">
+          <p className="text-[10px] text-text-muted leading-relaxed flex-1">{uploadMsg}</p>
+          <button type="button" onClick={() => setUploadMsg(null)}
+            className="text-text-muted hover:text-text-primary" title="Dismiss">
+            <X size={11} />
+          </button>
+        </div>
+      )}
+
+      {/* Grid — also the DROP TARGET. Dropping onto the panel you are already
+          looking at is the shortest path from "file on my desktop" to "in my
+          library"; the Add button is the discoverable equivalent. */}
+      <div
+        className={`flex-1 overflow-y-auto px-5 pb-5 min-h-0 relative ${
+          dragOver ? "outline outline-2 outline-primary/60 outline-offset-[-8px] rounded-lg" : ""
+        }`}
+        onDragOver={(e) => {
+          if (!e.dataTransfer.types.includes("Files")) return;   // ignore tile drags
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "copy";
+          if (!dragOver) setDragOver(true);
+        }}
+        onDragLeave={(e) => {
+          // Only clear when the pointer actually leaves the panel, not on every
+          // child boundary crossing (which makes the outline strobe).
+          if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(false);
+        }}
+        onDrop={(e) => {
+          if (!e.dataTransfer.types.includes("Files")) return;
+          e.preventDefault();
+          setDragOver(false);
+          void uploadFiles(Array.from(e.dataTransfer.files ?? []));
+        }}
+      >
+        {dragOver && (
+          <div className="absolute inset-2 z-20 flex items-center justify-center pointer-events-none
+                          rounded-lg bg-background-elevated/80 backdrop-blur-sm border border-primary/40">
+            <p className="text-xs text-primary font-medium">Drop to add to your library</p>
+          </div>
+        )}
         {loading && items.length === 0 ? (
           <div className="flex items-center justify-center py-12 text-text-muted gap-2 text-xs">
             <Loader2 size={16} className="animate-spin" /> Loading your library…
           </div>
         ) : error ? (
           <div className="text-xs text-error py-8 text-center">{error}</div>
-        ) : items.length === 0 && visibleDeviceItems.length === 0 ? (
+        ) : LIBRARY_SCOPES.includes(scope) && libraryAvailable === false ? (
+          /* No stock library on this machine. A specific, actionable message —
+             an empty grid here would read as "the library is broken". */
+          <div className="text-center py-12 text-text-muted">
+            <HardDrive size={28} className="mx-auto mb-2 opacity-40" />
+            <p className="text-sm">No licensed library on this machine</p>
+            <p className="text-[11px] mt-1 leading-relaxed">
+              The licensed library is a folder of media on this machine — sfx, music, footage,
+              stills, 3D, LUTs, fonts — read from the machine running Voidspace.
+              <br />
+              Set its location in the desktop app under Settings → Media Library Folder.
+            </p>
+            {libraryRoot && (
+              <p className="text-[10px] mt-3 font-mono opacity-70 break-all px-6">
+                Looked in: {libraryRoot}
+              </p>
+            )}
+          </div>
+        ) : visibleItems.length === 0 && visibleDeviceItems.length === 0 ? (
           <div className="text-center py-12 text-text-muted">
             <AudioLines size={28} className="mx-auto mb-2 opacity-40" />
-            <p className="text-sm">No generations yet</p>
-            <p className="text-[11px] mt-1">Generated SFX, music, images and videos show up here — reuse them in any project without regenerating.</p>
+            <p className="text-sm">
+              {scope === "licensed" ? "Nothing matches in your licensed packs"
+                : scope === "myfiles" ? "No files of this type yet"
+                : scope === "device" ? "No media saved in this browser"
+                  : "No generations yet"}
+            </p>
+            <p className="text-[11px] mt-1">
+              {scope === "licensed" || scope === "myfiles"
+                ? "Try a different search or type filter."
+                : scope === "device"
+                  ? "Media you import into projects in this browser shows up here."
+                  : "Generated SFX, music, images and videos show up here — reuse them in any project without regenerating."}
+            </p>
           </div>
         ) : (
           <>

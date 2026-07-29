@@ -704,9 +704,34 @@ export const AssetsPanel: React.FC = () => {
     try {
       const { openVoidspaceFolder: openIt } = await import("../../services/open-folder");
       const r = await openIt();
-      if (!r.ok) setFolderError(r.error || "Couldn't open the folder");
+      if (r.ok) {
+        // Say WHERE it opened. On a multi-monitor desktop the new Explorer
+        // window is easy to miss, and the path is the useful part anyway.
+        toast.success("Opened your Voidspace folder", r.path || undefined);
+        return;
+      }
+      setFolderError(r.error || "Couldn't open the folder");
+      // The failure has to be VISIBLE. This used to live only in the button's
+      // tooltip, so the button read as doing nothing at all — the single most
+      // common report about it. When the desktop app isn't running nothing on
+      // this machine can open a window, so the next best thing is handing over
+      // the path: copy it and say so, rather than leaving the user stuck.
+      if (r.path) {
+        let copied = false;
+        try {
+          await navigator.clipboard.writeText(r.path);
+          copied = true;
+        } catch { /* clipboard blocked — the path is still shown below */ }
+        toast.info(
+          copied ? "Folder path copied" : "Your Voidspace folder",
+          `${r.path}\n\n${r.error || ""}`.trim(),
+        );
+      } else {
+        toast.error("Couldn't open the folder", r.error || undefined);
+      }
     } catch (e: any) {
       setFolderError(e?.message ?? String(e));
+      toast.error("Couldn't open the folder", e?.message ?? String(e));
     } finally {
       setFolderBusy(false);
     }
