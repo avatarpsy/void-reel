@@ -1,16 +1,17 @@
 /**
- * "Open my Voidspace folder" — reveal the user's local media folder in their
- * OS file manager.
+ * WHERE the user's Voidspace folder and media library are on disk.
  *
- * Neither of the two places this code could run is able to do that itself: a
- * browser tab has no access to the desktop, and the website serves from a
- * container whose filesystem is not the user's. The only process that can open
- * a window on the user's machine is the Voidspace DESKTOP app, so the request
- * is dispatched to it over the device channel.
+ * This used to try to OPEN them in the OS file manager. It no longer does, and
+ * that is deliberate: nothing in the web path can do it reliably. A browser tab
+ * has no access to the desktop, and the website server is frequently a
+ * container whose filesystem is not the user's machine at all. The only
+ * component that could was the Voidspace DESKTOP app, dispatched over the
+ * device channel — but most people using the web editor do not have it running,
+ * so the action failed far more often than it succeeded.
  *
- * Which is also why every failure here is reported rather than swallowed: the
- * most likely cause is simply that the desktop app is not running, and a button
- * that silently does nothing gives the user no way to work that out.
+ * A button that usually does nothing is worse than no button. Reporting the
+ * path works on every platform, for every user, with no extra software, and is
+ * the thing they actually needed in order to go there themselves.
  */
 import { useVoidspaceStore } from "../stores/voidspace-store";
 
@@ -26,58 +27,46 @@ function apiBase(): string {
   return "";
 }
 
-export interface OpenFolderResult {
-  ok: boolean;
-  /**
-   * The destination path. Present on success AND — when the server knows it —
-   * on failure, so the caller can show the user where to look when the desktop
-   * app isn't there to open it for them.
-   */
+export interface FolderPathResult {
+  /** Absolute path on the machine running the server, when it is known. */
   path?: string;
   error?: string;
 }
 
-export interface OpenFolderOptions {
-  /** A folder INSIDE the Voidspace root (e.g. a project id). */
-  subPath?: string;
-  /**
-   * "library" opens the MEDIA LIBRARY instead of the Voidspace root. It lives
-   * outside that root (usually on a bigger drive), so it can't be addressed by
-   * subPath; the server resolves its absolute path from its own configuration.
-   */
-  target?: "voidspace" | "library";
+/**
+ * The user's Voidspace folder (renders, recordings, per-project media).
+ *
+ * @param subPath Optional folder INSIDE it (e.g. a project id).
+ */
+export async function getVoidspaceFolderPath(subPath?: string): Promise<FolderPathResult> {
+  return fetchPath(subPath ? { subPath } : {});
 }
 
-export async function openVoidspaceFolder(
-  opts: OpenFolderOptions | string = {},
-): Promise<OpenFolderResult> {
-  const { subPath, target } = typeof opts === "string" ? { subPath: opts, target: undefined } : opts;
+/**
+ * The shared MEDIA LIBRARY. It lives outside the Voidspace folder — usually on
+ * a bigger drive — so it has its own lookup rather than a subPath.
+ */
+export async function getMediaLibraryPath(): Promise<FolderPathResult> {
+  return fetchPath({ target: "library" });
+}
+
+async function fetchPath(body: Record<string, string>): Promise<FolderPathResult> {
   const vs = useVoidspaceStore.getState();
   const token = await vs.getIdToken?.();
-  if (!token) return { ok: false, error: "Not signed in." };
+  if (!token) return { error: "Not signed in." };
 
   try {
-    const res = await fetch(`${apiBase()}/api/studio/open-folder`, {
+    const res = await fetch(`${apiBase()}/api/studio/folder-path`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...(subPath ? { subPath } : {}),
-        ...(target === "library" ? { target: "library" } : {}),
-      }),
+      body: JSON.stringify(body),
     });
-    const body = await res.json().catch(() => ({} as any));
-    if (!res.ok || body?.ok === false) {
-      return {
-        ok: false,
-        path: body?.path,
-        error: body?.error || body?.statusMessage
-          || (res.status === 502
-            ? "The Voidspace desktop app isn't reachable — start it and try again."
-            : `Couldn't open the folder (HTTP ${res.status}).`),
-      };
+    const json = await res.json().catch(() => ({} as any));
+    if (!res.ok) {
+      return { error: json?.statusMessage || json?.error || `Couldn't look up the folder (HTTP ${res.status}).` };
     }
-    return { ok: true, path: body?.path };
+    return { path: json?.path || undefined, error: json?.error };
   } catch (e: any) {
-    return { ok: false, error: e?.message ?? String(e) };
+    return { error: e?.message ?? String(e) };
   }
 }

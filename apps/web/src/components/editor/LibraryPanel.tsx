@@ -309,37 +309,36 @@ export const LibraryPanel: React.FC = () => {
   const [openingFolder, setOpeningFolder] = useState(false);
 
   /**
-   * Reveal the media-library folder in the OS file manager.
+   * Show WHERE the library lives, and copy it.
    *
-   * A browser tab cannot open a folder, and the server may be a container whose
-   * filesystem isn't the user's — only the desktop app can. When it isn't
-   * running we still know WHERE the library is (the search endpoint reports it),
-   * so the fallback copies that path and shows it. Anything is better than a
-   * button that appears to do nothing, which is how this read before.
+   * This deliberately does NOT try to open a file manager. Nothing in the web
+   * path can do that reliably: a browser tab has no access to the desktop, and
+   * the server is frequently a container whose filesystem isn't the user's. The
+   * only component that could was the desktop app, which most web users do not
+   * have running — so the action failed far more often than it worked, and a
+   * button that usually does nothing is worse than no button.
+   *
+   * Telling the user the path always works, on every platform, and is what they
+   * actually needed in order to go there themselves.
    */
-  async function openLibraryFolder() {
+  async function showLibraryLocation() {
     if (openingFolder) return;
     setOpeningFolder(true);
     try {
-      const { openVoidspaceFolder } = await import("../../services/open-folder");
-      const r = await openVoidspaceFolder({ target: "library" });
-      if (r.ok) {
-        toast.success("Opened your library folder", r.path || libraryRoot || undefined);
+      if (!libraryRoot) {
+        toast.info(
+          "No media library on this machine",
+          "Set its location in the desktop app under Settings → Media Library Folder, "
+            + "or point ~/Voidspace/library.json at the folder.",
+        );
         return;
       }
-      const path = r.path || libraryRoot;
-      if (path) {
-        let copied = false;
-        try { await navigator.clipboard.writeText(path); copied = true; } catch { /* blocked */ }
-        toast.info(
-          copied ? "Library path copied" : "Your library folder",
-          `${path}\n\n${r.error || ""}`.trim(),
-        );
-      } else {
-        toast.error("Couldn't open the library folder", r.error || undefined);
-      }
-    } catch (e: any) {
-      toast.error("Couldn't open the library folder", e?.message ?? String(e));
+      let copied = false;
+      try { await navigator.clipboard.writeText(libraryRoot); copied = true; } catch { /* blocked */ }
+      toast.info(
+        copied ? "Library path copied" : "Your media library",
+        libraryRoot,
+      );
     } finally {
       setOpeningFolder(false);
     }
@@ -1127,18 +1126,17 @@ export const LibraryPanel: React.FC = () => {
             ? <><Loader2 size={13} className="animate-spin" />{uploading}</>
             : <><Upload size={13} />Add</>}
         </button>
-        {/* Reveal the library folder itself. Only the desktop app can open a
-            window on the user's machine, so when it isn't running this falls
-            back to handing over the path (copied + shown) instead of appearing
-            to do nothing. */}
+        {/* Where the library lives. Shows + copies the path rather than trying
+            to open a file manager — see showLibraryLocation for why opening
+            cannot be made reliable from the web. */}
         <button
           type="button"
           disabled={openingFolder}
-          onClick={() => void openLibraryFolder()}
-          title={libraryRoot ? `Open the library folder\n${libraryRoot}` : "Open the library folder on this machine"}
+          onClick={() => void showLibraryLocation()}
+          title={libraryRoot ? `Library location — click to copy\n${libraryRoot}` : "Where your media library lives"}
           className="w-9 h-9 flex items-center justify-center rounded-md border border-border text-text-secondary hover:text-text-primary hover:border-text-muted transition-colors disabled:opacity-40"
         >
-          {openingFolder ? <Loader2 size={13} className="animate-spin" /> : <FolderOpen size={13} />}
+          <FolderOpen size={13} />
         </button>
         <button
           type="button"

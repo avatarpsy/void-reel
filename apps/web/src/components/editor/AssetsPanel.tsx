@@ -697,41 +697,40 @@ export const AssetsPanel: React.FC = () => {
   // device, and a failure has to SAY so rather than appear to do nothing.
   const [folderBusy, setFolderBusy] = useState(false);
   const [folderError, setFolderError] = useState("");
-  async function openVoidspaceFolder() {
+  /**
+   * Show WHERE the user's Voidspace folder is, and copy the path.
+   *
+   * It used to try to OPEN it, dispatching to the desktop app because nothing
+   * else can: a browser tab has no access to the desktop and the server is
+   * often a container whose filesystem isn't the user's. But most web users
+   * don't have the desktop app running, so the action failed far more often
+   * than it worked — and its only failure signal was the button's tooltip,
+   * which is why it read as a dead button.
+   *
+   * Reporting the location always works, everywhere, and is the part the user
+   * actually needs.
+   */
+  async function showVoidspaceFolder() {
     if (folderBusy) return;
     setFolderBusy(true);
     setFolderError("");
     try {
-      const { openVoidspaceFolder: openIt } = await import("../../services/open-folder");
-      const r = await openIt();
-      if (r.ok) {
-        // Say WHERE it opened. On a multi-monitor desktop the new Explorer
-        // window is easy to miss, and the path is the useful part anyway.
-        toast.success("Opened your Voidspace folder", r.path || undefined);
+      const { getVoidspaceFolderPath } = await import("../../services/open-folder");
+      const r = await getVoidspaceFolderPath();
+      if (!r.path) {
+        setFolderError(r.error || "Couldn't determine your Voidspace folder");
+        toast.error("Couldn't find your Voidspace folder", r.error || undefined);
         return;
       }
-      setFolderError(r.error || "Couldn't open the folder");
-      // The failure has to be VISIBLE. This used to live only in the button's
-      // tooltip, so the button read as doing nothing at all — the single most
-      // common report about it. When the desktop app isn't running nothing on
-      // this machine can open a window, so the next best thing is handing over
-      // the path: copy it and say so, rather than leaving the user stuck.
-      if (r.path) {
-        let copied = false;
-        try {
-          await navigator.clipboard.writeText(r.path);
-          copied = true;
-        } catch { /* clipboard blocked — the path is still shown below */ }
-        toast.info(
-          copied ? "Folder path copied" : "Your Voidspace folder",
-          `${r.path}\n\n${r.error || ""}`.trim(),
-        );
-      } else {
-        toast.error("Couldn't open the folder", r.error || undefined);
-      }
+      let copied = false;
+      try {
+        await navigator.clipboard.writeText(r.path);
+        copied = true;
+      } catch { /* clipboard blocked — the path is still shown in the toast */ }
+      toast.info(copied ? "Folder path copied" : "Your Voidspace folder", r.path);
     } catch (e: any) {
       setFolderError(e?.message ?? String(e));
-      toast.error("Couldn't open the folder", e?.message ?? String(e));
+      toast.error("Couldn't find your Voidspace folder", e?.message ?? String(e));
     } finally {
       setFolderBusy(false);
     }
@@ -1272,9 +1271,9 @@ export const AssetsPanel: React.FC = () => {
               → label-activation dispatches the synthetic click on the
               input → file picker opens. */}
           <button
-            onClick={() => void openVoidspaceFolder()}
+            onClick={() => void showVoidspaceFolder()}
             disabled={folderBusy}
-            title={folderError || "Open your Voidspace folder on this computer"}
+            title={folderError || "Where your Voidspace folder is — click to copy the path"}
             className={`inline-flex items-center justify-center h-6 w-6 rounded-md transition-colors cursor-pointer disabled:opacity-40 ${
               folderError
                 ? "text-red-400 hover:bg-background-elevated"
