@@ -12,6 +12,7 @@ import { useProjectCloudSync } from './hooks/useProjectCloudSync';
 import { readHandoffParams, clearHandoffUrl, loadSrcAsProject, parseLocalAssetSource } from './services/image-handoff';
 import { openCloudCarouselById } from './services/carousel-cloud';
 import { openCloudImageProject } from './services/project-cloud-open';
+import { installImageRpc } from './agent/rpc';
 import { useProjectStore } from './stores/project-store';
 
 // Was the app opened to DIRECTLY load a project (carousel deep-link or an
@@ -41,9 +42,38 @@ export default function App() {
   useAutoSave();
   useProjectCloudSync();
 
+  // Theme. The editor used to force `.dark` permanently, so on a light-themed
+  // site the canvas pane stayed black — the one part of the page that ignored
+  // the user's choice. The host relays the site's mode with the SAME
+  // `voidspace:theme` message the video editor already answers, so both editors
+  // follow the site through one mechanism.
+  //
+  // Dark stays the default until a host says otherwise: standalone /image/ has
+  // no host to ask, and the editor's own palette is authored dark-first.
   useEffect(() => {
-    document.documentElement.classList.add('dark');
+    const apply = (mode: string) => {
+      document.documentElement.classList.toggle('dark', mode !== 'light');
+      // The canvas paints its workspace backdrop from the theme, and it only
+      // repaints on a state/size change — without this nudge the surround keeps
+      // the OLD theme's grey until the next edit.
+      window.dispatchEvent(new Event('resize'));
+    };
+    apply('dark');
+
+    const onMessage = (e: MessageEvent) => {
+      const msg: any = e?.data;
+      if (!msg || typeof msg !== 'object' || msg.type !== 'voidspace:theme') return;
+      apply(String(msg.mode || 'dark'));
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
   }, []);
+
+  // Chat ↔ editor RPC. Installed unconditionally: it only ever answers
+  // `voidspace:img-*` messages, so a standalone /image/ session (no parent frame)
+  // simply never receives one. Gating it on an embed flag would mean a project
+  // opened by deep link couldn't be driven by the agent.
+  useEffect(() => installImageRpc(), []);
 
   // Deep-link: the Studio projects hub's Images tab opens a specific carousel
   // via /image/?carousel=<draftId>. Load it as a multi-page project. We KEEP

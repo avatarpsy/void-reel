@@ -11,24 +11,29 @@ import { GuidePanel } from './panels/GuidePanel';
 import { PagesBar } from './pages/PagesBar';
 import { useUIStore } from '../../stores/ui-store';
 import { useProjectStore } from '../../stores/project-store';
-import { History, Ruler } from 'lucide-react';
+import { History, Ruler, SlidersHorizontal } from 'lucide-react';
 
 const ExportDialog = lazy(() => import('./ExportDialog').then(m => ({ default: m.ExportDialog })));
 const PublishCarouselModal = lazy(() => import('./PublishCarouselModal').then(m => ({ default: m.PublishCarouselModal })));
 
-// Layers now live in the LEFT panel (full height — Figma-style). The right side
-// is the selected-layer Inspector plus a resizable Guides/History dock.
-type BottomTab = 'history' | 'guides';
+// Layers live in the LEFT panel (full height — Figma-style). The right column is
+// a single tab strip: the selected-layer/artboard properties, guides, and edit
+// history are PEERS, so whichever one you are using gets the full height.
+type RightTab = 'design' | 'guides' | 'history';
+
+const RIGHT_TABS: Array<{ key: RightTab; label: string; Icon: typeof SlidersHorizontal }> = [
+  { key: 'design', label: 'Design', Icon: SlidersHorizontal },
+  { key: 'guides', label: 'Guides', Icon: Ruler },
+  { key: 'history', label: 'History', Icon: History },
+];
 
 export function EditorInterface() {
   const { isPanelCollapsed, isInspectorCollapsed, isExportDialogOpen, closeExportDialog } = useUIStore();
   const publishCarouselOpen = useUIStore((s) => s.publishCarouselOpen);
   const setPublishCarouselOpen = useUIStore((s) => s.setPublishCarouselOpen);
   const { project } = useProjectStore();
-  const [bottomTab, setBottomTab] = useState<BottomTab>('history');
-  const [dockHeight, setDockHeight] = useState(240);
+  const [rightTab, setRightTab] = useState<RightTab>('design');
   const [leftWidth, setLeftWidth] = useState(288); // w-72 = 18rem
-  const resizingRef = useRef(false);
   const leftResizingRef = useRef(false);
 
   const startLeftResize = (e: React.MouseEvent) => {
@@ -43,25 +48,6 @@ export function EditorInterface() {
     };
     const onUp = () => {
       leftResizingRef.current = false;
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-  };
-
-  const startResize = (e: React.MouseEvent) => {
-    e.preventDefault();
-    resizingRef.current = true;
-    const startY = e.clientY;
-    const startH = dockHeight;
-    const onMove = (ev: MouseEvent) => {
-      if (!resizingRef.current) return;
-      const dy = startY - ev.clientY; // drag up => taller
-      setDockHeight(Math.max(120, Math.min(window.innerHeight - 220, startH + dy)));
-    };
-    const onUp = () => {
-      resizingRef.current = false;
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
@@ -104,47 +90,45 @@ export function EditorInterface() {
         </div>
 
         {!isInspectorCollapsed && (
+          /* ONE tabbed column: Design · Guides · History.
+             It used to be the Inspector stacked ABOVE a resizable Guides/History
+             dock, which split the column in two and gave each half too little
+             room — the properties list scrolled inside a sliver while History sat
+             half-empty below it, and the drag handle between them was easy to
+             grab by accident. Three peers in one tab strip means whichever one
+             you are using gets the whole column. */
           <div className="w-72 border-l border-border flex flex-col bg-card">
-            <GenerativeFillPanel />
-            <div className="flex-1 overflow-y-auto">
-              <Inspector />
+            <div className="flex border-b border-border shrink-0" role="tablist" aria-label="Panel">
+              {RIGHT_TABS.map(({ key, label, Icon }) => (
+                <button
+                  key={key}
+                  role="tab"
+                  aria-selected={rightTab === key}
+                  onClick={() => setRightTab(key)}
+                  className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors ${
+                    rightTab === key
+                      ? 'text-foreground bg-background border-b-2 border-primary -mb-px'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-accent'
+                  }`}
+                >
+                  <Icon size={14} />
+                  {label}
+                </button>
+              ))}
             </div>
 
-            {/* Resizable Guides / History dock — drag the top edge to resize. */}
-            <div
-              onMouseDown={startResize}
-              className="h-1.5 cursor-row-resize border-t border-border hover:bg-primary/40 transition-colors shrink-0"
-              title="Drag to resize"
-            />
-            <div style={{ height: dockHeight }} className="flex flex-col shrink-0">
-              <div className="flex border-b border-border">
-                <button
-                  onClick={() => setBottomTab('guides')}
-                  className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors ${
-                    bottomTab === 'guides'
-                      ? 'text-foreground bg-background border-b-2 border-primary -mb-px'
-                      : 'text-muted-foreground hover:text-foreground hover:bg-accent'
-                  }`}
-                >
-                  <Ruler size={14} />
-                  Guides
-                </button>
-                <button
-                  onClick={() => setBottomTab('history')}
-                  className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors ${
-                    bottomTab === 'history'
-                      ? 'text-foreground bg-background border-b-2 border-primary -mb-px'
-                      : 'text-muted-foreground hover:text-foreground hover:bg-accent'
-                  }`}
-                >
-                  <History size={14} />
-                  History
-                </button>
-              </div>
-              <div className="flex-1 overflow-hidden">
-                {bottomTab === 'guides' && <GuidePanel />}
-                {bottomTab === 'history' && <HistoryPanel />}
-              </div>
+            <div className="flex-1 overflow-hidden flex flex-col">
+              {/* Generative Fill is a MODE, not a tab: it opens from the canvas
+                  context menu and must stay visible while you work on the
+                  selection, whichever tab is showing. */}
+              <GenerativeFillPanel />
+              {rightTab === 'design' && (
+                <div className="flex-1 overflow-y-auto">
+                  <Inspector />
+                </div>
+              )}
+              {rightTab === 'guides' && <GuidePanel />}
+              {rightTab === 'history' && <HistoryPanel />}
             </div>
           </div>
         )}

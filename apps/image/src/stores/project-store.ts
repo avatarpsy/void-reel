@@ -8,12 +8,16 @@ import {
   duplicateLayerInProject,
 } from '@openreel/image-core/operations';
 import {
+  type Command,
   AddArtboardCommand,
+  AddAssetCommand,
   AddLayerCommand,
+  CompositeCommand,
   DuplicateLayerCommand,
   GroupLayersCommand,
   PasteLayersCommand,
   RemoveArtboardCommand,
+  RemoveAssetCommand,
   RemoveLayerCommand,
   ReorderLayerCommand,
   SetProjectNameCommand,
@@ -88,6 +92,27 @@ interface ProjectActions {
   canUndo: () => boolean;
   canRedo: () => boolean;
 
+  /**
+   * Run several mutations as ONE undo step.
+   *
+   * A single action the user (or the agent) asked for is often several primitive
+   * commands — "place this image" is register-asset + add-layer; "add a headline"
+   * is add-layer + set-style. Run individually they became N undo entries, so one
+   * Ctrl+Z tore the action in half.
+   *
+   * Inside `fn`, call the normal store methods. They apply as they go (each sees
+   * the state the last one produced) but record nothing; on return, everything is
+   * committed as one labelled `CompositeCommand`.
+   *
+   * ALL-OR-NOTHING: if `fn` throws, the project is restored to its pre-transaction
+   * state and NOTHING is recorded — no torn, un-undoable half-edit. The error is
+   * re-thrown so the caller can report it.
+   *
+   * Nesting is safe (inner calls join the outer transaction). Returns whatever
+   * `fn` returns, so callers can hand back new layer ids.
+   */
+  runTransaction: <T>(label: string, fn: () => T) => T;
+
   addArtboard: (name: string, size: CanvasSize, position?: { x: number; y: number }) => string;
   removeArtboard: (artboardId: string) => void;
   updateArtboard: (artboardId: string, updates: Partial<Artboard>) => void;
@@ -141,11 +166,46 @@ interface ProjectActions {
 
 const generateId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
 
+/**
+ * Monotonic revision counter for optimistic concurrency.
+ *
+ * The agent reads the canvas, thinks, then writes; `rev` is how a write proves it
+ * was computed from the state that is still there. `project.updatedAt` CANNOT do
+ * this job: it is `Date.now()` in milliseconds, so two edits inside the same
+ * millisecond carry the same value and a stale write sails through the guard —
+ * and a clock adjustment can even move it backwards.
+ *
+ * A counter has neither problem. It is bumped from a subscription (below) rather
+ * than by hand at each mutation, so every path that changes the project — the
+ * ones written here, and the ones added later — is covered without anyone having
+ * to remember.
+ */
+let projectRev = 0;
+
+/** Current revision. Echoed to the agent on reads and checked on writes. */
+export function getProjectRev(): number {
+  return projectRev;
+}
+
+/**
+ * Open transaction, if any (see `runTransaction`).
+ *
+ * While one is open, `execCmd` still APPLIES each command — inner store methods
+ * read the project the previous step produced, so they must see real state — but
+ * it records nothing. The commands accumulate here and are committed as one
+ * `CompositeCommand`, so a multi-part action is a single undo step.
+ *
+ * Module-level (not store state) because it is per-call-stack bookkeeping, not
+ * something any component should re-render on.
+ */
+let openTx: { depth: number; commands: Command[]; projectBefore: Project | null } | null = null;
+
 // Helper to apply a command and update the project in one shot.
-function execCmd(
-  project: Project,
-  command: Parameters<ReturnType<typeof useHistoryStore['getState']>['execute']>[0],
-): Project {
+function execCmd(project: Project, command: Command): Project {
+  if (openTx) {
+    openTx.commands.push(command);
+    return command.apply(project);
+  }
   return useHistoryStore.getState().execute(command, project);
 }
 
@@ -240,6 +300,57 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
         const cmd = new SetProjectNameCommand(name, project.name);
         const newProject = execCmd(project, cmd);
         set({ project: newProject, isDirty: true });
+      },
+
+      // ── Transactions ────────────────────────────────────────────────────
+
+      runTransaction: (label, fn) => {
+        const before = get().project;
+        if (!before) return fn();
+
+        // Nested call — join the transaction already in flight. Only the
+        // outermost one commits, so the whole nest is one undo step.
+        if (openTx) {
+          openTx.depth += 1;
+          try {
+            return fn();
+          } finally {
+            openTx.depth -= 1;
+          }
+        }
+
+        openTx = { depth: 1, commands: [], projectBefore: before };
+        let result: ReturnType<typeof fn>;
+        try {
+          result = fn();
+        } catch (err) {
+          // All-or-nothing: put the document back exactly as it was and record
+          // nothing. A half-applied action with no undo entry is the one outcome
+          // we must never leave behind.
+          const tx = openTx;
+          openTx = null;
+          if (tx.commands.length > 0) {
+            set({
+              project: tx.projectBefore,
+              selectedLayerIds: [],
+              selectedArtboardId: tx.projectBefore?.activeArtboardId ?? null,
+            });
+          }
+          throw err;
+        }
+
+        const tx = openTx;
+        openTx = null;
+        if (!tx || tx.commands.length === 0) return result;
+
+        // Already applied by the inner calls — hand history the composite so the
+        // whole thing is one entry with one inverse.
+        const composite = tx.commands.length === 1 && label === ''
+          ? tx.commands[0]
+          : new CompositeCommand(tx.commands, label || 'Edit');
+        useHistoryStore.getState().record(composite, before);
+        set({ isDirty: true });
+        return result;
       },
 
       // ── Undo / Redo ─────────────────────────────────────────────────────
@@ -398,7 +509,10 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
         if (!artboard) return id;
         const layer: TextLayer = {
           id,
-          name: content.slice(0, 20) || 'Text',
+          // Single-line label. Multi-line copy used to put its raw newlines in
+          // the layer name, so a headline showed as "Design\nat the speed\n" in
+          // the Layers panel and in every agent read of the canvas.
+          name: content.replace(/\s+/g, ' ').trim().slice(0, 24) || 'Text',
           type: 'text',
           visible: true,
           locked: false,
@@ -959,14 +1073,20 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
           thumbnailUrl: dataUrl, dataUrl,
         };
         const merged = buildMergedImageLayer(target.name, assetId, W, H);
-        // Register the asset, insert the merged layer where `below` was, drop both sources.
-        let p: Project = { ...cur, assets: { ...cur.assets, [assetId]: mergedAsset } };
-        p = execCmd(p, new AddLayerCommand(artboard.id, merged, Math.max(ab.layerIds.indexOf(belowId), 0)));
-        let t = p.artboards.find((a) => a.id === artboard.id)!;
-        p = execCmd(p, new RemoveLayerCommand(layerId, artboard.id, target, t.layerIds.indexOf(layerId)));
-        t = p.artboards.find((a) => a.id === artboard.id)!;
-        p = execCmd(p, new RemoveLayerCommand(belowId, artboard.id, below, t.layerIds.indexOf(belowId)));
-        set({ project: p, selectedLayerIds: [merged.id], isDirty: true });
+        // ONE undo step for one action. This used to be three separate entries
+        // AND the merged asset was spliced in outside the command stack — so
+        // undoing a merge took three Ctrl+Z presses and orphaned the asset.
+        // The async render is deliberately outside the transaction: only the
+        // synchronous command sequence belongs inside it.
+        get().runTransaction(`Merge "${target.name}" down`, () => {
+          let p: Project = execCmd(cur, new AddAssetCommand(mergedAsset, 'Merged pixels'));
+          p = execCmd(p, new AddLayerCommand(artboard.id, merged, Math.max(ab.layerIds.indexOf(belowId), 0)));
+          let t = p.artboards.find((a) => a.id === artboard.id)!;
+          p = execCmd(p, new RemoveLayerCommand(layerId, artboard.id, target, t.layerIds.indexOf(layerId)));
+          t = p.artboards.find((a) => a.id === artboard.id)!;
+          p = execCmd(p, new RemoveLayerCommand(belowId, artboard.id, below, t.layerIds.indexOf(belowId)));
+          set({ project: p, selectedLayerIds: [merged.id], isDirty: true });
+        });
       },
 
       flattenImage: async () => {
@@ -989,30 +1109,33 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
           thumbnailUrl: dataUrl, dataUrl,
         };
         const merged = buildMergedImageLayer('Flattened', assetId, W, H);
-        let p: Project = { ...cur, assets: { ...cur.assets, [assetId]: mergedAsset } };
-        p = execCmd(p, new AddLayerCommand(artboard.id, merged, ab.layerIds.length));
-        for (const id of [...ab.layerIds]) {
-          const lyr = p.layers[id];
-          if (!lyr) continue;
-          const t = p.artboards.find((a) => a.id === artboard.id)!;
-          p = execCmd(p, new RemoveLayerCommand(id, artboard.id, lyr, t.layerIds.indexOf(id)));
-        }
-        set({ project: p, selectedLayerIds: [merged.id], isDirty: true });
+        // One undo step — flattening a 12-layer poster used to cost 13 presses
+        // to reverse, and the flattened asset was never on the command stack.
+        get().runTransaction('Flatten image', () => {
+          let p: Project = execCmd(cur, new AddAssetCommand(mergedAsset, 'Flattened pixels'));
+          p = execCmd(p, new AddLayerCommand(artboard.id, merged, ab.layerIds.length));
+          for (const id of [...ab.layerIds]) {
+            const lyr = p.layers[id];
+            if (!lyr) continue;
+            const t = p.artboards.find((a) => a.id === artboard.id)!;
+            p = execCmd(p, new RemoveLayerCommand(id, artboard.id, lyr, t.layerIds.indexOf(id)));
+          }
+          set({ project: p, selectedLayerIds: [merged.id], isDirty: true });
+        });
       },
 
-      // ── Assets (no undo needed for asset registration) ───────────────────
+      // ── Assets (undoable — see AddAssetCommand) ──────────────────────────
 
       addAsset: (asset) => {
-        set((state) => {
-          if (state.project) {
-            state.project.assets[asset.id] = asset;
-            state.project.updatedAt = Date.now();
-            state.isDirty = true;
-          }
-        });
-        // This mutation bypasses the command stack; a live redo stack would now
-        // replay onto a divergent project. Invalidate it (a new edit ends redo).
-        useHistoryStore.getState().invalidateRedo();
+        const { project } = get();
+        if (!project) return;
+        // Asset registration used to bypass the command stack and then wipe the
+        // redo stack to stay safe. That made every composite half-undoable:
+        // "place an image" left an orphan asset behind after one Ctrl+Z, and redo
+        // was already gone. It is now a real command, so a transaction can bind
+        // it to the layer that uses it and undo removes both together.
+        const newProject = execCmd(project, new AddAssetCommand(asset));
+        set({ project: newProject, isDirty: true });
       },
 
       commitRasterEdit: (assetId, newAsset, description) => {
@@ -1031,18 +1154,26 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
       },
 
       removeAsset: (assetId) => {
-        set((state) => {
-          if (state.project) {
-            delete state.project.assets[assetId];
-            state.project.updatedAt = Date.now();
-            state.isDirty = true;
-          }
-        });
-        useHistoryStore.getState().invalidateRedo();
+        const { project } = get();
+        if (!project) return;
+        const existing = project.assets[assetId];
+        if (!existing) return;
+        // Carries the whole asset so the inverse can restore the bytes.
+        const newProject = execCmd(project, new RemoveAssetCommand(existing));
+        set({ project: newProject, isDirty: true });
       },
 
       markDirty: () => set({ isDirty: true }),
       markClean: () => set({ isDirty: false }),
     }))
   )
+);
+
+// Bump the revision on EVERY change to the project object, whatever caused it —
+// a store action, a hand edit on the canvas, an agent RPC, or a mutation added
+// later by someone who never reads this file. One subscription is what makes the
+// concurrency guard complete instead of best-effort.
+useProjectStore.subscribe(
+  (s) => s.project,
+  () => { projectRev += 1; },
 );

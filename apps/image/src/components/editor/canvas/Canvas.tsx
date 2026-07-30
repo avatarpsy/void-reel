@@ -23,7 +23,8 @@ import { CloneStampTool } from '../../../tools/retouch/clone-stamp';
 import { HealingBrushTool } from '../../../tools/retouch/healing-brush';
 import { SpotHealingTool } from '../../../tools/retouch/spot-healing';
 
-const RULER_SIZE = 20;
+// Ruler thickness lives in Rulers.tsx now — the canvas no longer insets itself
+// by it, so it has no reason to know the value (see the canvas style block).
 const HANDLE_SIZE = 8;
 const ROTATION_HANDLE_DISTANCE = 24;
 
@@ -574,10 +575,15 @@ export function Canvas() {
     const ctx = canvas?.getContext('2d');
     if (!canvas || !ctx || !artboard || !project) return;
 
-    const container = containerRef.current;
-    if (container) {
-      canvas.width = container.clientWidth;
-      canvas.height = container.clientHeight;
+    // Size the bitmap from the canvas's OWN CSS box, so the two can never
+    // disagree and the browser never rescales what we drew. Assigning width or
+    // height clears the bitmap and resets the 2D context, so only do it when the
+    // size actually changed — otherwise every frame would start from scratch.
+    const cssW = canvas.clientWidth;
+    const cssH = canvas.clientHeight;
+    if (cssW > 0 && cssH > 0 && (canvas.width !== cssW || canvas.height !== cssH)) {
+      canvas.width = cssW;
+      canvas.height = cssH;
     }
 
     const marqueeHash = marqueeRect ? `${marqueeRect.x}-${marqueeRect.y}-${marqueeRect.width}-${marqueeRect.height}` : 'none';
@@ -594,7 +600,12 @@ export function Canvas() {
     forceRenderRef.current = false;
 
     ctx.save();
-    ctx.fillStyle = '#18181b';
+    // Workspace backdrop — the area AROUND the artboard. Follows the site theme:
+    // light grey in light mode, dark grey in dark. It was pinned to #18181b, so
+    // on a light-themed site the canvas stayed a black slab while every panel
+    // around it turned light. Read per-render (cheap) rather than cached, so a
+    // theme toggle repaints without remounting the editor.
+    ctx.fillStyle = document.documentElement.classList.contains('dark') ? '#18181b' : '#e8e9ed';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     const centerX = canvas.width / 2 + panX;
@@ -664,6 +675,23 @@ export function Canvas() {
       liveMaskPaint = null;
     }
 
+    // WYSIWYG: confine layer painting to the artboard.
+    //
+    // The export sizes its canvas to the artboard, so anything hanging over the
+    // edge is cropped there. The editor did NOT clip, so an element pushed past
+    // the frame stayed fully visible on screen and then vanished on export —
+    // what you saw was not what you got. That is worst for agent-placed work,
+    // where a coordinate slightly off the page looks fine in the preview and
+    // disappears from the file.
+    //
+    // Scoped with save/restore so it covers ONLY the layers; selection handles,
+    // guides and the marquee are drawn after this and must stay visible when a
+    // layer is partly off-page.
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, artboard.size.width, artboard.size.height);
+    ctx.clip();
+
     // Bottom-to-top. A layer with `clippingMask` clips to the layer below it
     // (its "base"): it shows only where the base has pixels (Photoshop). We draw
     // the base normally, then draw each clipped layer through the base's shape.
@@ -710,7 +738,8 @@ export function Canvas() {
       }
     }
 
-    ctx.restore();
+    ctx.restore(); // pop the artboard CLIP — overlays below must not be clipped
+    ctx.restore(); // pop the artboard transform — overlays use absolute coords
 
     selectedLayerIds.forEach((layerId) => {
       const layer = project.layers[layerId];
@@ -1076,9 +1105,45 @@ export function Canvas() {
         });
       }
     };
+
+    // Observe the CONTAINER, not just the window.
+    //
+    // The canvas keeps two sizes: its CSS size (100% of this container) and its
+    // backing-store size (`canvas.width/height`, set during render). They must
+    // agree, or the browser scales the bitmap to fit — the artwork visibly
+    // stretches or shrinks while the zoom level has not changed at all.
+    //
+    // Dragging the left assets panel, collapsing the right column, or resizing
+    // the agent chat all change this container's width WITHOUT firing a window
+    // resize event. So the CSS size changed instantly, the backing store did
+    // not, and the preview rescaled — which is exactly what it looked like.
+    // A ResizeObserver catches every one of those, from either side.
+    const ro = typeof ResizeObserver !== 'undefined'
+      ? new ResizeObserver(() => handleResize())
+      : null;
+    if (ro && containerRef.current) ro.observe(containerRef.current);
+
+    // Window resize is still needed: it covers the browser window itself, and
+    // it is what the theme relay dispatches to force a repaint.
     window.addEventListener('resize', handleResize);
     handleResize();
-    return () => window.removeEventListener('resize', handleResize);
+
+    // Repaint when a WEBFONT finishes loading.
+    //
+    // Google Fonts arrive asynchronously. The canvas draws text with
+    // `ctx.font = "... 'Anton'"`, so a layer created before its family landed is
+    // painted in the FALLBACK — and nothing ever redraws it, so the artwork
+    // silently keeps the wrong typeface. Asking for Anton and getting a serif is
+    // exactly the failure a design tool cannot have, and it hits the font picker
+    // as much as the agent.
+    const onFontsLoaded = () => forceRender();
+    try { document.fonts?.addEventListener?.('loadingdone', onFontsLoaded); } catch { /* older browser */ }
+
+    return () => {
+      ro?.disconnect();
+      window.removeEventListener('resize', handleResize);
+      try { document.fonts?.removeEventListener?.('loadingdone', onFontsLoaded); } catch { /* noop */ }
+    };
   }, [forceRender]);
 
   useEffect(() => {
@@ -3168,11 +3233,25 @@ export function Canvas() {
         onDoubleClick={handleDoubleClick}
         onContextMenu={handleContextMenu}
         className="absolute"
+        /* The canvas ALWAYS fills its container, rulers or not.
+         *
+         * It used to be inset by the ruler size, which left three different
+         * ideas of "how wide is the canvas" in play: the CSS box
+         * (container − 20), the bitmap (sized from the container), and the
+         * rulers (which compute the artboard centre as containerWidth / 2).
+         * The bitmap/CSS mismatch made the browser SCALE the artwork — so the
+         * preview appeared to resize whenever a side panel changed width — and
+         * `screenToCanvas`, which reads the CSS box for the offset but the
+         * bitmap for the centre, was off by half the ruler size on top.
+         *
+         * One size for all three removes the whole class of bug. The rulers are
+         * absolutely-positioned overlays (z-10/z-20) and simply sit on top of
+         * the canvas edges, which is where they already appeared to be. */
         style={{
-          top: showRulers ? RULER_SIZE : 0,
-          left: showRulers ? RULER_SIZE : 0,
-          width: showRulers ? `calc(100% - ${RULER_SIZE}px)` : '100%',
-          height: showRulers ? `calc(100% - ${RULER_SIZE}px)` : '100%',
+          top: 0,
+          left: 0,
+          width: '100%',
+          height: '100%',
           cursor: effectiveCursor,
         }}
       />

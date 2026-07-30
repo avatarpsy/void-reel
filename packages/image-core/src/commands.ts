@@ -35,6 +35,10 @@ function cloneProject(project: Project): Project {
   return JSON.parse(JSON.stringify(project)) as Project;
 }
 
+function cloneAsset(asset: MediaAsset): MediaAsset {
+  return JSON.parse(JSON.stringify(asset)) as MediaAsset;
+}
+
 function findArtboardIndex(project: Project, artboardId: string): number {
   return project.artboards.findIndex((a) => a.id === artboardId);
 }
@@ -606,6 +610,139 @@ export class UpdateAssetCommand implements Command {
 
   invert(): Command {
     return new UpdateAssetCommand(this.assetId, this.beforeJson, this.afterJson, `Undo ${this.descriptionText.toLowerCase()}`);
+  }
+}
+
+/**
+ * Register a new asset in `project.assets`.
+ *
+ * Asset registration used to bypass the command stack entirely (a direct
+ * `set()` in the project store plus `invalidateRedo()`). That made every
+ * composite operation half-undoable: "place an image" registered the asset
+ * un-undoably and added the layer undoably, so one Ctrl+Z removed the layer and
+ * left an orphan asset behind — and the redo stack had already been thrown away.
+ *
+ * With this command, asset registration joins the same history as everything
+ * else, so `CompositeCommand` can bind it to the layer that uses it and undo
+ * removes both together.
+ */
+export class AddAssetCommand implements Command {
+  readonly type = 'AddAsset';
+
+  private readonly asset: MediaAsset;
+
+  constructor(
+    asset: MediaAsset,
+    private readonly descriptionText?: string,
+  ) {
+    // Snapshot AT CONSTRUCTION, not at apply(). A command sits on the undo stack
+    // indefinitely and must be an immutable value: cloning lazily let a caller
+    // mutate the source object after enqueueing and have that leak into a
+    // later redo. Raster pipelines reuse asset objects, so this is reachable.
+    this.asset = cloneAsset(asset);
+  }
+
+  get description(): string {
+    return this.descriptionText ?? `Add asset "${this.asset.name}"`;
+  }
+
+  apply(project: Project): Project {
+    const next = cloneProject(project);
+    next.assets[this.asset.id] = cloneAsset(this.asset);
+    next.updatedAt = Date.now();
+    return next;
+  }
+
+  invert(): Command {
+    return new RemoveAssetCommand(this.asset, this.descriptionText);
+  }
+}
+
+/**
+ * Drop an asset from `project.assets`. Carries the full asset so its inverse can
+ * restore the bytes — an id alone would make undo lossy.
+ */
+export class RemoveAssetCommand implements Command {
+  readonly type = 'RemoveAsset';
+
+  private readonly asset: MediaAsset;
+
+  constructor(
+    asset: MediaAsset,
+    private readonly descriptionText?: string,
+  ) {
+    this.asset = cloneAsset(asset);
+  }
+
+  get description(): string {
+    return this.descriptionText ?? `Remove asset "${this.asset.name}"`;
+  }
+
+  apply(project: Project): Project {
+    const next = cloneProject(project);
+    delete next.assets[this.asset.id];
+    next.updatedAt = Date.now();
+    return next;
+  }
+
+  invert(): Command {
+    return new AddAssetCommand(this.asset, this.descriptionText);
+  }
+}
+
+/**
+ * One undo step made of several commands.
+ *
+ * WHY THIS EXISTS
+ * A single user- or agent-visible action is often several primitive mutations:
+ * "place this image" is register-asset + add-layer; "merge down" is add-merged +
+ * remove-two; "add a headline" is add-layer + set-style. Executed one by one they
+ * became N separate undo entries, so Ctrl+Z tore the action in half and left the
+ * document in a state the user never asked for. `mergeDown` shipped as three
+ * undos for exactly this reason.
+ *
+ * Children apply in order and invert in REVERSE order — the standard composite
+ * inverse — so undo unwinds the action exactly as it was built.
+ *
+ * `merge` deliberately returns null: a composite is a deliberate, labelled
+ * action and must never be coalesced into a neighbouring one by the
+ * history store's drag-coalescing window.
+ */
+export class CompositeCommand implements Command {
+  readonly type = 'Composite';
+
+  private readonly children: Command[];
+
+  constructor(
+    children: Command[],
+    private readonly descriptionText = 'Edit',
+  ) {
+    this.children = children.slice();
+  }
+
+  get description(): string {
+    return this.descriptionText;
+  }
+
+  /** Number of primitive commands folded into this step (diagnostics/tests). */
+  get size(): number {
+    return this.children.length;
+  }
+
+  apply(project: Project): Project {
+    let next = project;
+    for (const child of this.children) next = child.apply(next);
+    return next;
+  }
+
+  invert(): Command {
+    // Reverse order: the inverse of (a then b) is (b⁻¹ then a⁻¹).
+    const inverted = this.children.map((c) => c.invert()).reverse();
+    return new CompositeCommand(inverted, `Undo ${this.descriptionText.toLowerCase()}`);
+  }
+
+  merge(): Command | null {
+    return null;
   }
 }
 

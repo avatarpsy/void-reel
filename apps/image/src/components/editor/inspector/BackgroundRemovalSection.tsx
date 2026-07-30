@@ -3,18 +3,15 @@ import { Wand2, Loader2 } from 'lucide-react';
 import { Slider } from '@openreel/ui';
 import { useProjectStore } from '../../../stores/project-store';
 import type { ImageLayer } from '../../../types/project';
-import {
-  getBackgroundRemovalService,
-  BackgroundMode,
-  DEFAULT_OPTIONS,
-} from '../../../services/background-removal-service';
+import { BackgroundMode, DEFAULT_OPTIONS } from '../../../services/background-removal-service';
+import { removeLayerBackground } from '../../../services/background-removal-apply';
 
 interface Props {
   layer: ImageLayer;
 }
 
 export function BackgroundRemovalSection({ layer }: Props) {
-  const { project, addAsset, updateLayer } = useProjectStore();
+  const { project } = useProjectStore();
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
   const [mode, setMode] = useState<BackgroundMode>('transparent');
@@ -28,37 +25,18 @@ export function BackgroundRemovalSection({ layer }: Props) {
 
     setIsProcessing(true);
     setProgress(0);
-
     try {
-      const service = getBackgroundRemovalService();
-      const imageUrl = asset.dataUrl || asset.thumbnailUrl;
-
-      const resultDataUrl = await service.removeBackground(
-        imageUrl,
-        {
-          mode,
-          backgroundColor,
-          blurAmount,
-        },
-        setProgress
-      );
-
-      const newAssetId = `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
-      addAsset({
-        id: newAssetId,
-        name: `${asset.name} (no bg)`,
-        type: 'image',
-        mimeType: 'image/png',
-        size: 0,
-        width: asset.width,
-        height: asset.height,
-        thumbnailUrl: resultDataUrl,
-        dataUrl: resultDataUrl,
+      // Shared with the agent's img_remove_background — one implementation, so
+      // the button and the assistant can never drift apart. It also registers
+      // the new asset and repoints the layer in ONE undoable step, which this
+      // inline version did not.
+      const r = await removeLayerBackground(layer.id, {
+        mode,
+        backgroundColor,
+        blurAmount,
+        onProgress: setProgress,
       });
-
-      updateLayer<ImageLayer>(layer.id, { sourceId: newAssetId });
-    } catch (error) {
-      console.error('Background removal failed:', error);
+      if (!r.ok) console.error('Background removal failed:', r.message);
     } finally {
       setIsProcessing(false);
       setProgress(0);

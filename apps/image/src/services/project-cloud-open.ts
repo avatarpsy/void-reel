@@ -83,12 +83,22 @@ export async function openCloudImageProject(id: string): Promise<boolean> {
       thumbnailUrl: images[i],
       dataUrl: images[i],
     };
-    P.addAsset(asset);
-    P.addImageLayer(asset.id, { x: 0, y: 0, width: size.width, height: size.height });
+    // Register + place as ONE undo step: undoing a page must not leave its
+    // asset orphaned in the Assets panel.
+    useProjectStore.getState().runTransaction(`Open page ${i + 1}`, () => {
+      useProjectStore.getState().addAsset(asset);
+      useProjectStore.getState().addImageLayer(asset.id, { x: 0, y: 0, width: size.width, height: size.height });
+    });
   }
 
   const first = useProjectStore.getState().project?.artboards[0];
   if (first) P.selectArtboard(first.id);
+  // This copy is FLATTENED — one image per page, none of the original layer
+  // tree (that lives in the IndexedDB of the browser the project was made on).
+  // Flagged by project id so the agent tells the user instead of promising layer
+  // edits it cannot make here, and so the flag can't leak onto the next project.
+  const openedId = useProjectStore.getState().project?.id ?? null;
+  useUIStore.getState().setFlattenedProjectId(openedId);
   useUIStore.getState().setCurrentView('editor');
   return true;
 }

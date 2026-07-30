@@ -176,6 +176,21 @@ interface UIState {
   // place (a local-asset source). Lets Export offer "Update original". null
   // otherwise (normal editing, or a non-overwritable source like a Kie URL).
   editSource: EditSource | null;
+  /**
+   * Id of the project that was rebuilt from flattened cloud page thumbnails
+   * because the layered original lives in another browser's IndexedDB.
+   *
+   * Stored as an ID rather than a boolean so it CANNOT go stale: create or open
+   * any other project and it simply stops matching. A session-wide boolean would
+   * have to be cleared at every project entry point, and the one that got
+   * forgotten would mislabel a perfectly good layered project as flattened.
+   *
+   * The agent reads this. Without it, asked to "move the headline up" on a
+   * cross-device open, it would accept the job and find one full-bleed image
+   * layer where the headline used to be a text layer — and would either fail
+   * confusingly or silently do something else. Knowing up front lets it say so.
+   */
+  flattenedProjectId: string | null;
   activeTool: Tool;
   activePanel: Panel;
   isPanelCollapsed: boolean;
@@ -233,6 +248,7 @@ interface UIState {
 interface UIActions {
   setCurrentView: (view: AppView) => void;
   setEditSource: (v: EditSource | null) => void;
+  setFlattenedProjectId: (id: string | null) => void;
   setActiveTool: (tool: Tool) => void;
   setActivePanel: (panel: Panel) => void;
   togglePanelCollapsed: () => void;
@@ -298,6 +314,7 @@ export const useUIStore = create<UIState & UIActions>()(
   subscribeWithSelector((set, get) => ({
     currentView: 'welcome',
     editSource: null,
+    flattenedProjectId: null,
     activeTool: 'select',
     activePanel: 'layers',
     isPanelCollapsed: false,
@@ -441,6 +458,7 @@ export const useUIStore = create<UIState & UIActions>()(
 
     setCurrentView: (view) => set({ currentView: view }),
     setEditSource: (v) => set({ editSource: v }),
+    setFlattenedProjectId: (id) => set({ flattenedProjectId: id }),
     setActiveTool: (tool) => {
       const updates: Partial<UIState> = { activeTool: tool };
       if (tool === 'blur') {

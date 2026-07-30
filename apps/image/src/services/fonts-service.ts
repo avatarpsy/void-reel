@@ -107,7 +107,15 @@ export function loadGoogleFont(fontFamily: string, weights: string[] = ['400', '
 
     link.onload = () => {
       loadedFonts.add(key);
-      resolve();
+      // The stylesheet only DECLARES the @font-face rules. Browsers fetch the
+      // actual font file lazily, when DOM layout needs it — and a <canvas>
+      // never triggers that. Without this the canvas keeps painting the
+      // FALLBACK face forever: ask for Anton, get a serif, with no error
+      // anywhere. Force the real fetch, then resolve.
+      const faces = weights.map((w) => `${w} 16px "${fontFamily}"`);
+      Promise.all(faces.map((f) => document.fonts.load(f)))
+        .then(() => resolve())
+        .catch(() => resolve()); // a missing weight must not fail the whole load
     };
 
     link.onerror = () => {

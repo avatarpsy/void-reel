@@ -6,6 +6,7 @@ import { useProjectStore } from '../../stores/project-store';
 import { useUIStore } from '../../stores/ui-store';
 import { CANVAS_PRESETS, Project } from '../../types/project';
 import { CosmicField } from '../CosmicField';
+import { onTopLinkClick } from '../../services/navigate-top';
 
 // Voidspace brand mark (the gradient "S"), bundled at /image/images/logo.png.
 const LOGO_SRC = `${import.meta.env.BASE_URL}images/logo.png`;
@@ -191,6 +192,7 @@ export function WelcomeScreen() {
 
       {/* Back to the Voidspace Studio projects hub, landing on the Images tab. */}
       <a href="/studio/projects?tab=images"
+        onClick={onTopLinkClick('/studio/projects?tab=images')}
         className="absolute top-5 left-6 z-20 inline-flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary transition-colors">
         <ArrowRight className="rotate-180" size={14} /> My Projects
       </a>

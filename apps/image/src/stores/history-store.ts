@@ -35,6 +35,16 @@ interface HistoryState {
   baseProject: string | null;
   maxSize: number;
   snapshots: Snapshot[];
+  /**
+   * Coalescing barrier. Any record whose timestamp is at or before this instant
+   * refuses to absorb a following command. Set by `breakCoalescing()`; a fresh
+   * record always timestamps after it, so ordinary drag-coalescing still works
+   * within the next run.
+   */
+  mergeBarrierAt: number;
+  /** Monotonic counter of commands EVICTED by maxSize, so a checkpoint taken
+   *  before an eviction can tell "shifted" from "still valid". */
+  evictedCount: number;
 }
 
 interface HistoryActions {
@@ -43,6 +53,21 @@ interface HistoryActions {
    * Returns the updated project that callers must set into the project store.
    */
   execute: (cmd: Command, currentProject: Project) => Project;
+
+  /**
+   * Push a command that has ALREADY been applied.
+   *
+   * `execute` both applies and records; a transaction cannot use it, because its
+   * inner steps must apply as they go (each one reads the project the previous
+   * one produced) while landing on the stack as a SINGLE entry. So the
+   * transaction applies the parts itself and hands the composite here.
+   *
+   * `projectBeforeCommand` is only used to seed `baseProject` when this is the
+   * first command ever recorded, keeping `goToEntry` replay correct.
+   *
+   * Never coalesces — a recorded command is already a finished, labelled action.
+   */
+  record: (command: Command, projectBeforeCommand: Project) => void;
 
   /**
    * Undo the most recent command.  Applies the inverse to `currentProject`
@@ -100,6 +125,65 @@ interface HistoryActions {
   deleteSnapshot: (id: string) => void;
   renameSnapshot: (id: string, name: string) => void;
   getSnapshots: () => Snapshot[];
+
+  // ── Agent checkpoints (lightweight undo-stack bookmarks) ────────────────
+
+  /**
+   * End the coalescing run, so the NEXT `execute` can never be folded into the
+   * previous undo entry.
+   *
+   * `MERGE_WINDOW_MS` exists for continuous human gestures (a slider drag emits
+   * dozens of updates that should be one undo step). Agent tool calls arrive
+   * milliseconds apart and are NOT one gesture: two `img_edit_layer` calls on the
+   * same layer would otherwise collapse into a single entry, and a checkpoint
+   * taken between them could no longer be rewound to. Called at the end of every
+   * agent mutation so each tool call is exactly one undo step.
+   */
+  breakCoalescing: () => void;
+
+  /**
+   * Bookmark the current undo-stack position. Cheap — no project serialisation
+   * (an image project carries base64 pixels; snapshotting one per chat turn would
+   * cost tens of MB).
+   *
+   * Records BOTH the depth and the id of the command on top of the stack.
+   * `stackIndex` alone is not safe: the stack evicts its oldest entry past
+   * `maxSize`, which shifts every index down, so a bookmark taken 60 edits ago
+   * would silently resolve to the wrong place. `resolveCheckpoint` prefers the
+   * id and reports eviction honestly instead of guessing.
+   */
+  createCheckpoint: (label?: string) => Checkpoint;
+
+  /**
+   * Where does this checkpoint sit in the CURRENT stack?
+   *  - `{ ok: true, stackIndex }`      → rewind target (undo until depth === stackIndex)
+   *  - `{ ok: false, reason: 'evicted' }`  → the command was dropped by maxSize; the
+   *                                          caller must say so rather than rewind wrongly
+   *  - `{ ok: false, reason: 'stale' }`     → stack was cleared (project closed/reloaded)
+   */
+  resolveCheckpoint: (cp: Checkpoint) => { ok: true; stackIndex: number } | { ok: false; reason: 'evicted' | 'stale' };
+
+  /** Current undo depth — the value a checkpoint's `stackIndex` is compared to. */
+  getUndoDepth: () => number;
+}
+
+/**
+ * A lightweight undo-stack bookmark. `recordId` is the id of the command that was
+ * on top when the checkpoint was taken (`null` = taken on an empty stack, i.e.
+ * "rewind to the very beginning").
+ */
+export interface Checkpoint {
+  id: string;
+  label: string;
+  timestamp: number;
+  stackIndex: number;
+  recordId: string | null;
+  /**
+   * The store's `evictedCount` when this checkpoint was taken. A checkpoint that
+   * points at "the beginning of the stack" is only meaningful while nothing has
+   * been dropped or cleared since — comparing counters is how we know.
+   */
+  evictedAt: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -123,9 +207,11 @@ export const useHistoryStore = create<HistoryState & HistoryActions>()(
     baseProject: null,
     maxSize: 50,
     snapshots: [],
+    mergeBarrierAt: 0,
+    evictedCount: 0,
 
     execute: (cmd, currentProject) => {
-      const { undoStack, maxSize, baseProject } = get();
+      const { undoStack, maxSize, baseProject, mergeBarrierAt } = get();
 
       // Capture base project on first command ever.
       const base = baseProject ?? JSON.stringify(currentProject);
@@ -141,7 +227,10 @@ export const useHistoryStore = create<HistoryState & HistoryActions>()(
       if (undoStack.length > 0) {
         const last = undoStack[undoStack.length - 1];
         const withinWindow = Date.now() - last.timestamp <= MERGE_WINDOW_MS;
-        const merged = withinWindow ? (last.command.merge?.(cmd) ?? null) : null;
+        // A barrier (see breakCoalescing) closes the run: the record on top is
+        // final and cannot absorb this command, even inside the time window.
+        const barred = last.timestamp <= mergeBarrierAt;
+        const merged = withinWindow && !barred ? (last.command.merge?.(cmd) ?? null) : null;
         if (merged !== null) {
           const newProject = cmd.apply(currentProject);
           const updatedStack = [
@@ -188,12 +277,43 @@ export const useHistoryStore = create<HistoryState & HistoryActions>()(
           undoStack: newStack,
           redoStack: [],
           baseProject: newBase ? JSON.stringify(newBase) : base,
+          // Every index in the stack just shifted down by one. Checkpoints
+          // resolve by record id, and this counter is how they tell an eviction
+          // happened at all.
+          evictedCount: get().evictedCount + 1,
         });
       } else {
         set({ undoStack: newStack, redoStack: [], baseProject: base });
       }
 
       return newProject;
+    },
+
+    record: (command, projectBeforeCommand) => {
+      const { undoStack, maxSize, baseProject } = get();
+      const base = baseProject ?? JSON.stringify(projectBeforeCommand);
+
+      let newStack = [...undoStack, { id: generateId(), timestamp: Date.now(), command }];
+      let evicted = 0;
+      let nextBase = base;
+      if (newStack.length > maxSize) {
+        const dropped = newStack[0];
+        try {
+          nextBase = JSON.stringify(dropped.command.apply(JSON.parse(base) as Project));
+        } catch {
+          nextBase = base;
+        }
+        newStack = newStack.slice(1);
+        evicted = 1;
+      }
+      set({
+        undoStack: newStack,
+        redoStack: [],
+        baseProject: nextBase,
+        evictedCount: get().evictedCount + evicted,
+        // A recorded action closes any open coalescing run.
+        mergeBarrierAt: Date.now(),
+      });
     },
 
     undo: (currentProject) => {
@@ -274,6 +394,11 @@ export const useHistoryStore = create<HistoryState & HistoryActions>()(
         undoStack: [],
         redoStack: [],
         baseProject: baseProject ? JSON.stringify(baseProject) : null,
+        // A cleared stack invalidates every outstanding checkpoint. Bumping the
+        // eviction counter is what makes `resolveCheckpoint` answer 'stale'
+        // instead of matching a coincidentally-equal depth in the new session.
+        evictedCount: get().evictedCount + 1,
+        mergeBarrierAt: 0,
       });
     },
 
@@ -319,5 +444,51 @@ export const useHistoryStore = create<HistoryState & HistoryActions>()(
     },
 
     getSnapshots: () => get().snapshots,
+
+    // ── Agent checkpoints ──────────────────────────────────────────────────
+
+    breakCoalescing: () => set({ mergeBarrierAt: Date.now() }),
+
+    getUndoDepth: () => get().undoStack.length,
+
+    createCheckpoint: (label) => {
+      const { undoStack, evictedCount } = get();
+      const top = undoStack.length > 0 ? undoStack[undoStack.length - 1] : null;
+      // Close the coalescing run as well: whatever happens after this
+      // checkpoint must be a NEW undo entry, or the checkpoint would sit inside
+      // a record that later grows to include post-checkpoint work — and
+      // rewinding to it would undo more than it should.
+      set({ mergeBarrierAt: Date.now() });
+      return {
+        id: generateId(),
+        label: label ?? 'Checkpoint',
+        timestamp: Date.now(),
+        stackIndex: undoStack.length,
+        recordId: top?.id ?? null,
+        evictedAt: evictedCount,
+      };
+    },
+
+    resolveCheckpoint: (cp) => {
+      const { undoStack, evictedCount } = get();
+
+      // The bookmarked command is still on the stack — the unambiguous case, and
+      // true regardless of what was evicted below it. Depth is idx + 1: rewinding
+      // to it KEEPS the bookmarked command and drops everything after.
+      if (cp.recordId !== null) {
+        const idx = undoStack.findIndex((r) => r.id === cp.recordId);
+        if (idx >= 0) return { ok: true, stackIndex: idx + 1 };
+      } else if (evictedCount === cp.evictedAt) {
+        // Taken on an empty stack and nothing has been dropped or cleared since,
+        // so index 0 really is the state the checkpoint refers to.
+        return { ok: true, stackIndex: 0 };
+      }
+
+      // Unresolvable. Say WHICH way it failed — "you closed the project" and
+      // "that edit is older than the 50-step history" need different words, and
+      // guessing a stack position instead would rewind the wrong work.
+      if (undoStack.length === 0) return { ok: false, reason: 'stale' };
+      return { ok: false, reason: 'evicted' };
+    },
   }))
 );

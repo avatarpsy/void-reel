@@ -11,6 +11,8 @@ function resetStores() {
     baseProject: null,
     maxSize: 50,
     snapshots: [],
+    mergeBarrierAt: 0,
+    evictedCount: 0,
   });
   useProjectStore.setState({
     project: null,
@@ -332,5 +334,111 @@ describe('history-store (command-based)', () => {
       useProjectStore.getState().redo(); // redo rename
       expect(useProjectStore.getState().project!.layers[id]?.name).toBe('Updated');
     });
+  });
+});
+
+// ── Agent checkpoints + coalescing barrier ─────────────────────────────────────
+//
+// These pin the two failure modes that make agent-driven editing untrustworthy:
+// (1) two agent edits folding into one undo entry, so a per-turn rewind is
+//     impossible; (2) a checkpoint resolving to the WRONG stack position after
+//     the 50-entry cap evicts older commands.
+
+describe('breakCoalescing', () => {
+  it('stops two same-layer edits from folding into one undo step', () => {
+    createProject();
+    const store = useProjectStore.getState();
+    const id = store.addTextLayer('Hello');
+
+    const depthBefore = useHistoryStore.getState().getUndoDepth();
+    // Two transform nudges inside the 600ms window: normally ONE entry.
+    useProjectStore.getState().updateLayerTransform(id, { x: 10 });
+    useProjectStore.getState().updateLayerTransform(id, { x: 20 });
+    expect(useHistoryStore.getState().getUndoDepth()).toBe(depthBefore + 1);
+
+    // With a barrier between them they stay separate — which is what lets a
+    // checkpoint taken between two agent tool calls rewind just one of them.
+    useHistoryStore.getState().breakCoalescing();
+    useProjectStore.getState().updateLayerTransform(id, { x: 30 });
+    useHistoryStore.getState().breakCoalescing();
+    useProjectStore.getState().updateLayerTransform(id, { x: 40 });
+    expect(useHistoryStore.getState().getUndoDepth()).toBe(depthBefore + 3);
+  });
+
+  it('still lets an uninterrupted drag coalesce', () => {
+    createProject();
+    const id = useProjectStore.getState().addTextLayer('Hello');
+    const depth = useHistoryStore.getState().getUndoDepth();
+    for (let i = 0; i < 5; i++) {
+      useProjectStore.getState().updateLayerTransform(id, { x: i * 5 });
+    }
+    expect(useHistoryStore.getState().getUndoDepth()).toBe(depth + 1);
+  });
+});
+
+describe('checkpoints', () => {
+  it('resolves to a depth that keeps pre-checkpoint work and drops the rest', () => {
+    createProject();
+    const store = useProjectStore.getState();
+    store.addTextLayer('One');
+    const cp = useHistoryStore.getState().createCheckpoint('before turn');
+    useProjectStore.getState().addTextLayer('Two');
+    useProjectStore.getState().addTextLayer('Three');
+
+    const r = useHistoryStore.getState().resolveCheckpoint(cp);
+    expect(r.ok).toBe(true);
+    const target = (r as { ok: true; stackIndex: number }).stackIndex;
+
+    // Rewind exactly like the RPC does: undo until the depth matches.
+    while (useHistoryStore.getState().getUndoDepth() > target) {
+      useProjectStore.getState().undo();
+    }
+    const layers = Object.values(getProject().layers) as Array<{ name: string }>;
+    const names = layers.map((l) => l.name);
+    expect(names).toContain('One');
+    expect(names).not.toContain('Two');
+    expect(names).not.toContain('Three');
+  });
+
+  it('a checkpoint on an empty stack rewinds to the very beginning', () => {
+    createProject();
+    const cp = useHistoryStore.getState().createCheckpoint('fresh');
+    expect(cp.recordId).toBeNull();
+    useProjectStore.getState().addTextLayer('One');
+    const r = useHistoryStore.getState().resolveCheckpoint(cp);
+    expect(r).toEqual({ ok: true, stackIndex: 0 });
+  });
+
+  it('reports eviction instead of rewinding to the wrong place', () => {
+    createProject();
+    // Tiny cap so eviction is reachable in a test; the real cap is 50.
+    useHistoryStore.setState({ maxSize: 3 });
+    useProjectStore.getState().addTextLayer('A');
+    const cp = useHistoryStore.getState().createCheckpoint('doomed');
+    // Push past the cap so the bookmarked command is dropped.
+    for (const n of ['B', 'C', 'D', 'E']) {
+      useHistoryStore.getState().breakCoalescing();
+      useProjectStore.getState().addTextLayer(n);
+    }
+    const r = useHistoryStore.getState().resolveCheckpoint(cp);
+    expect(r).toEqual({ ok: false, reason: 'evicted' });
+  });
+
+  it('reports staleness after the project is closed and the stack cleared', () => {
+    createProject();
+    useProjectStore.getState().addTextLayer('One');
+    const cp = useHistoryStore.getState().createCheckpoint('before close');
+    useProjectStore.getState().closeProject();
+    const r = useHistoryStore.getState().resolveCheckpoint(cp);
+    expect(r).toEqual({ ok: false, reason: 'stale' });
+  });
+
+  it('is cheap — it does not serialise the project', () => {
+    createProject();
+    useProjectStore.getState().addTextLayer('One');
+    const cp = useHistoryStore.getState().createCheckpoint('cheap');
+    // A full-state snapshot would carry a `state` string of base64 pixels.
+    expect(Object.keys(cp).sort()).toEqual(['evictedAt', 'id', 'label', 'recordId', 'stackIndex', 'timestamp']);
+    expect(JSON.stringify(cp).length).toBeLessThan(300);
   });
 });

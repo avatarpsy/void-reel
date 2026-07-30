@@ -1,12 +1,28 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useUIStore } from '../../../stores/ui-store';
 import { useProjectStore } from '../../../stores/project-store';
 
 const RULER_SIZE = 20;
-const RULER_BG = '#1f1f23';
-const RULER_TEXT = '#71717a';
-const RULER_TICK = '#3f3f46';
+
+/**
+ * Ruler colours per theme.
+ *
+ * These were four hardcoded dark hexes, so on a light-themed site the rulers
+ * stayed a dark strip along two edges of an otherwise light editor — the last
+ * piece of chrome that ignored the theme. Read at draw time (the component
+ * already redraws on pan/zoom/size) so a theme toggle repaints them.
+ */
+const RULER_THEME = {
+  dark:  { bg: '#1f1f23', text: '#71717a', tick: '#3f3f46' },
+  light: { bg: '#f1f2f5', text: '#71717a', tick: '#c8cad1' },
+} as const;
 const RULER_HIGHLIGHT = '#3b82f6';
+
+function rulerColors() {
+  const isDark = typeof document !== 'undefined'
+    && document.documentElement.classList.contains('dark');
+  return isDark ? RULER_THEME.dark : RULER_THEME.light;
+}
 
 interface RulersProps {
   containerWidth: number;
@@ -19,6 +35,18 @@ export function Rulers({ containerWidth, containerHeight }: RulersProps) {
   const cornerRef = useRef<HTMLDivElement>(null);
 
   const { zoom, panX, panY, showRulers } = useUIStore();
+  // Re-render on a theme flip. The draw effect's other deps (size, zoom, pan)
+  // do not change when only the theme does, so without this the rulers keep the
+  // previous palette until the user happens to pan or zoom.
+  const [themeVersion, setThemeVersion] = useState(0);
+  useEffect(() => {
+    const onTheme = (e: MessageEvent) => {
+      if ((e?.data as any)?.type === 'voidspace:theme') setThemeVersion((v) => v + 1);
+    };
+    window.addEventListener('message', onTheme);
+    return () => window.removeEventListener('message', onTheme);
+  }, []);
+  const colors = rulerColors();
   const { project, selectedArtboardId } = useProjectStore();
 
   const artboard = project?.artboards.find((a) => a.id === selectedArtboardId);
@@ -47,7 +75,7 @@ export function Rulers({ containerWidth, containerHeight }: RulersProps) {
 
     renderHorizontalRuler(hCtx, containerWidth, artboardX, artboard.size.width, zoom);
     renderVerticalRuler(vCtx, containerHeight, artboardY, artboard.size.height, zoom);
-  }, [containerWidth, containerHeight, zoom, panX, panY, showRulers, artboard]);
+  }, [containerWidth, containerHeight, zoom, panX, panY, showRulers, artboard, themeVersion]);
 
   if (!showRulers) return null;
 
@@ -59,9 +87,9 @@ export function Rulers({ containerWidth, containerHeight }: RulersProps) {
         style={{
           width: RULER_SIZE,
           height: RULER_SIZE,
-          backgroundColor: RULER_BG,
-          borderRight: `1px solid ${RULER_TICK}`,
-          borderBottom: `1px solid ${RULER_TICK}`,
+          backgroundColor: colors.bg,
+          borderRight: `1px solid ${colors.tick}`,
+          borderBottom: `1px solid ${colors.tick}`,
         }}
       />
       <canvas
@@ -71,7 +99,7 @@ export function Rulers({ containerWidth, containerHeight }: RulersProps) {
           left: RULER_SIZE,
           width: containerWidth - RULER_SIZE,
           height: RULER_SIZE,
-          backgroundColor: RULER_BG,
+          backgroundColor: colors.bg,
         }}
       />
       <canvas
@@ -81,7 +109,7 @@ export function Rulers({ containerWidth, containerHeight }: RulersProps) {
           top: RULER_SIZE,
           width: RULER_SIZE,
           height: containerHeight - RULER_SIZE,
-          backgroundColor: RULER_BG,
+          backgroundColor: colors.bg,
         }}
       />
     </>
@@ -107,6 +135,7 @@ function renderHorizontalRuler(
   artboardWidth: number,
   zoom: number
 ) {
+  const { bg: RULER_BG, text: RULER_TEXT, tick: RULER_TICK } = rulerColors();
   ctx.fillStyle = RULER_BG;
   ctx.fillRect(0, 0, width, RULER_SIZE);
 
@@ -157,6 +186,7 @@ function renderVerticalRuler(
   artboardHeight: number,
   zoom: number
 ) {
+  const { bg: RULER_BG, text: RULER_TEXT, tick: RULER_TICK } = rulerColors();
   ctx.fillStyle = RULER_BG;
   ctx.fillRect(0, 0, RULER_SIZE, height);
 

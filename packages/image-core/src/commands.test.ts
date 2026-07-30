@@ -20,6 +20,7 @@ import {
   DEFAULT_POSTERIZE,
   DEFAULT_THRESHOLD,
   type GroupLayer,
+  type MediaAsset,
   type ShapeLayer,
   type TextLayer,
 } from './project';
@@ -27,8 +28,11 @@ import { DEFAULT_LAYER_MASK } from './mask';
 import { createProjectDocument } from './operations';
 import {
   AddArtboardCommand,
+  AddAssetCommand,
   AddLayerCommand,
   ApplyAdjustmentCommand,
+  CompositeCommand,
+  RemoveAssetCommand,
   ApplyMaskCommand,
   DuplicateLayerCommand,
   GroupLayersCommand,
@@ -743,5 +747,138 @@ describe('PasteLayersCommand', () => {
     const restored = roundTrip(project, cmd);
     expect(restored.layers['p-1']).toBeUndefined();
     expect(restored.artboards[0].layerIds).not.toContain('p-1');
+  });
+});
+
+// ── AddAssetCommand / RemoveAssetCommand ──────────────────────────────────────
+
+function makeAsset(id: string, name = 'Photo'): MediaAsset {
+  return {
+    id,
+    name,
+    type: 'image',
+    mimeType: 'image/png',
+    size: 1234,
+    width: 800,
+    height: 600,
+    thumbnailUrl: 'data:image/png;base64,AAA',
+    dataUrl: 'data:image/png;base64,AAA',
+  };
+}
+
+describe('AddAssetCommand', () => {
+  it('registers the asset', () => {
+    const cmd = new AddAssetCommand(makeAsset('a-1'));
+    const next = cmd.apply(makeProject());
+    expect(next.assets['a-1']).toBeDefined();
+    expect(next.assets['a-1'].name).toBe('Photo');
+  });
+
+  it('inverse removes it — asset registration is undoable', () => {
+    const cmd = new AddAssetCommand(makeAsset('a-1'));
+    const restored = roundTrip(makeProject(), cmd);
+    expect(restored.assets['a-1']).toBeUndefined();
+  });
+
+  it('stores a copy, so later mutation of the source object cannot leak in', () => {
+    const asset = makeAsset('a-1');
+    const cmd = new AddAssetCommand(asset);
+    asset.name = 'MUTATED';
+    const next = cmd.apply(makeProject());
+    expect(next.assets['a-1'].name).toBe('Photo');
+  });
+});
+
+describe('RemoveAssetCommand', () => {
+  it('drops the asset and its inverse restores the full bytes', () => {
+    const withAsset = new AddAssetCommand(makeAsset('a-1')).apply(makeProject());
+    const cmd = new RemoveAssetCommand(withAsset.assets['a-1']);
+    const removed = cmd.apply(withAsset);
+    expect(removed.assets['a-1']).toBeUndefined();
+    const restored = cmd.invert().apply(removed);
+    expect(restored.assets['a-1'].dataUrl).toBe('data:image/png;base64,AAA');
+  });
+});
+
+// ── CompositeCommand ──────────────────────────────────────────────────────────
+
+describe('CompositeCommand', () => {
+  it('applies children in order', () => {
+    const cmd = new CompositeCommand([
+      new SetProjectNameCommand('First', 'Test'),
+      new SetProjectNameCommand('Second', 'First'),
+    ], 'Rename twice');
+    const next = cmd.apply(makeProject());
+    expect(next.name).toBe('Second');
+  });
+
+  it('is ONE undo step for a multi-part action (place an image)', () => {
+    // The canonical composite: register the asset AND add the layer that uses
+    // it. Undo must remove both — an orphan asset was the old bug.
+    const asset = makeAsset('a-1');
+    const layer = makeTextLayer('l-1');
+    const cmd = new CompositeCommand([
+      new AddAssetCommand(asset),
+      new AddLayerCommand(AB_ID, layer, 0),
+    ], 'Place image');
+
+    const project = makeProject();
+    const after = cmd.apply(project);
+    expect(after.assets['a-1']).toBeDefined();
+    expect(after.layers['l-1']).toBeDefined();
+
+    const restored = cmd.invert().apply(after);
+    expect(restored.assets['a-1']).toBeUndefined();
+    expect(restored.layers['l-1']).toBeUndefined();
+    expect(restored.artboards[0].layerIds).not.toContain('l-1');
+  });
+
+  it('inverts children in REVERSE order', () => {
+    const order: string[] = [];
+    const probe = (tag: string) => ({
+      type: 'Probe',
+      description: tag,
+      apply: (p: typeof project) => { order.push(`apply:${tag}`); return p; },
+      invert: () => ({
+        type: 'Probe',
+        description: `inv:${tag}`,
+        apply: (p: typeof project) => { order.push(`invert:${tag}`); return p; },
+        invert: () => probe(tag),
+      }),
+    });
+    const project = makeProject();
+    const cmd = new CompositeCommand([probe('a'), probe('b'), probe('c')], 'Probe');
+    cmd.apply(project);
+    cmd.invert().apply(project);
+    expect(order).toEqual([
+      'apply:a', 'apply:b', 'apply:c',
+      'invert:c', 'invert:b', 'invert:a',
+    ]);
+  });
+
+  it('never coalesces — a labelled action stays its own undo step', () => {
+    const cmd = new CompositeCommand([new SetProjectNameCommand('X', 'Test')], 'Action');
+    expect(cmd.merge()).toBeNull();
+  });
+
+  it('round-trips to the original project state', () => {
+    const project = makeProject();
+    const cmd = new CompositeCommand([
+      new AddAssetCommand(makeAsset('a-1')),
+      new AddLayerCommand(AB_ID, makeTextLayer('l-1'), 0),
+      new AddLayerCommand(AB_ID, makeShapeLayer('l-2'), 1),
+    ], 'Build poster');
+    const restored = roundTrip(project, cmd);
+    expect(restored.layers).toEqual(project.layers);
+    expect(restored.assets).toEqual(project.assets);
+    expect(restored.artboards[0].layerIds).toEqual(project.artboards[0].layerIds);
+  });
+
+  it('reports how many primitives it folded', () => {
+    const cmd = new CompositeCommand([
+      new SetProjectNameCommand('a', 'Test'),
+      new SetProjectNameCommand('b', 'a'),
+    ], 'Two');
+    expect(cmd.size).toBe(2);
   });
 });

@@ -40,6 +40,7 @@ import {
 } from 'lucide-react';
 import { useUIStore, Tool } from '../../../stores/ui-store';
 import { useProjectStore } from '../../../stores/project-store';
+import { onTopLinkClick } from '../../../services/navigate-top';
 import { ZoomControl } from './ZoomControl';
 
 interface ToolItem {
@@ -274,9 +275,12 @@ export function Toolbar() {
       {/* Back to the Voidspace Studio projects hub, landing on the Images tab —
           same destination as the welcome screen's "My Projects" link. A real
           <a> (not a view switch) so middle-click / open-in-new-tab work; the
-          current project is safe because useAutoSave persists it to IndexedDB. */}
+          current project is safe because useAutoSave persists it to IndexedDB.
+          onTopLinkClick escapes the agent-host iframe — without it this would
+          render the projects hub INSIDE the editor pane, beside the chat. */}
       <a
         href="/studio/projects?tab=images"
+        onClick={onTopLinkClick('/studio/projects?tab=images')}
         className="p-1.5 rounded-lg hover:bg-accent transition-colors"
         title="My Projects"
       >
