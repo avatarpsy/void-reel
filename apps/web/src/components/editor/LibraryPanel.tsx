@@ -413,6 +413,21 @@ export const LibraryPanel: React.FC = () => {
   const [query, setQuery] = useState("");
   const [debounced, setDebounced] = useState("");
 
+  /**
+   * SEMANTIC SEARCH. Deliberately NOT a toggle the user has to find and flip.
+   *
+   * Typing in one box either searches by meaning or it does not, and asking the
+   * user to know which mode they want means explaining embeddings in a toolbar.
+   * So: if the library has been embedded, a text query goes through the semantic
+   * path (which still fuses in keyword matching server-side); otherwise it falls
+   * back to keywords alone. `semanticNote` carries the server's reason whenever
+   * the semantic lane could not be used, so a degraded search says so instead of
+   * looking like a bad result set.
+   */
+  const [semanticReady, setSemanticReady] = useState(false);
+  const [semanticActive, setSemanticActive] = useState(false);
+  const [semanticNote, setSemanticNote] = useState<string | null>(null);
+
   /** Quick filter — favourites / most-used / newest. Not persisted: it is a
    *  momentary "show me my good ones", not a standing preference. */
   const [quick, setQuick] = useState<QuickFilter>("none");
@@ -501,6 +516,27 @@ export const LibraryPanel: React.FC = () => {
     return () => clearTimeout(t);
   }, [query]);
 
+  // Ask ONCE whether the library is embedded. Cheap, and it decides which search
+  // transport to use — so it must resolve before the user's first query, not as a
+  // reaction to one. A failure leaves semanticReady false, which degrades to
+  // keyword search rather than breaking the panel.
+  useEffect(() => {
+    if (!LIBRARY_SCOPES.includes(scope) || semanticReady) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const token = await useVoidspaceStore.getState().getIdToken();
+        const r = await fetch(`${apiBase()}/api/media-library/embed-status`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        if (!r.ok) return;
+        const j = await r.json();
+        if (!cancelled) setSemanticReady(j?.ready === true);
+      } catch { /* keyword search still works */ }
+    })();
+    return () => { cancelled = true; };
+  }, [scope, semanticReady]);
+
   const load = useCallback(async (offset = 0, force = false) => {
     const seq = ++reqSeq.current;
     // Scope is part of the cache key. Without it, switching Mine↔Stock would
@@ -509,7 +545,11 @@ export const LibraryPanel: React.FC = () => {
     // Quick filter and facet selections are part of the key: without them,
     // switching to Favourites would show the unfiltered set from cache.
     const facetKey = Object.entries(facetSel).sort().map(([k, v]) => `${k}=${v}`).join(",");
-    const cacheKey = `${scope}::${type}::${debounced}::${mood}::${quick}::${facetKey}`;
+    // semanticReady is part of the key: the same query ranked by keywords and
+    // ranked by meaning are different result sets, and the status probe resolves
+    // asynchronously — without it the first keyword answer would be served back
+    // from cache forever once semantic search came online.
+    const cacheKey = `${scope}::${type}::${debounced}::${mood}::${quick}::${facetKey}::${semanticReady ? "sem" : "kw"}`;
     if (offset === 0) {
       setError(null);
       // Show the last result for this filter INSTANTLY, then revalidate. Only
@@ -549,12 +589,35 @@ export const LibraryPanel: React.FC = () => {
         else if (quick === "recent") sq.set("sort", "newest");
         for (const [k, v] of Object.entries(facetSel)) if (v) sq.set(k, v);
 
-        const sres = await fetch(`${apiBase()}/api/media-library/search?${sq.toString()}`, {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        });
+        // SEMANTIC PATH when there is something to interpret and the library is
+        // embedded. Same filters, same response shape — only the ranking differs —
+        // so everything below this branch is shared. A POST because the endpoint
+        // embeds the text server-side and the vector never touches the URL.
+        //
+        // An empty query has no meaning to embed, so it stays on the plain GET:
+        // that is the "just browse my library" case, and it must not pay for a
+        // model round trip.
+        const useSemantic = semanticReady && debounced.length > 0;
+        const sres = useSemantic
+          ? await fetch(`${apiBase()}/api/media-library/search-text`, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            body: JSON.stringify(Object.fromEntries(sq.entries())),
+          })
+          : await fetch(`${apiBase()}/api/media-library/search?${sq.toString()}`, {
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
+          });
         if (!sres.ok) throw new Error(`stock ${sres.status}`);
         const sj = await sres.json();
         if (seq !== reqSeq.current) return;
+        // Report what the ranking ACTUALLY was, from the server, not what we asked
+        // for — the semantic lane can decline (cold model, model upgrade mid-flight)
+        // and still return good keyword results, and the badge must not lie.
+        setSemanticActive(sj?.vector?.active === true);
+        setSemanticNote(useSemantic ? (sj?.vector?.note ?? null) : null);
         setLibraryAvailable(sj.available !== false);
         setLibraryRoot(typeof sj?.location?.root === "string" ? sj.location.root : "");
         setDerivedFacets(sj.derivedFacets && typeof sj.derivedFacets === "object" ? sj.derivedFacets : {});
@@ -629,7 +692,7 @@ export const LibraryPanel: React.FC = () => {
     } finally {
       if (seq === reqSeq.current) { setLoading(false); setLoadingMore(false); }
     }
-  }, [scope, type, debounced, mood, quick, facetSel]);
+  }, [scope, type, debounced, mood, quick, facetSel, semanticReady]);
 
   /**
    * Star / un-star an asset.
@@ -1301,12 +1364,26 @@ export const LibraryPanel: React.FC = () => {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder={
-              scope === "myfiles" ? "Search sfx, music, footage, stills…"
+              scope === "myfiles"
+                // Once meaning-based search is live the box accepts a DESCRIPTION,
+                // not a filename — and since most of this library is opaquely
+                // named, the placeholder is the only place the user learns that.
+                ? (semanticReady ? "Describe it — \"rain on a window\", \"deep whoosh\"…" : "Search sfx, music, footage, stills…")
                 : scope === "device" ? "Search media in this browser…"
                   : "Search your generations…"
             }
-            className="w-full pl-9 pr-3 text-xs bg-background-tertiary border border-border rounded-md text-text-primary h-9 focus:outline-none focus:border-primary"
+            className={`w-full pl-9 text-xs bg-background-tertiary border border-border rounded-md text-text-primary h-9 focus:outline-none focus:border-primary ${
+              semanticActive && debounced ? "pr-20" : "pr-3"
+            }`}
           />
+          {semanticActive && debounced ? (
+            <span
+              title="Ranked by meaning, not just filename — exact name and tag matches are still folded in."
+              className="absolute right-2 top-1/2 -translate-y-1/2 px-1.5 py-0.5 rounded text-[9px] font-medium uppercase tracking-wide bg-primary/15 text-primary pointer-events-none"
+            >
+              Meaning
+            </span>
+          ) : null}
         </div>
         <button
           type="button"
@@ -1352,6 +1429,13 @@ export const LibraryPanel: React.FC = () => {
           <RefreshCw size={13} className={loading ? "animate-spin" : ""} />
         </button>
       </div>
+
+      {/* Why the results may be weaker than expected. Only shown when the semantic
+          lane was asked for and declined — a silent fallback to keyword ranking
+          looks like the search is simply bad at its job. */}
+      {semanticNote && debounced ? (
+        <div className="px-5 mb-2 text-[10px] leading-snug text-text-muted">{semanticNote}</div>
+      ) : null}
 
       {/* Type filter pills */}
       <div className="px-5 mb-2 flex flex-wrap gap-1.5">
