@@ -1,5 +1,6 @@
 import { useEffect } from "react";
-import { X, Music, Pencil } from "lucide-react";
+import { X, Music, Pencil, Film, Loader2 } from "lucide-react";
+import { usePlayableVideo } from "../../services/video-playback";
 
 export type PreviewKind = "image" | "video" | "audio";
 
@@ -12,6 +13,11 @@ interface MediaPreviewOverlayProps {
   editUrl?: string;
   /** Cover art for audio (songs/BGM) — shown instead of the music icon. */
   coverUrl?: string;
+  /** Transcoded H.264 fallback, already tokenised like `url`. Some library
+   *  masters (ProRes/DNxHD .mov) decode fine for the server's thumbnailer but
+   *  not for any browser <video> element — the poster shows, playback never
+   *  starts. Tried only if the original fails to play. */
+  proxyUrl?: string | null;
   onClose: () => void;
 }
 
@@ -20,7 +26,10 @@ interface MediaPreviewOverlayProps {
  * opens this (it does NOT add the item to the project); items only land on the
  * timeline when dragged there. Backdrop click / Close button / Escape dismiss.
  */
-export function MediaPreviewOverlay({ url, kind, name, editUrl, coverUrl, onClose }: MediaPreviewOverlayProps) {
+export function MediaPreviewOverlay({ url, kind, name, editUrl, coverUrl, proxyUrl, onClose }: MediaPreviewOverlayProps) {
+  // Only matters for `kind === "video"`, but hooks run unconditionally either way.
+  const { src: videoSrc, onError: onVideoError, transcoding, failed: videoFailed } = usePlayableVideo(url, proxyUrl);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -74,7 +83,26 @@ export function MediaPreviewOverlay({ url, kind, name, editUrl, coverUrl, onClos
           <img src={url} alt={name || ""} className="max-w-[90vw] max-h-[90vh] object-contain rounded-lg" />
         )}
         {kind === "video" && (
-          <video src={url} className="max-w-[90vw] max-h-[90vh] rounded-lg bg-black" controls autoPlay playsInline />
+          transcoding ? (
+            <div className="flex flex-col items-center gap-3 text-white/80 text-sm">
+              <Loader2 size={28} className="animate-spin" />
+              Preparing playback…
+            </div>
+          ) : videoFailed ? (
+            <div className="flex flex-col items-center gap-3 text-white/70 text-sm max-w-xs text-center">
+              <Film size={28} />
+              This video's format can't be played in the browser.
+            </div>
+          ) : (
+            <video
+              src={videoSrc}
+              onError={onVideoError}
+              className="max-w-[90vw] max-h-[90vh] rounded-lg bg-black"
+              controls
+              autoPlay
+              playsInline
+            />
+          )
         )}
         {kind === "audio" && (
           <div className="flex flex-col items-center gap-6 px-14 py-12 rounded-2xl bg-gradient-to-br from-primary/15 to-primary/5 border border-white/10">

@@ -1,17 +1,17 @@
 /**
- * WHERE the user's Voidspace folder and media library are on disk.
+ * Open — or failing that, REPORT — the user's Voidspace folder and media library.
  *
- * This used to try to OPEN them in the OS file manager. It no longer does, and
- * that is deliberate: nothing in the web path can do it reliably. A browser tab
- * has no access to the desktop, and the website server is frequently a
- * container whose filesystem is not the user's machine at all. The only
- * component that could was the Voidspace DESKTOP app, dispatched over the
- * device channel — but most people using the web editor do not have it running,
- * so the action failed far more often than it succeeded.
+ * Opening a file-manager window needs a process on the user's own desktop. When
+ * Voidspace runs on their machine (the normal local install) the SERVER is that
+ * process, and `explorer` / `open` / `xdg-open` puts a real window on screen —
+ * Windows, macOS and Linux alike. The server decides this from whether the
+ * request arrived over loopback, which is the honest test.
  *
- * A button that usually does nothing is worse than no button. Reporting the
- * path works on every platform, for every user, with no extra software, and is
- * the thing they actually needed in order to go there themselves.
+ * When it can't — hosted deployment, or a container with no desktop — there is
+ * no way to open anything, so we hand over the PATH instead and say why. The
+ * one outcome that is never acceptable is the button appearing to do nothing,
+ * which is exactly how the previous desktop-app-only version behaved for the
+ * majority of users.
  */
 import { useVoidspaceStore } from "../stores/voidspace-store";
 
@@ -27,46 +27,58 @@ function apiBase(): string {
   return "";
 }
 
-export interface FolderPathResult {
+export interface RevealResult {
+  /** True when a file-manager window actually opened on the user's screen. */
+  opened: boolean;
   /** Absolute path on the machine running the server, when it is known. */
   path?: string;
+  /** Why it couldn't open — 'container' | 'remote' | 'missing' | 'failed'. */
+  reason?: string;
   error?: string;
 }
 
 /**
- * The user's Voidspace folder (renders, recordings, per-project media).
+ * The user's Voidspace folder — AI-generated media, recordings, renders.
  *
  * @param subPath Optional folder INSIDE it (e.g. a project id).
  */
-export async function getVoidspaceFolderPath(subPath?: string): Promise<FolderPathResult> {
-  return fetchPath(subPath ? { subPath } : {});
+export async function revealVoidspaceFolder(subPath?: string): Promise<RevealResult> {
+  return reveal(subPath ? { subPath } : {});
 }
 
 /**
  * The shared MEDIA LIBRARY. It lives outside the Voidspace folder — usually on
- * a bigger drive — so it has its own lookup rather than a subPath.
+ * a bigger drive — so it has its own target rather than a subPath.
  */
-export async function getMediaLibraryPath(): Promise<FolderPathResult> {
-  return fetchPath({ target: "library" });
+export async function revealMediaLibrary(): Promise<RevealResult> {
+  return reveal({ target: "library" });
 }
 
-async function fetchPath(body: Record<string, string>): Promise<FolderPathResult> {
+async function reveal(body: Record<string, string>): Promise<RevealResult> {
   const vs = useVoidspaceStore.getState();
   const token = await vs.getIdToken?.();
-  if (!token) return { error: "Not signed in." };
+  if (!token) return { opened: false, error: "Not signed in." };
 
   try {
-    const res = await fetch(`${apiBase()}/api/studio/folder-path`, {
+    const res = await fetch(`${apiBase()}/api/studio/open-folder`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
     const json = await res.json().catch(() => ({} as any));
     if (!res.ok) {
-      return { error: json?.statusMessage || json?.error || `Couldn't look up the folder (HTTP ${res.status}).` };
+      return {
+        opened: false,
+        error: json?.statusMessage || json?.error || `Couldn't reach the folder (HTTP ${res.status}).`,
+      };
     }
-    return { path: json?.path || undefined, error: json?.error };
+    return {
+      opened: json?.opened === true,
+      path: json?.path || undefined,
+      reason: json?.reason,
+      error: json?.error,
+    };
   } catch (e: any) {
-    return { error: e?.message ?? String(e) };
+    return { opened: false, error: e?.message ?? String(e) };
   }
 }

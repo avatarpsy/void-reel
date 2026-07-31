@@ -1,19 +1,24 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Search, Loader2, Plus, Check, Film, Music2, Image as ImageIcon, AudioLines, Mic, Pencil, HardDrive, Cloud, Lock, Upload, RefreshCw, ChevronDown, ChevronRight, Download, Settings2, FolderOpen, X } from "lucide-react";
+import { Search, Loader2, Plus, Check, Film, Music2, Image as ImageIcon, AudioLines, Mic, Pencil, HardDrive, Cloud, Star, Filter, Upload, RefreshCw, LayoutGrid, Grid2x2, List, ChevronDown, ChevronRight, Download, Settings2, X } from "lucide-react";
 import { useVoidspaceStore } from "../../stores/voidspace-store";
 import { useProjectStore } from "../../stores/project-store";
-import { toast } from "../../stores/notification-store";
 import { saveMediaBlob, loadMediaBlob } from "../../services/media-storage";
 import { checkForRecovery, recoverProject } from "../../services/auto-save";
 import { MediaPreviewOverlay, type PreviewKind } from "./MediaPreviewOverlay";
+import { usePlayableVideo } from "../../services/video-playback";
 
 /**
- * Library tab — the user's CROSS-PROJECT asset library. Three sources:
+ * Library tab — the user's CROSS-PROJECT asset library. Two tabs (below),
+ * five underlying sources:
  *   1. GET /api/studio/library — the user's own server-side store (disk
  *      partition manifests + Firestore generated media: agent chat, app,
- *      automation, finalized songs).
- *   2. "On this device" — media saved inside THIS browser's other projects
+ *      automation, finalized songs). Tab: My files.
+ *   2. GET /api/media-library/search — the media library on disk (sfx, music,
+ *      footage, stills, HDRI, LUTs, fonts, templates), shown whole and unsplit
+ *      as "My files". Scope: myfiles.
+ *   3. "On this device" — media saved inside THIS browser's other projects
  *      (IndexedDB), surfaced so locally-imported assets are never invisible.
+ *      Tab: My files.
  *
  * Display rules:
  *   • Image tiles load a COMPRESSED thumbnail (server `w=` resize) through
@@ -36,49 +41,45 @@ import { MediaPreviewOverlay, type PreviewKind } from "./MediaPreviewOverlay";
 type LibType = "all" | "video" | "image" | "music" | "sfx" | "voice";
 
 /**
- * WHERE the assets come from. A SCOPE, deliberately not a fourth tab.
+ * WHERE the assets come from. A SCOPE, deliberately not a tab.
  *
  * A "Cloud" tab used to exist here and was removed as redundant once
  * /api/studio/library began unioning the automation scene tree. Re-adding a tab
  * per source would repeat that mistake: the user does not think "which library?",
- * they think "my stuff" vs "the stock stuff". Same activity, different source —
- * which is a filter, not a tab.
+ * they think "my stuff". Same activity, different source — a filter, not a tab.
  *
- *   mine   — the user's own assets: generated media, renders, uploads.
- *            /api/studio/library (unions cloud + local-disk manifests).
- *   stock  — the shared reusable library: sfx, vfx, music, footage, stills, 3D,
- *            LUTs, fonts. /api/media-library/search. Local-first: it reads a
- *            folder on the machine RUNNING THE SERVER, so on a local install it
- *            is the user's own on-disk collection. Empty (available:false) when
- *            no library is present, and the panel says so rather than erroring.
- *   device — media inside other projects saved in THIS browser (IndexedDB).
- *            Promoted from a buried section to a first-class scope so locally
- *            imported assets are never invisible.
+ *   generated — the user's own generated media, renders, uploads.
+ *               /api/studio/library (unions cloud + local-disk manifests).
+ *   myfiles   — the on-disk media library: sfx, music, footage, stills, HDRI,
+ *               LUTs, fonts, templates. EVERYTHING in it, unsplit.
+ *   device    — media inside other projects saved in THIS browser (IndexedDB).
+ *
+ * WHY THERE IS NO "LICENSED" SCOPE (removed 2026-07-30)
+ * A `Licensed` pill briefly split the library by `license.type === 'licensed-stock'`.
+ * It was removed because that field was WRONG for most of the catalogue — VFX-Triune,
+ * much of the sfx and bgm, and others were marked licensed-stock without a licence
+ * actually having been verified. A UI that labels an asset "Licensed to you" on bad
+ * data is worse than no label: it invites the user to rely on rights they may not
+ * hold. The honest state is one undivided "My files", with provenance recorded in
+ * the catalogue (`license.type: 'unknown'` + a confirm-before-selling note) rather
+ * than asserted in the interface.
+ *
+ * WHY THERE IS NO "SHARED ASSETS" TAB (removed 2026-07-30)
+ * It would only ever list OTHER accounts' public uploads, and nothing is public
+ * while the library is local-only — so it shipped permanently empty. Removed until
+ * cloud sync exists and there is something real to show. The server-side
+ * `scope=shared` filter is retained (correct and tested) for when it returns.
  */
-type LibScope = "generated" | "myfiles" | "licensed" | "device";
+type LibScope = "generated" | "myfiles" | "device";
 
-/**
- * WHERE the assets come from. A scope, not a tab (a "Cloud" tab existed here and
- * was removed as redundant; per-source tabs repeat that mistake).
- *
- * The names have to state the CONTENTS, because the previous set —
- * "Mine / Licensed / This device" — told the user nothing and, worse, "Licensed"
- * was serving the WHOLE local library: the user's personal photos appeared under
- * a licence heading with a padlock on them.
- *
- * Ownership cannot separate those two: the CLI ingest records everything it writes
- * as `owner: operator`, so the split is by PROVENANCE (license.type), filtered
- * server-side via ?provenance=.
- */
 const SCOPE_PILLS: { id: LibScope; label: string; hint: string }[] = [
   { id: "generated", label: "Generated", hint: "AI generations and renders from your projects" },
-  { id: "myfiles",   label: "My files",  hint: "Your own media imported into the library" },
-  { id: "licensed",  label: "Licensed",  hint: "Purchased packs — private to you, kept on this machine" },
+  { id: "myfiles",   label: "My files",  hint: "Your media library on this machine — sfx, music, footage, stills, HDRI, fonts" },
   { id: "device",    label: "This browser", hint: "Media in other projects saved in this browser" },
 ];
 
 /** Which scopes read the shared media library (vs the generations store / IndexedDB). */
-const LIBRARY_SCOPES: LibScope[] = ["myfiles", "licensed"];
+const LIBRARY_SCOPES: LibScope[] = ["myfiles"];
 
 interface LibItem {
   id: string;
@@ -87,6 +88,10 @@ interface LibItem {
   label: string;
   url: string;            // /api/studio/local-asset?... OR absolute cloud URL
   thumbnailUrl?: string;  // compressed (`w=`) variant for grids
+  /** Transcoded H.264 fallback for videos whose master codec (ProRes/DNxHD
+   *  .mov, common in stock packs) no browser can decode natively. Only set
+   *  for shared-library items — /api/studio/library has no such field. */
+  proxyUrl?: string | null;
   bytes: number;
   createdAt: string;
   projectId: string;
@@ -97,7 +102,66 @@ interface LibItem {
   coverUrl?: string;
   mood?: string;
   sceneNumber?: number;
+  // ── Personal signals (media-library items only). Private to this user. ──
+  favorite?: boolean;
+  personalRating?: number;
+  myTags?: string[];
+  useCount?: number;
+  // ── Derived facets, computed server-side. ──
+  orientation?: string | null;
+  durationBand?: string | null;
+  resolutionTier?: string | null;
+  /** Best available date, and whether it is a real capture time. An approximate
+   *  date must never be rendered as though it were exact. */
+  dateForSort?: string | null;
+  dateIsApprox?: boolean;
 }
+
+/** Quick filters — the answer to "never open on everything". */
+type QuickFilter = "none" | "favourites" | "used" | "recent";
+
+const QUICK_FILTERS: { id: QuickFilter; label: string; hint: string }[] = [
+  { id: "favourites", label: "★ Favourites", hint: "Assets you starred" },
+  { id: "used",       label: "Most used",    hint: "What you keep coming back to — counted automatically" },
+  { id: "recent",     label: "Newest",       hint: "Most recent first, by capture date where known" },
+];
+
+/**
+ * Facet groups the server reports counts for.
+ *
+ * `types` is which type filters the group is MEANINGFUL for. Without it, "All"
+ * showed audio duration bands next to image resolutions — 16 chips over three
+ * rows, most irrelevant to whatever the user was actually looking for, pushing
+ * the grid off screen. A resolution band means nothing for a sound effect.
+ */
+const DERIVED_FACET_GROUPS: {
+  key: string;
+  title: string;
+  labels: Record<string, string>;
+  /** Order to render values in — NOT count order, which reshuffles as you filter
+   *  and makes the control feel unstable. Duration and resolution are ordinal. */
+  order?: string[];
+  types: LibType[];
+}[] = [
+  {
+    key: "orientation", title: "Shape",
+    labels: { landscape: "Landscape", portrait: "Portrait", square: "Square" },
+    order: ["landscape", "portrait", "square"],
+    types: ["all", "video", "image"],
+  },
+  {
+    key: "durationBand", title: "Length",
+    labels: { stinger: "Under 1s", oneshot: "1-5s", short: "5-30s", medium: "30s-2m", long: "Over 2m" },
+    order: ["stinger", "oneshot", "short", "medium", "long"],
+    types: ["all", "video", "music", "sfx", "voice"],
+  },
+  {
+    key: "resolutionTier", title: "Resolution",
+    labels: { "8K": "8K", "4K": "4K", "1440p": "1440p", "1080p": "1080p", "720p": "720p", SD: "SD" },
+    order: ["8K", "4K", "1440p", "1080p", "720p", "SD"],
+    types: ["all", "video", "image"],
+  },
+];
 
 /** A media item found in another project saved on THIS device (IndexedDB). */
 interface DeviceItem {
@@ -220,6 +284,23 @@ function bucketOf(iso: string): string {
 const BUCKET_ORDER = ["Today", "Yesterday", "This week", "This month", "Older"];
 
 /**
+ * The tile's muted background-preview <video> (used only when no server
+ * poster could be produced). A proper component, not inline JSX in a `.map`
+ * callback, because it needs its own hook — `usePlayableVideo` falls back to
+ * a transcoded proxy when the original master (ProRes/DNxHD .mov, common in
+ * stock packs) plays fine for the server's thumbnailer but not for any
+ * browser <video> element.
+ */
+function TileVideo({ src, proxySrc, onGiveUp }: { src: string; proxySrc?: string | null; onGiveUp: () => void }) {
+  const { src: playable, onError, failed } = usePlayableVideo(src, proxySrc ?? null);
+  useEffect(() => { if (failed) onGiveUp(); }, [failed, onGiveUp]);
+  if (failed) return null;
+  return (
+    <video src={playable} muted preload="metadata" className="w-full h-full object-cover" onError={onError} />
+  );
+}
+
+/**
  * Fetch a (thumbnail) URL with a FRESH auth token and keep a Cache API copy.
  * Order: network (updates cache) → cache (offline / expired upstream) → null.
  * The cache is what stops images "getting lost": once a thumb has rendered
@@ -282,11 +363,15 @@ export const LibraryPanel: React.FC = () => {
   const [scope, setScopeRaw] = useState<LibScope>(() => {
     try {
       const s = localStorage.getItem("voidspace.library.scope");
-      // Migrate the old names so a returning user is not dropped on a scope that
-      // no longer exists (which would render an empty panel).
-      const migrated = s === "mine" ? "generated" : s === "stock" ? "licensed" : s;
-      if (migrated === "generated" || migrated === "myfiles"
-          || migrated === "licensed" || migrated === "device") return migrated;
+      // Migrate retired names so a returning user is not dropped on a scope that
+      // no longer exists (which would render a permanently empty panel).
+      //   mine/stock — the original two-scope naming
+      //   licensed   — the removed provenance split, now folded into myfiles
+      //   shared     — the removed Shared-assets tab
+      const migrated = s === "mine" ? "generated"
+        : (s === "stock" || s === "licensed" || s === "shared") ? "myfiles"
+        : s;
+      if (migrated === "generated" || migrated === "myfiles" || migrated === "device") return migrated;
     } catch { /* fresh default */ }
     return "generated";
   });
@@ -305,47 +390,46 @@ export const LibraryPanel: React.FC = () => {
   const [libraryAvailable, setLibraryAvailable] = useState<boolean | null>(null);
   /** Where the library resolved to on the serving machine — /search always
    *  reports it, so we can show it and offer to open it. */
+  // Kept for the empty state ("Looked in: …"). There is deliberately no
+  // folder button here: the Assets header already has one, and two controls
+  // doing the same thing in one panel is just clutter.
   const [libraryRoot, setLibraryRoot] = useState<string>("");
-  const [openingFolder, setOpeningFolder] = useState(false);
 
-  /**
-   * Show WHERE the library lives, and copy it.
-   *
-   * This deliberately does NOT try to open a file manager. Nothing in the web
-   * path can do that reliably: a browser tab has no access to the desktop, and
-   * the server is frequently a container whose filesystem isn't the user's. The
-   * only component that could was the desktop app, which most web users do not
-   * have running — so the action failed far more often than it worked, and a
-   * button that usually does nothing is worse than no button.
-   *
-   * Telling the user the path always works, on every platform, and is what they
-   * actually needed in order to go there themselves.
-   */
-  async function showLibraryLocation() {
-    if (openingFolder) return;
-    setOpeningFolder(true);
+  /** Same three modes as the Media tab, so the two panels behave identically.
+   *  Persisted separately: Explorer-style, a shelf remembers its own view. */
+  const [viewMode, setViewModeRaw] = useState<"large" | "small" | "list">(() => {
     try {
-      if (!libraryRoot) {
-        toast.info(
-          "No media library on this machine",
-          "Set its location in the desktop app under Settings → Media Library Folder, "
-            + "or point ~/Voidspace/library.json at the folder.",
-        );
-        return;
-      }
-      let copied = false;
-      try { await navigator.clipboard.writeText(libraryRoot); copied = true; } catch { /* blocked */ }
-      toast.info(
-        copied ? "Library path copied" : "Your media library",
-        libraryRoot,
-      );
-    } finally {
-      setOpeningFolder(false);
-    }
-  }
+      const v = localStorage.getItem("voidspace.library.viewMode");
+      if (v === "large" || v === "small" || v === "list") return v;
+    } catch { /* default */ }
+    return "large";
+  });
+  const setViewMode = useCallback((v: "large" | "small" | "list") => {
+    setViewModeRaw(v);
+    try { localStorage.setItem("voidspace.library.viewMode", v); } catch { /* ignore */ }
+  }, []);
+
   const [type, setType] = useState<LibType>("all");
   const [query, setQuery] = useState("");
   const [debounced, setDebounced] = useState("");
+
+  /** Quick filter — favourites / most-used / newest. Not persisted: it is a
+   *  momentary "show me my good ones", not a standing preference. */
+  const [quick, setQuick] = useState<QuickFilter>("none");
+  /** Active derived-facet selections, e.g. { orientation: 'portrait' }. */
+  const [facetSel, setFacetSel] = useState<Record<string, string>>({});
+  /** Counts the server reports for the CURRENT result set. A group arrives empty
+   *  when it cannot narrow, and we then render nothing for it. */
+  const [derivedFacets, setDerivedFacets] = useState<Record<string, Record<string, number>>>({});
+  const [personalCounts, setPersonalCounts] = useState<{ favorite: number; rated: number; used: number }>(
+    { favorite: 0, rated: 0, used: 0 },
+  );
+  /** Optimistic favourite overrides, so a star fills the instant it is clicked
+   *  rather than after a refetch. Keyed by asset id. */
+  const [favOverride, setFavOverride] = useState<Record<string, boolean>>({});
+  /** Is the grouped filter panel expanded? Collapsed by default — the point of
+   *  the panel is that the toolbar stays short until the user asks for more. */
+  const [filtersOpen, setFiltersOpen] = useState(false);
   // Secondary mood filter (music) — the server returns the distinct moods
   // available for the current type/search so we can render them as chips.
   const [mood, setMood] = useState("");
@@ -362,7 +446,7 @@ export const LibraryPanel: React.FC = () => {
   const [rev, setRev] = useState(0);
   // Clicking a card previews it fullscreen; drag adds to the timeline, the +
   // affordance imports it into Media. (Click no longer auto-imports.)
-  const [previewItem, setPreviewItem] = useState<{ url: string; editUrl?: string; kind: PreviewKind; name: string; coverUrl?: string } | null>(null);
+  const [previewItem, setPreviewItem] = useState<{ url: string; editUrl?: string; kind: PreviewKind; name: string; coverUrl?: string; proxyUrl?: string | null } | null>(null);
   // Item whose metadata is being edited (rename / prompt / mood).
   const [editItem, setEditItem] = useState<LibItem | null>(null);
   // "On this device" — media inside other locally-saved projects.
@@ -422,7 +506,10 @@ export const LibraryPanel: React.FC = () => {
     // Scope is part of the cache key. Without it, switching Mine↔Stock would
     // show the other scope's tiles from cache — the exact "wrong stuff flashes
     // up" glitch the stale-while-revalidate cache exists to avoid.
-    const cacheKey = `${scope}::${type}::${debounced}::${mood}`;
+    // Quick filter and facet selections are part of the key: without them,
+    // switching to Favourites would show the unfiltered set from cache.
+    const facetKey = Object.entries(facetSel).sort().map(([k, v]) => `${k}=${v}`).join(",");
+    const cacheKey = `${scope}::${type}::${debounced}::${mood}::${quick}::${facetKey}`;
     if (offset === 0) {
       setError(null);
       // Show the last result for this filter INSTANTLY, then revalidate. Only
@@ -438,19 +525,30 @@ export const LibraryPanel: React.FC = () => {
       const token = await useVoidspaceStore.getState().getIdToken();
       if (token) setMediaToken(token);
 
-      // ── STOCK: the shared reusable library, a different API with a different
+      // ── MY FILES: the on-disk media library, a different API with a different
       // item shape. Mapped onto LibItem here so every downstream renderer,
       // drag handler and importer keeps working untouched.
+      //
+      // Deliberately sends NO `provenance` filter: the library is shown whole.
+      // It used to be split licensed-vs-own, which was dropped once the
+      // `licensed-stock` flag turned out to be wrong across most of the
+      // catalogue (see the LibScope comment).
       if (LIBRARY_SCOPES.includes(scope)) {
         const sq = new URLSearchParams({
           kind: LIB_KIND_FOR_TYPE[type] ?? "all",
-          // The split that stops personal photos appearing under "Licensed".
-          provenance: scope === "licensed" ? "licensed" : "own",
           q: debounced,
           limit: String(PAGE_SIZE),
           offset: String(offset),
-          facets: "0",              // panel has no facet UI; skip the computation
+          facets: "0",              // tag-facet UI not built yet; skip that work
         });
+        // Quick filters map onto server-side filters/sorts, never client-side —
+        // filtering a page after the fact silently drops results and yields
+        // short pages.
+        if (quick === "favourites") sq.set("favourites", "1");
+        else if (quick === "used") { sq.set("used", "1"); sq.set("sort", "used"); }
+        else if (quick === "recent") sq.set("sort", "newest");
+        for (const [k, v] of Object.entries(facetSel)) if (v) sq.set(k, v);
+
         const sres = await fetch(`${apiBase()}/api/media-library/search?${sq.toString()}`, {
           headers: token ? { Authorization: `Bearer ${token}` } : {},
         });
@@ -459,6 +557,8 @@ export const LibraryPanel: React.FC = () => {
         if (seq !== reqSeq.current) return;
         setLibraryAvailable(sj.available !== false);
         setLibraryRoot(typeof sj?.location?.root === "string" ? sj.location.root : "");
+        setDerivedFacets(sj.derivedFacets && typeof sj.derivedFacets === "object" ? sj.derivedFacets : {});
+        setPersonalCounts(sj.personalCounts || { favorite: 0, rated: 0, used: 0 });
         const page: LibItem[] = (Array.isArray(sj.items) ? sj.items : []).map((a: any) => ({
           id: a.id,
           type: libTypeOf(a.kind),
@@ -473,10 +573,22 @@ export const LibraryPanel: React.FC = () => {
           // a placeholder SVG. Leaving it undefined lets the existing kind-icon
           // fallback render instead, which reads as intentional rather than broken.
           thumbnailUrl: a.hasRasterPreview ? a.thumbUrl : undefined,
+          proxyUrl: a.proxyUrl ?? null,
           bytes: a.bytes ?? 0,
           createdAt: a.addedAt || "",
           projectId: "__stock__",
-          prompt: Array.isArray(a.tags) ? a.tags.slice(0, 6).join(", ") : undefined,
+          // Show the user's OWN tags first — they are the ones that mean
+          // something to them — then fill with machine tags.
+          prompt: [...(a.myTags || []), ...(Array.isArray(a.tags) ? a.tags : [])].slice(0, 6).join(", ") || undefined,
+          favorite: a.favorite === true,
+          personalRating: a.personalRating ?? 0,
+          myTags: a.myTags ?? [],
+          useCount: a.useCount ?? 0,
+          orientation: a.orientation ?? null,
+          durationBand: a.durationBand ?? null,
+          resolutionTier: a.resolutionTier ?? null,
+          dateForSort: a.dateForSort ?? null,
+          dateIsApprox: a.dateIsApprox !== false,
         }));
         const nextTotal = typeof sj.total === "number" ? sj.total : page.length;
         setItems((prev) => (offset === 0 ? page : [...prev, ...page]));
@@ -517,15 +629,47 @@ export const LibraryPanel: React.FC = () => {
     } finally {
       if (seq === reqSeq.current) { setLoading(false); setLoadingMore(false); }
     }
-  }, [scope, type, debounced, mood]);
+  }, [scope, type, debounced, mood, quick, facetSel]);
+
+  /**
+   * Star / un-star an asset.
+   *
+   * Optimistic: the star fills immediately and reverts only if the write fails.
+   * Waiting on a round trip for a one-click action is exactly the friction that
+   * stops people using favourites at all — and favourites only pay off if they
+   * are cheap enough to use without thinking.
+   *
+   * Writes to /personal, NOT /rate: the latter is a public review, gated on
+   * verified use and refusing self-rating. This is private organisation.
+   */
+  const toggleFavourite = useCallback(async (it: LibItem) => {
+    const next = !(favOverride[it.id] ?? it.favorite ?? false);
+    setFavOverride((p) => ({ ...p, [it.id]: next }));
+    try {
+      const token = await useVoidspaceStore.getState().getIdToken();
+      const res = await fetch(`${apiBase()}/api/media-library/personal`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ id: it.id, favorite: next }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      // Keep the count in step so the Favourites chip doesn't lie until refetch.
+      setPersonalCounts((c) => ({ ...c, favorite: Math.max(0, c.favorite + (next ? 1 : -1)) }));
+    } catch {
+      setFavOverride((p) => ({ ...p, [it.id]: !next }));   // revert; the write failed
+    }
+  }, [favOverride]);
 
   /**
    * Upload files into the library.
    *
    * Uploads land PRIVATE to the uploader (the server enforces this) and appear in
-   * the "Mine" scope. Deliberately switches scope on success: a file that uploads
-   * while you are looking at "Licensed" would otherwise vanish into a tab you are
-   * not on, which reads as a failed upload.
+   * the "My files" scope. Deliberately switches scope on success: a file that
+   * uploads while you are looking at "Generated" would otherwise vanish into a
+   * scope you are not on, which reads as a failed upload.
    *
    * Files are sent one at a time rather than in one request — a single failure in
    * a batch of ten should not lose the other nine, and per-file progress is the
@@ -788,7 +932,7 @@ export const LibraryPanel: React.FC = () => {
     if (LIBRARY_SCOPES.includes(scope)) {
       // An ingested catalogue has no meaningful per-item recency, so date buckets
       // would file everything under "Older". One flat grid is the honest layout.
-      const title = scope === "licensed" ? "Licensed" : "My files";
+      const title = "My files";
       return visibleItems.length ? [{ title, items: visibleItems }] : [];
     }
     const by = new Map<string, LibItem[]>();
@@ -800,6 +944,39 @@ export const LibraryPanel: React.FC = () => {
     }
     return BUCKET_ORDER.filter((b) => (by.get(b) ?? []).length > 0).map((b) => ({ title: b, items: by.get(b)! }));
   }, [scope, visibleItems]);
+
+  /**
+   * Facet groups worth offering right now. A group survives only if:
+   *   1. it is MEANINGFUL for the active type (a resolution band says nothing
+   *      about a sound effect), and
+   *   2. the server reported more than one distinct value for it — one value
+   *      cannot narrow, so the control would be decoration.
+   */
+  const availableFacetGroups = useMemo(() => {
+    return DERIVED_FACET_GROUPS
+      .filter((g) => g.types.includes(type))
+      .map((g) => ({ ...g, values: (derivedFacets[g.key] || {}) as Record<string, number> }))
+      .filter((g) => Object.keys(g.values).length > 1);
+  }, [type, derivedFacets]);
+
+  const facetCount = Object.keys(facetSel).length;
+
+  // A facet selection that is no longer offered (the user switched type) would
+  // otherwise keep filtering invisibly — the result set shrinks with no visible
+  // cause. Drop any selection whose group is gone.
+  useEffect(() => {
+    const allowed = new Set(availableFacetGroups.map((g) => g.key));
+    setFacetSel((prev) => {
+      const next = Object.fromEntries(Object.entries(prev).filter(([k]) => allowed.has(k)));
+      return Object.keys(next).length === Object.keys(prev).length ? prev : next;
+    });
+  }, [availableFacetGroups]);
+
+  /** Layout for the current view mode. `list` becomes a single column of rows;
+   *  the two grid modes only differ by tile size, so the same tile is reused. */
+  const gridStyle = viewMode === "list"
+    ? { gridTemplateColumns: "1fr" }
+    : { gridTemplateColumns: `repeat(auto-fill, minmax(0, ${viewMode === "small" ? 96 : 150}px))` };
 
   const renderServerTile = (it: LibItem) => {
     const added = importedUrls.has(it.url);
@@ -818,9 +995,10 @@ export const LibraryPanel: React.FC = () => {
     // badge would be noise on every tile there — hence `mine` only.
     const isCloud = /^https?:/i.test(it.url);
     const showStorageBadge = scope === "generated";
-    // Same slot, same styling — licensed tiles carry a lock instead of Cloud/Local.
-    // One badge vocabulary across the panel; no extra chrome.
-    const showLicenseBadge = scope === "licensed";
+    // Favourites only exist for media-library items (the /personal endpoint is
+    // keyed on a library asset id); generated + device items have no such id.
+    const canFavourite = LIBRARY_SCOPES.includes(scope);
+    const isFav = favOverride[it.id] ?? it.favorite ?? false;
     return (
       <div
         key={it.id}
@@ -843,6 +1021,7 @@ export const LibraryPanel: React.FC = () => {
           kind: (isImage ? "image" : isVideo ? "video" : "audio") as PreviewKind,
           name: it.label,
           coverUrl: it.coverUrl ? srcWithToken(it.coverUrl) : undefined,
+          proxyUrl: it.proxyUrl ? srcWithToken(it.proxyUrl) : null,
         })}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") {
@@ -853,24 +1032,17 @@ export const LibraryPanel: React.FC = () => {
               kind: (isImage ? "image" : isVideo ? "video" : "audio") as PreviewKind,
               name: it.label,
               coverUrl: it.coverUrl ? srcWithToken(it.coverUrl) : undefined,
+              proxyUrl: it.proxyUrl ? srcWithToken(it.proxyUrl) : null,
             });
           }
         }}
         title={`${it.label} — click to preview · drag onto the timeline to use${added ? " · already in this project" : ""}`}
         className={`group relative text-left rounded-lg overflow-hidden border transition-all cursor-grab active:cursor-grabbing ${
+          viewMode === "list" ? "flex items-center gap-2 p-1.5" : ""
+        } ${
           added ? "border-primary/60" : "border-border hover:border-primary/60"
         } bg-background-tertiary`}
       >
-        {showLicenseBadge && (
-          <div
-            className="absolute top-1 left-1 z-10 flex items-center gap-0.5 px-1.5 py-0.5 rounded
-                       bg-black/65 backdrop-blur-sm text-[9px] font-medium text-white/90 pointer-events-none"
-            title="Licensed to you — stays on this machine, never uploaded or shared"
-          >
-            <Lock size={9} />
-            Licensed
-          </div>
-        )}
         {showStorageBadge && (
           <div
             className="absolute top-1 left-1 z-10 flex items-center gap-0.5 px-1.5 py-0.5 rounded
@@ -883,7 +1055,29 @@ export const LibraryPanel: React.FC = () => {
             {isCloud ? "Cloud" : "Local"}
           </div>
         )}
-        <div className="aspect-video bg-background-elevated flex items-center justify-center overflow-hidden">
+        {/* Star. Always visible once set (it is information), fades in on hover
+            when unset (it is an offer). Stops propagation so starring never
+            opens the preview. */}
+        {canFavourite && (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); void toggleFavourite(it); }}
+            title={isFav ? "Starred — click to remove" : "Star this so it's easy to find again"}
+            aria-label={isFav ? "Remove star" : "Add star"}
+            aria-pressed={isFav}
+            className={`absolute top-1 right-1 z-20 w-6 h-6 rounded-full flex items-center justify-center
+                        transition-all ${
+              isFav
+                ? "bg-black/60 text-amber-400 opacity-100"
+                : "bg-black/50 text-white/70 opacity-0 group-hover:opacity-100 hover:text-amber-300"
+            }`}
+          >
+            <Star size={12} fill={isFav ? "currentColor" : "none"} />
+          </button>
+        )}
+        <div className={`bg-background-elevated flex items-center justify-center overflow-hidden ${
+          viewMode === "list" ? "w-14 h-9 shrink-0 rounded" : "aspect-video"
+        }`}>
           {isImage ? (
             <CachedThumb src={fullThumbSrc} alt={it.label} rev={rev} />
           ) : isVideo ? (
@@ -899,24 +1093,20 @@ export const LibraryPanel: React.FC = () => {
                 fallback={videoFailed ? (
                   <Film size={22} className="text-primary/60" />
                 ) : (
-                  <video
+                  <TileVideo
                     src={srcWithToken(it.url)}
-                    muted
-                    preload="metadata"
-                    className="w-full h-full object-cover"
-                    onError={() => setFailedVideos((prev) => new Set(prev).add(it.id))}
+                    proxySrc={it.proxyUrl ? srcWithToken(it.proxyUrl) : null}
+                    onGiveUp={() => setFailedVideos((prev) => new Set(prev).add(it.id))}
                   />
                 )}
               />
             ) : videoFailed ? (
               <Film size={22} className="text-primary/60" />
             ) : (
-              <video
+              <TileVideo
                 src={srcWithToken(it.url)}
-                muted
-                preload="metadata"
-                className="w-full h-full object-cover"
-                onError={() => setFailedVideos((prev) => new Set(prev).add(it.id))}
+                proxySrc={it.proxyUrl ? srcWithToken(it.proxyUrl) : null}
+                onGiveUp={() => setFailedVideos((prev) => new Set(prev).add(it.id))}
               />
             )
           ) : it.thumbnailUrl ? (
@@ -962,7 +1152,7 @@ export const LibraryPanel: React.FC = () => {
             <Download size={12} />
           </button>
         </div>
-        <div className="px-2 py-1.5">
+        <div className={viewMode === "list" ? "flex-1 min-w-0" : "px-2 py-1.5"}>
           <p className="text-[11px] text-text-primary truncate">{it.label}</p>
           <p className="text-[10px] text-text-muted truncate">
             {/* Separator is conditional: stock items have no source tag, and a
@@ -1010,10 +1200,14 @@ export const LibraryPanel: React.FC = () => {
         }}
         title={`${d.label} — from "${d.projectName}" on this device`}
         className={`group relative text-left rounded-lg overflow-hidden border transition-all cursor-grab active:cursor-grabbing ${
+          viewMode === "list" ? "flex items-center gap-2 p-1.5" : ""
+        } ${
           added ? "border-primary/60" : "border-border hover:border-primary/60"
         } bg-background-tertiary`}
       >
-        <div className="aspect-video bg-background-elevated flex items-center justify-center overflow-hidden">
+        <div className={`bg-background-elevated flex items-center justify-center overflow-hidden ${
+          viewMode === "list" ? "w-14 h-9 shrink-0 rounded" : "aspect-video"
+        }`}>
           {d.dataThumb ? (
             <img src={d.dataThumb} alt={d.label} loading="lazy" className="w-full h-full object-cover" />
           ) : d.objectUrl && isImage ? (
@@ -1039,7 +1233,7 @@ export const LibraryPanel: React.FC = () => {
             {addingId === d.id ? <Loader2 size={13} className="animate-spin" /> : added ? <Check size={13} /> : <Plus size={13} />}
           </button>
         </div>
-        <div className="px-2 py-1.5">
+        <div className={viewMode === "list" ? "flex-1 min-w-0" : "px-2 py-1.5"}>
           <p className="text-[11px] text-text-primary truncate">{d.label}</p>
           <p className="text-[10px] text-text-muted truncate">{d.type} · {d.projectName}</p>
         </div>
@@ -1068,9 +1262,10 @@ export const LibraryPanel: React.FC = () => {
 
   return (
     <div className="flex flex-col h-full min-h-0">
-      {/* Scope — WHERE assets come from. Above the type pills because it is the
-          coarser choice: pick the shelf, then narrow by kind. Full-width
-          segmented control so it reads as "one of these three", not as tags. */}
+      {/* Scope — WHERE the assets come from. A single segmented control: one
+          coarse choice, then narrow by kind below. Everything here is the user's
+          own; there is no public/shared destination while the library is
+          local-only, so there is no second level to pick. */}
       <div className="px-5 mb-2">
         <div
           role="tablist"
@@ -1106,10 +1301,9 @@ export const LibraryPanel: React.FC = () => {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder={
-              scope === "licensed" ? "Search licensed sfx, music, footage…"
-                : scope === "myfiles" ? "Search your files…"
-                  : scope === "device" ? "Search media in this browser…"
-                    : "Search your generations…"
+              scope === "myfiles" ? "Search sfx, music, footage, stills…"
+                : scope === "device" ? "Search media in this browser…"
+                  : "Search your generations…"
             }
             className="w-full pl-9 pr-3 text-xs bg-background-tertiary border border-border rounded-md text-text-primary h-9 focus:outline-none focus:border-primary"
           />
@@ -1126,18 +1320,29 @@ export const LibraryPanel: React.FC = () => {
             ? <><Loader2 size={13} className="animate-spin" />{uploading}</>
             : <><Upload size={13} />Add</>}
         </button>
-        {/* Where the library lives. Shows + copies the path rather than trying
-            to open a file manager — see showLibraryLocation for why opening
-            cannot be made reliable from the web. */}
-        <button
-          type="button"
-          disabled={openingFolder}
-          onClick={() => void showLibraryLocation()}
-          title={libraryRoot ? `Library location — click to copy\n${libraryRoot}` : "Where your media library lives"}
-          className="w-9 h-9 flex items-center justify-center rounded-md border border-border text-text-secondary hover:text-text-primary hover:border-text-muted transition-colors disabled:opacity-40"
-        >
-          <FolderOpen size={13} />
-        </button>
+        {/* Identical markup/classes to the Media tab's control — one visual
+            language for "how do I want this laid out". */}
+        <div className="flex items-center bg-background-tertiary border border-border rounded-lg p-0.5">
+          {([
+            { mode: "large" as const, icon: LayoutGrid, title: "Large icons" },
+            { mode: "small" as const, icon: Grid2x2, title: "Small icons" },
+            { mode: "list" as const, icon: List, title: "List view" },
+          ]).map(({ mode, icon: ViewIcon, title }) => (
+            <button
+              key={mode}
+              type="button"
+              onClick={() => setViewMode(mode)}
+              title={title}
+              className={`p-1.5 rounded transition-colors ${
+                viewMode === mode
+                  ? "bg-background-elevated text-text-primary"
+                  : "text-text-muted hover:text-text-secondary"
+              }`}
+            >
+              <ViewIcon size={13} />
+            </button>
+          ))}
+        </div>
         <button
           type="button"
           onClick={() => { void caches.delete(THUMB_CACHE).catch(() => {}); setRev((r) => r + 1); void load(0, true); void loadDevice(); }}
@@ -1165,6 +1370,120 @@ export const LibraryPanel: React.FC = () => {
           </button>
         ))}
       </div>
+
+      {/* QUICK FILTERS + DERIVED FACETS — the narrowing row.
+          Only rendered for the media library (the generations store and
+          IndexedDB have neither personal signals nor server-computed facets).
+
+          Each control is shown ONLY when it can actually change the result:
+          Favourites appears once something is starred, Most-used once something
+          has been used, and a facet group only when the server reports more than
+          one distinct value for it. A filter that cannot narrow is worse than no
+          filter — the user still has to read it. */}
+      {LIBRARY_SCOPES.includes(scope) && (
+        <div className="px-5 mb-2 flex flex-wrap items-center gap-1.5">
+          {QUICK_FILTERS.map(({ id, label, hint }) => {
+            // Hide a quick filter with nothing behind it.
+            if (id === "favourites" && !personalCounts.favorite && quick !== "favourites") return null;
+            if (id === "used" && !personalCounts.used && quick !== "used") return null;
+            const on = quick === id;
+            const count = id === "favourites" ? personalCounts.favorite : id === "used" ? personalCounts.used : 0;
+            return (
+              <button
+                key={id}
+                type="button"
+                title={hint}
+                onClick={() => setQuick(on ? "none" : id)}
+                className={`px-2.5 py-1 rounded-full text-[11px] font-medium border transition-colors ${
+                  on
+                    ? "bg-amber-400/15 border-amber-400/70 text-amber-300"
+                    : "bg-background-tertiary border-border text-text-secondary hover:border-text-muted"
+                }`}
+              >
+                {label}{count ? ` (${count})` : ""}
+              </button>
+            );
+          })}
+
+          {/* Everything else lives behind ONE button. Rendering every facet
+              inline cost three rows of 16 chips and pushed the grid off screen —
+              the opposite of helping. The badge carries how many are active so a
+              collapsed panel never hides state. */}
+          {availableFacetGroups.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setFiltersOpen((v) => !v)}
+              title="More ways to narrow this list"
+              aria-expanded={filtersOpen}
+              className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-medium border transition-colors ${
+                filtersOpen || facetCount > 0
+                  ? "bg-primary/15 border-primary text-primary"
+                  : "bg-background-tertiary border-border text-text-secondary hover:border-text-muted"
+              }`}
+            >
+              <Filter size={11} />
+              Filters{facetCount > 0 ? ` (${facetCount})` : ""}
+              {filtersOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+            </button>
+          )}
+
+          {(quick !== "none" || facetCount > 0) && (
+            <button
+              type="button"
+              onClick={() => { setQuick("none"); setFacetSel({}); }}
+              title="Clear filters"
+              className="px-2 py-1 rounded-full text-[11px] font-medium text-text-muted hover:text-text-primary transition-colors"
+            >
+              Clear
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* The filter panel. Grouped under headings, because a bare chip reading
+          "Under 1s" next to one reading "4K" is not self-explanatory. Values keep
+          their natural ORDINAL order rather than count order — a control whose
+          buttons reshuffle every time you touch it feels broken. */}
+      {LIBRARY_SCOPES.includes(scope) && filtersOpen && availableFacetGroups.length > 0 && (
+        <div className="px-5 mb-2 pb-2 space-y-2 border-b border-border/60">
+          {availableFacetGroups.map(({ key, title, labels, order, values }) => {
+            const active = facetSel[key];
+            const keys = order
+              ? order.filter((k) => values[k] != null)
+              : Object.keys(values);
+            return (
+              <div key={key}>
+                <p className="text-[10px] uppercase tracking-wide text-text-muted mb-1">{title}</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {keys.map((val) => {
+                    const n = values[val];
+                    const on = active === val;
+                    return (
+                      <button
+                        key={val}
+                        type="button"
+                        title={`${n} match${n === 1 ? "" : "es"}`}
+                        onClick={() => setFacetSel((p) => {
+                          const next = { ...p };
+                          if (on) delete next[key]; else next[key] = val;
+                          return next;
+                        })}
+                        className={`px-2.5 py-1 rounded-full text-[11px] font-medium border transition-colors ${
+                          on
+                            ? "bg-primary/15 border-primary text-primary"
+                            : "bg-background-tertiary border-border text-text-secondary hover:border-text-muted"
+                        }`}
+                      >
+                        {labels[val] || val} <span className="opacity-60">{n}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* Mood chips — a secondary filter for music so a big catalogue is easy
           to browse by feel. Only shown when Music is active and the server
@@ -1265,13 +1584,13 @@ export const LibraryPanel: React.FC = () => {
         ) : error ? (
           <div className="text-xs text-error py-8 text-center">{error}</div>
         ) : LIBRARY_SCOPES.includes(scope) && libraryAvailable === false ? (
-          /* No stock library on this machine. A specific, actionable message —
+          /* No library on this machine at all. A specific, actionable message —
              an empty grid here would read as "the library is broken". */
           <div className="text-center py-12 text-text-muted">
             <HardDrive size={28} className="mx-auto mb-2 opacity-40" />
-            <p className="text-sm">No licensed library on this machine</p>
+            <p className="text-sm">No media library on this machine</p>
             <p className="text-[11px] mt-1 leading-relaxed">
-              The licensed library is a folder of media on this machine — sfx, music, footage,
+              The library is a folder of media on this machine — sfx, music, footage,
               stills, 3D, LUTs, fonts — read from the machine running Voidspace.
               <br />
               Set its location in the desktop app under Settings → Media Library Folder.
@@ -1286,13 +1605,12 @@ export const LibraryPanel: React.FC = () => {
           <div className="text-center py-12 text-text-muted">
             <AudioLines size={28} className="mx-auto mb-2 opacity-40" />
             <p className="text-sm">
-              {scope === "licensed" ? "Nothing matches in your licensed packs"
-                : scope === "myfiles" ? "No files of this type yet"
+              {scope === "myfiles" ? "No files of this type yet"
                 : scope === "device" ? "No media saved in this browser"
                   : "No generations yet"}
             </p>
             <p className="text-[11px] mt-1">
-              {scope === "licensed" || scope === "myfiles"
+              {scope === "myfiles"
                 ? "Try a different search or type filter."
                 : scope === "device"
                   ? "Media you import into projects in this browser shows up here."
@@ -1307,7 +1625,7 @@ export const LibraryPanel: React.FC = () => {
                 {!collapsed.has(s.title) && (
                   <div
                     className="grid gap-2 mt-1"
-                    style={{ gridTemplateColumns: "repeat(auto-fill, minmax(0, 150px))" }}
+                    style={gridStyle}
                   >
                     {s.items.map(renderServerTile)}
                   </div>
@@ -1320,7 +1638,7 @@ export const LibraryPanel: React.FC = () => {
                 {!collapsed.has("On this device") && (
                   <div
                     className="grid gap-2 mt-1"
-                    style={{ gridTemplateColumns: "repeat(auto-fill, minmax(0, 150px))" }}
+                    style={gridStyle}
                   >
                     {visibleDeviceItems.map(renderDeviceTile)}
                   </div>
@@ -1348,6 +1666,7 @@ export const LibraryPanel: React.FC = () => {
           kind={previewItem.kind}
           name={previewItem.name}
           coverUrl={previewItem.coverUrl}
+          proxyUrl={previewItem.proxyUrl}
           onClose={() => setPreviewItem(null)}
         />
       )}

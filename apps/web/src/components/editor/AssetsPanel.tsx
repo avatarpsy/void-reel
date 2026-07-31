@@ -698,36 +698,41 @@ export const AssetsPanel: React.FC = () => {
   const [folderBusy, setFolderBusy] = useState(false);
   const [folderError, setFolderError] = useState("");
   /**
-   * Show WHERE the user's Voidspace folder is, and copy the path.
+   * Open the user's Voidspace folder — where recordings, AI-generated media and
+   * renders are saved — in their OS file manager.
    *
-   * It used to try to OPEN it, dispatching to the desktop app because nothing
-   * else can: a browser tab has no access to the desktop and the server is
-   * often a container whose filesystem isn't the user's. But most web users
-   * don't have the desktop app running, so the action failed far more often
-   * than it worked — and its only failure signal was the button's tooltip,
-   * which is why it read as a dead button.
-   *
-   * Reporting the location always works, everywhere, and is the part the user
-   * actually needs.
+   * On a local install the server shares the user's desktop and opens a real
+   * window (Windows, macOS and Linux alike). When Voidspace runs elsewhere, or
+   * in a container with no desktop, nothing can open a window — so we hand over
+   * the path and say why. The one outcome that's unacceptable is the button
+   * appearing to do nothing, which is how it behaved before.
    */
   async function showVoidspaceFolder() {
     if (folderBusy) return;
     setFolderBusy(true);
     setFolderError("");
     try {
-      const { getVoidspaceFolderPath } = await import("../../services/open-folder");
-      const r = await getVoidspaceFolderPath();
+      const { revealVoidspaceFolder } = await import("../../services/open-folder");
+      const r = await revealVoidspaceFolder();
+      if (r.opened) {
+        toast.success("Opened your Voidspace folder", r.path || undefined);
+        return;
+      }
       if (!r.path) {
         setFolderError(r.error || "Couldn't determine your Voidspace folder");
         toast.error("Couldn't find your Voidspace folder", r.error || undefined);
         return;
       }
+      setFolderError(r.error || "");
       let copied = false;
       try {
         await navigator.clipboard.writeText(r.path);
         copied = true;
       } catch { /* clipboard blocked — the path is still shown in the toast */ }
-      toast.info(copied ? "Folder path copied" : "Your Voidspace folder", r.path);
+      toast.info(
+        copied ? "Folder path copied" : "Your Voidspace folder",
+        `${r.path}${r.error ? `\n\n${r.error}` : ""}`,
+      );
     } catch (e: any) {
       setFolderError(e?.message ?? String(e));
       toast.error("Couldn't find your Voidspace folder", e?.message ?? String(e));
@@ -1273,7 +1278,7 @@ export const AssetsPanel: React.FC = () => {
           <button
             onClick={() => void showVoidspaceFolder()}
             disabled={folderBusy}
-            title={folderError || "Where your Voidspace folder is — click to copy the path"}
+            title={folderError || "Open your Voidspace folder — recordings, generated media and renders"}
             className={`inline-flex items-center justify-center h-6 w-6 rounded-md transition-colors cursor-pointer disabled:opacity-40 ${
               folderError
                 ? "text-red-400 hover:bg-background-elevated"
