@@ -1355,9 +1355,9 @@ export const LibraryPanel: React.FC = () => {
         </div>
       </div>
 
-      {/* Search + refresh */}
-      <div className="px-5 mb-3 flex items-center gap-2">
-        <div className="relative flex-1">
+      {/* Search — its own full-width row. See the note on the row below. */}
+      <div className="px-5 mb-2">
+        <div className="relative">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted z-10" />
           <input
             type="text"
@@ -1385,6 +1385,15 @@ export const LibraryPanel: React.FC = () => {
             </span>
           ) : null}
         </div>
+      </div>
+
+      {/* Add / view mode / refresh — a SEPARATE row from the search box.
+          They shared one row until the panel was measured at its real width: at
+          ~325px the five neighbours left the input about 80px, so the query scrolled
+          out of view and a descriptive placeholder was unreadable. Search is the
+          primary control here and gets the full width; one extra 36px row in a
+          full-height panel is a cheap trade. */}
+      <div className="px-5 mb-3 flex items-center gap-2">
         <button
           type="button"
           onClick={() => fileInputRef.current?.click()}
@@ -1398,8 +1407,9 @@ export const LibraryPanel: React.FC = () => {
             : <><Upload size={13} />Add</>}
         </button>
         {/* Identical markup/classes to the Media tab's control — one visual
-            language for "how do I want this laid out". */}
-        <div className="flex items-center bg-background-tertiary border border-border rounded-lg p-0.5">
+            language for "how do I want this laid out". `ml-auto` pushes the display
+            controls to the right edge now that search no longer shares this row. */}
+        <div className="ml-auto flex items-center bg-background-tertiary border border-border rounded-lg p-0.5">
           {([
             { mode: "large" as const, icon: LayoutGrid, title: "Large icons" },
             { mode: "small" as const, icon: Grid2x2, title: "Small icons" },
