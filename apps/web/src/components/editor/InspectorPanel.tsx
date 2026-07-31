@@ -874,9 +874,9 @@ export const InspectorPanel: React.FC = () => {
               </Section>
             )}
 
-            {/* AI Audio (Suno) - Cover, extend, vocals, instrumental, stems, WAV, lyrics */}
+            {/* AI Audio (Suno) - extend, vocals, instrumental, stems, WAV, lyrics */}
             {clipType === "audio" && (
-              <Section title="AI Audio (Suno)" sectionId="suno-audio" defaultOpen={false}>
+              <Section title="Make this a song" sectionId="suno-audio" defaultOpen>
                 <SunoAudioPanel clipId={clipId} />
               </Section>
             )}

@@ -9,14 +9,14 @@
  * Suno lineage so the Suno-native ops (separate / WAV / lyrics) light up.
  *
  *   Works on ANY audio (uploads the clip first):
- *     • Cover            – re-imagine in a new style
+ *     • Cover            – re-sing the melody in a new style (AI voice)
  *     • Extend           – continue past its end
  *     • Add Vocals       – sing over an instrumental
  *     • Add Instrumental – back an acapella
  *   Needs a Suno-origin source (taskId + audioId on the media item):
- *     • Separate Stems   – split into vocal + instrumental
  *     • Convert to WAV   – lossless export
  *     • Timestamped Lyrics – word-synced captions
+ *     • Artist Persona   – reusable identity for later releases
  */
 
 import React, { useCallback, useRef, useState } from "react";
@@ -41,12 +41,21 @@ import {
   Play,
   Pause,
   Check,
+  Replace,
+  Piano,
+  UserRoundPen,
+  Layers,
+  Wand2,
 } from "lucide-react";
 import { Input, Switch } from "@openreel/ui";
 import { useProjectStore } from "../../../stores/project-store";
+import { transcribeViaVoidspace } from "../../../services/voidspace-transcribe";
+import { loadMediaBlob } from "../../../services/media-storage";
 import { toast } from "../../../stores/notification-store";
 import {
   SUNO_OP_COST,
+  separateCost,
+  ADVANCED_STEM_NAMES,
   uploadClipAudio,
   coverClip,
   extendClipUpload,
@@ -54,6 +63,9 @@ import {
   addVocalsToClip,
   addInstrumentalToClip,
   separateClipStems,
+  replaceClipSection,
+  transcribeToMidi,
+  createPersona,
   convertClipToWav,
   getClipTimestampedLyrics,
   boostStyleText,
@@ -62,6 +74,7 @@ import {
   clipPlacementContext,
   proxiedMediaUrl,
   type SunoOp,
+  type SeparateType,
   type PlacementMode,
 } from "../../../services/suno";
 
@@ -72,6 +85,8 @@ interface Take {
   name: string;
   /** Suno per-track id — becomes the placed clip's sunoAudioId lineage. */
   audioId?: string;
+  /** Library media id, set as soon as the take is saved (see runTracksOp). */
+  mediaId?: string;
 }
 
 /** A group of produced takes awaiting a user placement decision. */
@@ -89,7 +104,14 @@ interface PendingGroup {
   placing?: boolean;
 }
 
-const SUNO_MODELS = ["V4_5PLUS", "V5", "V4_5"] as const;
+/**
+ * Default `audioWeight` for the ops that exist to transform the user's OWN
+ * recording (cover / extend-from-upload). 0.78 keeps the sung melody and
+ * phrasing clearly recognisable while still letting the new style land.
+ */
+const SOURCE_LED_AUDIO_WEIGHT = 0.78;
+
+const SUNO_MODELS = ["V4_5PLUS", "V5", "V5_5"] as const;
 type SunoModel = (typeof SUNO_MODELS)[number];
 
 interface SunoAudioPanelProps {
@@ -336,7 +358,13 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
   const [coverStyle, setCoverStyle] = useState("");
   const [coverTitle, setCoverTitle] = useState("");
   const [coverInstrumental, setCoverInstrumental] = useState(false);
-
+  /** false = "keep my melody, I'm not supplying lyrics" (the common case);
+   *  true  = the big field holds the actual lyrics to sing. */
+  const [coverLyricsMode, setCoverLyricsMode] = useState(false);
+  /** True while we read the sung words out of the recording. */
+  const [transcribing, setTranscribing] = useState(false);
+  /** What we heard — shown back so the user can correct a bad transcript. */
+  const [detectedLyrics, setDetectedLyrics] = useState<string | null>(null);
   const clipDuration = clip?.duration ?? 0;
   const [extendAt, setExtendAt] = useState<number>(
     Math.max(0, Math.round(clipDuration * 10) / 10),
@@ -351,6 +379,28 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
 
   const [instTags, setInstTags] = useState("");
   const [instTitle, setInstTitle] = useState("");
+
+  // Separation depth. separate_vocal is the cheap 2-stem split; split_stem
+  // returns up to 12 instrument stems; split_stem_advanced pulls ONE named part.
+  const [separateType, setSeparateType] = useState<SeparateType>("separate_vocal");
+  const [stemName, setStemName] = useState<string>("Bass");
+  /** Separation task id from the last split — MIDI transcription needs it. */
+  const [separationTaskId, setSeparationTaskId] = useState<string | null>(null);
+
+  // Replace-section
+  const [rsStart, setRsStart] = useState<number>(0);
+  const [rsEnd, setRsEnd] = useState<number>(0);
+  const [rsPrompt, setRsPrompt] = useState("");
+  const [rsTags, setRsTags] = useState("");
+  const [rsTitle, setRsTitle] = useState("");
+  const [rsLyrics, setRsLyrics] = useState("");
+
+  // Persona
+  const [personaName, setPersonaName] = useState("");
+  const [personaDesc, setPersonaDesc] = useState("");
+  const [personaStart, setPersonaStart] = useState<number>(0);
+  const [personaEnd, setPersonaEnd] = useState<number>(30);
+  const [personaId, setPersonaId] = useState<string | null>(null);
 
   const [extendStyle, setExtendStyle] = useState("");
   const [extendTitle, setExtendTitle] = useState("");
@@ -373,6 +423,24 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
       audioWeight: audioWeight === "" ? undefined : Number(audioWeight),
     }),
     [negativeTags, vocalGender, styleWeight, weirdness, audioWeight],
+  );
+
+  /**
+   * Params for the ops whose whole point is "keep MY performance".
+   *
+   * `audioWeight` is what tells Suno how much the uploaded audio should drive
+   * the result. Leaving it unset (our old "auto") let Suno weight the text
+   * prompt far above the recording, so a cover came back as a track built from
+   * the description with the singer's take ignored. These ops are meaningless
+   * without the source, so they default the knob HIGH; an explicit user value
+   * still wins.
+   */
+  const sourceLedParams = useCallback(
+    (): Record<string, unknown> => ({
+      ...advancedParams(),
+      audioWeight: audioWeight === "" ? SOURCE_LED_AUDIO_WEIGHT : Number(audioWeight),
+    }),
+    [advancedParams, audioWeight],
   );
 
   /** Shared <AdvancedFields> bound to the panel's advanced state. */
@@ -432,6 +500,29 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
           name: t.title ? `${t.title}${tracks.length > 1 ? ` (v${i + 1})` : ""}` : `${label} v${i + 1}`,
           audioId: t.audioId,
         }));
+
+        // SAVE EVERY TAKE IMMEDIATELY, before asking where to put it.
+        //
+        // These are paid generations and Suno's URLs expire in ~14 days. The
+        // panel used to hold them in component state only, so selecting a
+        // different clip unmounted it and silently threw away work the user
+        // had just paid for. Importing here writes them to the media library +
+        // local disk, so they survive deselect, reload and URL expiry, and the
+        // placement chooser below becomes a convenience rather than the only
+        // chance to keep them. Best-effort: a failed import must not lose the
+        // audition URLs we already have.
+        await Promise.all(
+          takes.map(async (take) => {
+            try {
+              const lineage = r.result.taskId
+                ? { sunoTaskId: r.result.taskId, sunoAudioId: take.audioId }
+                : {};
+              take.mediaId = await importResultToLibrary(take.url, take.name, lineage, ac.signal);
+            } catch (e) {
+              console.warn("[suno] library save failed for", take.name, e);
+            }
+          }),
+        );
         // Multiple tracks from one op = variations of the SAME thing → pick one.
         const group: PendingGroup = {
           id: uuidv4(),
@@ -443,11 +534,12 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
         };
         setPending((p) => [...p, group]);
         setBalance(r.balance);
+        const saved = takes.filter((t) => t.mediaId).length;
         toast.success(
           `${label} ready`,
-          takes.length > 1
-            ? `${takes.length} versions — listen & pick one · ${r.charged} credits`
-            : `Generated — choose placement · ${r.charged} credits`,
+          `${takes.length > 1 ? `${takes.length} versions · ` : ""}` +
+            `${saved === takes.length ? "saved to your library" : `${saved}/${takes.length} saved`}` +
+            ` · ${r.charged} credits`,
         );
       } catch (e) {
         fail(e);
@@ -479,8 +571,10 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
       setPlayingTakeId(null);
       setPending((p) => p.map((g) => (g.id === group.id ? { ...g, placing: true } : g)));
       try {
+        // Already saved by runTracksOp — reuse it instead of downloading and
+        // importing the same audio a second time.
         const lineage = group.taskId ? { sunoTaskId: group.taskId, sunoAudioId: take.audioId } : {};
-        const mediaId = await importResultToLibrary(take.url, take.name, lineage);
+        const mediaId = take.mediaId ?? (await importResultToLibrary(take.url, take.name, lineage));
         const ctx = clipPlacementContext(clipId);
         if (mode === "after-clip" && ctx) {
           await placeMedia(mediaId, "after-clip", { trackId: ctx.trackId, startTime: ctx.endTime });
@@ -510,29 +604,117 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
     [clipId, fail],
   );
 
+  /**
+   * Drop EVERY take in a group onto its own new audio track, all aligned to
+   * the source clip's start. This is what makes a 12-stem split usable: the
+   * one-at-a-time flow would be a dozen manual placements, and the stems have
+   * to stay time-aligned or the track no longer reassembles.
+   *
+   * Sequential on purpose — each placement mutates the project store, and
+   * firing them together races the track-creation step.
+   */
+  const placeAllStems = useCallback(
+    async (group: PendingGroup) => {
+      if (audioRef.current) audioRef.current.pause();
+      setPlayingTakeId(null);
+      setPending((p) => p.map((g) => (g.id === group.id ? { ...g, placing: true } : g)));
+      const ctx = clipPlacementContext(clipId);
+      let placed = 0;
+      try {
+        for (const take of group.takes) {
+          const mediaId = await importResultToLibrary(take.url, take.name);
+          await placeMedia(mediaId, "new-track", { startTime: ctx?.startTime });
+          placed++;
+        }
+        setPending((p) => p.filter((g) => g.id !== group.id));
+        toast.success("Stems placed", `${placed} track${placed === 1 ? "" : "s"}, aligned to the original`);
+      } catch (e) {
+        // Keep whatever is left so a mid-way failure doesn't lose the results
+        // the user already paid for.
+        setPending((p) =>
+          p.map((g) => (g.id === group.id ? { ...g, takes: g.takes.slice(placed), placing: false } : g)),
+        );
+        fail(e);
+      }
+    },
+    [clipId, fail],
+  );
+
   // ── op handlers ──────────────────────────────────────────────────────────
+  /**
+   * Re-sing the take in a new style.
+   *
+   * CUSTOM MODE IS MANDATORY HERE, and that is not a detail. Suno's non-custom
+   * upload-cover documents that "lyrics will be auto-generated (not strictly
+   * matching the input)" — it discards what the singer actually sang — and it
+   * ignores `duration`, which is how a 55s take came back as a 4-minute track
+   * about nothing. Custom mode needs real lyrics, so when the user asked to
+   * KEEP THEIR WORDS we go and get them: transcribe the recording first and
+   * feed that transcript in as the lyrics.
+   */
   const handleCover = useCallback(() => {
     if (!mediaItem) return;
-    if (!coverPrompt.trim()) {
-      setError("Describe the cover you want.");
+    const style = coverStyle.trim() || coverPrompt.trim();
+    if (!style) {
+      setError("Describe the style you want.");
+      return;
+    }
+    if (coverLyricsMode && !coverPrompt.trim()) {
+      setError("Type the lyrics to sing, or switch to “Keep my words”.");
       return;
     }
     runTracksOp("cover", "Cover", async (signal) => {
       const uploadUrl = await uploadClipAudio(mediaItem, signal);
+
+      let lyrics = coverPrompt.trim();
+      if (!coverLyricsMode) {
+        // Keep-my-words: the lyrics live in the audio, so read them out of it.
+        setTranscribing(true);
+        try {
+          const blob =
+            mediaItem.blob instanceof Blob
+              ? mediaItem.blob
+              : await loadMediaBlob(mediaItem.id);
+          if (!blob) throw new Error("no local audio");
+          const r = await transcribeViaVoidspace(blob);
+          lyrics = (r.text || "").trim();
+        } catch (e) {
+          console.warn("[suno] lyric transcription failed:", e);
+          lyrics = "";
+        } finally {
+          setTranscribing(false);
+        }
+        if (!lyrics) {
+          throw new Error(
+            "Could not make out any words in this recording, so a cover would invent its own. " +
+              "Switch to “New lyrics” and type them, or turn on “Instrumental only”.",
+          );
+        }
+        setDetectedLyrics(lyrics);
+      }
+
       return coverClip(
         uploadUrl,
         {
-          prompt: coverPrompt.trim(),
+          prompt: lyrics,
           model,
           instrumental: coverInstrumental,
-          style: coverStyle.trim() || undefined,
-          title: coverTitle.trim() || undefined,
-          ...advancedParams(),
+          style,
+          // Custom mode needs a title; the clip name is a fine default and
+          // saves the user a required field they do not care about.
+          title: coverTitle.trim() || mediaItem.name || "Cover",
+          // We are always supplying real lyrics now, so this is always custom.
+          lyricsMode: true,
+          // Without this a V5_5 cover comes back 20 seconds long — that is the
+          // upstream default when `duration` is omitted, not the source length.
+          sourceDurationSec:
+            mediaItem.metadata?.duration || clip?.duration || undefined,
+          ...sourceLedParams(),
         },
         signal,
       );
     });
-  }, [mediaItem, coverPrompt, coverStyle, coverTitle, coverInstrumental, model, runTracksOp, advancedParams]);
+  }, [mediaItem, clip, coverPrompt, coverStyle, coverTitle, coverInstrumental, coverLyricsMode, model, runTracksOp, sourceLedParams]);
 
   const handleExtend = useCallback(() => {
     if (!mediaItem) return;
@@ -598,30 +780,228 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
     });
   }, [mediaItem, instTags, instTitle, model, runTracksOp, advancedParams]);
 
+  /**
+   * One-click "back my vocals": upload the selected clip and let Suno build a
+   * full arrangement under it. When the user hasn't typed style tags we get a
+   * rich one from Suno's own style booster first — so a singer can record and
+   * press ONE button without knowing how to describe a genre. Explicit tags
+   * always win over the auto-generated ones.
+   */
+  const handleAutoInstrumental = useCallback(() => {
+    if (!mediaItem) return;
+    runTracksOp("add_instrumental", "Backing track", async (signal) => {
+      const uploadUrl = await uploadClipAudio(mediaItem, signal);
+      let tags = instTags.trim();
+      if (!tags) {
+        try {
+          const boosted = await boostStyleText(
+            "a full, modern band arrangement that supports a solo vocal — drums, bass, harmony instruments, tasteful dynamics",
+            signal,
+          );
+          tags = boosted.result;
+        } catch {
+          // Booster is a nicety, not a dependency — fall back to a plain
+          // arrangement brief rather than failing the whole run.
+          tags = "full band arrangement, drums, bass, warm harmony, modern production";
+        }
+      }
+      return addInstrumentalToClip(
+        uploadUrl,
+        { tags, model, title: instTitle.trim() || mediaItem.name || undefined, ...advancedParams() },
+        signal,
+      );
+    });
+  }, [mediaItem, instTags, instTitle, model, runTracksOp, advancedParams]);
+
+  /**
+   * Split into stems. Works on ANY audio: a Suno-origin clip separates by its
+   * ids, anything else (an import, a recording) is uploaded first and split by
+   * URL — the upstream endpoint accepts either, which is why this no longer
+   * requires Suno lineage.
+   */
   const handleSeparate = useCallback(async () => {
-    if (!mediaItem?.sunoTaskId || !mediaItem?.sunoAudioId || busy) return;
+    if (!mediaItem || busy) return;
     setBusy("separate");
     setError(null);
     const ac = new AbortController();
     abortRef.current = ac;
     try {
-      const r = await separateClipStems(mediaItem.sunoTaskId, mediaItem.sunoAudioId, ac.signal);
-      const takes: Take[] = [];
-      if (r.result.instrumentalUrl)
-        takes.push({ id: uuidv4(), url: r.result.instrumentalUrl, name: `${mediaItem.name} — Instrumental` });
-      if (r.result.vocalUrl)
-        takes.push({ id: uuidv4(), url: r.result.vocalUrl, name: `${mediaItem.name} — Vocals` });
-      if (!takes.length) throw new Error("No stems were returned.");
+      const source = (mediaItem.sunoTaskId && mediaItem.sunoAudioId)
+        ? { taskId: mediaItem.sunoTaskId, audioId: mediaItem.sunoAudioId }
+        : { audioUrl: await uploadClipAudio(mediaItem, ac.signal) };
+      const r = await separateClipStems(
+        source,
+        separateType,
+        separateType === "split_stem_advanced" ? stemName : undefined,
+        ac.signal,
+      );
+      const stems = r.result.stems || [];
+      if (!stems.length) throw new Error("No stems were returned.");
+      const takes: Take[] = stems.map((s) => ({
+        id: uuidv4(),
+        url: s.url,
+        name: `${mediaItem.name} — ${s.label}`,
+      }));
       // Stems are distinct outputs (not variations) → place each independently.
       setPending((p) => [...p, { id: uuidv4(), op: "separate", pickOne: false, takes }]);
+      setSeparationTaskId(r.result.taskId || null);
       setBalance(r.balance);
-      toast.success("Stems separated", `${takes.length} stems — place each · ${r.charged} credits`);
+      toast.success(
+        "Stems separated",
+        `${takes.length} stem${takes.length === 1 ? "" : "s"} — place each · ${r.charged} credits`,
+      );
     } catch (e) {
       fail(e);
     } finally {
       setBusy(null);
     }
-  }, [mediaItem, busy, fail]);
+  }, [mediaItem, busy, fail, separateType, stemName]);
+
+  /**
+   * Karaoke: 2-stem split, keep the instrumental, place it straight onto a new
+   * track. Skips the pick-a-stem step because there is only one thing the user
+   * wants here — a backing track to sing over.
+   */
+  const handleKaraoke = useCallback(async () => {
+    if (!mediaItem || busy) return;
+    setBusy("separate");
+    setError(null);
+    const ac = new AbortController();
+    abortRef.current = ac;
+    try {
+      const source = (mediaItem.sunoTaskId && mediaItem.sunoAudioId)
+        ? { taskId: mediaItem.sunoTaskId, audioId: mediaItem.sunoAudioId }
+        : { audioUrl: await uploadClipAudio(mediaItem, ac.signal) };
+      const r = await separateClipStems(source, "separate_vocal", undefined, ac.signal);
+      const instrumental =
+        r.result.instrumentalUrl ||
+        r.result.stems.find((s) => s.key === "instrumentalUrl")?.url ||
+        "";
+      if (!instrumental) throw new Error("No instrumental came back from the split.");
+      const name = `${mediaItem.name} — Karaoke`;
+      const mediaId = await importResultToLibrary(instrumental, name);
+      const ctx = clipPlacementContext(clipId);
+      await placeMedia(mediaId, "new-track", { startTime: ctx?.startTime });
+      setSeparationTaskId(r.result.taskId || null);
+      setBalance(r.balance);
+      toast.success("Karaoke track ready", `On a new track, vocals removed · ${r.charged} credits`);
+    } catch (e) {
+      fail(e);
+    } finally {
+      setBusy(null);
+    }
+  }, [mediaItem, busy, fail, clipId]);
+
+  /** Regenerate one window of the track in place. */
+  const handleReplaceSection = useCallback(() => {
+    if (!mediaItem) return;
+    const span = Number(rsEnd) - Number(rsStart);
+    if (!(span >= 6 && span <= 60)) {
+      setError("Pick a window between 6 and 60 seconds long.");
+      return;
+    }
+    if (!rsPrompt.trim() || !rsTags.trim() || !rsLyrics.trim()) {
+      setError("Replace needs a description, style tags, and the FULL lyrics after the edit.");
+      return;
+    }
+    runTracksOp("replace_section", "Replacement", async (signal) => {
+      const params = {
+        prompt: rsPrompt.trim(),
+        tags: rsTags.trim(),
+        title: rsTitle.trim() || mediaItem.name || "Untitled",
+        infillStartS: Number(rsStart),
+        infillEndS: Number(rsEnd),
+        fullLyrics: rsLyrics.trim(),
+        model,
+        ...advancedParams(),
+      };
+      if (mediaItem.sunoTaskId && mediaItem.sunoAudioId) {
+        return replaceClipSection(
+          { taskId: mediaItem.sunoTaskId, audioId: mediaItem.sunoAudioId },
+          params,
+          signal,
+        );
+      }
+      const uploadUrl = await uploadClipAudio(mediaItem, signal);
+      return replaceClipSection({ uploadUrl }, params, signal);
+    });
+  }, [mediaItem, rsStart, rsEnd, rsPrompt, rsTags, rsTitle, rsLyrics, model, runTracksOp, advancedParams]);
+
+  /** Capture a reusable artist identity from a window of this track. */
+  const handlePersona = useCallback(async () => {
+    if (!mediaItem?.sunoTaskId || !mediaItem?.sunoAudioId || busy) return;
+    const span = Number(personaEnd) - Number(personaStart);
+    if (!(span >= 10 && span <= 30)) {
+      setError("The persona reference window must be 10–30 seconds.");
+      return;
+    }
+    if (!personaName.trim() || !personaDesc.trim()) {
+      setError("Give the persona a name and describe its musical character.");
+      return;
+    }
+    setBusy("persona");
+    setError(null);
+    const ac = new AbortController();
+    abortRef.current = ac;
+    try {
+      const r = await createPersona(
+        mediaItem.sunoTaskId,
+        mediaItem.sunoAudioId,
+        {
+          name: personaName.trim(),
+          description: personaDesc.trim(),
+          vocalStart: Number(personaStart),
+          vocalEnd: Number(personaEnd),
+        },
+        ac.signal,
+      );
+      setPersonaId(r.result.personaId);
+      setBalance(r.balance);
+      toast.success("Persona created", `${r.result.name} · ${r.charged} credits`);
+    } catch (e) {
+      fail(e);
+    } finally {
+      setBusy(null);
+    }
+  }, [mediaItem, busy, fail, personaName, personaDesc, personaStart, personaEnd]);
+
+  /**
+   * Transcribe the last separation to MIDI and download it. Kie returns note
+   * lists rather than a file, so the .mid is assembled server-side and handed
+   * back base64 — this just turns it into a download.
+   */
+  const handleMidi = useCallback(async () => {
+    if (!separationTaskId || busy) return;
+    setBusy("midi");
+    setError(null);
+    const ac = new AbortController();
+    abortRef.current = ac;
+    try {
+      const r = await transcribeToMidi(separationTaskId, undefined, ac.signal);
+      const bin = atob(r.result.midiBase64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const url = URL.createObjectURL(new Blob([bytes], { type: "audio/midi" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${(mediaItem?.name || "transcription").replace(/[^a-zA-Z0-9._ -]/g, "_")}.mid`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      // Revoke on the next tick — revoking synchronously can cancel the
+      // download in Chromium before it starts.
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+      setBalance(r.balance);
+      toast.success(
+        "MIDI ready",
+        `${r.result.noteCount} notes across ${r.result.instruments.length} instrument(s) · ${r.charged} credits`,
+      );
+    } catch (e) {
+      fail(e);
+    } finally {
+      setBusy(null);
+    }
+  }, [separationTaskId, busy, fail, mediaItem]);
 
   const handleWav = useCallback(async () => {
     if (!mediaItem?.sunoTaskId || !mediaItem?.sunoAudioId || busy) return;
@@ -721,7 +1101,7 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
     <button
       onClick={() => boost(value, onApply, k)}
       disabled={!value.trim() || boosting === k}
-      title="Enhance this style with Suno's boost (1 cr)"
+      title="Rewrite this into a richer style description"
       className="shrink-0 px-2 py-1.5 rounded-md bg-background-secondary border border-border text-[9px] text-text-secondary hover:text-primary hover:border-primary/40 transition-colors disabled:opacity-50 flex items-center gap-1"
     >
       {boosting === k ? <Loader2 size={10} className="animate-spin" /> : <Sparkles size={10} />}
@@ -742,9 +1122,40 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
         <div className="min-w-0">
           <p className="text-[11px] font-medium text-text-primary">AI Audio · Suno</p>
           <p className="text-[9px] text-text-muted truncate">
-            Transform this clip — results land on new tracks
+            Every take is saved to your library automatically
           </p>
         </div>
+      </div>
+
+      {/* START HERE.
+          Everything below this is one row per Suno endpoint, which is the
+          right structure for someone who already knows the vocabulary and a
+          dead end for someone who just recorded themselves singing. These
+          three cover what people actually come here to do, in their words,
+          and each one just opens the row that does it. */}
+      <div className="space-y-1">
+        <p className="text-[9px] text-text-secondary">What do you want to do?</p>
+        {([
+          ["cover", "Turn this into a proper song", "keeps your words & melody, new production"],
+          ["add_instrumental", "Add music behind my voice", "your actual voice, with a band"],
+          ["separate", "Make a karaoke version", "strip the vocals out"],
+        ] as Array<[SunoOp, string, string]>).map(([op, label, hint]) => (
+          <button
+            key={op}
+            onClick={() => setOpenOp(op)}
+            className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg border text-left transition-colors ${
+              openOp === op
+                ? "bg-primary/15 border-primary/40"
+                : "bg-background-secondary border-border hover:border-primary/40"
+            }`}
+          >
+            <Sparkles size={11} className="text-primary shrink-0" />
+            <span className="min-w-0 flex-1">
+              <span className="block text-[10px] text-text-primary truncate">{label}</span>
+              <span className="block text-[8px] text-text-muted truncate">{hint}</span>
+            </span>
+          </button>
+        ))}
       </div>
 
       {/* Shared model selector */}
@@ -808,12 +1219,23 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
               </span>
               <button
                 onClick={() => dismissGroup(group.id)}
-                title="Discard (results aren't saved)"
+                title="Dismiss — the takes stay in your library"
                 className="text-text-muted hover:text-text-primary transition-colors"
               >
                 <X size={12} />
               </button>
             </div>
+
+            {!group.pickOne && group.takes.length > 1 && (
+              <button
+                disabled={group.placing}
+                onClick={() => placeAllStems(group)}
+                className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-md bg-primary text-black text-[10px] font-medium hover:bg-primary/90 transition-colors disabled:opacity-50"
+              >
+                {group.placing ? <Loader2 size={11} className="animate-spin" /> : <Layers size={11} />}
+                Place all {group.takes.length} on separate tracks
+              </button>
+            )}
 
             {group.takes.map((take) => {
               const isSel = group.selectedTakeId === take.id;
@@ -873,29 +1295,84 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
       })}
 
       {/* Cover */}
+      {/* Cover — the "phone demo → finished record" path. Deliberately the
+          first row: it is what most people mean by "make my song better".
+          The voice caveat is stated in the row, not buried, because it is the
+          one thing that surprises people. */}
       <OpRow
         id="cover"
-        icon={Music4}
-        title="Cover (restyle)"
+        icon={Sparkles}
+        title="Re-sing in a new style"
         cost={SUNO_OP_COST.cover}
         open={openOp === "cover"}
         busy={busy === "cover"}
         onToggle={() => toggle("cover")}
       >
-        <Field label="Describe the cover">
-          <textarea
-            value={coverPrompt}
-            onChange={(e) => setCoverPrompt(e.target.value)}
-            placeholder="e.g. acoustic, slow, intimate"
-            className={`${inputCls} h-14 resize-none`}
-          />
-        </Field>
-        <Field label="Style (optional)">
+        {/* Which KIND of text the big field holds decides how Suno reads it —
+            a description shapes the sound, lyrics get sung. Making that a
+            visible choice instead of an invisible consequence of filling in
+            Style+Title is the fix for "it ignored my recording". */}
+        <div className="flex gap-1">
+          {([
+            [false, "Keep my words", "sings what you sang"],
+            [true, "New lyrics", "you supply the words"],
+          ] as Array<[boolean, string, string]>).map(([mode, label, hint]) => (
+            <button
+              key={String(mode)}
+              onClick={() => setCoverLyricsMode(mode)}
+              className={`flex-1 px-2 py-1.5 rounded border text-left transition-colors ${
+                coverLyricsMode === mode
+                  ? "bg-primary/15 border-primary/40"
+                  : "bg-background-secondary border-border hover:border-primary/30"
+              }`}
+            >
+              <span className="block text-[10px] text-text-primary">{label}</span>
+              <span className="block text-[8px] text-text-muted">{hint}</span>
+            </button>
+          ))}
+        </div>
+        {coverLyricsMode ? (
+          <Field label="Lyrics to sing">
+            <textarea
+              value={coverPrompt}
+              onChange={(e) => setCoverPrompt(e.target.value)}
+              rows={4}
+              placeholder="the actual words to sing"
+              className="w-full rounded-md bg-background-secondary border border-border text-[10px] p-1.5 text-text-primary"
+            />
+          </Field>
+        ) : (
+          <div className="rounded-md border border-border bg-background-secondary/60 p-1.5 space-y-1">
+            <p className="text-[8px] text-text-muted">
+              {transcribing
+                ? "Listening to your take to read the words…"
+                : "Your sung words are read from the recording and used as the lyrics, so the cover says what you said."}
+            </p>
+            {detectedLyrics && (
+              <>
+                <label className="text-[8px] text-text-secondary block">Heard (edit if wrong)</label>
+                <textarea
+                  value={detectedLyrics}
+                  onChange={(e) => {
+                    setDetectedLyrics(e.target.value);
+                    // An edited transcript is the user supplying lyrics, so
+                    // switch modes rather than silently re-transcribing over it.
+                    setCoverPrompt(e.target.value);
+                    setCoverLyricsMode(true);
+                  }}
+                  rows={3}
+                  className="w-full rounded bg-background-secondary border border-border text-[10px] p-1.5 text-text-primary"
+                />
+              </>
+            )}
+          </div>
+        )}
+        <Field label="Style">
           <div className="flex gap-1.5">
             <Input
               value={coverStyle}
               onChange={(e) => setCoverStyle(e.target.value)}
-              placeholder="genre + mood"
+              placeholder="e.g. indie folk, warm, acoustic"
               className="h-7 text-[11px] bg-background-secondary border-border flex-1"
             />
             <BoostBtn value={coverStyle} onApply={setCoverStyle} k="cover-style" />
@@ -909,15 +1386,27 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
             className="h-7 text-[11px] bg-background-secondary border-border"
           />
         </Field>
-        <label className="flex items-center justify-between">
-          <span className="text-[9px] text-text-secondary">Instrumental</span>
+        <label className="flex items-center gap-2 text-[10px] text-text-secondary">
           <Switch checked={coverInstrumental} onCheckedChange={setCoverInstrumental} />
+          Instrumental only
         </label>
-        {renderAdvanced()}
-        <RunButton busy={busy === "cover"} cost={SUNO_OP_COST.cover} label="Generate cover" onClick={handleCover} />
+        {renderAdvanced("styles to exclude")}
+        <p className="text-[8px] text-text-muted">
+          Keeps your melody and rebuilds the production around it — the fastest route from a rough
+          take to something that sounds like a record.{" "}
+          <span className="text-amber-400/90">
+            An AI voice sings it, not yours.
+          </span>{" "}
+          To keep your own voice, use Vocal Studio above or “Add instrumental” below.
+        </p>
+        <RunButton
+          busy={busy === "cover"}
+          cost={SUNO_OP_COST.cover}
+          label={transcribing ? "Reading your words" : "Re-sing"}
+          onClick={handleCover}
+        />
       </OpRow>
 
-      {/* Extend */}
       <OpRow
         id="extend"
         icon={Music2}
@@ -1026,12 +1515,29 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
         busy={busy === "add_instrumental"}
         onToggle={() => toggle("add_instrumental")}
       >
-        <Field label="Style tags">
+        {/* The headline path for a singer: record, select the clip, one click.
+            Everything below is optional steering. */}
+        <button
+          onClick={handleAutoInstrumental}
+          disabled={!!busy}
+          className="w-full py-2 rounded-lg bg-primary text-black text-[11px] font-medium hover:bg-primary/90 transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5"
+        >
+          {busy === "add_instrumental"
+            ? <Loader2 size={12} className="animate-spin" />
+            : <Wand2 size={12} />}
+          Back my vocals — one click
+          <span className="opacity-70">· {SUNO_OP_COST.add_instrumental} cr</span>
+        </button>
+        <p className="text-[8px] text-text-muted">
+          Sing over silence, then press the button — Suno writes and plays the band underneath.
+          Leave the fields blank and the style is chosen for you.
+        </p>
+        <Field label="Style tags (optional)">
           <div className="flex gap-1.5">
             <Input
               value={instTags}
               onChange={(e) => setInstTags(e.target.value)}
-              placeholder="e.g. lofi, mellow, piano"
+              placeholder="auto — or e.g. lofi, mellow, piano"
               className="h-7 text-[11px] bg-background-secondary border-border flex-1"
             />
             <BoostBtn value={instTags} onApply={setInstTags} k="inst-tags" />
@@ -1055,22 +1561,238 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
         />
       </OpRow>
 
-      {/* Separate Stems */}
+      {/* Separate Stems — works on ANY audio, not just Suno-origin tracks. */}
       <OpRow
         id="separate"
         icon={Scissors}
         title="Separate stems"
-        cost={SUNO_OP_COST.separate}
+        cost={separateCost(separateType)}
         open={openOp === "separate"}
         busy={busy === "separate"}
-        disabled={!hasLineage}
-        disabledHint="Only available for tracks generated by Suno here"
         onToggle={() => toggle("separate")}
       >
-        <p className="text-[9px] text-text-secondary">
-          Splits this track into separate vocal and instrumental tracks.
+        <Field label="How deep">
+          <div className="space-y-1">
+            {([
+              ["separate_vocal", "Vocal + instrumental", "2 stems — the quick split"],
+              ["split_stem", "Every instrument", "up to 12 stems"],
+              ["split_stem_advanced", "One instrument", "pick exactly what to pull out"],
+            ] as Array<[SeparateType, string, string]>).map(([value, label, hint]) => (
+              <button
+                key={value}
+                onClick={() => setSeparateType(value)}
+                className={`w-full flex items-center justify-between px-2 py-1.5 rounded border text-left transition-colors ${
+                  separateType === value
+                    ? "bg-primary/15 border-primary/40"
+                    : "bg-background-secondary border-border hover:border-primary/30"
+                }`}
+              >
+                <span className="min-w-0">
+                  <span className="block text-[10px] text-text-primary">{label}</span>
+                  <span className="block text-[8px] text-text-muted">{hint}</span>
+                </span>
+                <span className="shrink-0 text-[9px] text-text-secondary flex items-center gap-0.5">
+                  <Coins size={8} /> {separateCost(value)}
+                </span>
+              </button>
+            ))}
+          </div>
+        </Field>
+        {separateType === "split_stem_advanced" && (
+          <Field label="Which stem">
+            <div className="flex flex-wrap gap-1">
+              {ADVANCED_STEM_NAMES.map((n) => (
+                <button
+                  key={n}
+                  onClick={() => setStemName(n)}
+                  className={`px-1.5 py-0.5 rounded text-[9px] border transition-colors ${
+                    stemName === n
+                      ? "bg-primary text-black border-primary font-medium"
+                      : "bg-background-secondary text-text-secondary border-border hover:border-primary/40"
+                  }`}
+                >
+                  {n}
+                </button>
+              ))}
+            </div>
+          </Field>
+        )}
+        <p className="text-[8px] text-text-muted">
+          Each stem lands on its own audio track, so you can rebalance or replace one part
+          without touching the rest. Imported and recorded audio works too — not just AI tracks.
         </p>
-        <RunButton busy={busy === "separate"} cost={SUNO_OP_COST.separate} label="Separate" onClick={handleSeparate} />
+        <RunButton
+          busy={busy === "separate"}
+          cost={separateCost(separateType)}
+          label="Separate"
+          onClick={handleSeparate}
+        />
+        {/* Karaoke is just the 2-stem split with the vocal thrown away, but
+            nobody thinks of it that way — so it gets its own button. */}
+        <button
+          onClick={handleKaraoke}
+          disabled={!!busy}
+          className="w-full py-1.5 rounded-lg bg-background-secondary border border-border text-[10px] text-text-secondary hover:text-primary hover:border-primary/40 transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5"
+        >
+          {busy === "separate" ? <Loader2 size={11} className="animate-spin" /> : <Mic2 size={11} />}
+          Make a karaoke track — instrumental only · {separateCost("separate_vocal")} cr
+        </button>
+      </OpRow>
+
+      {/* Replace a section — the surgical alternative to re-rolling a whole song. */}
+      <OpRow
+        id="replace_section"
+        icon={Replace}
+        title="Replace a section"
+        cost={SUNO_OP_COST.replace_section}
+        open={openOp === "replace_section"}
+        busy={busy === "replace_section"}
+        onToggle={() => toggle("replace_section")}
+      >
+        <div className="grid grid-cols-2 gap-1.5">
+          <Field label="From (s)">
+            <Input
+              type="number"
+              value={rsStart}
+              onChange={(e) => setRsStart(Number(e.target.value))}
+              className="h-7 text-[11px] bg-background-secondary border-border"
+            />
+          </Field>
+          <Field label="To (s)">
+            <Input
+              type="number"
+              value={rsEnd}
+              onChange={(e) => setRsEnd(Number(e.target.value))}
+              className="h-7 text-[11px] bg-background-secondary border-border"
+            />
+          </Field>
+        </div>
+        <Field label="What should this part become">
+          <Input
+            value={rsPrompt}
+            onChange={(e) => setRsPrompt(e.target.value)}
+            placeholder="e.g. a bigger chorus with stacked harmonies"
+            className="h-7 text-[11px] bg-background-secondary border-border"
+          />
+        </Field>
+        <Field label="Style tags">
+          <div className="flex gap-1.5">
+            <Input
+              value={rsTags}
+              onChange={(e) => setRsTags(e.target.value)}
+              placeholder="e.g. indie pop, anthemic"
+              className="h-7 text-[11px] bg-background-secondary border-border flex-1"
+            />
+            <BoostBtn value={rsTags} onApply={setRsTags} k="rs-tags" />
+          </div>
+        </Field>
+        <Field label="Title">
+          <Input
+            value={rsTitle}
+            onChange={(e) => setRsTitle(e.target.value)}
+            placeholder={mediaItem.name || "track title"}
+            className="h-7 text-[11px] bg-background-secondary border-border"
+          />
+        </Field>
+        <Field label="Full lyrics after the edit">
+          <textarea
+            value={rsLyrics}
+            onChange={(e) => setRsLyrics(e.target.value)}
+            rows={4}
+            placeholder="The COMPLETE lyric of the track once this section is changed — not just the new lines."
+            className="w-full rounded-md bg-background-secondary border border-border text-[10px] p-1.5 text-text-primary"
+          />
+        </Field>
+        <p className="text-[8px] text-text-muted">
+          6–60 seconds, and at most half the track. Suno blends the new part into what comes
+          before and after, so the rest of the song is untouched.
+        </p>
+        <RunButton
+          busy={busy === "replace_section"}
+          cost={SUNO_OP_COST.replace_section}
+          label="Replace section"
+          onClick={handleReplaceSection}
+        />
+      </OpRow>
+
+      {/* Persona — one artist identity across many releases. */}
+      <OpRow
+        id="persona"
+        icon={UserRoundPen}
+        title="Create artist persona"
+        cost={SUNO_OP_COST.persona}
+        open={openOp === "persona"}
+        busy={busy === "persona"}
+        disabled={!hasLineage}
+        disabledHint="Only available for tracks generated by Suno here"
+        onToggle={() => toggle("persona")}
+      >
+        <Field label="Artist name">
+          <Input
+            value={personaName}
+            onChange={(e) => setPersonaName(e.target.value)}
+            placeholder="e.g. Nightwell"
+            className="h-7 text-[11px] bg-background-secondary border-border"
+          />
+        </Field>
+        <Field label="What defines this artist">
+          <Input
+            value={personaDesc}
+            onChange={(e) => setPersonaDesc(e.target.value)}
+            placeholder="e.g. breathy alto over warm analog synths, unhurried phrasing"
+            className="h-7 text-[11px] bg-background-secondary border-border"
+          />
+        </Field>
+        <div className="grid grid-cols-2 gap-1.5">
+          <Field label="From (s)">
+            <Input
+              type="number"
+              value={personaStart}
+              onChange={(e) => setPersonaStart(Number(e.target.value))}
+              className="h-7 text-[11px] bg-background-secondary border-border"
+            />
+          </Field>
+          <Field label="To (s)">
+            <Input
+              type="number"
+              value={personaEnd}
+              onChange={(e) => setPersonaEnd(Number(e.target.value))}
+              className="h-7 text-[11px] bg-background-secondary border-border"
+            />
+          </Field>
+        </div>
+        <p className="text-[8px] text-text-muted">
+          Learns the sound of a 10–30s window so later tracks can be the same artist.
+          Needs Suno V5 or V5.5 when you use it.
+        </p>
+        {personaId && (
+          <p className="text-[9px] text-primary break-all">Persona id: {personaId}</p>
+        )}
+        <RunButton
+          busy={busy === "persona"}
+          cost={SUNO_OP_COST.persona}
+          label="Create persona"
+          onClick={handlePersona}
+        />
+      </OpRow>
+
+      {/* MIDI — only meaningful once a separation exists. */}
+      <OpRow
+        id="midi"
+        icon={Piano}
+        title="Transcribe to MIDI"
+        cost={SUNO_OP_COST.midi}
+        open={openOp === "midi"}
+        busy={busy === "midi"}
+        disabled={!separationTaskId}
+        disabledHint="Separate this track into stems first"
+        onToggle={() => toggle("midi")}
+      >
+        <p className="text-[9px] text-text-secondary">
+          Turns the stems from your last separation into notes and downloads a .mid you can
+          open in any DAW.
+        </p>
+        <RunButton busy={busy === "midi"} cost={SUNO_OP_COST.midi} label="Download MIDI" onClick={handleMidi} />
       </OpRow>
 
       {/* Convert to WAV */}
@@ -1119,7 +1841,8 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
       )}
       {!hasLineage && (
         <p className="text-[8px] text-text-muted text-center">
-          Separate / WAV / Lyrics unlock for tracks generated by Suno here.
+          WAV, lyrics and personas unlock for tracks generated by Suno here. Stem separation,
+          covers, extends and section replacement work on any audio.
         </p>
       )}
     </div>

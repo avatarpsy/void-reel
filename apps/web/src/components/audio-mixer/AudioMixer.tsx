@@ -9,7 +9,11 @@ import { useProjectStore } from "../../stores/project-store";
 import { ChannelStrip } from "./ChannelStrip";
 import type { ChannelStripState } from "./types";
 import { volumeToDb, formatDb } from "./types";
+import { Transport } from "../editor/Transport";
 import { getRealtimeAudioGraph } from "@openreel/core";
+
+/** Output rates worth offering: CD, broadcast/DAW standard, and hi-res. */
+const SAMPLE_RATES = [44100, 48000, 96000] as const;
 
 export interface AudioMixerProps {
   /** Whether the mixer panel is visible */
@@ -135,6 +139,7 @@ export const AudioMixer: React.FC<AudioMixerProps> = ({
   const project = useProjectStore((state) => state.project);
   const muteTrack = useProjectStore((state) => state.muteTrack);
   const soloTrack = useProjectStore((state) => state.soloTrack);
+  const updateSettings = useProjectStore((state) => state.updateSettings);
 
   // Use the same graph as playback so mixer volume affects preview/playback
   const audioGraphRef = useRef<ReturnType<typeof getRealtimeAudioGraph> | null>(null);
@@ -379,18 +384,51 @@ export const AudioMixer: React.FC<AudioMixerProps> = ({
         />
       </div>
 
-      {/* Status bar */}
-      <div className="mt-3 pt-3 border-t border-border flex items-center justify-between text-xs text-text-muted shrink-0">
+      {/* Transport row — deliberately its own row BELOW the channel strips so
+          it sits where the video preview's control bar sits. Muscle memory for
+          play/scrub should not move when you switch between video and music. */}
+      <div className="mt-3 pt-3 border-t border-border flex items-center justify-center shrink-0">
+        <Transport />
+      </div>
+
+      {/* Status + output configuration */}
+      <div className="mt-2 pt-2 border-t border-border flex items-center justify-between text-xs text-text-muted shrink-0">
         <span>
           {channels.length} channel{channels.length !== 1 ? "s" : ""}
           {hasSoloedTracks && (
             <span className="ml-2 text-amber-400">• Solo active</span>
           )}
         </span>
-        <span>
-          Sample Rate: {project.settings.sampleRate}Hz | Channels:{" "}
-          {project.settings.channels}
-        </span>
+        {/* Output configuration. These were a read-only label; they drive the
+            render and every user asking "what am I bouncing at?" had no way to
+            change it without leaving the mixer. */}
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-1.5">
+            <span>Sample rate</span>
+            <select
+              value={project.settings.sampleRate}
+              onChange={(e) => updateSettings({ sampleRate: Number(e.target.value) })}
+              className="bg-background-secondary border border-border rounded px-1.5 py-0.5 text-text-primary focus:border-primary focus:outline-none"
+              aria-label="Output sample rate"
+            >
+              {SAMPLE_RATES.map((r) => (
+                <option key={r} value={r}>{r === 44100 ? "44.1 kHz" : `${r / 1000} kHz`}</option>
+              ))}
+            </select>
+          </label>
+          <label className="flex items-center gap-1.5">
+            <span>Channels</span>
+            <select
+              value={project.settings.channels}
+              onChange={(e) => updateSettings({ channels: Number(e.target.value) })}
+              className="bg-background-secondary border border-border rounded px-1.5 py-0.5 text-text-primary focus:border-primary focus:outline-none"
+              aria-label="Output channel count"
+            >
+              <option value={1}>Mono</option>
+              <option value={2}>Stereo</option>
+            </select>
+          </label>
+        </div>
       </div>
     </div>
   );

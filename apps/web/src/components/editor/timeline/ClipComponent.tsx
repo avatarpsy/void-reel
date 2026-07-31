@@ -425,7 +425,13 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
       : 1;
 
   const hasFilmstrip = (mediaItem?.filmstripThumbnails?.length ?? 0) > 0;
-  const clipName = mediaItem?.name || clip.mediaId.slice(0, 8);
+  // `clip.mediaId` is typed as required but a malformed/partially-written clip
+  // can reach the timeline without one (interrupted save, a bridge call that
+  // failed mid-way, hand-edited project_state). Calling .slice on it threw
+  // inside render, which the ErrorBoundary turned into "timeline failed to
+  // load" for the WHOLE project — one bad clip taking down every good one.
+  // Degrade to a placeholder label instead.
+  const clipName = mediaItem?.name || clip.mediaId?.slice(0, 8) || "untitled clip";
 
   const isInteracting = isDragging || isTrimming;
 

@@ -1473,10 +1473,18 @@ function App() {
             const mediaIndex = new Map<string, string>();
             const mediaNameIndex = new Map<string, string>();
             const mediaTypeIndex = new Map<string, string>();
+            // Suno lineage per media item. Without this on the wire the agent
+            // can never run the Suno-NATIVE ops (stem separation on a Suno
+            // track, WAV, timestamped lyrics, persona, native extend) — they
+            // all key off taskId+audioId, and read_tracks was the only place
+            // the agent could have learned them.
+            const mediaSunoIndex = new Map<string, { taskId: string; audioId: string }>();
             for (const m of (proj.mediaLibrary?.items ?? [])) {
               if (m.id && m.originalUrl) mediaIndex.set(m.id, m.originalUrl);
               if (m.id && (m as any).name) mediaNameIndex.set(m.id, String((m as any).name));
               if (m.id && (m as any).type) mediaTypeIndex.set(m.id, String((m as any).type));
+              const st = (m as any).sunoTaskId, sa = (m as any).sunoAudioId;
+              if (m.id && st && sa) mediaSunoIndex.set(m.id, { taskId: String(st), audioId: String(sa) });
             }
             // Media tracks: video, narration, music. The "track-captions"
             // entry in timeline.tracks has empty clips[] (text clips live
@@ -1503,6 +1511,10 @@ function App() {
                   // read current values before adjusting them.
                   fade: c.fade ?? null,
                   automation: c.automation ?? null,
+                  // Suno lineage (present only on Suno-generated audio) —
+                  // unlocks the native-only transform ops for the agent.
+                  sunoTaskId: mediaSunoIndex.get(c.mediaId)?.taskId,
+                  sunoAudioId: mediaSunoIndex.get(c.mediaId)?.audioId,
                 })),
               }));
             // Bucket live text clips into a single captions track.
