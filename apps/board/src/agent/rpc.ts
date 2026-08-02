@@ -36,10 +36,9 @@ import {
   type MediaRole, type RefKind,
 } from '../shot/model';
 import { allBlocks, findBlock, searchBlocks, setBlockCatalogue } from '../shot/blocks';
-import {
-  SEQUENCE_PURPOSES, nextSceneId, nextSequenceId, plannedRuntimeSec, readScreenplay,
-  sceneLetter, writeScreenplay,
-} from '../shot/screenplay-doc';
+import { readParsed, readScript, writeScript } from '../shot/screenplay-doc';
+import { coverage, nextScene, renderScene, renderScriptContext } from '../shot/resolution';
+import { sequenceOf } from '../shot/fountain';
 import {
   allModels, checkShot, effectiveModel, estimateShotCredits, findModel, referenceTag,
   setModelCatalogue, type ModelCaps,
@@ -127,22 +126,8 @@ function checkRev(expectRev: unknown): { ok: true } | ReturnType<typeof fail> {
  */
 function digest(board: MountedBoard) {
   const shots = readShots(board.std);
-  const sp = readScreenplay(board.std);
-
-  /**
-   * WHICH SCENES STILL HAVE NO SHOTS.
-   *
-   * Reported rather than left to be worked out, because it IS the agent's to-do
-   * list — the whole "now let us go scene by scene" flow is driven by this one
-   * array. An agent that had to derive it from two other arrays sometimes would
-   * not bother, and would then declare a storyboard finished with a hole in it.
-   */
-  const shotCountByScene = new Map<string, number>();
-  for (const sh of shots) {
-    if (!sh.sceneId) continue;
-    shotCountByScene.set(sh.sceneId, (shotCountByScene.get(sh.sceneId) ?? 0) + 1);
-  }
-  const seqNumber = new Map(sp.sequences.map((q, i) => [q.id, i + 1] as const));
+  const script = readParsed(board.std);
+  const cov = coverage(script, shots);
 
   return {
     ok: true as const,
@@ -151,45 +136,43 @@ function digest(board: MountedBoard) {
     surfaceId: board.surfaceId,
     shotCount: shots.length,
     /**
-     * THE SCREENPLAY — Sequence → Scene → Shot.
+     * THE SCRIPT AS A MAP, NOT AS A DOCUMENT.
      *
-     * Sent on EVERY read, not behind a separate tool, because the structure is
-     * what makes any individual shot answerable. An agent asked to improve shot
-     * 4 can only talk about shot 4 unless something says shot 4 is the turn.
+     * One line per scene and per sequence — small enough to send on every read
+     * however long the screenplay gets, and enough to know where you are. The
+     * full text of any scene is one `board-read-script` call away, which is what
+     * keeps a 40-scene script the same per-turn cost as a 4-scene one.
+     *
+     * `uncovered` is the load-bearing field: it is verified from the actual shot
+     * blocks, never asserted, and it IS the to-do list.
      */
-    screenplay: {
-      title: sp.title,
-      logline: sp.logline,
-      audience: sp.audience,
-      voice: sp.voice,
-      notes: sp.notes,
-      plannedRuntimeSec: plannedRuntimeSec(sp),
-      sequences: sp.sequences.map((q, i) => ({
-        id: q.id,
-        n: i + 1,
-        title: q.title,
-        purpose: q.purpose,
-        summary: q.summary,
-        targetSec: q.targetSec,
-        music: q.music,
-        look: q.look,
-        sceneIds: sp.scenes.filter(c => c.sequenceId === q.id).map(c => c.id),
+    script: {
+      title: script.title,
+      credit: script.credit,
+      empty: script.empty,
+      /** Character count, so the agent knows whether it holds the whole thing. */
+      chars: readScript(board.std).length,
+      acts: script.acts.map(a => ({ title: a.title, synopsis: a.synopsis.join(' ') })),
+      sequences: script.sequences.map((q, i) => ({
+        n: i + 1, title: q.title, synopsis: q.synopsis.join(' '),
       })),
-      scenes: sp.scenes.map((c, i) => ({
-        id: c.id,
-        letter: sceneLetter(i),
-        sequenceId: c.sequenceId,
-        sequence: seqNumber.get(c.sequenceId) ?? 0,
-        slug: c.slug,
-        summary: c.summary,
-        shotCount: shotCountByScene.get(c.id) ?? 0,
-      })),
-      /** Scene ids with nothing shot for them — where the work is. */
-      emptyScenes: sp.scenes.filter(c => !shotCountByScene.has(c.id)).map(c => c.id),
-      /** Sequences with no scenes at all — one level further back. */
-      emptySequences: sp.sequences
-        .filter(q => !sp.scenes.some(c => c.sequenceId === q.id))
-        .map(q => q.id),
+      scenes: cov.scenes.map(c => {
+        const scene = script.scenes.find(x => x.key === c.key)!;
+        return {
+          key: c.key,
+          n: c.n,
+          heading: c.heading,
+          synopsis: scene.synopsis.join(' '),
+          sequence: sequenceOf(script, scene)?.title ?? '',
+          shots: c.shots,
+        };
+      }),
+      /** Scene keys with no shots yet — the work remaining, in reading order. */
+      uncovered: cov.uncovered,
+      /** The one to work on next. Reading order, so the film is built front to back. */
+      next: nextScene(script, shots),
+      /** Shots on no scene, or on a scene the script no longer has. */
+      offScript: cov.offScript,
     },
     shots: shots.map((s, i) => {
       // A GRAPHIC HAS NO MODEL. `effectiveModel` falls back to the board
@@ -204,8 +187,8 @@ function digest(board: MountedBoard) {
         id: s.id,
         /** Position in the filmstrip, and therefore the shot number. */
         order: i,
-        /** Which scene this shot covers. '' when unplaced, which is legal. */
-        sceneId: s.sceneId,
+        /** Which scene of the script this covers. '' = off-script, which is legal. */
+        sceneKey: s.sceneKey,
         title: s.title,
         action: s.action,
         voiceover: s.voiceover,
@@ -299,103 +282,81 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
     'voidspace:board-read': () => digest(board),
 
     /**
-     * THE SCREENPLAY — written whole, in one call.
+     * THE SCREENPLAY — written whole, as Fountain.
      *
-     * Whole rather than incrementally, because a screenplay is a SHAPE: a tool
-     * that could only append would let an agent bolt a fourth sequence onto a
-     * three-sequence piece without ever reconsidering the first three. Rewriting
-     * is one undo step, so a bad restructure costs the user one Ctrl+Z.
+     * ONE STRING, and it replaces the document. There is no "append a scene"
+     * verb, because a screenplay is a shape: a tool that could only append would
+     * let an agent bolt a fourth sequence onto a three-sequence piece without
+     * ever reconsidering the first three. A rewrite is one Ctrl+Z, so a bad
+     * draft costs the user one gesture.
      *
-     * Ids are preserved across a rewrite when the caller sends them back, which
-     * is how shots keep their scene. An agent that drops an id gets a new scene
-     * and its shots become unplaced — recoverable, and visible immediately,
-     * because the panel will say "no shots" against it.
+     * SCENE KEYS SURVIVE A REWRITE as long as the sluglines do — they are
+     * derived from the slugline, not from position — so a rewrite that adds a
+     * scene in the middle does not orphan the shots below it. Renaming a
+     * slugline DOES orphan that scene's shots, visibly, as `offScript`.
      */
-    'voidspace:board-write-screenplay': args => {
+    'voidspace:board-write-script': args => {
       const g = guard(args); if (!g.ok) return g;
-      const current = readScreenplay(board.std);
-      const patch: Record<string, unknown> = {};
-      for (const k of ['title', 'logline', 'audience', 'voice', 'notes'] as const) {
-        if (typeof args[k] === 'string') patch[k] = args[k];
+      if (typeof args.text !== 'string') {
+        return fail('empty', 'Send the whole screenplay as `text`, in Fountain.');
       }
-
-      if (Array.isArray(args.sequences)) {
-        const taken = new Set<string>();
-        patch.sequences = (args.sequences as unknown[]).map(raw => {
-          const q = (raw ?? {}) as Record<string, unknown>;
-          // Two sequences sharing an id would silently merge their scenes, so a
-          // duplicate is given a fresh id rather than accepted.
-          let id = String(q.id ?? '').trim() || nextSequenceId(
-            [...current.sequences, ...[...taken].map(t => ({ id: t } as never))],
-          );
-          while (taken.has(id)) id = `${id}b`;
-          taken.add(id);
-          return {
-            id,
-            title: String(q.title ?? ''),
-            purpose: SEQUENCE_PURPOSES.includes(q.purpose as never) ? q.purpose : 'setup',
-            summary: String(q.summary ?? ''),
-            targetSec: Number(q.targetSec) > 0 ? Number(q.targetSec) : 0,
-            music: String(q.music ?? ''),
-            look: String(q.look ?? ''),
-          };
-        });
-      }
-
-      if (Array.isArray(args.scenes)) {
-        const taken = new Set<string>();
-        patch.scenes = (args.scenes as unknown[]).map(raw => {
-          const c = (raw ?? {}) as Record<string, unknown>;
-          let id = String(c.id ?? '').trim() || nextSceneId(
-            [...current.scenes, ...[...taken].map(t => ({ id: t } as never))],
-          );
-          while (taken.has(id)) id = `${id}b`;
-          taken.add(id);
-          return {
-            id,
-            sequenceId: String(c.sequenceId ?? ''),
-            slug: String(c.slug ?? ''),
-            summary: String(c.summary ?? ''),
-          };
-        });
-      }
-
-      if (!Object.keys(patch).length) {
-        return fail(
-          'empty',
-          'Give at least one of: title, logline, audience, voice, notes, sequences, scenes.',
-        );
-      }
-
-      writeScreenplay(board.std, board.surfaceId, patch as never);
+      writeScript(board.std, board.surfaceId, args.text);
       rev++;
       return digest(board);
     },
 
     /**
-     * Put a shot in a scene, or take it out of one.
+     * ONE SCENE, VERBATIM — the T2 tier.
      *
-     * Separate from `board-update-shot` because it is a STRUCTURAL move rather
-     * than an edit to the shot's content, and because it needs to validate
-     * against the screenplay — a shot pointing at a scene that does not exist is
-     * how a storyboard starts claiming coverage it has not got.
+     * Read-only and free. This is how the agent loads the scene it is about to
+     * cover without carrying the whole script every turn. Verbatim because it is
+     * about to decide how to photograph it, and a summary of a scene is not a
+     * scene: the detail the action lingers on is exactly what a shot contains.
      */
+    'voidspace:board-read-script': args => {
+      const script = readParsed(board.std);
+      const key = String(args.sceneKey ?? '').trim();
+
+      if (!key) {
+        // No scene asked for → the map, plus as much text as fits.
+        const ctx = renderScriptContext(script, String(args.focus ?? '') || null);
+        return {
+          ok: true as const,
+          rev,
+          mode: ctx.mode,
+          totalScenes: ctx.totalScenes,
+          included: ctx.included,
+          text: ctx.body,
+        };
+      }
+
+      const text = renderScene(script, key);
+      if (text === null) {
+        return fail(
+          'unknown_scene',
+          `No scene "${key}" in the screenplay. Call board_read for the scene keys — `
+          + 'the slugline may have been rewritten since you last looked.',
+        );
+      }
+      return { ok: true as const, rev, mode: 'scene' as const, sceneKey: key, text };
+    },
+
+    /** Put a shot on a scene, or take it off. */
     'voidspace:board-set-scene': args => {
       const g = guard(args); if (!g.ok) return g;
       const shotId = String(args.shotId ?? '');
       const missing = needShot(shotId); if (missing) return missing;
-      const sceneId = String(args.sceneId ?? '').trim();
-      if (sceneId) {
-        const sp = readScreenplay(board.std);
-        if (!sp.scenes.some(c => c.id === sceneId)) {
+      const sceneKey = String(args.sceneKey ?? '').trim();
+      if (sceneKey) {
+        const script = readParsed(board.std);
+        if (!script.scenes.some(c => c.key === sceneKey)) {
           return fail(
             'unknown_scene',
-            `No scene "${sceneId}" in the screenplay. Call board_read for the scene ids, `
-            + 'or write the screenplay first with board_write_screenplay.',
+            `No scene "${sceneKey}" in the screenplay. Call board_read for the scene keys.`,
           );
         }
       }
-      setShotFields(board.std, shotId, { sceneId } as never);
+      setShotFields(board.std, shotId, { sceneKey } as never);
       rev++;
       return digest(board);
     },
@@ -411,17 +372,17 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
        * the filmstrip are two documents that merely happen to be about the same
        * film, and nothing can answer "which scene still has no shots".
        */
-      const sceneId = String(args.sceneId ?? '').trim();
-      if (sceneId && !readScreenplay(board.std).scenes.some(c => c.id === sceneId)) {
+      const sceneKey = String(args.sceneKey ?? '').trim();
+      if (sceneKey && !readParsed(board.std).scenes.some(c => c.key === sceneKey)) {
         return fail(
           'unknown_scene',
-          `No scene "${sceneId}" in the screenplay. Call board_read for the scene ids, `
-          + 'or write the screenplay first with board_write_screenplay.',
+          `No scene "${sceneKey}" in the screenplay. Call board_read for the scene keys, `
+          + 'or write the screenplay first with board_write_script.',
         );
       }
       const made = createShots(board.std, board.surfaceId, titles);
-      if (sceneId) {
-        for (const id of made) setShotFields(board.std, id, { sceneId } as never);
+      if (sceneKey) {
+        for (const id of made) setShotFields(board.std, id, { sceneKey } as never);
       }
       /**
        * SHOW WHAT WAS JUST MADE.

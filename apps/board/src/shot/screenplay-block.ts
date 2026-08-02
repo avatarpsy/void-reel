@@ -1,59 +1,52 @@
 /**
- * The screenplay panel, rendered.
+ * The screenplay, rendered as a screenplay.
  *
- * A block on the board, exactly like a shot — same drag-handle header, same
- * claimed body, same commit-on-blur. It is the document the shots come from, so
- * it is a thing you can see and type into rather than state hidden behind a
- * button.
+ * ── WHY IT LOOKS LIKE THIS ───────────────────────────────────────────────────
+ * A script has a typographic form that is a hundred years old and every writer
+ * recognises: 12pt Courier, sluglines hard left in caps, action full width,
+ * character names indented to about 3.7in, dialogue in a narrow column beneath.
+ * Those measurements are not decoration — they are why a page of screenplay runs
+ * roughly a minute, which is the only reason anyone can judge pacing by looking.
  *
- * ── WHAT IT SHOWS, AND WHY IN THIS ORDER ─────────────────────────────────────
- * The top half is the film's identity — title, logline, who it is for, how it
- * speaks. The logline sits directly under the title and is the widest thing on
- * the card, because it is the sentence you re-read when a shot stops making
- * sense, and a screenplay whose logline is buried is a screenplay nobody checks
- * against.
+ * So this renders a PAGE: paper, margins, monospace, real indents. A person can
+ * read it the way they read a PDF, and scroll it, and believe it.
  *
- * The bottom half is the STRUCTURE: one row per sequence, each showing what it
- * is for, how long it should run, and how many shots exist for it. That last
- * number is the whole point of the panel — a sequence reading "no shots" is the
- * next piece of work, visible without counting cards on the canvas.
+ * ── EDITING ──────────────────────────────────────────────────────────────────
+ * Reading is the default; editing is a mode. Double-click (or the Edit button)
+ * swaps the rendered page for a plain textarea holding the raw Fountain, and
+ * blur commits. That split exists because the two things want opposite layouts:
+ * you read a formatted page, and you write plain text where every character is
+ * where you put it. Trying to serve both at once produces a contenteditable that
+ * fights the writer over indentation.
  *
- * ── THE RUNTIME BAR ──────────────────────────────────────────────────────────
- * Planned seconds against the shots actually placed. Videos fail by running long
- * far more often than they fail by any single bad shot, and by the time a person
- * notices in the editor the fix is expensive. Here it costs a sentence.
+ * ── WHAT IS DELIBERATELY NOT HERE ────────────────────────────────────────────
+ * No sequence rows, no scene forms, no purpose dropdowns, no duration fields.
+ * All of that was deleted. The structure is IN the text — `#` acts, `##`
+ * sequences, sluglines — and anything that needs it parses it. Nothing about the
+ * film is authored twice.
  */
 import { GfxBlockComponent } from '@blocksuite/std';
 import { css, html, nothing } from 'lit';
 import { state } from 'lit/decorators.js';
 import { repeat } from 'lit/directives/repeat.js';
 
-import { takeCaret, stopFieldKeys } from '../ui/field-caret';
+import { parseFountain, type Element } from './fountain';
 import { readShots } from './shots';
-import {
-  PURPOSE_HINT, SEQUENCE_PURPOSES, nextSceneId, nextSequenceId, plannedRuntimeSec,
-  readScreenplay, sceneLetter,
-  type Scene, type ScreenplayBlockModel, type Sequence, type SequencePurpose,
-} from './screenplay-doc';
+import { coverage } from './resolution';
+import { readScript, type ScreenplayBlockModel } from './screenplay-doc';
 
-/** The identity fields, in the order a writer settles them. */
-const HEAD_FIELDS = [
-  {
-    key: 'logline' as const,
-    label: 'LOGLINE',
-    placeholder: 'One sentence: what this video IS.',
-  },
-  {
-    key: 'audience' as const,
-    label: 'AUDIENCE',
-    placeholder: 'Who it is for, and where it plays.',
-  },
-  {
-    key: 'notes' as const,
-    label: 'DIRECTION',
-    placeholder: 'Tone, references, what to avoid.',
-  },
-];
+/** Shown on a board whose screenplay has not been started. */
+const PLACEHOLDER = `Title: Untitled
+
+# ACT ONE
+
+## SEQUENCE 1 — the opening
+= What this run has to do.
+
+INT. SOMEWHERE — DAY
+
+Something happens.
+`;
 
 export class ScreenplayBlockComponent extends GfxBlockComponent<ScreenplayBlockModel> {
   static override styles = css`
@@ -77,13 +70,13 @@ export class ScreenplayBlockComponent extends GfxBlockComponent<ScreenplayBlockM
       color: var(--vs-text, #1a1a2e);
     }
 
-    /* THE DRAG HANDLE — deliberately does not claim pointer events, so the
-       panel moves like any other object on the canvas. */
+    /* THE DRAG HANDLE — no pointer claiming, so the page moves like any other
+       object on the canvas. */
     .sp__head {
       display: flex;
       align-items: center;
       gap: 8px;
-      padding: 10px 14px;
+      padding: 9px 14px;
       border-bottom: 1px solid var(--vs-border, rgba(255, 255, 255, 0.1));
       background: var(--vs-shot-head, rgba(127, 140, 170, 0.08));
       cursor: grab;
@@ -98,710 +91,303 @@ export class ScreenplayBlockComponent extends GfxBlockComponent<ScreenplayBlockM
     .sp__title {
       flex: 1;
       min-width: 0;
-      font: 600 15px/1.3 var(--affine-font-family, sans-serif);
-      outline: none;
-      cursor: text;
+      font: 600 13px/1.3 var(--affine-font-family, sans-serif);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
-    .sp__title:empty::before {
-      content: attr(data-placeholder);
+    .sp__stat {
+      font: 400 10px/1 var(--affine-font-family, sans-serif);
       color: var(--vs-muted, #94a3b8);
-      font-weight: 400;
+      white-space: nowrap;
     }
+    .sp__btn {
+      font: 500 10px/1 var(--affine-font-family, sans-serif);
+      border: 1px solid var(--vs-border, rgba(127, 140, 170, 0.32));
+      background: none;
+      color: var(--vs-text, #1a1a2e);
+      border-radius: 6px;
+      padding: 4px 8px;
+      cursor: pointer;
+      flex: none;
+    }
+    .sp__btn:hover { background: var(--vs-hover, rgba(127, 140, 170, 0.14)); }
 
-    .sp__body {
+    /* ── The page ───────────────────────────────────────────────────────────
+       A tinted sheet inside a darker gutter, so it reads as paper on a desk
+       rather than as a text field. */
+    .sp__scroll {
       flex: 1;
       min-height: 0;
       overflow-y: auto;
-      padding: 12px 14px 16px;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
+      background: var(--vs-page-gutter, #e8eaf0);
+      padding: 14px 0 28px;
     }
-
-    .field {
-      display: flex;
-      flex-direction: column;
-      gap: 3px;
-    }
-    .field__label {
-      font: 600 9px/1 var(--affine-font-family, sans-serif);
-      letter-spacing: 0.13em;
-      color: var(--vs-muted, #94a3b8);
-    }
-    .field__text {
-      font: 400 12.5px/1.5 var(--affine-font-family, sans-serif);
-      outline: none;
-      cursor: text;
-      border-radius: 6px;
-      padding: 4px 6px;
-      margin: 0 -6px;
+    .page {
+      width: 100%;
+      max-width: 520px;
+      margin: 0 auto;
+      background: var(--vs-page, #fffef9);
+      border: 1px solid rgba(15, 23, 42, 0.1);
+      box-shadow: 0 2px 10px rgba(15, 23, 42, 0.1);
+      /* 1in top/bottom, 1.5in left, 1in right — scaled to this width. */
+      padding: 34px 26px 40px 38px;
+      /* 12pt Courier is the standard. Anything else and the page-per-minute
+         relationship a writer judges pacing by stops holding. */
+      font-family: 'Courier New', Courier, monospace;
+      font-size: 11.5px;
+      line-height: 1.36;
+      color: #14151a;
       white-space: pre-wrap;
       word-break: break-word;
     }
-    .field__text:hover {
-      background: var(--vs-hover, rgba(127, 140, 170, 0.07));
+
+    .el-scene_heading {
+      text-transform: uppercase;
+      font-weight: 700;
+      margin: 14px 0 6px;
+      letter-spacing: 0.02em;
     }
-    .field__text:focus {
-      background: var(--vs-hover, rgba(127, 140, 170, 0.1));
+    .el-action { margin: 0 0 6px; }
+    .el-character {
+      margin: 10px 0 0 36%;
+      text-transform: uppercase;
     }
-    .field__text:empty::before {
-      content: attr(data-placeholder);
-      color: var(--vs-muted, #94a3b8);
+    .el-parenthetical { margin: 0 0 0 28%; }
+    .el-dialogue { margin: 0 12% 0 20%; }
+    .el-transition {
+      text-align: right;
+      text-transform: uppercase;
+      margin: 8px 0 10px;
     }
-    .field--logline .field__text {
-      font-size: 14px;
-      line-height: 1.45;
-      font-weight: 500;
+    .el-centered { text-align: center; margin: 8px 0; }
+    .el-blank { height: 0.7em; }
+    .el-page_break {
+      border-top: 1px dashed rgba(15, 23, 42, 0.25);
+      margin: 16px 0;
+      height: 0;
     }
 
-    /* ── The runtime bar ───────────────────────────────────────────────── */
-    .runtime {
-      display: flex;
-      align-items: baseline;
-      gap: 6px;
-      font: 400 11px/1 var(--affine-font-family, sans-serif);
-      color: var(--vs-muted, #64748b);
-    }
-    .runtime b {
-      font-weight: 600;
-      font-size: 13px;
-      color: var(--vs-text, #1a1a2e);
-    }
-    .runtime--over b {
-      color: #dc2626;
-    }
-
-    .sect {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      border-top: 1px solid var(--vs-border, rgba(127, 140, 170, 0.16));
+    /* SECTIONS AND SYNOPSES ARE NOT PART OF THE SCRIPT.
+       Every Fountain tool omits them from the printed page, so they are drawn in
+       the margin voice — visible while working, obviously not the film. */
+    .el-section {
+      font-family: var(--affine-font-family, Inter, sans-serif);
+      color: #7c3aed;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin: 20px 0 2px;
+      border-top: 1px solid rgba(124, 58, 237, 0.22);
       padding-top: 10px;
     }
-    .sect__label {
-      font: 600 9px/1 var(--affine-font-family, sans-serif);
-      letter-spacing: 0.13em;
-      color: var(--vs-muted, #94a3b8);
+    .el-section[data-depth='1'] { font-size: 11px; }
+    .el-section[data-depth='2'] { font-size: 10px; margin-top: 16px; }
+    .el-synopsis {
+      font-family: var(--affine-font-family, Inter, sans-serif);
+      font-style: italic;
+      font-size: 10.5px;
+      color: #6b7280;
+      margin: 0 0 8px;
     }
 
-    .seqs {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
+    /* A scene the board has no shots for. Marked in the MARGIN, never in the
+       prose — the script must read as the script, not as a checklist. */
+    .marker {
+      position: relative;
     }
-    .seq {
-      border: 1px solid var(--vs-border, rgba(127, 140, 170, 0.2));
-      border-radius: 9px;
-      padding: 7px 9px;
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-      background: var(--vs-hover, rgba(127, 140, 170, 0.04));
-    }
-    /* A sequence with nothing shot for it is the next piece of work, so it is
-       drawn as an invitation rather than as an error. */
-    .seq--empty {
-      border-style: dashed;
-      background: none;
-    }
-    .seq__top {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-    .seq__n {
-      font: 600 10px/1 var(--affine-font-family, sans-serif);
-      color: var(--vs-muted, #94a3b8);
-      flex: none;
-    }
-    .seq__title {
-      flex: 1;
-      min-width: 0;
-      font: 500 12.5px/1.35 var(--affine-font-family, sans-serif);
-      outline: none;
-      cursor: text;
-    }
-    .seq__title:empty::before {
-      content: attr(data-placeholder);
-      color: var(--vs-muted, #94a3b8);
-      font-weight: 400;
-    }
-    .seq__purpose {
-      font: 600 9px/1 var(--affine-font-family, sans-serif);
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      padding: 3px 6px;
-      border-radius: 999px;
-      border: 1px solid var(--vs-border, rgba(127, 140, 170, 0.3));
-      background: none;
-      color: var(--vs-text, #1a1a2e);
-      cursor: pointer;
-      flex: none;
-    }
-    .seq__purpose:hover {
-      background: var(--vs-hover, rgba(127, 140, 170, 0.12));
-    }
-    .seq__sec {
-      font: 500 10px/1 var(--affine-font-family, sans-serif);
-      color: var(--vs-muted, #64748b);
-      width: 34px;
+    .marker::before {
+      content: attr(data-mark);
+      position: absolute;
+      left: -34px;
+      top: 15px;
+      width: 28px;
       text-align: right;
-      outline: none;
-      cursor: text;
-      flex: none;
+      font-family: var(--affine-font-family, sans-serif);
+      font-size: 8.5px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      color: #b45309;
     }
-    .seq__sec:empty::before {
-      content: '—s';
-      color: var(--vs-muted, #cbd5e1);
-    }
-    .seq__sum {
-      font: 400 11.5px/1.45 var(--affine-font-family, sans-serif);
-      color: var(--vs-muted, #64748b);
-      outline: none;
-      cursor: text;
-    }
-    .seq__sum:empty::before {
-      content: attr(data-placeholder);
-      color: var(--vs-muted, #cbd5e1);
-    }
-    /* ── Scenes, nested inside their sequence ──────────────────────────── */
-    .scenes {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-      /* Indented and rule-marked so the nesting is legible at a glance —
-         three levels of plain rows read as one flat list. */
-      margin-left: 8px;
-      padding-left: 8px;
-      border-left: 2px solid var(--vs-border, rgba(127, 140, 170, 0.22));
-    }
-    .scene {
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-      padding: 4px 6px;
-      border-radius: 7px;
-      background: var(--vs-shot-bg, #fff);
-      border: 1px solid var(--vs-border, rgba(127, 140, 170, 0.16));
-    }
-    .scene--empty {
-      border-style: dashed;
-      background: none;
-    }
-    .scene__top {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-    .scene__letter {
-      font: 700 10px/1 var(--affine-font-family, sans-serif);
-      color: var(--vs-muted, #94a3b8);
-      width: 14px;
-      flex: none;
-    }
-    .scene__slug {
+    .marker[data-covered='yes']::before { color: #16a34a; font-weight: 500; }
+
+    /* ── The editor ─────────────────────────────────────────────────────── */
+    .editor {
       flex: 1;
-      min-width: 0;
-      font: 600 11px/1.35 var(--affine-font-family, sans-serif);
-      letter-spacing: 0.02em;
-      text-transform: uppercase;
-      outline: none;
-      cursor: text;
-    }
-    .scene__slug:empty::before {
-      content: attr(data-placeholder);
-      color: var(--vs-muted, #cbd5e1);
-      font-weight: 400;
-    }
-    .scene__count {
-      font: 400 9.5px/1 var(--affine-font-family, sans-serif);
-      color: var(--vs-muted, #94a3b8);
-      flex: none;
-    }
-    .scene__count--empty {
-      color: #b45309;
-      font-weight: 600;
-    }
-    .scene__sum {
-      font: 400 11px/1.4 var(--affine-font-family, sans-serif);
-      color: var(--vs-muted, #64748b);
-      outline: none;
-      cursor: text;
-      padding-left: 20px;
-    }
-    .scene__sum:empty::before {
-      content: attr(data-placeholder);
-      color: var(--vs-muted, #cbd5e1);
-    }
-
-    .seq__foot {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      font: 400 10px/1 var(--affine-font-family, sans-serif);
-      color: var(--vs-muted, #94a3b8);
-    }
-    .seq__add {
-      border: none;
-      background: none;
-      font: 500 10px/1 var(--affine-font-family, sans-serif);
-      color: var(--vs-muted, #64748b);
-      cursor: pointer;
-      padding: 3px 5px;
-      border-radius: 5px;
-    }
-    .seq__add:hover {
-      background: var(--vs-hover, rgba(127, 140, 170, 0.14));
-      color: var(--vs-text, #1a1a2e);
-    }
-    .seq__count--empty {
-      color: #b45309;
-      font-weight: 600;
-    }
-    .seq__x {
-      margin-left: auto;
-      border: none;
-      background: none;
-      color: var(--vs-muted, #94a3b8);
-      cursor: pointer;
-      font-size: 13px;
-      line-height: 1;
-      padding: 2px 4px;
-      border-radius: 5px;
-    }
-    .seq__x:hover {
-      background: rgba(220, 38, 38, 0.1);
-      color: #dc2626;
-    }
-
-    .add {
-      border: 1px dashed var(--vs-border, rgba(127, 140, 170, 0.34));
-      border-radius: 9px;
-      padding: 7px;
-      font: 500 11px/1 var(--affine-font-family, sans-serif);
-      color: var(--vs-muted, #64748b);
-      background: none;
-      cursor: pointer;
+      min-height: 0;
       width: 100%;
-    }
-    .add:hover {
-      background: var(--vs-hover, rgba(127, 140, 170, 0.08));
-      color: var(--vs-text, #1a1a2e);
+      box-sizing: border-box;
+      border: none;
+      outline: none;
+      resize: none;
+      padding: 16px 18px;
+      background: var(--vs-page, #fffef9);
+      color: #14151a;
+      font-family: 'Courier New', Courier, monospace;
+      font-size: 12px;
+      line-height: 1.45;
+      tab-size: 4;
     }
 
     .empty {
-      font: 400 11.5px/1.5 var(--affine-font-family, sans-serif);
-      color: var(--vs-muted, #94a3b8);
+      max-width: 520px;
+      margin: 0 auto;
+      padding: 26px 24px;
+      font: 400 12px/1.6 var(--affine-font-family, sans-serif);
+      color: var(--vs-muted, #64748b);
+      background: var(--vs-page, #fffef9);
+      border: 1px dashed rgba(15, 23, 42, 0.18);
+      border-radius: 8px;
       text-align: center;
-      padding: 10px 4px;
     }
-
-    /* The purpose menu. Bounded and scrollable, so it can never overflow the
-       fixed-height card — the mistake the block picker made first time. */
-    .menu {
-      position: absolute;
-      z-index: 20;
-      right: 12px;
-      max-height: 232px;
-      overflow-y: auto;
-      background: var(--vs-shot-bg, #fff);
-      border: 1px solid var(--vs-border, rgba(127, 140, 170, 0.28));
-      border-radius: 10px;
-      box-shadow: 0 12px 32px rgba(15, 23, 42, 0.18);
-      padding: 4px;
-      min-width: 210px;
-    }
-    .menu__item {
-      display: block;
-      width: 100%;
-      text-align: left;
-      border: none;
-      background: none;
-      border-radius: 6px;
-      padding: 6px 8px;
-      cursor: pointer;
-      color: var(--vs-text, #1a1a2e);
-    }
-    .menu__item:hover {
-      background: var(--vs-hover, rgba(127, 140, 170, 0.12));
-    }
-    .menu__k {
-      font: 600 10px/1.3 var(--affine-font-family, sans-serif);
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-    }
-    .menu__h {
-      font: 400 10.5px/1.35 var(--affine-font-family, sans-serif);
-      color: var(--vs-muted, #94a3b8);
-    }
+    .empty b { display: block; margin-bottom: 6px; color: var(--vs-text, #1a1a2e); }
   `;
 
-  /** Which sequence's purpose menu is open, by id. */
-  @state() private accessor _menuFor = '';
+  @state() private accessor _editing = false;
 
   /**
-   * Re-render when SHOTS change, not just when the screenplay does.
+   * Repaint when SHOTS change, not only when the script does.
    *
-   * The per-sequence shot count and the actual runtime are read off the shot
-   * blocks, so without this the panel would keep saying "no shots" after one was
-   * added — the single most misleading thing it could do, because that count is
-   * the reason the panel exists.
+   * The margin marks are coverage, read off the shot blocks. Without this the
+   * page would keep marking a scene uncovered after its shots were added —
+   * the single most misleading thing it could say, because those marks are the
+   * whole reason the page is worth looking at while working.
    */
-  private disposeShots: (() => void) | null = null;
+  private disposeDoc: (() => void) | null = null;
 
   override connectedCallback(): void {
     super.connectedCallback();
-    const sub = this.store.slots.blockUpdated.subscribe(() => this.requestUpdate());
-    this.disposeShots = () => sub.unsubscribe();
+    const sub = this.store.slots.blockUpdated.subscribe(({ id }) => {
+      if (id !== this.model.id) this.requestUpdate();
+    });
+    this.disposeDoc = () => sub.unsubscribe();
   }
 
   override disconnectedCallback(): void {
-    this.disposeShots?.();
-    this.disposeShots = null;
+    this.disposeDoc?.();
+    this.disposeDoc = null;
     super.disconnectedCallback();
   }
 
-  private get screenplay() {
-    return readScreenplay(this.std);
-  }
-
-  private readonly claimCaret = (e: PointerEvent) => {
-    e.stopPropagation();
-    takeCaret(this.std, e.currentTarget as HTMLElement, e.clientX, e.clientY);
-  };
-
-  /** Commit on blur — a store write per keystroke would flood undo history. */
-  private commitHead(key: 'title' | 'logline' | 'audience' | 'notes', el: HTMLElement): void {
-    const value = (el.textContent ?? '').trim();
-    if (value !== this.model.props[key]) {
+  private commit(el: HTMLTextAreaElement): void {
+    const next = el.value;
+    if (next !== this.model.props.text) {
       this.store.captureSync();
-      this.store.updateBlock(this.model, { [key]: value });
+      this.store.updateBlock(this.model, { text: next });
     }
+    this._editing = false;
   }
 
-  /**
-   * Write one field of one sequence.
-   *
-   * The whole array is replaced rather than mutated in place: `sequences` is a
-   * plain array prop, and mutating the stored object would not be seen as a
-   * change by the store — the edit would appear to work and then vanish on
-   * reload. See [[feedback-iframe-boundary-plain-data]] for the same class of
-   * bug at the other boundary.
-   */
-  private patchSequence(id: string, patch: Partial<Sequence>): void {
-    const next = this.screenplay.sequences.map(q => (q.id === id ? { ...q, ...patch } : q));
-    this.store.captureSync();
-    this.store.updateBlock(this.model, { sequences: next });
-  }
-
-  private commitSequence(id: string, key: 'title' | 'summary', el: HTMLElement): void {
-    const value = (el.textContent ?? '').trim();
-    const current = this.screenplay.sequences.find(q => q.id === id);
-    if (current && current[key] !== value) this.patchSequence(id, { [key]: value });
-  }
-
-  private commitSeconds(id: string, el: HTMLElement): void {
-    const n = Math.max(0, Math.round(Number((el.textContent ?? '').replace(/[^0-9.]/g, '')) || 0));
-    const current = this.screenplay.sequences.find(q => q.id === id);
-    if (current && current.targetSec !== n) this.patchSequence(id, { targetSec: n });
-    // Repaint so "12" becomes "12s" and rubbish becomes the placeholder.
-    this.requestUpdate();
-  }
-
-  private addSequence(): void {
-    const sequences = this.screenplay.sequences;
-    const next: Sequence = {
-      id: nextSequenceId(sequences),
-      title: '',
-      // The first sequence of anything is the hook; after that, most writers are
-      // adding the next stage rather than another opening.
-      purpose: sequences.length === 0 ? 'hook' : 'setup',
-      summary: '',
-      targetSec: 0,
-      music: '',
-      look: '',
-    };
-    this.store.captureSync();
-    this.store.updateBlock(this.model, { sequences: [...sequences, next] });
-  }
-
-  /**
-   * Remove a sequence — and DETACH its scenes rather than deleting them.
-   *
-   * Deleting a structural row must never destroy work. The scenes survive with
-   * an empty `sequenceId`, keeping every shot still attached to its scene, and
-   * they reappear under "not in a sequence" where they can be re-placed in one
-   * click. Nothing on the canvas moves and nothing is lost.
-   */
-  private removeSequence(id: string): void {
-    this.store.captureSync();
-    this.store.updateBlock(this.model, {
-      sequences: this.screenplay.sequences.filter(q => q.id !== id),
-      scenes: this.screenplay.scenes.map(c =>
-        (c.sequenceId === id ? { ...c, sequenceId: '' } : c)),
-    });
-  }
-
-  /**
-   * Remove a scene — and DETACH its shots, same rule one level down.
-   *
-   * The shots stay on the board with an empty `sceneId`, exactly like shots
-   * someone sketched before writing a screenplay.
-   */
-  private removeScene(id: string): void {
-    this.store.captureSync();
-    this.store.transact(() => {
-      this.store.updateBlock(this.model, {
-        scenes: this.screenplay.scenes.filter(c => c.id !== id),
-      });
-      for (const shot of readShots(this.std)) {
-        if (shot.sceneId !== id) continue;
-        const block = this.store.getBlock(shot.id);
-        if (block) this.store.updateBlock(block.model, { sceneId: '' });
-      }
-    });
-  }
-
-  private patchScene(id: string, patch: Partial<Scene>): void {
-    const next = this.screenplay.scenes.map(c => (c.id === id ? { ...c, ...patch } : c));
-    this.store.captureSync();
-    this.store.updateBlock(this.model, { scenes: next });
-  }
-
-  private commitScene(id: string, key: 'slug' | 'summary', el: HTMLElement): void {
-    const value = (el.textContent ?? '').trim();
-    const current = this.screenplay.scenes.find(c => c.id === id);
-    if (current && current[key] !== value) this.patchScene(id, { [key]: value });
-  }
-
-  /** A new scene inside a sequence. Appended AFTER that sequence's last scene,
-   *  so the array order stays the reading order rather than creation order. */
-  private addScene(sequenceId: string): void {
-    const scenes = this.screenplay.scenes;
-    const next: Scene = { id: nextSceneId(scenes), sequenceId, slug: '', summary: '' };
-    let at = scenes.length;
-    for (let i = scenes.length - 1; i >= 0; i--) {
-      if (scenes[i].sequenceId === sequenceId) { at = i + 1; break; }
+  private startEditing(seed?: string): void {
+    if (seed !== undefined && !this.model.props.text.trim()) {
+      this.store.captureSync();
+      this.store.updateBlock(this.model, { text: seed });
     }
-    this.store.captureSync();
-    this.store.updateBlock(this.model, {
-      scenes: [...scenes.slice(0, at), next, ...scenes.slice(at)],
+    this._editing = true;
+    // Focus after the textarea exists.
+    requestAnimationFrame(() => {
+      const ta = this.querySelector<HTMLTextAreaElement>('.editor');
+      ta?.focus();
+      ta?.setSelectionRange(ta.value.length, ta.value.length);
     });
   }
 
-  private setPurpose(id: string, purpose: SequencePurpose): void {
-    this._menuFor = '';
-    this.patchSequence(id, { purpose });
-  }
-
-  /** One scene row — used inside a sequence and in the unplaced list. */
-  private renderScene(c: Scene, letter: string, shots: number) {
-    return html`<div class="scene ${shots === 0 ? 'scene--empty' : ''}">
-      <div class="scene__top">
-        <span class="scene__letter">${letter}</span>
-        <div
-          class="scene__slug"
-          contenteditable="plaintext-only"
-          data-placeholder="INT. KITCHEN — DAY"
-          title="Where and when. A scene ends when either changes."
-          @pointerdown=${this.claimCaret}
-          @keydown=${stopFieldKeys}
-          @blur=${(e: FocusEvent) => this.commitScene(c.id, 'slug', e.target as HTMLElement)}
-        >${c.slug}</div>
-        <span class="scene__count ${shots === 0 ? 'scene__count--empty' : ''}"
-          >${shots === 0 ? 'no shots' : shots === 1 ? '1 shot' : `${shots} shots`}</span>
-        <button
-          class="seq__x"
-          title="Remove this scene — its shots stay on the board"
-          @click=${(e: Event) => { e.stopPropagation(); this.removeScene(c.id); }}
-        >×</button>
-      </div>
-      <div
-        class="scene__sum"
-        contenteditable="plaintext-only"
-        data-placeholder="What happens here"
-        @pointerdown=${this.claimCaret}
-        @keydown=${stopFieldKeys}
-        @blur=${(e: FocusEvent) => this.commitScene(c.id, 'summary', e.target as HTMLElement)}
-      >${c.summary}</div>
-    </div>`;
+  /** Group elements so a scene heading and its body share one marker element. */
+  private renderElement(e: Element, mark: string | null, covered: boolean) {
+    const cls = `el-${e.type}${mark !== null ? ' marker' : ''}`;
+    if (e.type === 'blank') return html`<div class="el-blank"></div>`;
+    if (e.type === 'page_break') return html`<div class="el-page_break"></div>`;
+    return html`<div
+      class=${cls}
+      data-depth=${e.depth ?? ''}
+      data-mark=${mark ?? ''}
+      data-covered=${covered ? 'yes' : 'no'}
+    >${e.text}</div>`;
   }
 
   override renderGfxBlock() {
-    const s = this.screenplay;
+    const text = readScript(this.std);
+    const script = parseFountain(text);
     const shots = readShots(this.std);
-    /**
-     * Shot counts are per SCENE, and a sequence's count is the sum of its
-     * scenes'. Counted once here rather than filtered inside the template: the
-     * panel repaints on every document update, and a filter per row would walk
-     * the whole shot list once per scene.
-     */
-    const countByScene = new Map<string, number>();
-    for (const shot of shots) {
-      if (!shot.sceneId) continue;
-      countByScene.set(shot.sceneId, (countByScene.get(shot.sceneId) ?? 0) + 1);
-    }
-    // Letters are assigned by ARRAY position across the whole screenplay, so a
-    // scene keeps its letter when a sequence above it is edited.
-    const letterOf = new Map(s.scenes.map((c, i) => [c.id, sceneLetter(i)] as const));
-    const shotsInSequence = (qid: string) => s.scenes
-      .filter(c => c.sequenceId === qid)
-      .reduce((n, c) => n + (countByScene.get(c.id) ?? 0), 0);
+    const cov = coverage(script, shots);
+    const byKey = new Map(cov.scenes.map(s => [s.key, s] as const));
 
-    const planned = plannedRuntimeSec(s);
-    // What the shots actually add up to. Shots with no duration set contribute
-    // nothing, so this reads low early on — which is honest: an unplanned shot
-    // has no length yet, and pretending otherwise would hide the overrun.
-    const actual = shots.reduce((n, sh) => n + (sh.durationSec > 0 ? sh.durationSec : 0), 0);
-    const over = planned > 0 && actual > planned;
-    const unplaced = s.scenes.filter(c => !s.sequences.some(q => q.id === c.sequenceId));
+    // Which line each scene heading sits on, so the margin mark lands on it.
+    const markAtLine = new Map<number, { mark: string; covered: boolean }>();
+    for (const scene of script.scenes) {
+      const c = byKey.get(scene.key);
+      markAtLine.set(scene.fromLine, {
+        mark: c && c.shots > 0 ? `${c.shots}` : '—',
+        covered: !!c && c.shots > 0,
+      });
+    }
+
+    const covered = cov.scenes.filter(s => s.shots > 0).length;
+    const stat = script.scenes.length
+      ? `${covered}/${script.scenes.length} scenes covered${cov.offScript ? ` · ${cov.offScript} off-script` : ''}`
+      : '';
 
     return html`<div class="sp">
-      <!-- Header = drag handle. No pointer claiming: the panel must move like
-           any other canvas object. -->
       <div class="sp__head">
         <span class="sp__kind">Screenplay</span>
-        <div
-          class="sp__title"
-          contenteditable="plaintext-only"
-          data-placeholder="Untitled video"
-          @pointerdown=${this.claimCaret}
-          @keydown=${stopFieldKeys}
-          @blur=${(e: FocusEvent) => this.commitHead('title', e.target as HTMLElement)}
-        >${s.title}</div>
+        <span class="sp__title">${script.title || 'Untitled'}</span>
+        ${stat ? html`<span class="sp__stat">${stat}</span>` : nothing}
+        <button
+          class="sp__btn"
+          @pointerdown=${(e: Event) => e.stopPropagation()}
+          @click=${(e: Event) => {
+            e.stopPropagation();
+            if (this._editing) {
+              this.querySelector<HTMLTextAreaElement>('.editor')?.blur();
+            } else {
+              this.startEditing();
+            }
+          }}
+        >${this._editing ? 'Done' : 'Edit'}</button>
       </div>
 
-      <div
-        class="sp__body"
-        @pointerdown=${(e: PointerEvent) => e.stopPropagation()}
-        @dblclick=${(e: Event) => e.stopPropagation()}
-        @wheel=${(e: WheelEvent) => e.stopPropagation()}
-      >
-        ${HEAD_FIELDS.map(f => html`<div class="field field--${f.key}">
-          <span class="field__label">${f.label}</span>
-          <div
-            class="field__text"
-            contenteditable="plaintext-only"
-            data-placeholder=${f.placeholder}
-            @pointerdown=${this.claimCaret}
-            @keydown=${stopFieldKeys}
-            @blur=${(e: FocusEvent) => this.commitHead(f.key, e.target as HTMLElement)}
-          >${s[f.key]}</div>
-        </div>`)}
-
-        <div class="sect">
-          <span class="sect__label">Structure</span>
-          ${planned > 0
-            ? html`<span class="runtime ${over ? 'runtime--over' : ''}">
-                <b>${actual}s</b> of ${planned}s planned
-              </span>`
-            : nothing}
-        </div>
-
-        ${s.sequences.length
-          ? html`<div class="seqs">
-              ${repeat(s.sequences, q => q.id, (q, i) => {
-                const scenes = s.scenes.filter(c => c.sequenceId === q.id);
-                const n = shotsInSequence(q.id);
-                return html`<div class="seq ${n === 0 ? 'seq--empty' : ''}">
-                  <div class="seq__top">
-                    <span class="seq__n">${i + 1}</span>
-                    <div
-                      class="seq__title"
-                      contenteditable="plaintext-only"
-                      data-placeholder="What this run has to do"
-                      @pointerdown=${this.claimCaret}
-                      @keydown=${stopFieldKeys}
-                      @blur=${(e: FocusEvent) =>
-                        this.commitSequence(q.id, 'title', e.target as HTMLElement)}
-                    >${q.title}</div>
-                    <div
-                      class="seq__sec"
-                      contenteditable="plaintext-only"
-                      title="Time budget for this run"
-                      @pointerdown=${this.claimCaret}
-                      @keydown=${stopFieldKeys}
-                      @blur=${(e: FocusEvent) =>
-                        this.commitSeconds(q.id, e.target as HTMLElement)}
-                    >${q.targetSec ? `${q.targetSec}s` : ''}</div>
-                    <button
-                      class="seq__purpose"
-                      title=${PURPOSE_HINT[q.purpose]}
-                      @click=${(e: Event) => {
-                        e.stopPropagation();
-                        this._menuFor = this._menuFor === q.id ? '' : q.id;
-                      }}
-                    >${q.purpose}</button>
-                  </div>
-                  <div
-                    class="seq__sum"
-                    contenteditable="plaintext-only"
-                    data-placeholder=${PURPOSE_HINT[q.purpose]}
-                    @pointerdown=${this.claimCaret}
-                    @keydown=${stopFieldKeys}
-                    @blur=${(e: FocusEvent) =>
-                      this.commitSequence(q.id, 'summary', e.target as HTMLElement)}
-                  >${q.summary}</div>
-
-                  ${scenes.length
-                    ? html`<div class="scenes">
-                        ${repeat(scenes, c => c.id, c => this.renderScene(
-                          c, letterOf.get(c.id) ?? '?', countByScene.get(c.id) ?? 0))}
-                      </div>`
-                    : nothing}
-
-                  <div class="seq__foot">
-                    <button
-                      class="seq__add"
-                      @click=${(e: Event) => { e.stopPropagation(); this.addScene(q.id); }}
-                    >+ scene</button>
-                    ${q.music ? html`<span>♪ ${q.music}</span>` : nothing}
-                    <button
-                      class="seq__x"
-                      title="Remove this sequence — its scenes and shots stay"
-                      @click=${(e: Event) => { e.stopPropagation(); this.removeSequence(q.id); }}
-                    >×</button>
-                  </div>
-
-                  ${this._menuFor === q.id
-                    ? html`<div class="menu" @click=${(e: Event) => e.stopPropagation()}>
-                        ${SEQUENCE_PURPOSES.map(pp => html`<button
-                          class="menu__item"
-                          @click=${() => this.setPurpose(q.id, pp)}
-                        >
-                          <div class="menu__k">${pp}</div>
-                          <div class="menu__h">${PURPOSE_HINT[pp]}</div>
-                        </button>`)}
-                      </div>`
-                    : nothing}
-                </div>`;
-              })}
-            </div>`
-          : html`<div class="empty">
-              No structure yet. Tell the agent what you want to make, or add the
-              first sequence yourself.
-            </div>`}
-
-        <!--
-          SCENES NOBODY HAS PLACED YET, shown rather than hidden.
-
-          A scene loses its sequence when that sequence is deleted, and shots
-          attached to it are real work. Dropping it out of the panel would make
-          those shots look unaccounted for while they sit on the canvas.
-        -->
-        ${unplaced.length
-          ? html`<div class="sect"><span class="sect__label">Not in a sequence</span></div>
-            <div class="scenes">
-              ${repeat(unplaced, c => c.id, c => this.renderScene(
-                c, letterOf.get(c.id) ?? '?', countByScene.get(c.id) ?? 0))}
-            </div>`
-          : nothing}
-
-        <button class="add" @click=${(e: Event) => { e.stopPropagation(); this.addSequence(); }}>
-          + Add sequence
-        </button>
-      </div>
+      ${this._editing
+        ? html`<textarea
+            class="editor"
+            spellcheck="false"
+            .value=${text}
+            @pointerdown=${(e: Event) => e.stopPropagation()}
+            @dblclick=${(e: Event) => e.stopPropagation()}
+            @wheel=${(e: WheelEvent) => e.stopPropagation()}
+            @keydown=${(e: KeyboardEvent) => {
+              // The canvas listens for keys on the host — Backspace deletes the
+              // selected block, space pans. Without this, writing a script would
+              // also drive the board.
+              e.stopPropagation();
+              if (e.key === 'Escape') (e.target as HTMLTextAreaElement).blur();
+            }}
+            @blur=${(e: FocusEvent) => this.commit(e.target as HTMLTextAreaElement)}
+          ></textarea>`
+        : html`<div
+            class="sp__scroll"
+            @pointerdown=${(e: Event) => e.stopPropagation()}
+            @wheel=${(e: WheelEvent) => e.stopPropagation()}
+            @dblclick=${(e: Event) => { e.stopPropagation(); this.startEditing(); }}
+          >
+            ${script.empty
+              ? html`<div class="empty">
+                  <b>No screenplay yet.</b>
+                  Tell the agent what you want to make and it will write one —
+                  or double-click here to start typing.
+                </div>`
+              : html`<div class="page">
+                  ${repeat(
+                    script.elements,
+                    e => e.line,
+                    e => {
+                      const m = markAtLine.get(e.line);
+                      return this.renderElement(e, m ? m.mark : null, !!m?.covered);
+                    },
+                  )}
+                </div>`}
+          </div>`}
     </div>`;
   }
 }
+
+export { PLACEHOLDER as SCREENPLAY_PLACEHOLDER };

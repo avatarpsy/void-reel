@@ -31,7 +31,7 @@ import {
 } from './model';
 import { allBlocks, findBlock, onBlockCatalogue, searchBlocks, type BlockInfo } from './blocks';
 import { resolveSlots, slotFills } from './slots';
-import { readScreenplay, sceneLetter } from './screenplay-doc';
+import { readParsed } from './screenplay-doc';
 import { lazyBlockPreview, openBlockLightbox, type LazyPreview } from '../ui/block-preview';
 import {
   allModels, checkShot, effectiveModel, estimateShotCredits, formatCredits,
@@ -149,6 +149,13 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
     .shot__seq--none {
       color: var(--vs-muted, #94a3b8);
       border-style: dashed;
+    }
+    /* The shot's scene was renamed or removed. Amber, not red: nothing is
+       broken and nothing is lost — it just needs re-pointing. */
+    .shot__seq--lost {
+      color: #b45309;
+      border-color: rgba(180, 83, 9, 0.45);
+      background: rgba(180, 83, 9, 0.08);
     }
     /* Bounded and scrollable — a menu that grows with the screenplay must never
        overflow a fixed-height card. */
@@ -1097,84 +1104,91 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
   }
 
   /**
-   * Put this shot in a scene, or take it out of one.
+   * Put this shot on a scene of the screenplay, or take it off.
    *
-   * Detaching is offered FIRST in the menu, deliberately: a shot in the wrong
-   * scene is worse than a shot in none, because the structure then claims
-   * coverage it does not have — and the whole value of the screenplay panel is
-   * that "no shots yet" can be trusted.
+   * Detaching is offered FIRST in the menu, deliberately: a shot on the WRONG
+   * scene is worse than one on none, because the screenplay then claims coverage
+   * it has not got — and the whole value of the margin marks is that "no shots
+   * yet" can be trusted.
    */
-  private setScene(sceneId: string): void {
+  private setScene(sceneKey: string): void {
     this._pickingSeq = false;
-    if ((this.model.props.sceneId ?? '') === sceneId) return;
+    if ((this.model.props.sceneKey ?? '') === sceneKey) return;
     this.store.captureSync();
-    this.store.updateBlock(this.model, { sceneId });
+    this.store.updateBlock(this.model, { sceneKey });
   }
 
   private renderSeqPill() {
-    const s = readScreenplay(this.std);
-    const id = this.model.props.sceneId ?? '';
-    const i = s.scenes.findIndex(c => c.id === id);
-    if (i < 0) {
+    const script = readParsed(this.std);
+    const key = this.model.props.sceneKey ?? '';
+    const scene = script.scenes.find(c => c.key === key);
+
+    if (!key) {
       return html`<button
         class="shot__seq shot__seq--none"
-        title="Not in a scene yet"
+        title="Not on a scene yet"
         @pointerdown=${(e: Event) => e.stopPropagation()}
         @click=${(e: Event) => { e.stopPropagation(); this._pickingSeq = !this._pickingSeq; }}
       >+ scene</button>`;
     }
-    const scene = s.scenes[i];
-    const seq = s.sequences.find(q => q.id === scene.sequenceId);
-    // Sequence number is shown alongside the scene letter because the two
-    // together are the shot's full address: "1A" says which run and which
-    // moment, which is exactly what someone scanning the filmstrip wants.
-    const seqN = seq ? s.sequences.indexOf(seq) + 1 : '';
+
+    /**
+     * A KEY THAT NO LONGER RESOLVES, said plainly.
+     *
+     * This happens when the writer renames a slugline out from under a shot. It
+     * is not corruption and nothing is lost — the shot still holds all its
+     * references — but it must be VISIBLE, because a silent re-bind to the
+     * wrong scene is the one failure that would quietly ruin a storyboard.
+     */
+    if (!scene) {
+      return html`<button
+        class="shot__seq shot__seq--lost"
+        title="This shot's scene is no longer in the screenplay — pick its new one"
+        @pointerdown=${(e: Event) => e.stopPropagation()}
+        @click=${(e: Event) => { e.stopPropagation(); this._pickingSeq = !this._pickingSeq; }}
+      >off-script</button>`;
+    }
+
     return html`<button
       class="shot__seq"
-      title=${`${seq ? `Sequence ${seqN} · ${seq.purpose} — ` : ''}Scene ${sceneLetter(i)}${scene.slug ? ` · ${scene.slug}` : ''}`}
+      title=${`Scene ${scene.n} — ${scene.heading}`}
       @pointerdown=${(e: Event) => e.stopPropagation()}
       @click=${(e: Event) => { e.stopPropagation(); this._pickingSeq = !this._pickingSeq; }}
-    >${seqN}${sceneLetter(i)}</button>`;
+    >sc ${scene.n}</button>`;
   }
 
   private renderSeqMenu() {
-    const s = readScreenplay(this.std);
-    const current = this.model.props.sceneId ?? '';
+    const script = readParsed(this.std);
+    const current = this.model.props.sceneKey ?? '';
     return html`<div
       class="seqmenu"
       @pointerdown=${(e: Event) => e.stopPropagation()}
       @click=${(e: Event) => e.stopPropagation()}
       @wheel=${(e: WheelEvent) => e.stopPropagation()}
     >
-      ${s.scenes.length
+      ${script.scenes.length
         ? html`
           <button
             class="seqmenu__item"
             aria-current=${current === '' ? 'true' : 'false'}
             @click=${() => this.setScene('')}
           >
-            <div class="seqmenu__k">No scene</div>
-            <div class="seqmenu__h">Sketching — not part of the structure yet.</div>
+            <div class="seqmenu__k">Off-script</div>
+            <div class="seqmenu__h">A visual idea with no scene written for it yet.</div>
           </button>
-          ${s.scenes.map((c, i) => {
-            const seq = s.sequences.find(q => q.id === c.sequenceId);
-            const seqN = seq ? s.sequences.indexOf(seq) + 1 : '';
-            return html`<button
-              class="seqmenu__item"
-              aria-current=${c.id === current ? 'true' : 'false'}
-              @click=${() => this.setScene(c.id)}
-            >
-              <div class="seqmenu__k">
-                Scene ${sceneLetter(i)}${c.slug ? ` · ${c.slug}` : ''}
-              </div>
-              <div class="seqmenu__h">
-                ${seq ? `Sequence ${seqN} · ${seq.purpose}` : 'not in a sequence'}${c.summary ? ` — ${c.summary}` : ''}
-              </div>
-            </button>`;
-          })}`
+          ${script.scenes.map(c => html`<button
+            class="seqmenu__item"
+            aria-current=${c.key === current ? 'true' : 'false'}
+            @click=${() => this.setScene(c.key)}
+          >
+            <div class="seqmenu__k">${c.n}. ${c.heading}</div>
+            ${c.synopsis.length
+              ? html`<div class="seqmenu__h">${c.synopsis[0]}</div>`
+              : nothing}
+          </button>`)}`
         : html`<div class="seqmenu__empty">
-            No scenes yet. Add them in the screenplay panel — or tell the agent
-            what this video should be about and it will draft the structure.
+            No screenplay yet. Write one first — tell the agent what you want to
+            make, or type it into the screenplay page.
           </div>`}
     </div>`;
   }
@@ -1345,14 +1359,14 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
         <!--
           WHAT THIS SHOT IS FOR, on the card.
 
-          A shot only knows what it SHOWS; its scene says where and when it
-          happens, and the scene's sequence says what it is DOING. Put here
-          rather than in a panel because "which of these is the hook?" is a
-          question you ask while looking at the filmstrip, and an answer you
-          have to go and open something to get is one nobody checks.
+          A shot only knows what it SHOWS. The scene it covers is what says
+          where and when it happens and what it is FOR. Put here rather than in
+          a panel because "which scene is this?" is a question you ask while
+          looking at the filmstrip, and an answer you have to go and open
+          something to get is one nobody checks.
 
-          Unassigned reads "+ scene" — an invitation, not a warning. Shots
-          drawn before the structure exists are normal work.
+          Unattached reads "+ scene" — an invitation, not a warning. A visual
+          idea sketched before its scene is written is normal work.
         -->
         ${this.renderSeqPill()}
         <!--

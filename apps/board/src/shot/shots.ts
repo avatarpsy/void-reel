@@ -43,8 +43,8 @@ export interface ShotView {
   composition: string;
   /** Values for that block's declared slots. */
   compositionVars: Record<string, string>;
-  /** Which screenplay scene this shot covers. '' when unstructured. */
-  sceneId: string;
+  /** Which screenplay scene this shot covers. '' when off-script. */
+  sceneKey: string;
   x: number;
 }
 
@@ -95,7 +95,7 @@ export function readShots(std: BlockStdScope): ShotView[] {
          * data; `media` was already safe because the digest rebuilds each entry.
          */
         compositionVars: { ...(p.compositionVars ?? {}) },
-        sceneId: p.sceneId ?? '',
+        sceneKey: p.sceneKey ?? '',
         x,
       };
     })
@@ -176,7 +176,7 @@ export function setShotFields(
   id: string,
   patch: Partial<Pick<ShotView,
     'title' | 'action' | 'voiceover' | 'camera' | 'model' | 'durationSec' | 'kind'
-    | 'composition' | 'compositionVars' | 'sceneId'
+    | 'composition' | 'compositionVars' | 'sceneKey'
   >>,
 ): boolean {
   const block = std.store.getBlock(id);

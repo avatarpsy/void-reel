@@ -479,23 +479,25 @@ type ShotProps = {
    */
   compositionVars: Record<string, string>;
   /**
-   * WHICH SCENE THIS SHOT COVERS.
+   * WHICH SCENE OF THE SCREENPLAY THIS SHOT COVERS.
    *
-   * The link between the screenplay and the filmstrip, and the reason either is
-   * worth having. It lets the board say "the turn has no shots yet", lets
+   * The only link between the document and the filmstrip, and the reason either
+   * is worth having. It lets the board say "this scene has no shots yet", lets
    * compile hand the editor a structured film instead of a flat list, and lets
    * the agent answer "what is this shot FOR" — which it cannot do from the shot
    * alone, because a shot only knows what it shows.
    *
-   * The SCENE, not the sequence: a shot's sequence is derived by following
-   * `scene.sequenceId`. Storing both would let the two disagree, and on the day
-   * they did, "which sequence is this in?" would have two answers.
+   * A KEY, NOT A POSITION. `parseFountain` derives it from the slugline plus an
+   * ordinal among identical sluglines, so inserting a scene at the top of the
+   * script does not silently re-point every shot below it. Renaming a slugline
+   * DOES orphan its shots — deliberately, because that surfaces as visible drift
+   * the user can fix rather than as a silent re-binding.
    *
-   * Empty is legal and common: someone sketching shots before the structure
-   * exists is working normally, not wrongly. Nothing in the pipeline requires
-   * it, so an unassigned shot compiles exactly as it always did.
+   * Empty is legal and common: someone sketching a visual idea before the scene
+   * is written is working normally. Those shots show as off-script and compile
+   * exactly as they always did.
    */
-  sceneId: string;
+  sceneKey: string;
 } & GfxCommonBlockProps;
 
 /** Panel geometry. Width is fixed; height is whatever the content needs, and the
@@ -517,7 +519,7 @@ export const ShotBlockSchema = defineBlockSchema({
     kind: 'clip',
     composition: '',
     compositionVars: {},
-    sceneId: '',
+    sceneKey: '',
     xywh: `[0,0,${SHOT_W},${SHOT_H}]`,
     index: 'a0',
     lockedBySelf: false,
