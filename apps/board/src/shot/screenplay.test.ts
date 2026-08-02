@@ -43,22 +43,37 @@ function media(over: Partial<ShotMedia> = {}): Omit<ShotMedia, 'id'> {
 }
 
 describe('compileBoard', () => {
-  it('emits exactly one beat per shot, in filmstrip order', () => {
+  it('emits exactly one heading per shot, in filmstrip order', () => {
     const board = makeTestBoard();
     createShots(board.std, board.surfaceId, ['Kitchen', 'Street', 'Window']);
 
     const out = compileBoard(board.std, HEADER);
     expect(out.shots.map(s => s.title)).toEqual(['Kitchen', 'Street', 'Window']);
-    expect(out.screenplay.match(/^SCENE \d+ — /gm)).toHaveLength(3);
-    expect(out.screenplay).toContain('SCENE 2 — Street');
+    expect(out.screenplay.match(/^SHOT \d+ — /gm)).toHaveLength(3);
+    expect(out.screenplay).toContain('SHOT 2 — Street');
+  });
+
+  /**
+   * SHOT, NOT SCENE — and the distinction is load-bearing, not cosmetic.
+   *
+   * A scene is a different object one level up: several shots may cover one.
+   * If the per-clip headings also said SCENE, the compiled document would use
+   * the word for two things and a model reading it could not tell which.
+   */
+  it('numbers clips as SHOT so SCENE stays free for the level above', () => {
+    const board = makeTestBoard();
+    createShots(board.std, board.surfaceId, ['Kitchen']);
+    const text = compileBoard(board.std, HEADER).screenplay;
+    expect(text).toContain('SHOT 1 — Kitchen');
+    expect(text).not.toMatch(/^SCENE \d+ — /m);
   });
 
   /** A shot named "SCENE 3 — Kitchen" by the user or the agent must not compile
-   *  to "SCENE 1 — SCENE 3 — Kitchen". */
-  it('does not double up a scene prefix the title already carries', () => {
+   *  to "SHOT 1 — SCENE 3 — Kitchen". */
+  it('does not double up a heading prefix the title already carries', () => {
     const board = makeTestBoard();
     createShots(board.std, board.surfaceId, ['SCENE 3 — Kitchen']);
-    expect(compileBoard(board.std, HEADER).screenplay).toContain('SCENE 1 — Kitchen');
+    expect(compileBoard(board.std, HEADER).screenplay).toContain('SHOT 1 — Kitchen');
   });
 
   it('carries what the user wrote, and only what they wrote', () => {

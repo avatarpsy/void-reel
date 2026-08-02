@@ -478,6 +478,24 @@ type ShotProps = {
    * mapping between them is how a card ends up saying the wrong number.
    */
   compositionVars: Record<string, string>;
+  /**
+   * WHICH SCENE THIS SHOT COVERS.
+   *
+   * The link between the screenplay and the filmstrip, and the reason either is
+   * worth having. It lets the board say "the turn has no shots yet", lets
+   * compile hand the editor a structured film instead of a flat list, and lets
+   * the agent answer "what is this shot FOR" — which it cannot do from the shot
+   * alone, because a shot only knows what it shows.
+   *
+   * The SCENE, not the sequence: a shot's sequence is derived by following
+   * `scene.sequenceId`. Storing both would let the two disagree, and on the day
+   * they did, "which sequence is this in?" would have two answers.
+   *
+   * Empty is legal and common: someone sketching shots before the structure
+   * exists is working normally, not wrongly. Nothing in the pipeline requires
+   * it, so an unassigned shot compiles exactly as it always did.
+   */
+  sceneId: string;
 } & GfxCommonBlockProps;
 
 /** Panel geometry. Width is fixed; height is whatever the content needs, and the
@@ -499,6 +517,7 @@ export const ShotBlockSchema = defineBlockSchema({
     kind: 'clip',
     composition: '',
     compositionVars: {},
+    sceneId: '',
     xywh: `[0,0,${SHOT_W},${SHOT_H}]`,
     index: 'a0',
     lockedBySelf: false,

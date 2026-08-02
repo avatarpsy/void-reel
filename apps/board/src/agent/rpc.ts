@@ -37,6 +37,10 @@ import {
 } from '../shot/model';
 import { allBlocks, findBlock, searchBlocks, setBlockCatalogue } from '../shot/blocks';
 import {
+  SEQUENCE_PURPOSES, nextSceneId, nextSequenceId, plannedRuntimeSec, readScreenplay,
+  sceneLetter, writeScreenplay,
+} from '../shot/screenplay-doc';
+import {
   allModels, checkShot, effectiveModel, estimateShotCredits, findModel, referenceTag,
   setModelCatalogue, type ModelCaps,
 } from '../shot/models';
@@ -76,12 +80,19 @@ function fail(reason: string, message: string) {
  * This is the second of the lock's three places (the others are the Firestore
  * status the save endpoints check, and the tool dispatcher on the page).
  */
+/**
+ * Refuse a mutation only when the DOCUMENT itself is read-only.
+ *
+ * Which now means a genuinely read-only session — a shared link, a replay — and
+ * NOT "this board has been compiled". Compiling leaves the board editable on
+ * purpose: recompiling mints a new project, so fixing a mistake costs nothing
+ * and there is no state a person can get stuck in.
+ */
 function checkWritable(board: MountedBoard): { ok: true } | ReturnType<typeof fail> {
   if (!board.store.readonly) return { ok: true };
   return fail(
-    'board_compiled',
-    'This board has been compiled into a project and is read-only. '
-    + 'To keep working on these ideas, duplicate it as a new board.',
+    'board_readonly',
+    'This board is open read-only, so it cannot be changed right now.',
   );
 }
 
@@ -116,12 +127,70 @@ function checkRev(expectRev: unknown): { ok: true } | ReturnType<typeof fail> {
  */
 function digest(board: MountedBoard) {
   const shots = readShots(board.std);
+  const sp = readScreenplay(board.std);
+
+  /**
+   * WHICH SCENES STILL HAVE NO SHOTS.
+   *
+   * Reported rather than left to be worked out, because it IS the agent's to-do
+   * list — the whole "now let us go scene by scene" flow is driven by this one
+   * array. An agent that had to derive it from two other arrays sometimes would
+   * not bother, and would then declare a storyboard finished with a hole in it.
+   */
+  const shotCountByScene = new Map<string, number>();
+  for (const sh of shots) {
+    if (!sh.sceneId) continue;
+    shotCountByScene.set(sh.sceneId, (shotCountByScene.get(sh.sceneId) ?? 0) + 1);
+  }
+  const seqNumber = new Map(sp.sequences.map((q, i) => [q.id, i + 1] as const));
+
   return {
     ok: true as const,
     rev,
     boardId: board.workspace.id,
     surfaceId: board.surfaceId,
     shotCount: shots.length,
+    /**
+     * THE SCREENPLAY — Sequence → Scene → Shot.
+     *
+     * Sent on EVERY read, not behind a separate tool, because the structure is
+     * what makes any individual shot answerable. An agent asked to improve shot
+     * 4 can only talk about shot 4 unless something says shot 4 is the turn.
+     */
+    screenplay: {
+      title: sp.title,
+      logline: sp.logline,
+      audience: sp.audience,
+      voice: sp.voice,
+      notes: sp.notes,
+      plannedRuntimeSec: plannedRuntimeSec(sp),
+      sequences: sp.sequences.map((q, i) => ({
+        id: q.id,
+        n: i + 1,
+        title: q.title,
+        purpose: q.purpose,
+        summary: q.summary,
+        targetSec: q.targetSec,
+        music: q.music,
+        look: q.look,
+        sceneIds: sp.scenes.filter(c => c.sequenceId === q.id).map(c => c.id),
+      })),
+      scenes: sp.scenes.map((c, i) => ({
+        id: c.id,
+        letter: sceneLetter(i),
+        sequenceId: c.sequenceId,
+        sequence: seqNumber.get(c.sequenceId) ?? 0,
+        slug: c.slug,
+        summary: c.summary,
+        shotCount: shotCountByScene.get(c.id) ?? 0,
+      })),
+      /** Scene ids with nothing shot for them — where the work is. */
+      emptyScenes: sp.scenes.filter(c => !shotCountByScene.has(c.id)).map(c => c.id),
+      /** Sequences with no scenes at all — one level further back. */
+      emptySequences: sp.sequences
+        .filter(q => !sp.scenes.some(c => c.sequenceId === q.id))
+        .map(q => q.id),
+    },
     shots: shots.map((s, i) => {
       // A GRAPHIC HAS NO MODEL. `effectiveModel` falls back to the board
       // default, which is right for a clip nobody has chosen for yet and wrong
@@ -133,8 +202,10 @@ function digest(board: MountedBoard) {
       const credits = estimateShotCredits(s);
       return {
         id: s.id,
-        /** Position in the filmstrip, and therefore the scene number. */
+        /** Position in the filmstrip, and therefore the shot number. */
         order: i,
+        /** Which scene this shot covers. '' when unplaced, which is legal. */
+        sceneId: s.sceneId,
         title: s.title,
         action: s.action,
         voiceover: s.voiceover,
@@ -227,11 +298,131 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
     /** Read the board. Cheap, no side effects — the agent may call it freely. */
     'voidspace:board-read': () => digest(board),
 
+    /**
+     * THE SCREENPLAY — written whole, in one call.
+     *
+     * Whole rather than incrementally, because a screenplay is a SHAPE: a tool
+     * that could only append would let an agent bolt a fourth sequence onto a
+     * three-sequence piece without ever reconsidering the first three. Rewriting
+     * is one undo step, so a bad restructure costs the user one Ctrl+Z.
+     *
+     * Ids are preserved across a rewrite when the caller sends them back, which
+     * is how shots keep their scene. An agent that drops an id gets a new scene
+     * and its shots become unplaced — recoverable, and visible immediately,
+     * because the panel will say "no shots" against it.
+     */
+    'voidspace:board-write-screenplay': args => {
+      const g = guard(args); if (!g.ok) return g;
+      const current = readScreenplay(board.std);
+      const patch: Record<string, unknown> = {};
+      for (const k of ['title', 'logline', 'audience', 'voice', 'notes'] as const) {
+        if (typeof args[k] === 'string') patch[k] = args[k];
+      }
+
+      if (Array.isArray(args.sequences)) {
+        const taken = new Set<string>();
+        patch.sequences = (args.sequences as unknown[]).map(raw => {
+          const q = (raw ?? {}) as Record<string, unknown>;
+          // Two sequences sharing an id would silently merge their scenes, so a
+          // duplicate is given a fresh id rather than accepted.
+          let id = String(q.id ?? '').trim() || nextSequenceId(
+            [...current.sequences, ...[...taken].map(t => ({ id: t } as never))],
+          );
+          while (taken.has(id)) id = `${id}b`;
+          taken.add(id);
+          return {
+            id,
+            title: String(q.title ?? ''),
+            purpose: SEQUENCE_PURPOSES.includes(q.purpose as never) ? q.purpose : 'setup',
+            summary: String(q.summary ?? ''),
+            targetSec: Number(q.targetSec) > 0 ? Number(q.targetSec) : 0,
+            music: String(q.music ?? ''),
+            look: String(q.look ?? ''),
+          };
+        });
+      }
+
+      if (Array.isArray(args.scenes)) {
+        const taken = new Set<string>();
+        patch.scenes = (args.scenes as unknown[]).map(raw => {
+          const c = (raw ?? {}) as Record<string, unknown>;
+          let id = String(c.id ?? '').trim() || nextSceneId(
+            [...current.scenes, ...[...taken].map(t => ({ id: t } as never))],
+          );
+          while (taken.has(id)) id = `${id}b`;
+          taken.add(id);
+          return {
+            id,
+            sequenceId: String(c.sequenceId ?? ''),
+            slug: String(c.slug ?? ''),
+            summary: String(c.summary ?? ''),
+          };
+        });
+      }
+
+      if (!Object.keys(patch).length) {
+        return fail(
+          'empty',
+          'Give at least one of: title, logline, audience, voice, notes, sequences, scenes.',
+        );
+      }
+
+      writeScreenplay(board.std, board.surfaceId, patch as never);
+      rev++;
+      return digest(board);
+    },
+
+    /**
+     * Put a shot in a scene, or take it out of one.
+     *
+     * Separate from `board-update-shot` because it is a STRUCTURAL move rather
+     * than an edit to the shot's content, and because it needs to validate
+     * against the screenplay — a shot pointing at a scene that does not exist is
+     * how a storyboard starts claiming coverage it has not got.
+     */
+    'voidspace:board-set-scene': args => {
+      const g = guard(args); if (!g.ok) return g;
+      const shotId = String(args.shotId ?? '');
+      const missing = needShot(shotId); if (missing) return missing;
+      const sceneId = String(args.sceneId ?? '').trim();
+      if (sceneId) {
+        const sp = readScreenplay(board.std);
+        if (!sp.scenes.some(c => c.id === sceneId)) {
+          return fail(
+            'unknown_scene',
+            `No scene "${sceneId}" in the screenplay. Call board_read for the scene ids, `
+            + 'or write the screenplay first with board_write_screenplay.',
+          );
+        }
+      }
+      setShotFields(board.std, shotId, { sceneId } as never);
+      rev++;
+      return digest(board);
+    },
+
     'voidspace:board-add-shots': args => {
       const g = guard(args); if (!g.ok) return g;
       const titles = Array.isArray(args.titles) ? args.titles.map(String) : [];
       if (!titles.length) return fail('empty', 'No shot titles were given.');
-      createShots(board.std, board.surfaceId, titles);
+      /**
+       * SHOTS REMEMBER WHICH SCENE THEY COVER.
+       *
+       * Optional, and validated when given. Without the link the screenplay and
+       * the filmstrip are two documents that merely happen to be about the same
+       * film, and nothing can answer "which scene still has no shots".
+       */
+      const sceneId = String(args.sceneId ?? '').trim();
+      if (sceneId && !readScreenplay(board.std).scenes.some(c => c.id === sceneId)) {
+        return fail(
+          'unknown_scene',
+          `No scene "${sceneId}" in the screenplay. Call board_read for the scene ids, `
+          + 'or write the screenplay first with board_write_screenplay.',
+        );
+      }
+      const made = createShots(board.std, board.surfaceId, titles);
+      if (sceneId) {
+        for (const id of made) setShotFields(board.std, id, { sceneId } as never);
+      }
       /**
        * SHOW WHAT WAS JUST MADE.
        *
@@ -782,24 +973,27 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
     },
 
     /**
-     * Make the board read-only, in the browser.
+     * Record that the board has been compiled — WITHOUT locking it.
      *
-     * The durable lock is `status: 'compiled'` in Firestore, which the save and
-     * meta endpoints both check. This is the third place, and it is the one the
-     * user can see: the canvas stops accepting edits the moment compile returns
-     * rather than at the next reload.
+     * This used to set `store.readonly` and mark the chrome dead, because
+     * compiling was a one-way door. It is not one any more: recompiling mints a
+     * new project, so the board has to stay editable or a person who spots a
+     * mistake loses everything on it.
+     *
+     * The handler is kept rather than deleted so an older client bundle — one
+     * still calling it after compile — gets a success instead of an unknown-verb
+     * error. It now just reports where the board went.
      */
     'voidspace:board-lock': args => {
-      board.store.readonly = true;
-      // The chrome follows the document. Leaving "Add shot" and the drop target
-      // live on a board that will refuse every write is worse than removing
-      // them: the user clicks, nothing happens, and nothing explains why.
-      document.documentElement.dataset.locked = 'true';
+      const projectId = String(args.projectId ?? '');
+      // The chrome is told a project EXISTS, not that the board is finished.
+      // The page uses this to show "open the project", never to disable editing.
+      if (projectId) document.documentElement.dataset.compiled = projectId;
       return {
         ok: true as const,
         rev,
-        locked: true,
-        compiledProjectId: String(args.projectId ?? ''),
+        locked: false,
+        compiledProjectId: projectId,
       };
     },
 

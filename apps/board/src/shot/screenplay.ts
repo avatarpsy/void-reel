@@ -3,8 +3,8 @@
  *
  * THE INVARIANT THIS FILE EXISTS TO HOLD:
  *
- *   shot count in  ==  `SCENE n` beat count out  ==  scene count in the project
- *   order preserved · every reference present on its scene · every role kept
+ *   shot count in  ==  `SHOT n` heading count out  ==  item count in the project
+ *   order preserved · every reference present on its shot · every role kept
  *
  * A user who hand-arranges twelve shots and gets nine back in a different order
  * will never trust the feature again, so the serialization is asserted against
@@ -12,7 +12,24 @@
  * project is created — on the server, where the parser lives, and not "probably
  * fine because the format looks right".
  *
- * The heading grammar is fixed by that parser: `SCENE <n> — <heading>`.
+ * The heading grammar is fixed by that parser: `SHOT <n> — <heading>`.
+ *
+ * ── WHY THE HEADINGS SAY SHOT, NOT SCENE ─────────────────────────────────────
+ * Because a SCENE is a different object now, and it is one level up: continuous
+ * action in one place and time, which several shots may cover. Emitting `SCENE n`
+ * for what is really one clip would mean the compiled document used the word for
+ * something the board uses it for too, and a language model reading both would
+ * have no way to tell which was meant.
+ *
+ * The studio's parser has always accepted `SHOT n` as well as `SCENE n`, so this
+ * costs nothing downstream: the same headings parse, the same count is checked,
+ * the same numbering reaches the timeline.
+ *
+ * ── WHAT THE STRUCTURE CONTRIBUTES ───────────────────────────────────────────
+ * Sequences and scenes ride in the PREAMBLE, which the studio keeps in context at
+ * every turn regardless of how long the film gets. Neither can be mistaken for a
+ * heading — `SEQUENCE 1` and `SCENE A` do not match a grammar that requires
+ * SHOT/SCENE followed by digits — so adding them cannot change the shot count.
  *
  * READING A SHOT IS NOW JUST READING ITS PROPS. This used to be a spatial query
  * over the canvas — whatever was geometrically inside a frame — which meant a
@@ -28,6 +45,7 @@ import {
 import { effectiveModel, referenceTag } from './models';
 import { slotFills } from './slots';
 import { readShots } from './shots';
+import { formatStructure, readScreenplay, sceneLetter } from './screenplay-doc';
 
 export interface CompiledReference {
   id: string;
@@ -64,10 +82,26 @@ export interface CompiledReference {
 }
 
 export interface CompiledShot {
-  /** 1-based, and it is the scene number in the project. */
+  /** 1-based, and it is this shot's item number in the project. */
   n: number;
   id: string;
   title: string;
+  /**
+   * WHERE THIS SHOT SITS IN THE STRUCTURE, resolved at compile time.
+   *
+   * Sent as resolved strings rather than as ids because the consumer is a video
+   * agent that has never seen this board and has no way to look an id up. Empty
+   * for a shot nobody placed, which is legal.
+   */
+  sceneId: string;
+  /** "A", "B" — the letter the board shows. Empty when not in a scene. */
+  scene: string;
+  /** The scene's slugline: `INT. KITCHEN — DAY`. */
+  sceneSlug: string;
+  /** 1-based sequence number, or 0 when the scene is not in a sequence. */
+  sequence: number;
+  /** The sequence's job: hook, turn, payoff… Empty when not in one. */
+  purpose: string;
   action?: string;
   voiceover?: string;
   camera?: string;
@@ -96,6 +130,25 @@ export interface CompiledBoard {
   shots: CompiledShot[];
   screenplay: string;
   /**
+   * The structure as data, alongside the prose in `screenplay`.
+   *
+   * Both, deliberately: the prose is what a model reads, and this is what the
+   * server stores so a later reader does not have to parse English back into
+   * objects. They are generated from the same source in the same pass, so they
+   * cannot disagree.
+   */
+  structure: {
+    sequences: Array<{
+      id: string; n: number; title: string; purpose: string;
+      summary: string; targetSec: number; music: string; look: string;
+      sceneIds: string[];
+    }>;
+    scenes: Array<{
+      id: string; letter: string; sequenceId: string;
+      slug: string; summary: string; shotNumbers: number[];
+    }>;
+  };
+  /**
    * Media the user left on the OPEN CANVAS.
    *
    * Reported so the confirm sheet can say what will NOT be carried over rather
@@ -109,12 +162,12 @@ export interface CompiledBoard {
   loose: number;
 }
 
-/** A heading the studio's parser reads back as one beat. */
-function beatHeading(n: number, title: string): string {
+/** A heading the studio's parser reads back as one numbered unit. */
+function shotHeading(n: number, title: string): string {
   const clean = title.replace(/\s+/g, ' ').trim() || 'Untitled';
-  // Strip a leading "SCENE 3 —" the user or agent may already have typed, so a
-  // shot named that way does not compile to "SCENE 1 — SCENE 3 — Kitchen".
-  return `SCENE ${n} — ${clean.replace(/^(?:SCENE|SHOT)\s+\d+\s*[—\-–:|]\s*/i, '')}`;
+  // Strip a leading "SHOT 3 —" the user or agent may already have typed, so a
+  // shot named that way does not compile to "SHOT 1 — SHOT 3 — Kitchen".
+  return `SHOT ${n} — ${clean.replace(/^(?:SCENE|SHOT)\s+\d+\s*[—\-–:|]\s*/i, '')}`;
 }
 
 const REF_LABEL: Record<MediaRole, string> = {
@@ -194,6 +247,18 @@ export function compileBoard(
   std: BlockStdScope,
   header: { title: string; aspect: string; goal: string },
 ): CompiledBoard {
+  /**
+   * THE SCREENPLAY IS READ FIRST, and it is optional.
+   *
+   * A board with no screenplay compiles exactly as it always did — the structure
+   * block is simply empty and nothing about the shots changes. That is the
+   * flexibility rule applied to compile: someone who sketched twelve shots
+   * without writing a structure has done nothing wrong and must not be stopped.
+   */
+  const sp = readScreenplay(std);
+  const sceneIndex = new Map(sp.scenes.map((c, i) => [c.id, { c, letter: sceneLetter(i) }] as const));
+  const seqIndex = new Map(sp.sequences.map((q, i) => [q.id, { q, n: i + 1 }] as const));
+
   const shots = readShots(std).map((shot, i): CompiledShot => {
     const caps = effectiveModel(shot.model);
     /**
@@ -213,10 +278,18 @@ export function compileBoard(
     // user saw and what is compiled cannot disagree.
     const graphicSlots = isGraphic ? slotFills(shot) : [];
 
+    const placed = sceneIndex.get(shot.sceneId);
+    const inSeq = placed ? seqIndex.get(placed.c.sequenceId) : undefined;
+
     return {
       n: i + 1,
       id: shot.id,
       title: shot.title,
+      sceneId: shot.sceneId,
+      scene: placed?.letter ?? '',
+      sceneSlug: placed?.c.slug ?? '',
+      sequence: inSeq?.n ?? 0,
+      purpose: inSeq?.q.purpose ?? '',
       // Only what the user actually WROTE. An empty field must not become a line
       // in the screenplay: the planner would treat it as an approved description.
       ...(shot.action.trim() ? { action: shot.action.trim() } : {}),
@@ -247,14 +320,48 @@ export function compileBoard(
     };
   });
 
+  // Which shots ended up under which scene — the structure block reports it, so
+  // "SCENE B has no shots" is a fact rather than something to be inferred.
+  const shotsByScene = new Map<string, number[]>();
+  for (const shot of shots) {
+    if (!shot.sceneId) continue;
+    const list = shotsByScene.get(shot.sceneId) ?? [];
+    list.push(shot.n);
+    shotsByScene.set(shot.sceneId, list);
+  }
+
   const preamble = [
-    header.title.trim() || 'Untitled',
+    header.title.trim() || sp.title.trim() || 'Untitled',
     header.aspect ? `Aspect: ${header.aspect}` : '',
     header.goal.trim() ? `Goal: ${header.goal.trim()}` : '',
+    sp.logline.trim() ? `Logline: ${sp.logline.trim()}` : '',
+    sp.audience.trim() ? `Audience: ${sp.audience.trim()}` : '',
+    sp.voice.trim() ? `Voice: ${sp.voice.trim()}` : '',
+    sp.notes.trim() ? `Direction: ${sp.notes.trim()}` : '',
+    /**
+     * THE NUMBERING LEGEND — one line that stops a downstream agent guessing.
+     *
+     * Three levels are in play and two of them are numbered, so state the
+     * mapping outright rather than trusting inference. This is the single line
+     * that makes the handoff unambiguous.
+     */
+    sp.sequences.length || sp.scenes.length
+      ? 'Numbering: SEQUENCE 1.. are runs of the film, SCENE A.. are moments '
+        + 'within them, and SHOT 1.. below are the individual clips — shot n is '
+        + 'item n on the timeline.'
+      : '',
+    formatStructure(sp, shotsByScene),
   ].filter(Boolean).join('\n');
 
   const body = shots.map(shot => {
-    const lines = [beatHeading(shot.n, shot.title)];
+    const lines = [shotHeading(shot.n, shot.title)];
+    // WHERE THIS SHOT BELONGS, restated on the shot itself. The structure block
+    // above already says it, but a long screenplay is read in slices — and the
+    // slice a video agent loads is this one.
+    if (shot.scene) {
+      const seq = shot.sequence ? `SEQUENCE ${shot.sequence}${shot.purpose ? ` (${shot.purpose})` : ''} · ` : '';
+      lines.push(`  IN: ${seq}SCENE ${shot.scene}${shot.sceneSlug ? ` — ${shot.sceneSlug}` : ''}`);
+    }
     // WHAT THE USER WROTE COMES FIRST: it is the scene's meaning, and the
     // references are the material it is made from.
     if (shot.action) lines.push(`  ACTION: ${shot.action.replace(/\s+/g, ' ')}`);
@@ -298,7 +405,29 @@ export function compileBoard(
   const loose = ['affine:image', 'affine:attachment']
     .reduce((n, flavour) => n + std.store.getBlocksByFlavour(flavour).length, 0);
 
-  return { shots, screenplay: `${preamble}\n\n${body}\n`, loose };
+  const structure = {
+    sequences: sp.sequences.map((q, i) => ({
+      id: q.id,
+      n: i + 1,
+      title: q.title,
+      purpose: q.purpose,
+      summary: q.summary,
+      targetSec: q.targetSec,
+      music: q.music,
+      look: q.look,
+      sceneIds: sp.scenes.filter(c => c.sequenceId === q.id).map(c => c.id),
+    })),
+    scenes: sp.scenes.map((c, i) => ({
+      id: c.id,
+      letter: sceneLetter(i),
+      sequenceId: c.sequenceId,
+      slug: c.slug,
+      summary: c.summary,
+      shotNumbers: shotsByScene.get(c.id) ?? [],
+    })),
+  };
+
+  return { shots, screenplay: `${preamble}\n\n${body}\n`, loose, structure };
 }
 
 /** Human summary of one shot, for the agent's digest. */

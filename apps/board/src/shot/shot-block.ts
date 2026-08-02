@@ -23,6 +23,7 @@ import { state } from 'lit/decorators.js';
 import { repeat } from 'lit/directives/repeat.js';
 
 import { withToken } from '../board/parent-auth';
+import { takeCaret } from '../ui/field-caret';
 import {
   FIELD_SPECS, REF_KIND_LABEL, roleLabel, SHOT_KIND_HINT, SHOT_KIND_LABEL, SHOT_KINDS,
   formatTime, isTimed, rolesFor, trimWindow,
@@ -30,6 +31,7 @@ import {
 } from './model';
 import { allBlocks, findBlock, onBlockCatalogue, searchBlocks, type BlockInfo } from './blocks';
 import { resolveSlots, slotFills } from './slots';
+import { readScreenplay, sceneLetter } from './screenplay-doc';
 import { lazyBlockPreview, openBlockLightbox, type LazyPreview } from '../ui/block-preview';
 import {
   allModels, checkShot, effectiveModel, estimateShotCredits, formatCredits,
@@ -125,6 +127,75 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
       background: var(--vs-shot-head, rgba(127, 140, 170, 0.08));
       cursor: grab;
       flex: none;
+    }
+    /* The sequence pill. Claims its own pointer events so it stays clickable
+       inside a header whose whole job is to be a drag handle. */
+    .shot__seq {
+      font: 600 9px/1 var(--affine-font-family, sans-serif);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      padding: 3px 7px;
+      border-radius: 999px;
+      border: 1px solid var(--vs-border, rgba(127, 140, 170, 0.34));
+      background: none;
+      color: var(--vs-text, #1a1a2e);
+      cursor: pointer;
+      flex: none;
+      white-space: nowrap;
+    }
+    .shot__seq:hover {
+      background: var(--vs-hover, rgba(127, 140, 170, 0.14));
+    }
+    .shot__seq--none {
+      color: var(--vs-muted, #94a3b8);
+      border-style: dashed;
+    }
+    /* Bounded and scrollable — a menu that grows with the screenplay must never
+       overflow a fixed-height card. */
+    .seqmenu {
+      position: absolute;
+      z-index: 24;
+      top: 40px;
+      left: 12px;
+      right: 12px;
+      max-height: 240px;
+      overflow-y: auto;
+      background: var(--vs-shot-bg, #fff);
+      border: 1px solid var(--vs-border, rgba(127, 140, 170, 0.28));
+      border-radius: 10px;
+      box-shadow: 0 12px 32px rgba(15, 23, 42, 0.18);
+      padding: 4px;
+    }
+    .seqmenu__item {
+      display: block;
+      width: 100%;
+      text-align: left;
+      border: none;
+      background: none;
+      border-radius: 6px;
+      padding: 6px 8px;
+      cursor: pointer;
+      color: var(--vs-text, #1a1a2e);
+    }
+    .seqmenu__item:hover {
+      background: var(--vs-hover, rgba(127, 140, 170, 0.12));
+    }
+    .seqmenu__item[aria-current='true'] {
+      background: var(--vs-hover, rgba(127, 140, 170, 0.18));
+    }
+    .seqmenu__k {
+      font: 600 10px/1.35 var(--affine-font-family, sans-serif);
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+    }
+    .seqmenu__h {
+      font: 400 10.5px/1.35 var(--affine-font-family, sans-serif);
+      color: var(--vs-muted, #94a3b8);
+    }
+    .seqmenu__empty {
+      font: 400 11px/1.45 var(--affine-font-family, sans-serif);
+      color: var(--vs-muted, #94a3b8);
+      padding: 8px;
     }
     .shot__n {
       font: 600 11px/1 var(--affine-font-family, sans-serif);
@@ -746,6 +817,8 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
   @state() private accessor _pickingModel = false;
   /** The block list, open. Same reasoning. */
   @state() private accessor _pickingBlock = false;
+  /** True while the sequence menu is open on this card. */
+  @state() private accessor _pickingSeq = false;
   /** The block's text and colour slots, open for filling. */
   @state() private accessor _filling = false;
   /** What has been typed into the block filter. Deliberately NOT stored on the
@@ -829,6 +902,16 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
 
   private disposeBlocks: (() => void) | null = null;
 
+  /**
+   * The sequence pill reads the SCREENPLAY block, not this one.
+   *
+   * So renaming a sequence, or reordering the structure, changes what this card
+   * should say while nothing about this card has changed — and Lit would keep
+   * painting the old label. Watching document updates is the cheap fix; the
+   * handler only marks dirty, and Lit coalesces to one repaint per frame.
+   */
+  private disposeDoc: (() => void) | null = null;
+
   override connectedCallback(): void {
     super.connectedCallback();
     // BOTH catalogues arrive after first paint, and the card reads both — the
@@ -837,14 +920,22 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
     // dirty when they land.
     this.disposeCatalogue = onModelCatalogue(() => this.requestUpdate());
     this.disposeBlocks = onBlockCatalogue(() => this.requestUpdate());
+    const sub = this.store.slots.blockUpdated.subscribe(({ id }) => {
+      // Only for OTHER blocks: this card's own props already trigger a render,
+      // and re-requesting on them would double the work on every keystroke.
+      if (id !== this.model.id) this.requestUpdate();
+    });
+    this.disposeDoc = () => sub.unsubscribe();
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.disposeCatalogue?.();
     this.disposeBlocks?.();
+    this.disposeDoc?.();
     this.disposeCatalogue = null;
     this.disposeBlocks = null;
+    this.disposeDoc = null;
     this.preview?.destroy();
     this.preview = null;
     this.previewHost = null;
@@ -1000,81 +1091,92 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
     if (e.key === 'Escape') (e.target as HTMLElement).blur();
   };
 
-  /**
-   * TAKE THE CARET, AND KEEP IT. Clicking a field is not enough on its own.
-   *
-   * Two separate things were stopping a click from putting a caret in a field,
-   * and both had to be handled or the card looked editable and silently
-   * swallowed every keystroke — the whole of "it is so hard to click on things
-   * in the shot box".
-   *
-   *  1. The edgeless root `preventDefault()`s pointerdown to run its own
-   *     selection, which also cancels the browser's default for a click on a
-   *     contenteditable: focus it, and put the caret where you clicked.
-   *
-   *  2. Worse, the same gesture SELECTS the shot as a canvas object, and
-   *     `range-binding.ts:293` responds to any non-text selection by calling
-   *     `host.focus()` — explicitly to stop a stray top-level contenteditable
-   *     holding focus. That is correct for a document and exactly wrong for a
-   *     block with its own fields, and it fires a frame later, so simply
-   *     focusing during pointerdown is undone before the user can type.
-   *
-   * So the field takes focus, places the caret from the pointer, and removes the
-   * canvas selection so there is nothing left for that guard to react to.
-   *
-   * `std.selection.clear()` AND NOT `gfx.selection.clear()`. They sound like the
-   * same thing and are opposites here: the gfx one calls
-   * `set({ elements: [] })`, which leaves an EMPTY `SurfaceSelection` in place —
-   * still a non-text selection, still `recoverable: false`, so it satisfies the
-   * guard's `selections.length > 0` and re-triggers the steal on every tick.
-   * Measured: eighteen steal/refocus cycles from one click, focus bouncing back
-   * to the host each time. The std-level clear removes the selections outright,
-   * `selections.length` is 0, and the caret stays put.
-   */
+  /** See `ui/field-caret.ts` — the reasoning lives with the code. */
   private takeCaret(el: HTMLElement, clientX: number, clientY: number): void {
-    const doc = this.ownerDocument;
+    takeCaret(this.std, el, clientX, clientY);
+  }
 
-    /**
-     * Caret at the click, not at the start — landing at position 0 of text the
-     * user clicked the END of is its own small betrayal.
-     *
-     * RE-RESOLVED FROM THE POINT each time, never cloned from a Range captured
-     * earlier. A Lit re-render replaces the text node inside this field, so a
-     * Range held across one points at a node that is no longer in the document:
-     * the selection then anchors outside the field and the first characters
-     * typed land in the wrong place. The POINT stays valid; the nodes do not.
-     */
-    const put = () => {
-      this.std.selection.clear();
-      if (doc.activeElement !== el) el.focus({ preventScroll: true });
+  /**
+   * Put this shot in a scene, or take it out of one.
+   *
+   * Detaching is offered FIRST in the menu, deliberately: a shot in the wrong
+   * scene is worse than a shot in none, because the structure then claims
+   * coverage it does not have — and the whole value of the screenplay panel is
+   * that "no shots yet" can be trusted.
+   */
+  private setScene(sceneId: string): void {
+    this._pickingSeq = false;
+    if ((this.model.props.sceneId ?? '') === sceneId) return;
+    this.store.captureSync();
+    this.store.updateBlock(this.model, { sceneId });
+  }
 
-      const sel = doc.defaultView?.getSelection();
-      if (!sel) return;
-      const legacy = doc as Document & {
-        caretRangeFromPoint?: (x: number, y: number) => Range | null;
-      };
-      const range = legacy.caretRangeFromPoint?.(clientX, clientY);
-      // Only if it actually landed in this field — a point that resolves into a
-      // sibling would move the caret somewhere the user did not click.
-      if (!range || !el.contains(range.startContainer)) {
-        // Fall back to the end of the text, which is where someone who clicked
-        // a filled field almost always wants to be.
-        const end = doc.createRange();
-        end.selectNodeContents(el);
-        end.collapse(false);
-        sel.removeAllRanges();
-        sel.addRange(end);
-        return;
-      }
-      sel.removeAllRanges();
-      sel.addRange(range);
-    };
+  private renderSeqPill() {
+    const s = readScreenplay(this.std);
+    const id = this.model.props.sceneId ?? '';
+    const i = s.scenes.findIndex(c => c.id === id);
+    if (i < 0) {
+      return html`<button
+        class="shot__seq shot__seq--none"
+        title="Not in a scene yet"
+        @pointerdown=${(e: Event) => e.stopPropagation()}
+        @click=${(e: Event) => { e.stopPropagation(); this._pickingSeq = !this._pickingSeq; }}
+      >+ scene</button>`;
+    }
+    const scene = s.scenes[i];
+    const seq = s.sequences.find(q => q.id === scene.sequenceId);
+    // Sequence number is shown alongside the scene letter because the two
+    // together are the shot's full address: "1A" says which run and which
+    // moment, which is exactly what someone scanning the filmstrip wants.
+    const seqN = seq ? s.sequences.indexOf(seq) + 1 : '';
+    return html`<button
+      class="shot__seq"
+      title=${`${seq ? `Sequence ${seqN} · ${seq.purpose} — ` : ''}Scene ${sceneLetter(i)}${scene.slug ? ` · ${scene.slug}` : ''}`}
+      @pointerdown=${(e: Event) => e.stopPropagation()}
+      @click=${(e: Event) => { e.stopPropagation(); this._pickingSeq = !this._pickingSeq; }}
+    >${seqN}${sceneLetter(i)}</button>`;
+  }
 
-    put();
-    // Once more after the gesture settles: the edgeless tool sets its selection
-    // on pointerup, after this handler has run, and the browser's own
-    // double-click word-selection lands in between.
-    requestAnimationFrame(() => { if (el.isConnected) put(); });
+  private renderSeqMenu() {
+    const s = readScreenplay(this.std);
+    const current = this.model.props.sceneId ?? '';
+    return html`<div
+      class="seqmenu"
+      @pointerdown=${(e: Event) => e.stopPropagation()}
+      @click=${(e: Event) => e.stopPropagation()}
+      @wheel=${(e: WheelEvent) => e.stopPropagation()}
+    >
+      ${s.scenes.length
+        ? html`
+          <button
+            class="seqmenu__item"
+            aria-current=${current === '' ? 'true' : 'false'}
+            @click=${() => this.setScene('')}
+          >
+            <div class="seqmenu__k">No scene</div>
+            <div class="seqmenu__h">Sketching — not part of the structure yet.</div>
+          </button>
+          ${s.scenes.map((c, i) => {
+            const seq = s.sequences.find(q => q.id === c.sequenceId);
+            const seqN = seq ? s.sequences.indexOf(seq) + 1 : '';
+            return html`<button
+              class="seqmenu__item"
+              aria-current=${c.id === current ? 'true' : 'false'}
+              @click=${() => this.setScene(c.id)}
+            >
+              <div class="seqmenu__k">
+                Scene ${sceneLetter(i)}${c.slug ? ` · ${c.slug}` : ''}
+              </div>
+              <div class="seqmenu__h">
+                ${seq ? `Sequence ${seqN} · ${seq.purpose}` : 'not in a sequence'}${c.summary ? ` — ${c.summary}` : ''}
+              </div>
+            </button>`;
+          })}`
+        : html`<div class="seqmenu__empty">
+            No scenes yet. Add them in the screenplay panel — or tell the agent
+            what this video should be about and it will draft the structure.
+          </div>`}
+    </div>`;
   }
 
   private readonly claimCaret = (e: PointerEvent) => {
@@ -1241,6 +1343,19 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
       <div class="shot__head" data-drag-region>
         <span class="shot__n">SCENE ${this.sceneNumber}</span>
         <!--
+          WHAT THIS SHOT IS FOR, on the card.
+
+          A shot only knows what it SHOWS; its scene says where and when it
+          happens, and the scene's sequence says what it is DOING. Put here
+          rather than in a panel because "which of these is the hook?" is a
+          question you ask while looking at the filmstrip, and an answer you
+          have to go and open something to get is one nobody checks.
+
+          Unassigned reads "+ scene" — an invitation, not a warning. Shots
+          drawn before the structure exists are normal work.
+        -->
+        ${this.renderSeqPill()}
+        <!--
           SINGLE CLICK MOVES THE CARD, DOUBLE CLICK RENAMES IT.
 
           The title is flex:1, so it covers nearly the whole header — which
@@ -1260,6 +1375,8 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
           @blur=${(e: FocusEvent) => this.commit('title', e.target as HTMLElement)}
         >${this.model.props.title}</div>
       </div>
+
+      ${this._pickingSeq ? this.renderSeqMenu() : nothing}
 
       <div
         class="shot__body"

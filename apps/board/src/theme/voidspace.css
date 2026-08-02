@@ -775,11 +775,14 @@ editor-host {
 .vs-role-chip__btn:hover { background: var(--affine-hover-color); color: var(--vs-text); }
 .vs-role-chip__btn.is-on { background: var(--vs-accent-b); color: #fff; }
 
-/* ══ Compiled = read-only ══════════════════════════════════════════════════
+/* ══ Read-only sessions ════════════════════════════════════════════════════
    `store.readonly` already refuses every write, but leaving the chrome live on
    a board that will silently reject each click is worse than removing it: the
-   user presses Add shot, nothing happens, and nothing says why. The banner in
-   the chat column beside the canvas is where the explanation lives. */
+   user presses Add shot, nothing happens, and nothing says why.
+
+   COMPILING NO LONGER SETS THIS. A compiled board stays fully editable —
+   recompiling mints a new project — so the only thing that reaches here is a
+   genuinely read-only session, such as a shared link. */
 
 :root[data-locked='true'] .vs-board-bar,
 :root[data-locked='true'] .vs-role-chip,
@@ -788,8 +791,7 @@ editor-host {
 :root[data-locked='true'] edgeless-toolbar-widget {
   display: none !important;
 }
-/* Panning, zooming and READING all still work — a compiled board is a record
-   the user should be able to look through. Only mutation is gone. */
+/* Panning, zooming and READING all still work. Only mutation is gone. */
 
 /* ══ Lane pagers ═══════════════════════════════════════════════════════════
    A canvas has no scrollable sub-region, so a shot's media rows PAGE. These are

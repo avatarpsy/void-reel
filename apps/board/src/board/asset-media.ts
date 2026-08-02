@@ -142,13 +142,16 @@ export async function placeAsset(
   std: BlockStdScope,
   input: PlaceAssetInput,
 ): Promise<PlaceResult> {
-  // A COMPILED BOARD ACCEPTS NOTHING. Checked before the fetch, not after: the
-  // user should not wait for a download to be told the board is locked.
+  // A READ-ONLY DOCUMENT ACCEPTS NOTHING. Checked before the fetch, not after:
+  // the user should not wait for a download to be told it will be refused.
+  //
+  // This is a genuinely read-only SESSION — a shared link — and no longer means
+  // "compiled". Compiling leaves the board editable.
   if (std.store.readonly) {
     return {
       ok: false,
       reason: 'rejected',
-      message: 'This board has been compiled and is read-only. Duplicate it to keep working.',
+      message: 'This board is open read-only, so media cannot be added right now.',
     };
   }
 

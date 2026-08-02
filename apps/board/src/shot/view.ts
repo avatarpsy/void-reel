@@ -1,5 +1,5 @@
 /**
- * Registering `voidspace:shot` with BlockSuite.
+ * Registering `voidspace:shot` and `voidspace:screenplay` with BlockSuite.
  *
  * Two halves, and they must both be present or the failure is silent in a
  * confusing way: the SCHEMA half lets the block exist in the document, the VIEW
@@ -23,10 +23,12 @@ import { BlockSchemaIdentifier, type BlockSchemaType, type ExtensionType } from 
 import { literal } from 'lit/static-html.js';
 
 import { ShotBlockSchemaExtension } from './model';
+import { ScreenplayBlockSchemaExtension } from './screenplay-doc';
+import { ScreenplayBlockComponent } from './screenplay-block';
 import { ShotBlockComponent } from './shot-block';
 
 /**
- * TEACH THE SURFACE THAT A SHOT MAY LIVE ON IT.
+ * TEACH THE SURFACE WHICH OF OUR BLOCKS MAY LIVE ON IT.
  *
  * `affine:surface` declares a CLOSED `children` allowlist — frame, image,
  * bookmark, attachment, `affine:embed-*`, edgeless-text — and schema validation
@@ -50,7 +52,15 @@ const SurfaceWithShots: BlockSchemaType = {
   ...SurfaceBlockSchema,
   model: {
     ...SurfaceBlockSchema.model,
-    children: [...(SurfaceBlockSchema.model.children ?? []), 'voidspace:shot'],
+    children: [
+      ...(SurfaceBlockSchema.model.children ?? []),
+      'voidspace:shot',
+      // The screenplay is a block on the board for the same reason a shot is:
+      // it is a thing the user reads, selects, moves and types into. Adding it
+      // here is what makes `addBlock` legal — omitted, the block would be
+      // rejected inside the Yjs transaction and simply never appear.
+      'voidspace:screenplay',
+    ],
   },
 };
 
@@ -63,6 +73,7 @@ const SurfaceWithShotsExtension: ExtensionType = {
 /** Schema only — safe to import from a headless context (tests, compile). */
 export const shotStoreExtensions: ExtensionType[] = [
   ShotBlockSchemaExtension,
+  ScreenplayBlockSchemaExtension,
   // AFTER the surface's own registration — see above.
   SurfaceWithShotsExtension,
 ];
@@ -75,10 +86,16 @@ export class ShotViewExtension extends ViewExtensionProvider {
     if (!customElements.get('voidspace-shot')) {
       customElements.define('voidspace-shot', ShotBlockComponent);
     }
+    if (!customElements.get('voidspace-screenplay')) {
+      customElements.define('voidspace-screenplay', ScreenplayBlockComponent);
+    }
   }
 
   override setup(context: ViewExtensionContext): void {
     super.setup(context);
     context.register(BlockViewExtension('voidspace:shot', literal`voidspace-shot`));
+    context.register(
+      BlockViewExtension('voidspace:screenplay', literal`voidspace-screenplay`),
+    );
   }
 }
