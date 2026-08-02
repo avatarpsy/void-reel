@@ -269,8 +269,39 @@ export function installImageRpc(): () => void {
   };
 
   window.addEventListener('message', onMessage);
+
+  /**
+   * TELL THE PARENT WHICH PROJECT IS OPEN.
+   *
+   * Unsolicited, unlike everything else here — the host page cannot ask,
+   * because it does not know when a project is created or switched. Without it
+   * the page has no id to put in the URL, and a refresh drops the user into a
+   * blank canvas with their work stranded in storage under an id nothing links
+   * to. The board already avoids this by minting its id into the URL on first
+   * open; this is the same fix, one layer down.
+   *
+   * Fired on identity change only, not on every edit: the URL should change
+   * when the document does, and never while someone is typing.
+   */
+  let announced = '';
+  const announce = () => {
+    try {
+      const p = useProjectStore.getState().project;
+      const id = p?.id ?? '';
+      if (!id || id === announced) return;
+      announced = id;
+      window.parent?.postMessage(
+        { type: 'voidspace:img-project', projectId: id, name: p?.name ?? '' },
+        '*',
+      );
+    } catch { /* store not ready */ }
+  };
+  announce();
+  const unsubscribe = useProjectStore.subscribe(announce);
+
   return () => {
     window.removeEventListener('message', onMessage);
+    unsubscribe();
     installed = false;
   };
 }

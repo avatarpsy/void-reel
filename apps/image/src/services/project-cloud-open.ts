@@ -1,15 +1,21 @@
 // project-cloud-open.ts
 // -----------------------------------------------------------------------------
-// Cross-device fallback for reopening an image-editor project from the Studio
-// Images tab. The full, layer-preserving project lives in the ORIGINAL browser's
-// local IndexedDB; on any other device that copy isn't present, so we rebuild a
-// FLATTENED project from the per-page thumbnails stored in the cloud (one image
-// layer per page). The user can keep editing — each page comes back as an image
-// layer they can add to, mask, etc. — they just don't get the original layer
-// tree that only exists on the device the project was made on.
+// Reopening an image-editor project, in the order that loses the least.
+//
+//   1. THE STORED DOCUMENT   the real layered project, from Cloud Storage.
+//                            Works on any device, restores exactly what was
+//                            saved. This is the normal path.
+//   2. THE FLATTENED PAGES   one image layer per page, rebuilt from the listing
+//                            thumbnails. Only for projects made before documents
+//                            were stored, where no file exists to fetch.
+//
+// The fallback is kept because those projects are real and someone still wants
+// them; it is not the design, it is the tail. A project opened that way says so,
+// so nobody believes they have their layer tree back when they do not.
 // -----------------------------------------------------------------------------
 
 import { getVoidspaceIdToken } from './voidspace-storage';
+import type { Project } from '../types/project';
 import { useProjectStore } from '../stores/project-store';
 import { useUIStore } from '../stores/ui-store';
 import { aspectRatioToSize } from './image-generation';
@@ -34,6 +40,32 @@ function imageSize(dataUrl: string): Promise<{ width: number; height: number }> 
 }
 
 /**
+ * Load the REAL stored document for a project, if there is one.
+ *
+ * Returns null when the project predates document storage — the caller then
+ * falls back to the flattened rebuild, which is the old behaviour, so nothing
+ * regresses for those.
+ */
+export async function loadProjectDocument(projectId: string): Promise<Project | null> {
+  const token = await getVoidspaceIdToken();
+  if (!token) return null;
+  try {
+    const res = await fetch(
+      `/api/studio/image-doc?project=${encodeURIComponent(projectId)}`,
+      { headers: { authorization: `Bearer ${token}` } },
+    );
+    if (!res.ok) return null; // 404 = no stored document; anything else is a miss too
+    const doc = await res.json();
+    // A document with no artboards is not openable and would replace the user's
+    // canvas with nothing — treat it as absent rather than as valid.
+    if (!doc || !Array.isArray(doc.artboards) || !doc.artboards.length) return null;
+    return doc as Project;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Open the cloud project <id> as a flattened multi-page editor project (page N =
  * one full-bleed image layer). Returns false if it isn't found. Switches to the
  * editor when at least one page loads.
@@ -41,6 +73,25 @@ function imageSize(dataUrl: string): Promise<{ width: number; height: number }> 
 export async function openCloudImageProject(id: string): Promise<boolean> {
   const token = await getVoidspaceIdToken();
   if (!token) return false;
+
+  /**
+   * THE REAL DOCUMENT FIRST.
+   *
+   * When one exists this returns the project exactly as it was saved — every
+   * layer, on any device. The flattened rebuild below only runs for projects
+   * made before documents were stored, where there is genuinely nothing else to
+   * open.
+   */
+  const doc = await loadProjectDocument(id);
+  if (doc) {
+    useProjectStore.getState().loadProject(doc);
+    // NOT flattened — this is the real layer tree. Cleared explicitly so the
+    // flag from a previously opened flattened project cannot leak onto this
+    // one and make the agent apologise for limits that do not apply.
+    useUIStore.getState().setFlattenedProjectId(null);
+    useUIStore.getState().setCurrentView('editor');
+    return true;
+  }
 
   const res = await fetch(`/api/studio/image-project?id=${encodeURIComponent(id)}`, {
     headers: { Authorization: `Bearer ${token}` },
