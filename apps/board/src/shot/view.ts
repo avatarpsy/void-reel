@@ -25,6 +25,8 @@ import { literal } from 'lit/static-html.js';
 import { ShotBlockSchemaExtension } from './model';
 import { ScreenplayBlockSchemaExtension } from './screenplay-doc';
 import { ScreenplayBlockComponent } from './screenplay-block';
+import { DraftBlockSchemaExtension } from './draft-block';
+import { DraftBlockComponent } from './draft-card';
 import { ShotBlockComponent } from './shot-block';
 
 /**
@@ -60,6 +62,8 @@ const SurfaceWithShots: BlockSchemaType = {
       // here is what makes `addBlock` legal — omitted, the block would be
       // rejected inside the Yjs transaction and simply never appear.
       'voidspace:screenplay',
+      // The scratch pad: a designed block being previewed before it is saved.
+      'voidspace:blockdraft',
     ],
   },
 };
@@ -74,6 +78,7 @@ const SurfaceWithShotsExtension: ExtensionType = {
 export const shotStoreExtensions: ExtensionType[] = [
   ShotBlockSchemaExtension,
   ScreenplayBlockSchemaExtension,
+  DraftBlockSchemaExtension,
   // AFTER the surface's own registration — see above.
   SurfaceWithShotsExtension,
 ];
@@ -89,6 +94,9 @@ export class ShotViewExtension extends ViewExtensionProvider {
     if (!customElements.get('voidspace-screenplay')) {
       customElements.define('voidspace-screenplay', ScreenplayBlockComponent);
     }
+    if (!customElements.get('voidspace-blockdraft')) {
+      customElements.define('voidspace-blockdraft', DraftBlockComponent);
+    }
   }
 
   override setup(context: ViewExtensionContext): void {
@@ -96,6 +104,9 @@ export class ShotViewExtension extends ViewExtensionProvider {
     context.register(BlockViewExtension('voidspace:shot', literal`voidspace-shot`));
     context.register(
       BlockViewExtension('voidspace:screenplay', literal`voidspace-screenplay`),
+    );
+    context.register(
+      BlockViewExtension('voidspace:blockdraft', literal`voidspace-blockdraft`),
     );
   }
 }

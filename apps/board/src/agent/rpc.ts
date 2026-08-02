@@ -39,6 +39,17 @@ import { allBlocks, findBlock, searchBlocks, setBlockCatalogue } from '../shot/b
 import { readParsed, readScript, writeScript } from '../shot/screenplay-doc';
 import { coverage, nextScene, renderScene, renderScriptContext } from '../shot/resolution';
 import { sequenceOf } from '../shot/fountain';
+import { DRAFT_H, DRAFT_W, type DraftBlockModel } from '../shot/draft-block';
+
+/** A gfx block's box, for the viewport. `xywh` is stored as a JSON tuple. */
+function bounds(m: { xywh?: string }): { x: number; y: number; w: number; h: number } {
+  try {
+    const [x, y, w, h] = JSON.parse(m.xywh ?? '[0,0,0,0]');
+    return { x, y, w, h };
+  } catch {
+    return { x: 0, y: 0, w: DRAFT_W, h: DRAFT_H };
+  }
+}
 import {
   allModels, checkShot, effectiveModel, estimateShotCredits, findModel, referenceTag,
   setModelCatalogue, type ModelCaps,
@@ -359,6 +370,105 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
       setShotFields(board.std, shotId, { sceneKey } as never);
       rev++;
       return digest(board);
+    },
+
+    /**
+     * PUT A BLOCK DRAFT ON THE CANVAS — the scratch pad.
+     *
+     * Composing does NOT save. It renders the design where the user can see it
+     * at a size worth judging, next to the shots it will sit among, and leaves
+     * it inert until they say yes. A block is reusable and shadows a starter of
+     * the same name, so saving one is a commitment nobody should make on the
+     * user's behalf.
+     *
+     * ONE DRAFT PER NAME. "Make the headline bigger" rewrites the card that is
+     * already there rather than stacking a second one beside it — a scratch pad
+     * with six near-identical versions on it is one nobody can read.
+     */
+    'voidspace:board-draft-block': args => {
+      const g = guard(args); if (!g.ok) return g;
+      const name = String(args.name ?? '').trim();
+      const html = String(args.html ?? '');
+      if (!name) return fail('empty', 'A draft needs a name.');
+      if (!html.trim()) return fail('empty', 'A draft needs its HTML.');
+
+      const meta = JSON.stringify(args.meta && typeof args.meta === 'object' ? args.meta : {});
+      const existing = board.std.store
+        .getBlocksByFlavour('voidspace:blockdraft')
+        .map(b => b.model as DraftBlockModel)
+        .find(m => m.props.name === name);
+
+      if (existing) {
+        board.std.store.captureSync();
+        board.std.store.updateBlock(existing, { html, meta, status: 'draft', note: '' });
+        rev++;
+        // Scroll to it: an update the user cannot see is an update they will
+        // assume did not happen.
+        ensureVisible(bounds(existing.props));
+        return { ok: true as const, rev, blockId: existing.id, updated: true };
+      }
+
+      /**
+       * PLACED ABOVE THE FILMSTRIP, not in it.
+       *
+       * A draft is not a shot and must not read as one while someone scans left
+       * to right. Sitting it clear of the strip keeps the film legible and gives
+       * the design its own space.
+       */
+      const shots = readShots(board.std);
+      const x = shots.length ? shots[shots.length - 1].x + 260 : 0;
+      const id = board.std.store.addBlock(
+        'voidspace:blockdraft',
+        { name, html, meta, status: 'draft', note: '', xywh: `[${x},${-(DRAFT_H + 140)},${DRAFT_W},${DRAFT_H}]` },
+        board.surfaceId,
+      );
+      rev++;
+      const made = board.std.store.getBlock(id)?.model as DraftBlockModel | undefined;
+      if (made) ensureVisible(bounds(made.props));
+      return { ok: true as const, rev, blockId: id, updated: false };
+    },
+
+    /** What the page needs to save a draft: its name, html and manifest. */
+    'voidspace:board-read-draft': args => {
+      const id = String(args.blockId ?? '');
+      const m = board.std.store.getBlock(id)?.model as DraftBlockModel | undefined;
+      if (!m || m.flavour !== 'voidspace:blockdraft') {
+        return fail('not_found', `No block draft ${id}.`);
+      }
+      let meta: unknown = {};
+      try { meta = JSON.parse(m.props.meta || '{}'); } catch { /* keep {} */ }
+      return {
+        ok: true as const,
+        rev,
+        blockId: id,
+        name: m.props.name,
+        html: m.props.html,
+        meta,
+        status: m.props.status,
+      };
+    },
+
+    /** Report the outcome of a save back onto the card. */
+    'voidspace:board-settle-draft': args => {
+      const id = String(args.blockId ?? '');
+      const m = board.std.store.getBlock(id)?.model as DraftBlockModel | undefined;
+      if (!m) return fail('not_found', `No block draft ${id}.`);
+      board.std.store.updateBlock(m, {
+        status: args.saved === true ? 'saved' : 'draft',
+        note: String(args.note ?? ''),
+      });
+      rev++;
+      return { ok: true as const, rev, blockId: id };
+    },
+
+    'voidspace:board-remove-draft': args => {
+      const id = String(args.blockId ?? '');
+      const b = board.std.store.getBlock(id);
+      if (!b) return fail('not_found', `No block draft ${id}.`);
+      board.std.store.captureSync();
+      board.std.store.deleteBlock(b.model);
+      rev++;
+      return { ok: true as const, rev };
     },
 
     'voidspace:board-add-shots': args => {
