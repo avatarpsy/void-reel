@@ -424,15 +424,61 @@ export interface SlotFill {
   cssVar?: string;
 }
 
+/**
+ * A Content-Security-Policy for a block somebody ELSE wrote.
+ *
+ * ── WHY IT COSTS AN UNTRUSTED BLOCK NOTHING ──────────────────────────────────
+ * A published block has already passed the static check: no fetch, no eval, no
+ * remote script, font or image, no nested frame. So a policy that forbids
+ * exactly those things forbids nothing it actually does. That is the whole
+ * reason the check and the policy were designed together — the check makes the
+ * policy free, and the policy catches what the check cannot, because a substring
+ * scan can be defeated by string concatenation and a browser cannot.
+ *
+ * ── AND WHY IT IS NOT APPLIED TO YOUR OWN BLOCKS ─────────────────────────────
+ * 113 of the shipped blocks load GSAP from a CDN. Applying this everywhere would
+ * black out most of the library to defend against the user's own files running
+ * on the user's own machine, which is not a threat. Trust follows provenance:
+ * your blocks run as you wrote them, other people's run in a box.
+ *
+ * `script-src 'unsafe-inline'` because a block's own scripts are inline in the
+ * srcdoc — there is no external script to allow, which is the point.
+ */
+const UNTRUSTED_CSP = [
+  "default-src 'none'",
+  "script-src 'unsafe-inline'",
+  "style-src 'unsafe-inline'",
+  'img-src data: blob:',
+  'media-src data: blob:',
+  'font-src data:',
+  // The two that matter most: a block that cannot connect cannot exfiltrate,
+  // and one that cannot frame cannot escape.
+  "connect-src 'none'",
+  "frame-src 'none'",
+  "form-action 'none'",
+  "base-uri 'none'",
+].join('; ');
+
 export function blockSrcdoc(
   html: string,
   vars: Record<string, string> = {},
   previewId = '',
   slots: SlotFill[] = [],
+  opts: { untrusted?: boolean } = {},
 ): string {
   // The reporter goes FIRST — its error listener has to predate the block's own
   // scripts or the failure it exists to catch happens before it is watching.
-  const shim = `<script>window.__vsPreviewId=${JSON.stringify(previewId)};<\/script>${REPORTER}${shimFor(vars)}`;
+  /**
+   * THE POLICY GOES FIRST, before anything the block brought with it.
+   *
+   * A CSP delivered by meta tag applies from the point it is parsed onward, so a
+   * script above it would already have run unpoliced. Putting it at the very
+   * front of head is what makes it a boundary rather than a suggestion.
+   */
+  const csp = opts.untrusted
+    ? `<meta http-equiv="Content-Security-Policy" content="${UNTRUSTED_CSP}">`
+    : '';
+  const shim = `${csp}<script>window.__vsPreviewId=${JSON.stringify(previewId)};<\/script>${REPORTER}${shimFor(vars)}`;
   let out = withGsapPlugins(html);
   if (/<head[^>]*>/i.test(out)) out = out.replace(/<head([^>]*)>/i, `<head$1>${shim}`);
   else if (/<html[^>]*>/i.test(out)) out = out.replace(/<html([^>]*)>/i, `<html$1><head>${shim}</head>`);
