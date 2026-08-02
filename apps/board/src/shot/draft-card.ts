@@ -27,6 +27,7 @@ import { css, html, nothing } from 'lit';
 import { state } from 'lit/decorators.js';
 
 import { blockSrcdoc } from '../ui/block-render';
+import { ensureBlockRuntime } from '../ui/block-runtime';
 import { draftMeta, type DraftBlockModel } from './draft-block';
 
 /** Slot kinds, in the order a person reads a design: what it says, then shows. */
@@ -232,10 +233,20 @@ export class DraftBlockComponent extends GfxBlockComponent<DraftBlockModel> {
    *  design judged at the wrong scale. */
   @state() private accessor _scale = 0.2;
 
+  /**
+   * Flipped once the animation runtime is in hand, purely to force a repaint.
+   *
+   * The preview is built synchronously inside `render()`, so a runtime that
+   * arrives afterwards would sit in the cache while this card showed a frozen
+   * first frame until something unrelated happened to re-render it.
+   */
+  @state() private accessor _runtimeReady = false;
+
   private ro: ResizeObserver | null = null;
 
   override connectedCallback(): void {
     super.connectedCallback();
+    void ensureBlockRuntime().then(() => { this._runtimeReady = true; });
     this.ro = new ResizeObserver(() => this.refit());
     requestAnimationFrame(() => {
       const stage = this.querySelector('.d__stage');
@@ -301,6 +312,9 @@ export class DraftBlockComponent extends GfxBlockComponent<DraftBlockModel> {
 
     const w = Number((meta as { width?: number }).width) || 1080;
     const h = Number((meta as { height?: number }).height) || 1920;
+    // Read so lit tracks it: the srcdoc's contents depend on the runtime being
+    // loaded, which is not otherwise visible to the reactivity system.
+    void this._runtimeReady;
     const srcdoc = blockSrcdoc(html_, {}, `draft-${this.model.id}`, fills as never);
     return html`<iframe
       sandbox="allow-scripts"

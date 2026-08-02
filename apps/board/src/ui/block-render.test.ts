@@ -296,16 +296,33 @@ describe('gsap plugins', () => {
 <script>gsap.to('.x', { text: 'hello' });</script>
 </body></html>`;
 
-  it('loads TextPlugin straight after the block’s own gsap tag', () => {
+  /**
+   * ── THIS CHANGED WHEN THE RENDERER STARTED PROVIDING GSAP ──────────────────
+   *
+   * TextPlugin used to be injected after whatever GSAP tag the block carried,
+   * because the block's tag was the only GSAP there was. Now the runtime is
+   * injected into every frame with TextPlugin already registered, so a tag
+   * asking for the version we provide is redundant and is removed — which is
+   * also what makes the block work in the published sandbox, where no
+   * `<script src>` of any kind can load.
+   *
+   * `withGsapPlugins` is therefore no longer the common path. It survives for
+   * the one case that still needs it: a block deliberately pinning a DIFFERENT
+   * GSAP, whose tag is left alone and which must get a matching plugin.
+   */
+  it('removes a tag asking for the version we already provide', () => {
     const out = blockSrcdoc(withGsap());
-    const gsapAt = out.indexOf('dist/gsap.min.js');
-    const pluginAt = out.indexOf('dist/TextPlugin.min.js');
-    const blockAt = out.indexOf("gsap.to('.x'");
-    expect(pluginAt).toBeGreaterThan(gsapAt);
-    // Before the block's own code, which is the only ordering that matters:
-    // classic script tags run in document order.
-    expect(pluginAt).toBeLessThan(blockAt);
-    expect(out).toContain('gsap.registerPlugin(TextPlugin)');
+    expect(out).not.toContain('cdn.jsdelivr.net');
+    // Nothing is left pointing at a file the sandbox could never load.
+    expect(out).not.toContain('dist/TextPlugin.min.js');
+    // The block's own code is untouched.
+    expect(out).toContain("gsap.to('.x'");
+  });
+
+  it('removes an unpinned tag too — it can only mean “current”', () => {
+    const out = blockSrcdoc(withGsap('/lib/gsap.js'));
+    expect(out).not.toContain('src="/lib/gsap.js"');
+    expect(out).not.toContain('src="/lib/TextPlugin.js"');
   });
 
   /**
@@ -318,11 +335,6 @@ describe('gsap plugins', () => {
     expect(out).not.toContain('3.14.2');
   });
 
-  it('handles an unminified build', () => {
-    const out = blockSrcdoc(withGsap('/lib/gsap.js'));
-    expect(out).toContain('src="/lib/TextPlugin.js"');
-  });
-
   it('leaves a block that never loads gsap completely alone', () => {
     const plain = '<html><head></head><body><div id="root"></div></body></html>';
     const out = blockSrcdoc(plain);
@@ -333,8 +345,8 @@ describe('gsap plugins', () => {
   });
 
   /** Registration must never be what breaks a preview. */
-  it('swallows a registration failure', () => {
-    const out = blockSrcdoc(withGsap());
+  it('swallows a registration failure on the version-pinned path', () => {
+    const out = blockSrcdoc(withGsap('https://cdn.jsdelivr.net/npm/gsap@3.9.1/dist/gsap.min.js'));
     expect(out).toMatch(/try\s*\{\s*gsap\.registerPlugin\(TextPlugin\);\s*\}\s*catch/);
   });
 });

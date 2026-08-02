@@ -33,6 +33,7 @@
  * to defend against a threat that does not exist yet.
  */
 import { getParentToken } from '../board/parent-auth';
+import { blockRuntimeScript, dropRedundantGsapTag, ensureBlockRuntime } from './block-runtime';
 
 /** One block's source, as the preview needs it. */
 export interface BlockDoc {
@@ -478,8 +479,20 @@ export function blockSrcdoc(
   const csp = opts.untrusted
     ? `<meta http-equiv="Content-Security-Policy" content="${UNTRUSTED_CSP}">`
     : '';
-  const shim = `${csp}<script>window.__vsPreviewId=${JSON.stringify(previewId)};<\/script>${REPORTER}${shimFor(vars)}`;
-  let out = withGsapPlugins(html);
+  /**
+   * THE RUNTIME GOES IN BEFORE ANYTHING THE BLOCK BROUGHT.
+   *
+   * Classic scripts run in document order, so GSAP has to be in head before the
+   * block's own inline script — that is the only moment that matters. It sits
+   * AFTER the CSP meta (which must be first to be a boundary at all) and after
+   * the reporter (whose error listener has to predate the code it watches).
+   *
+   * Empty string when the runtime has not loaded, so this stays a pure string
+   * function; `ensureBlockRuntime()` is awaited by the callers that paint.
+   */
+  const shim = `${csp}<script>window.__vsPreviewId=${JSON.stringify(previewId)};<\/script>${REPORTER}${blockRuntimeScript()}${shimFor(vars)}`;
+  // Its own GSAP tag is redundant now, and only when it asks for OUR version.
+  let out = withGsapPlugins(dropRedundantGsapTag(html));
   if (/<head[^>]*>/i.test(out)) out = out.replace(/<head([^>]*)>/i, `<head$1>${shim}`);
   else if (/<html[^>]*>/i.test(out)) out = out.replace(/<html([^>]*)>/i, `<html$1><head>${shim}</head>`);
   else out = `${shim}${out}`;
@@ -600,7 +613,13 @@ export function mountBlockPreview(
     fit();
   }
 
-  void loadBlock(name).then(d => {
+  /**
+   * BOTH IN PARALLEL, because they are independent and the preview waits on the
+   * slower of the two either way. The runtime resolves to null if it cannot be
+   * fetched and the block is painted regardless — unanimated beats absent, and
+   * the block's own report already carries `gsap: false` when it matters.
+   */
+  void Promise.all([loadBlock(name), ensureBlockRuntime()]).then(([d]) => {
     if (dead) return;
     if (!d) {
       // NAMED, not a spinner that never resolves. A block can genuinely be
