@@ -1,0 +1,39 @@
+{
+  "name": "@openreel/board",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "node scripts/typecheck.mjs && vite build",
+    "preview": "vite preview",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "typecheck": "node scripts/typecheck.mjs",
+    "clean": "rm -rf dist node_modules/.vite"
+  },
+  "dependencies": {
+    "@blocksuite/affine": "0.22.4",
+    "@blocksuite/affine-widget-edgeless-selected-rect": "0.22.4",
+    "@blocksuite/affine-widget-edgeless-zoom-toolbar": "0.22.4",
+    "@blocksuite/global": "0.22.4",
+    "@blocksuite/std": "0.22.4",
+    "@blocksuite/store": "0.22.4",
+    "@blocksuite/sync": "0.22.4",
+    "@openreel/asset-browser": "workspace:*",
+    "@toeverything/theme": "^1.1.23",
+    "fractional-indexing": "^3.2.0",
+    "lit": "^3.3.3",
+    "rxjs": "^7.8.2",
+    "y-indexeddb": "^9.0.12",
+    "y-protocols": "^1.0.7",
+    "yjs": "^13.6.31"
+  },
+  "devDependencies": {
+    "@vanilla-extract/vite-plugin": "^5.2.6",
+    "happy-dom": "^20.11.1",
+    "typescript": "^5.6.0",
+    "vite": "^5.4.0",
+    "vitest": "^2.1.0"
+  }
+}

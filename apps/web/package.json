@@ -18,6 +18,7 @@
   "dependencies": {
     "@gsap/react": "^2.1.2",
     "@huggingface/transformers": "3.1.1",
+    "@openreel/asset-browser": "workspace:*",
     "@openreel/core": "workspace:*",
     "@openreel/ui": "workspace:*",
     "@radix-ui/react-context-menu": "^2.2.16",

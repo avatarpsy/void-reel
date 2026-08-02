@@ -1,0 +1,1199 @@
+/**
+ * Voidspace skin for BlockSuite.
+ *
+ * A LUCKY ALIGNMENT, and the reason this file is short: `@toeverything/theme`
+ * switches on `[data-theme=dark]` / `[data-theme=light]`, which is the exact
+ * attribute the Voidspace studio already uses (`:root[data-theme='light']` in
+ * `assets/studio/_overrides.css`). So the parent page's existing theme signal
+ * drives AFFiNE's palette with no translation layer — the iframe just sets the
+ * same attribute on its own <html>.
+ *
+ * Values below are lifted verbatim from `assets/studio/_layout.css` (dark) and
+ * `assets/studio/_overrides.css` (light) so the canvas and the chat column beside
+ * it are the same colours by construction rather than by eye.
+ *
+ * We override only what the user actually sees on a board. AFFiNE ships hundreds
+ * of `--affine-*` tokens; restyling all of them would be a fork of their design
+ * system that we would have to re-reconcile on every upgrade.
+ */
+@import '@toeverything/theme/style.css';
+
+:root {
+  --vs-accent-a: #4a9bd9;
+  --vs-accent-b: #2f6fa3;
+}
+
+/* ── Dark (default) ─────────────────────────────────────────────────────── */
+:root,
+:root[data-theme='dark'] {
+  /* Neutral dark grey, not navy. A storyboard canvas is a work surface: any
+     colour cast in the background fights the artwork sitting on it, and shot
+     cards read as "tinted" rather than neutral. */
+  --vs-bg: #1b1d21;
+  --vs-surface: rgba(255, 255, 255, 0.05);
+  --vs-surface-strong: rgba(255, 255, 255, 0.08);
+  --vs-border: rgba(255, 255, 255, 0.1);
+  --vs-border-strong: rgba(96, 141, 178, 0.28);
+  --vs-text: #ffffff;
+  --vs-text-dim: rgba(255, 255, 255, 0.7);
+  --vs-text-mute: rgba(255, 255, 255, 0.42);
+
+  --affine-background-primary-color: var(--vs-bg);
+  --affine-background-secondary-color: var(--vs-surface);
+  --affine-background-tertiary-color: var(--vs-surface-strong);
+  --affine-background-overlay-panel-color: #0d1a2b;
+  --affine-text-primary-color: var(--vs-text);
+  --affine-text-secondary-color: var(--vs-text-dim);
+  --affine-text-disable-color: var(--vs-text-mute);
+  --affine-icon-color: var(--vs-text-dim);
+  --affine-border-color: var(--vs-border);
+  --affine-divider-color: var(--vs-border);
+  --affine-hover-color: rgba(255, 255, 255, 0.06);
+  --affine-primary-color: var(--vs-accent-a);
+  --affine-brand-color: var(--vs-accent-a);
+  /* The edgeless dot-grid. Too strong and the canvas reads as graph paper;
+     too weak and there is no sense of an infinite plane to pan across. */
+  --affine-edgeless-grid-color: rgba(255, 255, 255, 0.06);
+
+  /* ── The shot card ──────────────────────────────────────────────────────
+     A shot is the one thing on this canvas the user works INSIDE, so it is
+     lifted off the background rather than tinted into it — the card, its
+     header, its media wells and its text fields each a step apart. Lit's
+     `static styles` carry fallbacks for all of these, so a missing token
+     degrades to a readable card rather than an invisible one. */
+  /* Warnings. Amber reads as "look at this", not "this failed" — a shot whose
+     model ignores its last frame is still a shot. Lighter on dark. */
+  --vs-warn: #e0a72c;
+
+  /* OPAQUE, unlike --vs-surface-strong.
+     The asset panel and its sticky section headers sit over a canvas that
+     scrolls behind them. In dark mode --vs-surface-strong is 8% white, so shot
+     cards were visible THROUGH the panel and list rows scrolled through the
+     "IN THIS BOARD" header — legible enough to look broken. Light mode never
+     showed it because its --vs-surface-strong is #fff, which is why this only
+     ever went wrong in the dark. */
+  --vs-panel: #202329;
+
+  --vs-shot-bg: #23262c;
+  --vs-shot-head: rgba(255, 255, 255, 0.05);
+  --vs-shot-well: rgba(255, 255, 255, 0.04);
+  --vs-shot-field: rgba(255, 255, 255, 0.035);
+}
+
+/* ── Light ──────────────────────────────────────────────────────────────── */
+:root[data-theme='light'] {
+  /* Light GREY, not white. Shot cards are white/near-white, so a white canvas
+     makes their edges disappear and the filmstrip stops reading as cards. */
+  --vs-bg: #eef0f3;
+  --vs-surface: #ffffff;
+  --vs-surface-strong: #ffffff;
+  --vs-border: rgba(15, 23, 42, 0.1);
+  --vs-border-strong: rgba(15, 23, 42, 0.22);
+  --vs-text: #1a1a2e;
+  --vs-text-dim: rgba(26, 26, 46, 0.66);
+  --vs-text-mute: rgba(26, 26, 46, 0.42);
+
+  --affine-background-primary-color: var(--vs-bg);
+  --affine-background-secondary-color: rgba(15, 23, 42, 0.04);
+  --affine-background-tertiary-color: rgba(15, 23, 42, 0.06);
+  --affine-background-overlay-panel-color: #ffffff;
+  --affine-text-primary-color: var(--vs-text);
+  --affine-text-secondary-color: var(--vs-text-dim);
+  --affine-text-disable-color: var(--vs-text-mute);
+  --affine-icon-color: var(--vs-text-dim);
+  --affine-border-color: var(--vs-border);
+  --affine-divider-color: var(--vs-border);
+  --affine-hover-color: rgba(15, 23, 42, 0.05);
+  --affine-primary-color: var(--vs-accent-b);
+  --affine-brand-color: var(--vs-accent-b);
+  --affine-edgeless-grid-color: rgba(15, 23, 42, 0.10);
+
+  /* Darker amber: #e0a72c on white is 2.1:1 and unreadable. */
+  --vs-warn: #9a6b06;
+
+  --vs-panel: #ffffff;
+
+  /* Paper on a desk — see the dark block above for why these exist. */
+  --vs-shot-bg: #ffffff;
+  --vs-shot-head: rgba(15, 23, 42, 0.04);
+  --vs-shot-well: rgba(15, 23, 42, 0.035);
+  --vs-shot-field: rgba(15, 23, 42, 0.03);
+}
+
+/* ── Shell ──────────────────────────────────────────────────────────────── */
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden; /* the canvas pans; the PAGE must never scroll */
+  background: var(--vs-bg);
+  color: var(--vs-text);
+  font-family: var(--affine-font-family);
+}
+
+/* `position: relative` on #board-root is load-bearing: our chrome (asset panel,
+   toolbars, empty-state) is absolutely positioned and mounts HERE as a sibling
+   of the editor rather than inside `.affine-edgeless-viewport`, which belongs to
+   BlockSuite's event dispatcher. See the chromeHost note in main.ts. */
+#board-root {
+  position: relative;
+}
+
+/* NOTE: styling the attachment's <video> from here does NOT work and was removed
+   after being measured — the player lives in the block's SHADOW ROOT, which a
+   page-level stylesheet cannot reach, and the embed config sets `object-fit`
+   inline as well. `getComputedStyle` still reported `cover` with the rule in
+   place. The letterboxing fix lives in board/media-embed.ts, which overrides the
+   embed config itself. */
+
+#board-root,
+editor-host {
+  display: block;
+  height: 100%;
+  width: 100%;
+}
+
+/* The viewport wrapper mountBoard() creates. BlockSuite's gfx blocks resolve
+   the scrolling viewport through this exact class name (registered by
+   RootViewExtension as ViewportElementExtension('.affine-edgeless-viewport')),
+   so it must exist AND be the element that actually has the size — a zero-height
+   wrapper makes every block compute empty bounds. */
+.affine-edgeless-viewport {
+  position: relative;
+  display: block;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  container-type: size;
+}
+
+/* Boot state. The parent page already paints an "Opening editor…" spinner over
+   the iframe until `load` fires (EditorPane), so this only has to avoid a flash
+   of unstyled white in the gap between `load` and first paint. */
+#board-boot {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: var(--vs-bg);
+  color: var(--vs-text-mute);
+  font: 400 13px/1.4 var(--affine-font-family);
+  transition: opacity 0.18s ease;
+}
+#board-boot[hidden] {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* ══ Board chrome ══════════════════════════════════════════════════════════
+   The empty state and toolbar (src/ui/board-ui.ts). Uses the same tokens as
+   the chat column beside it, so the two halves of the page are one surface. */
+
+.vs-board-empty {
+  position: absolute;
+  /* Clear the asset panel on the left so the card stays visually centred in the
+     CANVAS, not in the viewport. */
+  inset: 0 0 0 244px;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  /* The canvas must stay pannable THROUGH the empty state — only the card
+     inside it takes clicks. Blocking the whole layer makes a new board feel
+     frozen before the user has done anything. */
+  pointer-events: none;
+  z-index: 5;
+  transition: opacity 0.18s ease;
+}
+/**
+ * HIDDEN MEANS GONE FROM HIT-TESTING, and `opacity: 0` alone does not.
+ *
+ * The card below sets `pointer-events: auto` on itself — it has to, because its
+ * parent layer sets `none` so the canvas stays pannable through it. But a child
+ * re-enabling pointer events is not undone by the PARENT going transparent, so
+ * an invisible 420px card sat over the middle of the board intercepting every
+ * hit test: `elementFromPoint` returned a `<p>` from inside it instead of the
+ * shot underneath, which is what made dropping into a panel near the centre of
+ * the canvas feel dead.
+ *
+ * `visibility: hidden` DOES cascade to descendants and does remove them from
+ * hit-testing. Delaying it by the fade duration keeps the transition visible.
+ */
+.vs-board-empty.is-hidden {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.18s ease, visibility 0s linear 0.18s;
+}
+
+.vs-board-empty__card {
+  pointer-events: auto;
+  max-width: 420px;
+  text-align: center;
+  padding: 28px 30px 24px;
+  border: 1px solid var(--vs-border);
+  border-radius: 16px;
+  /* Same reasoning as the toolbar: readable body copy needs a background, not
+     a tint. See the light override below. */
+  background: color-mix(in srgb, var(--vs-panel) 92%, transparent);
+  backdrop-filter: blur(8px);
+}
+:root[data-theme='light'] .vs-board-empty__card {
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06);
+}
+.vs-board-empty__card h2 {
+  margin: 0 0 8px;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--vs-text);
+}
+.vs-board-empty__card p {
+  margin: 0 0 18px;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--vs-text-dim);
+}
+.vs-board-empty__hint {
+  margin: 14px 0 0 !important;
+  font-size: 11.5px !important;
+  color: var(--vs-text-mute) !important;
+}
+
+.vs-board-bar {
+  position: absolute;
+  /* TOP-centre: AFFiNE's native toolbar sits bottom-centre and its zoom control
+     bottom-left. Sharing an edge with either would overlap them. */
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid var(--vs-border);
+  border-radius: 12px;
+  /* Mostly opaque, matching the light rule below. At 8% white over the canvas
+     this bar had barely more contrast than the dot grid behind it, and the
+     cost readout inside it — a panel on a panel — disappeared entirely. */
+  background: color-mix(in srgb, var(--vs-panel) 94%, transparent);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  z-index: 6;
+}
+:root[data-theme='light'] .vs-board-bar {
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 4px 18px rgba(15, 23, 42, 0.1);
+}
+
+.vs-board-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--vs-text-dim);
+  font: 500 12.5px/1 var(--affine-font-family);
+  cursor: pointer;
+  transition: background 0.14s ease, color 0.14s ease;
+}
+.vs-board-btn:hover { background: var(--affine-hover-color); color: var(--vs-text); }
+.vs-board-btn:active { transform: translateY(0.5px); }
+.vs-board-icon { padding: 0; width: 32px; justify-content: center; }
+.vs-board-zoom { min-width: 52px; justify-content: center; font-variant-numeric: tabular-nums; }
+
+.vs-board-btn--primary {
+  background: var(--vs-accent-b);
+  color: #fff;
+}
+.vs-board-btn--primary:hover { background: var(--vs-accent-a); color: #fff; }
+
+.vs-board-empty__card .vs-board-btn--primary {
+  height: 36px;
+  padding: 0 16px;
+  font-size: 13px;
+}
+
+.vs-board-sep {
+  width: 1px;
+  height: 20px;
+  margin: 0 3px;
+  background: var(--vs-border);
+}
+
+/* What the board will cost, sitting where the eye already is. Reads as a
+   readout, not a button — it is not clickable and must not invite a click. */
+/* `display: flex` below OUTRANKS the UA's `[hidden] { display: none }`, so an
+   empty board drew an empty pill floating next to Fit — a control with nothing
+   in it, which reads as broken. Explicit, and before the flex rule. */
+.vs-board-total[hidden] { display: none; }
+.vs-board-total {
+  display: flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 8px;
+  background: var(--affine-hover-color);
+  border: 1px solid var(--vs-border);
+  color: var(--vs-text-dim);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: default;
+}
+/* Some shots have no model yet, so the figure is a floor, not a total. Dashed
+   rather than a warning colour: it is incomplete, not wrong. */
+.vs-board-total.is-partial {
+  border-style: dashed;
+  border-color: var(--vs-border-strong);
+}
+
+/* The empty state's built-in guide. Deliberately terse — a first-time user reads
+   about four lines before they start clicking, so it names the containment rule
+   (the one concept that is not guessable) and the controls, and stops. */
+.vs-board-guide {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--vs-border);
+  text-align: left;
+}
+.vs-board-guide__lead {
+  margin: 0 0 12px !important;
+  font-size: 12.5px !important;
+  line-height: 1.55;
+  color: var(--vs-text-dim) !important;
+}
+.vs-board-guide__lead strong { color: var(--vs-text); font-weight: 600; }
+.vs-board-guide__keys { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.vs-board-guide__keys li {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  gap: 10px;
+  align-items: baseline;
+  font-size: 11.5px;
+  color: var(--vs-text-mute);
+}
+.vs-board-guide__keys b { color: var(--vs-text-dim); font-weight: 600; }
+.vs-board-empty__card { max-width: 460px; }
+
+/* ══ Asset panel ═══════════════════════════════════════════════════════════
+   Left rail over the canvas, matching the video editor's Assets panel in
+   structure (scope pills → semantic search → kind filters → grid) so the two
+   read as the same feature in two places. */
+.vs-assets {
+  position: absolute;
+  top: 0; left: 0; bottom: 0;
+  width: 244px;
+  display: flex; flex-direction: column;
+  background: var(--vs-panel);
+  border-right: 1px solid var(--vs-border);
+  backdrop-filter: blur(10px);
+  z-index: 7;
+  transition: width 0.16s ease;
+}
+.vs-assets.is-collapsed { width: 38px; }
+
+.vs-assets__toggle {
+  display: flex; align-items: center; gap: 6px;
+  height: 34px; padding: 0 10px;
+  border: 0; border-bottom: 1px solid var(--vs-border);
+  background: transparent; color: var(--vs-text-dim);
+  font: 600 11.5px/1 var(--affine-font-family); cursor: pointer;
+}
+.vs-assets__toggle:hover { color: var(--vs-text); background: var(--affine-hover-color); }
+.vs-assets__toggle { width: 100%; justify-content: flex-start; }
+/* The mark is the affordance: clicking it opens and closes the panel, so it is
+   the one control that stays visible when collapsed. */
+.vs-assets__logo {
+  flex: 0 0 auto; width: 18px; height: 18px; object-fit: contain; border-radius: 4px;
+}
+.vs-assets__chev { margin-left: auto; opacity: 0.6; font-size: 10px; }
+.is-collapsed .vs-assets__toggle { justify-content: center; padding: 8px 0; }
+.is-collapsed .vs-assets__toggle span { display: none; }
+
+.vs-assets__body { display: flex; flex-direction: column; min-height: 0; flex: 1; padding: 8px; gap: 8px; }
+/* In a column flex container every child stretches to fill by default — which
+   turned the search box into a full-height rectangle. Only the LIST may grow. */
+.vs-assets__body > * { flex: 0 0 auto; }
+.vs-assets__body > .vs-assets__list { flex: 1 1 auto; }
+.vs-assets__scopes, .vs-assets__kinds { display: flex; flex-wrap: wrap; gap: 4px; }
+.vs-assets__scope, .vs-assets__kind {
+  flex: 0 0 auto; /* size to their label, never to the panel */
+  border: 1px solid var(--vs-border); border-radius: 999px;
+  padding: 3px 9px; background: transparent; cursor: pointer;
+  color: var(--vs-text-mute); font: 500 10.5px/1.4 var(--affine-font-family);
+}
+.vs-assets__scope.is-on, .vs-assets__kind.is-on {
+  background: var(--vs-accent-b); border-color: var(--vs-accent-b); color: #fff;
+}
+.vs-assets__q {
+  width: 100%; box-sizing: border-box;
+  height: 28px; min-height: 28px; max-height: 28px; padding: 0 9px;
+  border: 1px solid var(--vs-border); border-radius: 8px;
+  background: transparent; color: var(--vs-text);
+  font: 400 11.5px/1 var(--affine-font-family); outline: none;
+}
+.vs-assets__q:focus { border-color: var(--vs-accent-a); }
+
+.vs-assets__list { flex: 1; min-height: 0; overflow-y: auto; display: grid; gap: 3px; align-content: start; }
+.vs-assets__muted, .vs-assets__note {
+  margin: 6px 2px; font: 400 11px/1.45 var(--affine-font-family); color: var(--vs-text-mute);
+}
+.vs-assets__note { color: var(--vs-accent-a); }
+
+.vs-assets__item {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 4px; border: 0; border-radius: 7px; background: transparent;
+  color: var(--vs-text-dim); text-align: left; cursor: grab;
+}
+.vs-assets__item:hover { background: var(--affine-hover-color); color: var(--vs-text); }
+.vs-assets__item:active { cursor: grabbing; }
+.vs-assets__thumb {
+  /* Constant in list view. Only the GRID modes let the thumb scale, and there it
+     follows the column width rather than the panel width directly. */
+  flex: 0 0 auto; width: 38px; height: 28px; border-radius: 4px; overflow: hidden;
+  display: grid; place-items: center; font-size: 12px;
+  background: var(--affine-background-secondary-color);
+}
+.vs-assets__thumb img,
+/* A clip with no server thumbnail previews from its own first frame — see the
+   note in asset-panel.ts. It has to fill the tile exactly as an image does, or
+   the two kinds of tile stop matching. */
+.vs-assets__thumb video { width: 100%; height: 100%; object-fit: cover; }
+.vs-assets__names { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
+.vs-assets__name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font: 400 11px/1.3 var(--affine-font-family);
+}
+/* What a block IS, on the tile. Slot count decides whether it fits your
+   content, and "needs adapting" is the difference between a template and
+   somebody else's finished card — see BLOCK_SHARING_BUILD_PLAN §7. */
+.vs-assets__detail {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font: 400 9.5px/1.3 var(--affine-font-family);
+  color: var(--vs-text-mute);
+}
+/* Blocks are designs, not files. A square, flat swatch reads as a template
+   where a 16:9 thumb reads as footage. */
+.vs-assets__item--block .vs-assets__thumb {
+  width: 30px; height: 30px;
+  font-size: 15px;
+  color: var(--vs-accent-a);
+  background: var(--affine-background-tertiary-color);
+}
+/* In the grid modes the tile is a column, so the detail line would double the
+   row height for a benefit the tooltip already gives. */
+.vs-assets__list--grid .vs-assets__detail,
+.vs-assets__list--compact .vs-assets__detail { display: none; }
+
+/* ── A block, rendering ────────────────────────────────────────────────────
+   The iframe runs at the composition's NATIVE size and is scaled by transform
+   — see block-preview.ts for why resizing it instead would show a layout
+   nobody will ever render. */
+.vs-blockprev {
+  position: relative;
+  width: 100%;
+  height: min(62vh, 720px);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: #05070b;
+  border-radius: 10px;
+}
+.vs-blockprev__frame {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform-origin: center center;
+  border: 0;
+  background: transparent;
+  /* Set inline from the block's own data-width/height. */
+}
+.vs-blockprev__note {
+  padding: 24px;
+  text-align: center;
+  font: 400 12px/1.5 var(--affine-font-family);
+  color: rgba(255, 255, 255, 0.6);
+}
+
+/* Tile: click previews, the + adds. */
+.vs-assets__item { position: relative; }
+.vs-assets__add {
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  width: 20px; height: 20px; border: 0; border-radius: 5px; cursor: pointer;
+  background: var(--vs-accent-b); color: #fff; font: 600 13px/1 var(--affine-font-family);
+  opacity: 0; transition: opacity 0.12s ease;
+}
+.vs-assets__item:hover .vs-assets__add { opacity: 1; }
+
+/* Preview overlay — the board's equivalent of MediaPreviewOverlay. */
+.vs-preview {
+  /* Same reasoning as .vs-inspect — a modal belongs to the viewport. */
+  position: fixed; inset: 0; z-index: 20;
+  display: grid; place-items: center;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.62); backdrop-filter: blur(3px);
+}
+.vs-preview__box {
+  width: min(78%, 900px); max-height: 84%;
+  display: flex; flex-direction: column;
+  border: 1px solid var(--vs-border); border-radius: 12px; overflow: hidden;
+  background: var(--vs-panel);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+.vs-preview__head {
+  display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+  border-bottom: 1px solid var(--vs-border);
+  font: 600 12.5px/1 var(--affine-font-family); color: var(--vs-text);
+}
+.vs-preview__head span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vs-preview__head button {
+  border: 0; border-radius: 7px; padding: 6px 10px; cursor: pointer;
+  background: var(--vs-accent-b); color: #fff; font: 600 11.5px/1 var(--affine-font-family);
+}
+.vs-preview__head button[data-a="prev-close"] { background: transparent; color: var(--vs-text-dim); padding: 6px 8px; }
+.vs-preview__body { display: grid; place-items: center; padding: 14px; overflow: auto; background: #000; }
+.vs-preview__body img, .vs-preview__body video { max-width: 100%; max-height: 62vh; display: block; }
+.vs-preview__body audio { width: min(520px, 90%); }
+.vs-preview__fail { color: var(--vs-text-mute); font: 400 12px/1.5 var(--affine-font-family); padding: 24px; }
+
+/* Recency section headers + Load more — shared rules, board rendering. */
+.vs-assets__section {
+  position: sticky; top: 0; z-index: 1;
+  margin: 8px 2px 2px; padding: 3px 4px;
+  font: 600 10px/1.3 var(--affine-font-family); letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--vs-text-mute);
+  background: var(--vs-panel);
+}
+.vs-assets__more {
+  margin: 8px 2px 2px; padding: 7px 0; width: calc(100% - 4px);
+  border: 1px solid var(--vs-border); border-radius: 8px; cursor: pointer;
+  background: transparent; color: var(--vs-text-dim);
+  font: 500 11px/1 var(--affine-font-family);
+}
+.vs-assets__more:hover { background: var(--affine-hover-color); color: var(--vs-text); }
+
+/* Preview navigation */
+.vs-preview__body { position: relative; }
+.vs-preview__count {
+  font: 500 11px/1 var(--affine-font-family); color: var(--vs-text-mute);
+  font-variant-numeric: tabular-nums;
+}
+.vs-preview__nav {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  width: 38px; height: 60px; border: 0; cursor: pointer;
+  background: rgba(0, 0, 0, 0.45); color: #fff;
+  font: 400 26px/1 var(--affine-font-family);
+  border-radius: 8px; transition: background 0.12s ease, opacity 0.12s ease;
+}
+.vs-preview__nav:hover:not(:disabled) { background: rgba(0, 0, 0, 0.72); }
+.vs-preview__nav:disabled { opacity: 0.25; cursor: default; }
+.vs-preview__nav--l { left: 10px; }
+.vs-preview__nav--r { right: 10px; }
+
+/* ── View modes ────────────────────────────────────────────────────────────
+   Three layouts over the same tiles. The DOM never changes between modes —
+   only the grid does — so switching cannot reorder or re-fetch anything. */
+/* FIXED-SIZE ICON BUTTONS, right-aligned — the video editor's behaviour.
+   They were `flex: 1`, which stretched each button as the panel widened and made
+   the whole control grow and shrink with the drag. Chrome should stay a constant
+   size while only the CONTENT reflows; a toolbar that resizes with its container
+   reads as a zoom, not a resize. */
+.vs-assets__views { display: flex; gap: 2px; justify-content: flex-end; }
+.vs-assets__view {
+  flex: 0 0 auto; width: 26px; height: 24px;
+  display: grid; place-items: center;
+  border: 1px solid var(--vs-border); border-radius: 6px; cursor: pointer;
+  background: transparent; color: var(--vs-text-mute);
+}
+.vs-assets__view.is-on { background: var(--vs-accent-b); border-color: var(--vs-accent-b); color: #fff; }
+.vs-assets__view:hover:not(.is-on) { color: var(--vs-text); background: var(--affine-hover-color); }
+
+/* LIST — a row per asset, name beside a small thumb. The default. */
+.vs-assets__list--list { display: grid; gap: 3px; }
+
+/* GRID / COMPACT — thumbnail-first, name underneath, auto-fill so the columns
+   follow the panel's dragged width instead of a fixed count. */
+.vs-assets__list--grid,
+.vs-assets__list--compact { display: grid; gap: 6px; align-content: start; }
+.vs-assets__list--grid { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
+.vs-assets__list--compact { grid-template-columns: repeat(auto-fill, minmax(62px, 1fr)); }
+
+.vs-assets__list--grid .vs-assets__item,
+.vs-assets__list--compact .vs-assets__item {
+  flex-direction: column; align-items: stretch; gap: 4px; padding: 0;
+}
+.vs-assets__list--grid .vs-assets__thumb,
+.vs-assets__list--compact .vs-assets__thumb {
+  width: 100%; height: auto; aspect-ratio: 4 / 3; border-radius: 7px;
+}
+.vs-assets__list--grid .vs-assets__name,
+.vs-assets__list--compact .vs-assets__name { padding: 0 2px 4px; }
+/* Compact is a contact sheet — names would dominate the tile. */
+.vs-assets__list--compact .vs-assets__name { display: none; }
+.vs-assets__list--grid .vs-assets__add,
+.vs-assets__list--compact .vs-assets__add { top: 6px; right: 6px; transform: none; }
+
+/* Section headers span every column rather than becoming a grid cell. */
+.vs-assets__list--grid .vs-assets__section,
+.vs-assets__list--compact .vs-assets__section,
+.vs-assets__list--grid .vs-assets__more,
+.vs-assets__list--compact .vs-assets__more { grid-column: 1 / -1; }
+
+/* ── Resize grip ───────────────────────────────────────────────────────────
+   6px hit area on the right edge, widened invisibly so it is grabbable without
+   drawing a thick border. */
+.vs-assets__grip {
+  position: absolute; top: 0; right: -3px; bottom: 0; width: 6px;
+  cursor: ew-resize; z-index: 2;
+}
+.vs-assets__grip:hover, .vs-assets__grip:active { background: var(--vs-accent-a); opacity: 0.5; }
+.is-collapsed .vs-assets__grip { display: none; }
+
+/* ── Scrollbars ────────────────────────────────────────────────────────────
+   The asset list scrolls a lot, and a default light scrollbar on the dark
+   canvas is the one chrome element that gives the theme away. `color-scheme`
+   fixes the native widget (Firefox, and the form controls); the WebKit rules
+   style the track and thumb to the same tokens as everything else. */
+:root { color-scheme: dark; }
+:root[data-theme='light'] { color-scheme: light; }
+
+* { scrollbar-width: thin; scrollbar-color: var(--vs-border-strong) transparent; }
+
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: var(--vs-border-strong);
+  border-radius: 6px;
+  /* Inset with a transparent border so the thumb reads as a slim pill rather
+     than filling the gutter edge to edge. */
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--vs-text-mute); background-clip: content-box; }
+*::-webkit-scrollbar-corner { background: transparent; }
+
+/* The search placeholder. Browsers pick their own placeholder colour from the
+   default UA stylesheet, which does NOT follow our tokens — on the dark canvas
+   it rendered near-black on dark grey and was effectively invisible. Set it
+   explicitly for both themes, and make the typed text inherit our ink so the
+   two are consistent once the user starts typing. */
+.vs-assets__q { color: var(--vs-text); }
+.vs-assets__q::placeholder { color: var(--vs-text-mute); opacity: 1; }
+.vs-assets__q::-webkit-input-placeholder { color: var(--vs-text-mute); opacity: 1; }
+/* Chrome renders the search-field clear button from the UA sheet too; tint it
+   so it is visible on dark without being loud on light. */
+.vs-assets__q::-webkit-search-cancel-button { filter: invert(0.5); cursor: pointer; }
+
+/* ══ Toasts ════════════════════════════════════════════════════════════════
+   Placement is asynchronous — a fetch, a metadata probe, a block — so there is
+   always a window where the only honest thing to do is say what is happening.
+   The absence of that window is what made users drop an asset twice and end up
+   with two copies (src/ui/toast.ts). */
+
+.vs-toasts {
+  position: absolute;
+  left: 50%;
+  bottom: 84px; /* clear of AFFiNE's own toolbar, which owns bottom-centre */
+  transform: translateX(-50%);
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+  /* The stack must never intercept a click meant for the canvas underneath. */
+  pointer-events: none;
+}
+
+.vs-toast {
+  max-width: min(460px, 68vw);
+  padding: 9px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--vs-border);
+  background: var(--vs-surface-strong);
+  backdrop-filter: blur(14px);
+  color: var(--vs-text);
+  font: 400 12.5px/1.45 var(--affine-font-family);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.34);
+  /* Animate in from below; `is-in` is added on the second frame so the
+     transition has a laid-out starting point to run from. */
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+:root[data-theme='light'] .vs-toast { box-shadow: 0 10px 28px rgba(15, 23, 42, 0.16); }
+.vs-toast.is-in { opacity: 1; transform: translateY(0); }
+.vs-toast--error { border-color: rgba(255, 116, 116, 0.42); }
+.vs-toast--info { color: var(--vs-text-dim); }
+
+/* ══ Role chip ═════════════════════════════════════════════════════════════
+   "What is this picture FOR?" — explicit, because nothing about a still's
+   position says whether it is a first frame or a mood reference, and guessing
+   produces the wrong video with no visible cause (src/ui/role-chip.ts). */
+
+.vs-role-chip {
+  position: absolute;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 5px;
+  border-radius: 10px;
+  border: 1px solid var(--vs-border);
+  background: var(--vs-surface-strong);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  font: 400 11.5px/1 var(--affine-font-family);
+  white-space: nowrap;
+}
+:root[data-theme='light'] .vs-role-chip { box-shadow: 0 8px 22px rgba(15, 23, 42, 0.14); }
+.vs-role-chip[hidden] { display: none; }
+
+.vs-role-chip__where {
+  padding: 0 6px 0 4px;
+  color: var(--vs-text-mute);
+  font-size: 11px;
+  letter-spacing: 0.01em;
+}
+/* Outside a shot there are no roles to offer, only the containment rule to
+   state — so the line is allowed to be a sentence rather than a label. */
+.vs-role-chip__where--loose { padding: 3px 8px; color: var(--vs-text-dim); }
+
+.vs-role-chip__btn {
+  appearance: none;
+  border: 0;
+  border-radius: 7px;
+  padding: 5px 9px;
+  background: transparent;
+  color: var(--vs-text-dim);
+  font: inherit;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.vs-role-chip__btn:hover { background: var(--affine-hover-color); color: var(--vs-text); }
+.vs-role-chip__btn.is-on { background: var(--vs-accent-b); color: #fff; }
+
+/* ══ Compiled = read-only ══════════════════════════════════════════════════
+   `store.readonly` already refuses every write, but leaving the chrome live on
+   a board that will silently reject each click is worse than removing it: the
+   user presses Add shot, nothing happens, and nothing says why. The banner in
+   the chat column beside the canvas is where the explanation lives. */
+
+:root[data-locked='true'] .vs-board-bar,
+:root[data-locked='true'] .vs-role-chip,
+/* AFFiNE's own creative toolbar — pen, shapes, sticky notes. Every one of them
+   would produce a block the document refuses. */
+:root[data-locked='true'] edgeless-toolbar-widget {
+  display: none !important;
+}
+/* Panning, zooming and READING all still work — a compiled board is a record
+   the user should be able to look through. Only mutation is gone. */
+
+/* ══ Lane pagers ═══════════════════════════════════════════════════════════
+   A canvas has no scrollable sub-region, so a shot's media rows PAGE. These are
+   chrome, not canvas objects: a button drawn as a shape would be selectable,
+   draggable and deletable, and the compile step would have to know to ignore it.
+   Shown only for the shot the user is working in — a board can hold sixty
+   panels, and pagers for all of them would be hundreds of buttons repainting on
+   every pan. (src/ui/lane-nav.ts) */
+
+.vs-lanes {
+  position: absolute;
+  inset: 0;
+  z-index: 25;
+  /* The layer must never intercept a canvas gesture; only the buttons do. */
+  pointer-events: none;
+}
+.vs-lanes[hidden] { display: none; }
+
+.vs-lane-nav {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  pointer-events: auto;
+  font: 400 10.5px/1 var(--affine-font-family);
+  color: var(--vs-text-mute);
+  white-space: nowrap;
+}
+.vs-lane-nav span { font-variant-numeric: tabular-nums; padding: 0 2px; }
+
+.vs-lane-nav button {
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--vs-border);
+  border-radius: 5px;
+  background: var(--vs-surface-strong);
+  color: var(--vs-text-dim);
+  font: 400 12px/1 var(--affine-font-family);
+  cursor: pointer;
+}
+.vs-lane-nav button:hover:not(:disabled) {
+  background: var(--vs-accent-b);
+  border-color: var(--vs-accent-b);
+  color: #fff;
+}
+/* Disabled rather than hidden: a control that vanishes at the end of a list
+   makes the row jump, and the user loses the thing they were aiming at. */
+.vs-lane-nav button:disabled { opacity: 0.35; cursor: default; }
+
+/* ══ Media viewer ══════════════════════════════════════════════════════════
+   Playback lives here, not on the canvas. A 90px card is not where anyone
+   watches a video — the controls are unusable and they eat the clicks that
+   should select and drag the card — and an inline player is a network client,
+   so a board in view was twenty of them negotiating range requests before
+   anyone asked to watch anything. (src/ui/lightbox.ts) */
+
+/* ══ Media inspector ═══════════════════════════════════════════════════════
+   Where a reference is judged and described (src/ui/media-inspector.ts).
+   Two columns: the media at a size you can actually assess, and the decisions
+   it carries. A trim bar underneath for anything with a duration. */
+
+.vs-inspect {
+  /* FIXED, not absolute. Absolute resolved against #board-root, so anything
+     that changed the root's box — a resize, a zoom — moved the dialog with it.
+     The viewport is what a modal is actually anchored to. */
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  /* An oversized child in a centred grid overflows BOTH ends and becomes
+     unreachable. It cannot get oversized any more (see below), and this is the
+     belt to that braces. */
+  overflow: hidden;
+}
+.vs-inspect[hidden] { display: none; }
+
+.vs-inspect__scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(6, 9, 14, 0.72);
+  backdrop-filter: blur(6px);
+}
+
+.vs-inspect__box {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(94%, 1240px);
+  /* `max-height`, not `height`: a fixed height on a flex column whose child can
+     outgrow it is a promise the layout cannot keep — and it did not. */
+  height: min(90%, 860px);
+  max-height: min(90%, 860px);
+  min-height: 0;
+  /* Nothing inside may paint outside the dialog. */
+  overflow: hidden;
+}
+/* ALWAYS LIGHT, never the theme token.
+   Everything outside the side panel sits directly on the scrim, which is dark
+   in BOTH themes (rgba(6,9,14,.72)). Using `--vs-text` here rendered near-black
+   text on it in light mode — the filename, the trim label and the readout were
+   all present, correctly positioned, and unreadable. A surface with a fixed
+   background needs fixed foreground colours. */
+.vs-inspect__box header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: none;
+  color: rgba(255, 255, 255, 0.92);
+  font: 500 13px/1.3 var(--affine-font-family);
+}
+.vs-inspect__name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vs-inspect__box header button {
+  appearance: none;
+  width: 30px; height: 30px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 13px;
+  cursor: pointer;
+}
+.vs-inspect__box header button:hover { color: #fff; background: rgba(255, 255, 255, 0.18); }
+
+.vs-inspect__body {
+  display: flex;
+  gap: 14px;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.vs-inspect__main {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  /* THE BUG. A flex item's default `min-height: auto` means it refuses to
+     shrink below its content — so a tall still made this column grow past the
+     dialog, which then grew past the screen and hung off the bottom. Every
+     flex child that contains media needs this, and this one was missed while
+     its siblings had it. */
+  min-height: 0;
+}
+
+.vs-inspect__stage {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  overflow: hidden;
+  /* TRANSPARENT, not a black slab.
+     `object-fit: contain` letterboxes whatever does not match the stage, so a
+     16:9 still in a tall dialog sat in a thick black frame while a 4:5 one
+     filled it — the same rule, two completely different-looking results. With
+     no painted background the media simply IS the frame, so every aspect is
+     presented identically. */
+  background: transparent;
+}
+/* FILL THE STAGE, contain the aspect.
+   `max-width/max-height` alone only ever SHRINK — so a 320px display variant
+   rendered at 320px inside a 1200px dialog, which is exactly the "why is media
+   not opening full" report. Sizing to the stage and containing the ratio makes
+   a portrait still and a 21:9 clip both fill it without distortion. */
+/* FILL THE STAGE, CONTAIN THE ASPECT — sized by the BOX, not by a percentage.
+ *
+ * Three requirements pull against each other here and all three matter:
+ *  • it must UPSCALE — `max-width` alone only ever shrinks, which is how a
+ *    320px thumbnail once rendered at 320px inside a 1200px dialog;
+ *  • it must not distort — hence `contain`;
+ *  • it must never make the dialog grow.
+ *
+ * `height: 100%` satisfied the first two and broke the third: a percentage
+ * height needs a DEFINITE height on the parent, and the stage is a flex item
+ * whose height is resolved by layout rather than declared. Where that
+ * percentage failed to resolve it fell back to the image's intrinsic size — a
+ * 2600px-tall still became a 2600px-tall element, pushed the dialog down the
+ * page and hung off the bottom of the screen. Only TALL images did it, which is
+ * exactly the "some images, not all" shape of the report.
+ *
+ * Absolute positioning takes the size from the stage's box directly, so there
+ * is no percentage to resolve and no way for the content to size its own
+ * container. */
+.vs-inspect__stage { position: relative; }
+.vs-inspect__stage img,
+.vs-inspect__stage video {
+  display: block;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.vs-inspect__stage audio { width: min(620px, 90%); }
+.vs-inspect__fail {
+  margin: 0;
+  padding: 56px 24px;
+  color: rgba(255, 255, 255, 0.7);
+  font: 400 13px/1.5 var(--affine-font-family);
+  text-align: center;
+}
+
+.vs-inspect__side {
+  flex: none;
+  width: 300px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  overflow-y: auto;
+  border: 1px solid var(--vs-border);
+  border-radius: 12px;
+  /* Opaque: this panel sits on the dialog's dark scrim, and a translucent one
+     would put the media stage's picture behind the fields. */
+  background: var(--vs-panel);
+}
+.vs-inspect__field { display: flex; flex-direction: column; gap: 5px; }
+.vs-inspect__field > span {
+  font: 500 9.5px/1.3 var(--affine-font-family);
+  letter-spacing: 0.08em;
+  color: var(--vs-text-mute);
+}
+.vs-inspect__field > span em {
+  font-style: normal;
+  letter-spacing: 0;
+  text-transform: none;
+  opacity: 0.85;
+}
+.vs-inspect__field--grow { flex: 1; min-height: 0; }
+.vs-inspect__field input,
+.vs-inspect__field select,
+.vs-inspect__field textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 9px;
+  border: 1px solid var(--vs-border);
+  border-radius: 8px;
+  background: var(--vs-bg);
+  color: var(--vs-text);
+  font: 400 12.5px/1.45 var(--affine-font-family);
+  outline: none;
+  resize: none;
+}
+.vs-inspect__field textarea { flex: 1; min-height: 84px; }
+.vs-inspect__field input:focus,
+.vs-inspect__field select:focus,
+.vs-inspect__field textarea:focus { border-color: var(--vs-accent-a); }
+
+/* ── The trim bar ──────────────────────────────────────────────────────────
+   Playback is clamped to this window, so dragging a handle SCRUBS: you hear
+   and see where you are landing. That is the whole reason it lives beside the
+   player rather than in a numeric field somewhere. */
+.vs-trim { flex: none; display: flex; flex-direction: column; gap: 7px; }
+/* On the scrim — see the header note above. */
+.vs-trim__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font: 500 9.5px/1 var(--affine-font-family);
+  letter-spacing: 0.08em;
+  color: rgba(255, 255, 255, 0.62);
+}
+.vs-trim__read { flex: 1; letter-spacing: 0; font-weight: 400; font-size: 11px; }
+.vs-trim__clear {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 999px;
+  padding: 3px 9px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.8);
+  font: 500 10px/1 var(--affine-font-family);
+  letter-spacing: 0;
+  cursor: pointer;
+}
+.vs-trim__clear:hover { color: #fff; background: rgba(255, 255, 255, 0.12); }
+
+.vs-trim__bar {
+  position: relative;
+  height: 30px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  touch-action: none;
+}
+.vs-trim__region {
+  position: absolute;
+  top: 0; bottom: 0;
+  background: rgba(74, 155, 217, 0.28);
+  border-left: 2px solid var(--vs-accent-a);
+  border-right: 2px solid var(--vs-accent-a);
+  pointer-events: none;
+}
+.vs-trim__handle {
+  position: absolute;
+  top: -4px;
+  width: 14px;
+  height: 38px;
+  margin-left: -7px;
+  padding: 0;
+  border: 1px solid var(--vs-accent-a);
+  border-radius: 5px;
+  background: var(--vs-accent-a);
+  cursor: ew-resize;
+  touch-action: none;
+}
+.vs-trim__handle:hover { filter: brightness(1.12); }
+.vs-trim__hint {
+  font: 400 10.5px/1.4 var(--affine-font-family);
+  color: rgba(255, 255, 255, 0.5);
+}
+
+
+/* ── A block, full size ────────────────────────────────────────────────────
+   Opened from a shot card's preview, which is 190px and inert by necessity —
+   see openBlockLightbox. Sits over everything including the asset panel. */
+.vs-blocklb {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+}
+.vs-blocklb__scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(6, 9, 14, 0.78);
+  backdrop-filter: blur(6px);
+}
+.vs-blocklb__box {
+  position: relative;
+  width: min(92%, 1100px);
+  height: min(88%, 820px);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+/* Fixed light text: everything here sits on the scrim, which is dark in BOTH
+   themes — the same rule the media inspector's chrome follows. */
+.vs-blocklb__box header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  color: rgba(255, 255, 255, 0.92);
+  font: 500 13px/1.3 var(--affine-font-family);
+}
+.vs-blocklb__name { font-weight: 600; }
+.vs-blocklb__sub {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: rgba(255, 255, 255, 0.6);
+  font-weight: 400;
+}
+.vs-blocklb__box header button {
+  appearance: none;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.85);
+  font: 500 12px/1 var(--affine-font-family);
+  cursor: pointer;
+}
+.vs-blocklb__box header button:hover { color: #fff; background: rgba(255, 255, 255, 0.2); }
+.vs-blocklb__box header button[data-close] { width: 30px; padding: 0; }
+.vs-blocklb__stage {
+  flex: 1;
+  min-height: 0;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #05070b;
+  display: grid;
+  place-items: center;
+  position: relative;
+}
+/* The stage IS the preview host, so it needs the same geometry rules the
+   standalone .vs-blockprev gets. */
+.vs-blocklb__stage > .vs-blockprev__frame {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform-origin: center center;
+  border: 0;
+  background: transparent;
+}
+
+/* ── A block, on a panel tile ──────────────────────────────────────────────
+   Thumbnail-first views only: the list view's thumb is 38x28, where a
+   composition is a smudge and the glyph reads better. */
+.vs-assets__thumb .vs-blockprev__frame {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform-origin: center center;
+  border: 0;
+  background: transparent;
+  pointer-events: none;
+}
+.vs-assets__thumb { position: relative; }
+.vs-assets__item--block .vs-assets__thumb .vs-blockprev__note { display: none; }

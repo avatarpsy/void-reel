@@ -1,11 +1,20 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Search, Loader2, Plus, Check, Film, Music2, Image as ImageIcon, AudioLines, Mic, Pencil, HardDrive, Cloud, Star, Filter, Upload, RefreshCw, LayoutGrid, Grid2x2, List, ChevronDown, ChevronRight, Download, Settings2, X } from "lucide-react";
+import { Search, Loader2, Plus, Check, Film, Music2, Image as ImageIcon, AudioLines, Mic, Pencil, HardDrive, Cloud, Star, Filter, Upload, RefreshCw, LayoutGrid, Grid2x2, List, ChevronDown, ChevronRight, Download, Settings2, X, Globe } from "lucide-react";
 import { useVoidspaceStore } from "../../stores/voidspace-store";
 import { useProjectStore } from "../../stores/project-store";
 import { saveMediaBlob, loadMediaBlob } from "../../services/media-storage";
 import { checkForRecovery, recoverProject } from "../../services/auto-save";
 import { MediaPreviewOverlay, type PreviewKind } from "./MediaPreviewOverlay";
 import { usePlayableVideo } from "../../services/video-playback";
+// The SHARED asset-browser rules. Recency bucketing, page size and page merging
+// live in @openreel/asset-browser so this panel, the image editor and the board
+// cannot drift apart — a change there lands in all three at once. The local
+// copies these replaced are deleted below, not commented out.
+import {
+  BUCKET_ORDER,
+  PAGE_SIZE,
+  bucketOf,
+} from "@openreel/asset-browser";
 
 /**
  * Library tab — the user's CROSS-PROJECT asset library. Two tabs (below),
@@ -64,18 +73,24 @@ type LibType = "all" | "video" | "image" | "music" | "sfx" | "voice";
  * the catalogue (`license.type: 'unknown'` + a confirm-before-selling note) rather
  * than asserted in the interface.
  *
- * WHY THERE IS NO "SHARED ASSETS" TAB (removed 2026-07-30)
- * It would only ever list OTHER accounts' public uploads, and nothing is public
- * while the library is local-only — so it shipped permanently empty. Removed until
- * cloud sync exists and there is something real to show. The server-side
- * `scope=shared` filter is retained (correct and tested) for when it returns.
+ * SHARED ASSETS (removed 2026-07-30, RESTORED 2026-07-31)
+ * It was removed because nothing was public while the library was local-only, so it
+ * shipped permanently empty — the right call at the time. It is back because there is
+ * now something real behind it: `media_shared_assets` holds a public projection per
+ * published asset, and /api/media-library/shared/search fuses a semantic lane over the
+ * shared vector index with a keyword lane over that projection.
+ *
+ * It is a SCOPE and not a tab for the same reason the others are: the user thinks
+ * "my stuff" vs "everyone's stuff", which is one axis, and a tab per source is the
+ * mistake the Cloud tab already made here.
  */
-type LibScope = "generated" | "myfiles" | "device";
+type LibScope = "generated" | "myfiles" | "device" | "shared";
 
 const SCOPE_PILLS: { id: LibScope; label: string; hint: string }[] = [
   { id: "generated", label: "Generated", hint: "AI generations and renders from your projects" },
   { id: "myfiles",   label: "My files",  hint: "Your media library on this machine — sfx, music, footage, stills, HDRI, fonts" },
   { id: "device",    label: "This browser", hint: "Media in other projects saved in this browser" },
+  { id: "shared",    label: "Shared",      hint: "Assets other creators have shared — free to use, credited to them" },
 ];
 
 /** Which scopes read the shared media library (vs the generations store / IndexedDB). */
@@ -198,6 +213,24 @@ const LIB_KIND_FOR_TYPE: Record<LibType, string> = {
   voice: "audio-voice",
 };
 
+/**
+ * Type pill → EXPLICIT kinds, for the shared endpoint.
+ *
+ * The on-disk library accepts a group PREFIX (`visual` matches `visual-image`,
+ * `visual-hdri`, …). Firestore has no prefix match, so the shared endpoint needs the
+ * kinds enumerated. Derived from the same pills so one type filter still drives every
+ * scope — the alternative is two vocabularies for the same control, which is what the
+ * comment above exists to prevent.
+ */
+const LIB_KINDS_FOR_TYPE: Record<LibType, string[]> = {
+  all: [],
+  video: ["visual-video", "visual-vfx"],
+  image: ["visual-image", "visual-hdri", "visual-vector"],
+  music: ["audio-music"],
+  sfx: ["audio-sfx", "audio-ambience"],
+  voice: ["audio-voice"],
+};
+
 /** Stock `kind` → the coarse type the rest of this panel (icons, drag payloads,
  *  preview routing) already understands. */
 function libTypeOf(kind: string): string {
@@ -209,7 +242,6 @@ function libTypeOf(kind: string): string {
   return "video";
 }
 
-const PAGE_SIZE = 120;
 const THUMB_CACHE = "voidspace-library-thumbs-v1";
 
 // Stale-while-revalidate cache: switching to the Library tab (or between type
@@ -269,19 +301,6 @@ function sourceTag(projectId: string): string {
 }
 
 /** Recency bucket for section grouping. */
-function bucketOf(iso: string): string {
-  const t = new Date(iso || 0).getTime();
-  if (!Number.isFinite(t) || t <= 0) return "Older";
-  const startOfToday = new Date();
-  startOfToday.setHours(0, 0, 0, 0);
-  const day = 86400000;
-  if (t >= startOfToday.getTime()) return "Today";
-  if (t >= startOfToday.getTime() - day) return "Yesterday";
-  if (t >= Date.now() - 7 * day) return "This week";
-  if (t >= Date.now() - 30 * day) return "This month";
-  return "Older";
-}
-const BUCKET_ORDER = ["Today", "Yesterday", "This week", "This month", "Older"];
 
 /**
  * The tile's muted background-preview <video> (used only when no server
@@ -573,6 +592,65 @@ export const LibraryPanel: React.FC = () => {
       // It used to be split licensed-vs-own, which was dropped once the
       // `licensed-stock` flag turned out to be wrong across most of the
       // catalogue (see the LibScope comment).
+      // ── SHARED: other creators' published assets. A different API and a different
+      // item shape, mapped onto LibItem here so every downstream renderer, drag
+      // handler and importer keeps working untouched.
+      //
+      // One endpoint for both browse and search: an empty query browses by
+      // popularity, a query fuses meaning and keyword lanes server-side. The client
+      // does not choose a ranking strategy — that would put ranking policy in two
+      // places, which is how the local search's fusion drifted once already.
+      if (scope === "shared") {
+        const res = await fetch(`${apiBase()}/api/media-library/shared/search`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({
+            q: debounced,
+            kinds: LIB_KINDS_FOR_TYPE[type] ?? [],
+            limit: PAGE_SIZE,
+            offset,
+          }),
+        });
+        if (!res.ok) throw new Error(`shared ${res.status}`);
+        const sj = await res.json();
+        if (seq !== reqSeq.current) return;
+        // Report what the ranking ACTUALLY was, from the server — the semantic lane can
+        // decline (cold tower, empty index) and still return good keyword results, and
+        // the badge must not claim otherwise.
+        setSemanticActive(sj?.vector?.active === true);
+        setSemanticNote(sj?.vector?.note ?? null);
+        setLibraryAvailable(true);
+        const page: LibItem[] = (Array.isArray(sj.items) ? sj.items : []).map((a: any) => ({
+          id: a.sha256,
+          type: libTypeOf(a.kind),
+          kind: a.kind,
+          label: a.name || a.id,
+          url: `${apiBase()}${a.url}`,
+          thumbnailUrl: `${apiBase()}${a.thumbUrl}`,
+          proxyUrl: null,
+          bytes: a.bytes ?? 0,
+          createdAt: a.publishedAt || "",
+          projectId: "__shared__",
+          // The credit line goes where the tile already shows secondary text, so
+          // attribution is visible at a glance rather than hidden behind a click. A
+          // handle, never a uid.
+          artist: a.credit?.handle ? `@${a.credit.handle}` : (a.credit?.name || undefined),
+          prompt: (Array.isArray(a.tags) ? a.tags : []).slice(0, 6).join(", ") || undefined,
+          useCount: a.uses ?? 0,
+        }));
+        const nextTotal = typeof sj.total === "number" ? sj.total : page.length;
+        setItems((prev) => (offset === 0 ? page : [...prev, ...page]));
+        setTotal(nextTotal);
+        if (offset === 0) {
+          setMoods([]);
+          libClientCache.set(cacheKey, { items: page, total: nextTotal, at: Date.now() });
+        }
+        return;
+      }
+
       if (LIBRARY_SCOPES.includes(scope)) {
         const sq = new URLSearchParams({
           kind: LIB_KIND_FOR_TYPE[type] ?? "all",
@@ -1057,7 +1135,56 @@ export const LibraryPanel: React.FC = () => {
     // knowing BEFORE building a project around it. Stock is always local, so the
     // badge would be noise on every tile there — hence `mine` only.
     const isCloud = /^https?:/i.test(it.url);
-    const showStorageBadge = scope === "generated";
+    // ── SHARE WITH CREATORS ────────────────────────────────────────────────────
+  //
+  // Available on every item the Library can show, because that is exactly the rule the server
+  // enforces: /api/studio/library resolves the id, so if it appears here it is yours and it is
+  // shareable. That keeps a NEW generation route shareable the day it lands, with no change to
+  // this component.
+  //
+  // Per-item state, keyed by id: a grid shows many tiles and a single busy flag would spin the
+  // wrong one.
+  const [sharingId, setSharingId] = useState<string | null>(null);
+  const [sharedIds, setSharedIds] = useState<Record<string, boolean>>({});
+  // Messages go to the panel's existing PERSISTENT result line, not a toast. The file already argues
+  // that a message which vanishes is useless for "why did that fail?" — and a share refusal (a
+  // duplicate under review, a size limit, an unclaimed asset) is exactly that case.
+
+  const shareItem = useCallback(async (it: LibItem) => {
+    // Local-disk items have no cloud bytes. Said here rather than after a failed round trip, so
+    // the user is pointed at the desktop app instead of at an error.
+    if (it.id.startsWith("local:")) {
+      setUploadMsg("This file is only on your computer — add it to your cloud library in the desktop app first.");
+      return;
+    }
+    setSharingId(it.id);
+    try {
+      const token = await useVoidspaceStore.getState().getIdToken();
+      const already = sharedIds[it.id] === true;
+      const res = await fetch(`${apiBase()}/api/media-library/shared/publish-generation`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ id: it.id, ...(already ? { share: false } : {}) }),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        // The server writes these for a human and names the fix — a duplicate opens a review, an
+        // oversized file states the limit. Passing it through beats "something went wrong".
+        setUploadMsg(j?.statusMessage || j?.message || `Could not share (${res.status})`);
+        return;
+      }
+      setSharedIds((m) => ({ ...m, [it.id]: !already }));
+      setUploadMsg(already
+        ? "No longer shared."
+        : (j?.message || "Shared. Other creators can find and use this, credited to you."));
+    } catch (e: any) {
+      setUploadMsg(e?.message || "Could not share.");
+    } finally {
+      setSharingId(null);
+    }
+  }, [sharedIds]);
+
+  const showStorageBadge = scope === "generated";
     // Favourites only exist for media-library items (the /personal endpoint is
     // keyed on a library asset id); generated + device items have no such id.
     const canFavourite = LIBRARY_SCOPES.includes(scope);
@@ -1203,6 +1330,24 @@ export const LibraryPanel: React.FC = () => {
               className="absolute top-1.5 right-1.5 w-6 h-6 rounded-full flex items-center justify-center shadow bg-black/55 text-white opacity-0 group-hover:opacity-100 hover:bg-black/80 transition-opacity"
             >
               <Settings2 size={12} />
+            </button>
+          )}
+          {/* Share with other creators. Bottom-LEFT so it never sits under the download button,
+              and only on scopes that represent the user's own material — the Shared scope already
+              shows other people's work, where a share button would be meaningless. */}
+          {scope !== "shared" && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); void shareItem(it); }}
+              title={sharedIds[it.id]
+                ? "Shared with creators — click to stop sharing"
+                : "Share with other creators (credited to you)"}
+              className={`absolute bottom-1.5 left-1.5 w-6 h-6 rounded-full flex items-center justify-center shadow
+                          text-white transition-opacity ${sharedIds[it.id]
+                            ? "bg-primary/90 opacity-100"
+                            : "bg-black/55 opacity-0 group-hover:opacity-100 hover:bg-black/80"}`}
+            >
+              {sharingId === it.id ? <Loader2 size={12} className="animate-spin" /> : <Globe size={12} />}
             </button>
           )}
           {/* download with embedded metadata (title/artist/prompt/cover) */}
@@ -1699,7 +1844,8 @@ export const LibraryPanel: React.FC = () => {
           <div className="text-center py-12 text-text-muted">
             <AudioLines size={28} className="mx-auto mb-2 opacity-40" />
             <p className="text-sm">
-              {scope === "myfiles" ? "No files of this type yet"
+              {scope === "shared" ? "Nothing shared yet"
+                : scope === "myfiles" ? "No files of this type yet"
                 : scope === "device" ? "No media saved in this browser"
                   : "No generations yet"}
             </p>
