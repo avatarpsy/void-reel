@@ -776,43 +776,25 @@ function App() {
               resolve({ ok: false, error: "timeout" });
             }, 15000);
           });
-          // Firestore-blob size guard. The parent's timeline-state endpoint
-          // rejects payloads > 900KB (Firestore doc hard limit is 1MiB), and
-          // a rejected save means the user's WORK stops persisting — losing
-          // undo history is strictly better than losing the save. Trim the
-          // history the same way ActionHistory trims on overflow (drop oldest
-          // entries + remap snapshot stackIndex bookmarks); drop it entirely
-          // as the last resort. Local IndexedDB keeps the full history for
-          // same-machine recovery either way.
-          const SIZE_CAP = 830_000; // chars ≈ bytes, headroom under the 900KB cap
-          let historyPayload: string | null = historyData;
-          try {
-            const projectSize = JSON.stringify(project).length;
-            if (historyPayload && projectSize + historyPayload.length > SIZE_CAP) {
-              let trimmed: string | null = null;
-              try {
-                const h = JSON.parse(historyPayload);
-                if (Array.isArray(h?.undoStack)) {
-                  for (const keep of [30, 15, 5]) {
-                    const cut = Math.max(0, h.undoStack.length - keep);
-                    const candidate = JSON.stringify({
-                      ...h,
-                      undoStack: h.undoStack.slice(cut),
-                      redoStack: [],
-                      snapshots: (Array.isArray(h.snapshots) ? h.snapshots : [])
-                        .map((s: any) => ({ ...s, stackIndex: s.stackIndex - cut }))
-                        .filter((s: any) => s.stackIndex >= 0),
-                    });
-                    if (projectSize + candidate.length <= SIZE_CAP) { trimmed = candidate; break; }
-                  }
-                }
-              } catch { /* malformed history — drop it below */ }
-              historyPayload = trimmed;
-              console.warn(
-                `[Voidspace] project blob near size cap (${Math.round(projectSize / 1024)}KB project) — ${historyPayload ? "trimmed" : "dropped"} undo history for this remote save`,
-              );
-            }
-          } catch { /* sizing failed — send as-is and let the server decide */ }
+          // NO SIZE GUARD — and that is the point.
+          //
+          // This used to trim (and then drop) the user's undo history whenever
+          // project + history approached 830 KB, because the parent's
+          // timeline-state endpoint returned 413 above 900 KB. That cap existed
+          // only because the blob was stored in a FIRESTORE DOCUMENT FIELD,
+          // which is capped at ~1 MiB. It cost real work: a survey of 311
+          // projects found six already past the threshold, their histories cut
+          // to 0.1–4.7 KB against 500–856 KB timelines — undo, redo and
+          // chat-message rollback silently dead on exactly the big projects
+          // where they matter most.
+          //
+          // The blob now goes to Cloud Storage (see the website's
+          // `project-state-store.ts`), which has no such ceiling, so the full
+          // history is sent every time. The server keeps a 40 MB sanity bound
+          // for genuinely pathological payloads; nothing legitimate approaches
+          // it, and a project that did should surface as an error rather than
+          // as quietly amputated undo state.
+          const historyPayload: string | null = historyData;
           window.parent.postMessage({
             type: "voidspace:save-project",
             requestId,

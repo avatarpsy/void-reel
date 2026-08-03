@@ -272,6 +272,64 @@ async function maybeAuthStamp(url: string): Promise<string> {
   }
 }
 
+/**
+ * Fetch the timeline blob for a project.
+ *
+ * WHY THIS IS A FETCH AND NOT A FIELD READ
+ * `project_state` used to be a field on the scene_list document, so the loader
+ * got it free with the document it was already reading. It now lives in Cloud
+ * Storage (see the website's `project-state-store.ts`) because real projects
+ * reach 875 KB and the Firestore document ceiling was refusing saves and
+ * eating the user's undo history. Boards and image projects already stored
+ * their documents this way; this is the third one catching up.
+ *
+ * The RETURN SHAPE IS DELIBERATELY IDENTICAL to the old field — `{ json,
+ * history }` — so every downstream guard (poisoned-blob detection, empty-blob
+ * safety net, stale-blob scene-count check, history extraction, stale-URL
+ * healing) is untouched. Only where the string comes from changed.
+ *
+ * `inline` is the legacy field, passed through as a fallback: if this fetch
+ * fails for any reason — network blip, auth hiccup, a project not yet migrated
+ * on an older server — we use whatever the document still carries rather than
+ * reporting "no timeline", which would send the loader down its per-scene
+ * rebuild path and silently discard the user's real edit history.
+ */
+async function fetchProjectStateBlob(
+  sceneListId: string,
+  inline: { json?: string; history?: string } | undefined,
+): Promise<{ json?: string; history?: string } | undefined> {
+  try {
+    const u = auth.currentUser;
+    const token = u ? await u.getIdToken(false) : "";
+    const res = await fetch(
+      `/api/studio/projects/${encodeURIComponent(sceneListId)}/timeline-state?raw=1`,
+      { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const body = (await res.json()) as { hasBlob?: boolean; json?: string | null; history?: string | null };
+    if (body?.hasBlob && typeof body.json === "string" && body.json) {
+      return { json: body.json, ...(typeof body.history === "string" ? { history: body.history } : {}) };
+    }
+    // An authoritative "this project has no timeline yet" — a project the
+    // pipeline created that nobody has opened in the editor. Returning the
+    // inline field here would resurrect a blob the server has superseded, so
+    // return nothing and let the per-scene rebuild do its job.
+    if (body && body.hasBlob === false && !inline?.json) return undefined;
+    if (body && body.hasBlob === false) {
+      console.warn(
+        "[voidspace-loader] server reports no timeline blob but the document still carries an inline one — using the inline copy (pre-migration project)",
+      );
+      return inline;
+    }
+    return inline;
+  } catch (e) {
+    console.warn(
+      `[voidspace-loader] timeline blob fetch failed (${(e as Error)?.message ?? e}) — falling back to the inline field if present`,
+    );
+    return inline;
+  }
+}
+
 export async function fetchMediaBlob(
   url: string | null,
   timeoutMs = 15000,
@@ -1095,9 +1153,15 @@ export async function loadSceneListAsProject(
   // → ActionHistory → autoSaveManager. The blob captures them. There's
   // no parallel "agent writes per-scene + we reconcile" path — that's
   // the freshness/staleness machinery we just deleted.
-  const projectStateRaw = (slData as Record<string, unknown>).project_state as
-    | { json?: string; history?: string }
-    | undefined;
+  // The blob lives in Cloud Storage now; the scene_list document carries only a
+  // pointer. `fetchProjectStateBlob` returns the SAME `{ json, history }` shape
+  // the field used to have — deliberately, so none of the validation below had
+  // to change — and falls back to the inline field for a project that has not
+  // been migrated yet or when the fetch fails.
+  const projectStateRaw = await fetchProjectStateBlob(
+    sceneListId,
+    (slData as Record<string, unknown>).project_state as { json?: string; history?: string } | undefined,
+  );
   if (projectStateRaw && typeof projectStateRaw.json === "string" && projectStateRaw.json) {
     try {
       const parsed = JSON.parse(projectStateRaw.json) as Project;
