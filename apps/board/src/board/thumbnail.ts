@@ -37,8 +37,11 @@ const H = 270;
 /** Cards drawn at most. Beyond this the strip reads as texture, not content. */
 const MAX_CARDS = 6;
 
-/** Quality chosen so a typical board lands ~10-15KB. */
-const JPEG_QUALITY = 0.72;
+/**
+ * PNG, not JPEG — the sheet is transparent so the tile's own themed backdrop
+ * shows through, and JPEG has no alpha channel. Flat card fills compress well;
+ * measured well under the endpoint's 400KB ceiling.
+ */
 
 /** How long a single media image gets before the preview goes on without it. */
 const IMAGE_TIMEOUT_MS = 1500;
@@ -117,31 +120,34 @@ export async function renderBoardThumbnail(opts: ThumbnailOptions): Promise<stri
   if (!shots.length) return '';
 
   /**
-   * ── DELIBERATELY THEME-INDEPENDENT ──────────────────────────────────────
-   * This started out theme-aware and that was wrong by construction. A preview
-   * is rendered ONCE and stored; the viewer's theme can change afterwards, and
-   * boards last saved under different themes end up side by side in the same
-   * grid looking like two different products. Regenerating on every theme
-   * switch would be pure waste for a tile.
+   * ── NO BACKDROP. THE TILE PROVIDES IT. ──────────────────────────────────
+   * Two earlier attempts were both wrong:
    *
-   * One fixed treatment instead. Dark, because these tiles sit next to video
-   * stills and image covers — arbitrary photographs — so a dark preview reads
-   * as content in BOTH themes, exactly the way those do, rather than as chrome
-   * that has come unstuck from the page.
+   *   1. Theme-aware at render time. A preview is rendered ONCE and STORED, so
+   *      it cannot track a theme the viewer changes later, and boards saved
+   *      under different themes sat side by side looking like different
+   *      products.
+   *   2. A fixed dark backdrop, on the reasoning that these tiles sit beside
+   *      video stills and image covers. But those are PHOTOGRAPHS and this is
+   *      synthesised — a dark slab next to the pale placeholder tiles reads as
+   *      out of place on a light page, which is exactly what it looked like.
+   *
+   * A synthesised preview should not be imposing a page colour at all. The
+   * canvas is left TRANSPARENT and only the cards are drawn, so the letterbox
+   * behind them is `.studio-thumb`'s own background — which IS theme-aware.
+   * One stored image, correct in both modes, and nothing to regenerate.
+   *
+   * This is why the output is PNG: JPEG has no alpha channel.
+   *
+   * The cards themselves are mid-tone (45% lightness) rather than dark or pale,
+   * so they hold their own against both backdrops, and their labels are white
+   * with a scrim — legible on either.
    */
-  const dark = true;
   const canvas = document.createElement('canvas');
   canvas.width = W;
   canvas.height = H;
   const ctx = canvas.getContext('2d');
   if (!ctx) return '';
-
-  // ── backdrop ──
-  const bg = ctx.createLinearGradient(0, 0, W, H);
-  if (dark) { bg.addColorStop(0, '#10151f'); bg.addColorStop(1, '#0a0d14'); }
-  else { bg.addColorStop(0, '#f4f7fb'); bg.addColorStop(1, '#e6ecf5'); }
-  ctx.fillStyle = bg;
-  ctx.fillRect(0, 0, W, H);
 
   // Fetch every image up front so the draw loop is synchronous and ordered.
   // They are independent, so this is one wall-clock wait, not N.
@@ -191,12 +197,13 @@ export async function renderBoardThumbnail(opts: ThumbnailOptions): Promise<stri
       // No usable image: a tinted panel plus text lines, which reads as "a card
       // with writing on it" — what an unillustrated shot actually is.
       const panel = ctx.createLinearGradient(x, y, x, y + cardH);
-      panel.addColorStop(0, `hsl(${hue} 45% ${dark ? 26 : 76}%)`);
-      panel.addColorStop(1, `hsl(${hue} 38% ${dark ? 15 : 66}%)`);
+      // Mid-tone, so the card holds against a near-black tile AND a pale one.
+      panel.addColorStop(0, `hsl(${hue} 42% 52%)`);
+      panel.addColorStop(1, `hsl(${hue + 8} 44% 38%)`);
       ctx.fillStyle = panel;
       ctx.fillRect(x, y, cardW, cardH);
 
-      ctx.fillStyle = dark ? 'rgba(255,255,255,0.20)' : 'rgba(20,30,50,0.20)';
+      ctx.fillStyle = 'rgba(255,255,255,0.30)';
       const lineX = x + 10;
       const lineW = cardW - 20;
       [0.42, 0.54, 0.66].forEach((t, li) => {
@@ -221,7 +228,7 @@ export async function renderBoardThumbnail(opts: ThumbnailOptions): Promise<stri
       }
       if (!img) {
         // On a tinted panel the text needs its own contrast, not the scrim's.
-        ctx.fillStyle = dark ? 'rgba(255,255,255,0.95)' : 'rgba(15,25,45,0.95)';
+        ctx.fillStyle = 'rgba(255,255,255,0.96)';
       }
       ctx.fillText(text, x + 8, y + cardH - 10);
     }
@@ -229,7 +236,8 @@ export async function renderBoardThumbnail(opts: ThumbnailOptions): Promise<stri
     ctx.restore();
 
     // Hairline border, matching the tile treatment elsewhere in Studio.
-    ctx.strokeStyle = dark ? 'rgba(255,255,255,0.10)' : 'rgba(20,30,50,0.10)';
+    // Neutral hairline that reads on either backdrop.
+    ctx.strokeStyle = 'rgba(255,255,255,0.16)';
     ctx.lineWidth = 1;
     roundRect(ctx, x + 0.5, y + 0.5, cardW - 1, cardH - 1, 8);
     ctx.stroke();
@@ -252,6 +260,6 @@ export async function renderBoardThumbnail(opts: ThumbnailOptions): Promise<stri
 
   // Untainted by construction (see loadImage), so this cannot throw. Guarded
   // anyway: a preview is never worth breaking a save over.
-  try { return canvas.toDataURL('image/jpeg', JPEG_QUALITY); }
+  try { return canvas.toDataURL('image/png'); }
   catch { return ''; }
 }
