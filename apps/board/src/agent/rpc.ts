@@ -30,6 +30,7 @@
  */
 import type { MountedBoard } from '../blocksuite/editor';
 import { placeAsset } from '../board/asset-media';
+import { renderBoardThumbnail } from '../board/thumbnail';
 import { compileBoard, describeShot } from '../shot/screenplay';
 import {
   MEDIA_ROLES, REF_KINDS, SHOT_H, SHOT_W, isTimed, normaliseShotKind, rolesFor, trimWindow,
@@ -1079,6 +1080,33 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
     'voidspace:board-fit': () => {
       fitBoard({ smooth: false });
       return { ok: true as const, rev };
+    },
+
+    /**
+     * Render the board's tile preview and hand back a JPEG data URL.
+     *
+     * The parent asks for this after a save settles; it never renders itself,
+     * because only this side has the shots. See `board/thumbnail.ts` for why
+     * the preview is drawn from data rather than screenshotted off the canvas.
+     *
+     * `src` is the card's own small proxy, not `url` — a 480px tile has no use
+     * for a master, and using it would make the preview the slow path.
+     */
+    'voidspace:board-thumbnail': async args => {
+      const all = readShots(board.std);
+      const dataUrl = await renderBoardThumbnail({
+        theme: args?.theme === 'light' ? 'light' : 'dark',
+        shots: all.map(s => {
+          const pick = (s.media ?? []).find(m => m.kind === 'image')
+            ?? (s.media ?? []).find(m => !!m.poster);
+          return {
+            title: s.title ?? '',
+            kind: s.kind ?? 'clip',
+            mediaUrl: pick ? (pick.kind === 'image' ? (pick.src || pick.url) : (pick.poster || '')) : '',
+          };
+        }),
+      });
+      return { ok: true as const, rev, dataUrl, shots: all.length };
     },
 
     /** Which shot is at a model point. Used by the drop path's tests. */
