@@ -49,6 +49,7 @@ import {
 import { useUIStore, Panel } from '../../../stores/ui-store';
 import { useProjectStore } from '../../../stores/project-store';
 import { LayerPanel } from '../layers/LayerPanel';
+import { SCOPE_LABEL } from '@openreel/asset-browser';
 import {
   fetchVoidspaceLibrary,
   libraryImageToAsset,
@@ -105,6 +106,15 @@ export const LeftPanel = memo(function LeftPanel() {
 });
 
 
+/**
+ * `library` reads `/api/studio/library` — AI generations and renders.
+ *
+ * It was LABELLED "Library", which was the third name for that one source: the
+ * board called it "My files" and the video editor calls it "Generated". The id
+ * stays as it is (it is threaded through this component), the label comes from
+ * the shared package, and all three editors now say the same word for the same
+ * thing.
+ */
 type AssetTab = 'project' | 'library';
 
 function AssetsPanel() {
@@ -180,7 +190,7 @@ function AssetsPanel() {
               tab === t ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'
             }`}
           >
-            {t === 'project' ? 'This project' : 'Library'}
+            {t === 'project' ? SCOPE_LABEL.project : SCOPE_LABEL.generated}
           </button>
         ))}
       </div>

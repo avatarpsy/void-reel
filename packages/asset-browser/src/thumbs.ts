@@ -17,6 +17,9 @@ import type { AssetBrowserHost } from './types';
  *  has already cached on the user's device. */
 const THUMB_CACHE = 'voidspace-library-thumbs-v1';
 
+/** Thumbnails the server has already said it does not have. See `fetchThumb`. */
+const missing = new Set<string>();
+
 /**
  * A COMPRESSED variant of an asset, for grid tiles.
  *
@@ -142,8 +145,51 @@ function isOurOrigin(url: string): boolean {
   }
 }
 
-/** Fetch a thumbnail with auth, falling back to the on-device cache. */
+/**
+ * Fetch a thumbnail with auth, reading the on-device cache FIRST.
+ *
+ * ── THIS WAS THE "IT LOADS EVERY TIME" ───────────────────────────────────────
+ * The cache was consulted only when the network FAILED. So it was an offline
+ * fallback wearing the word "cache": every thumbnail was re-downloaded on every
+ * render, and the stored copy was read approximately never.
+ *
+ * Measured on a real library: ONE scope switch issued ~120 thumbnail requests,
+ * and switching away and back issued ~120 more — for images that had just been
+ * on screen and cannot have changed. That is the stall, not the list fetch.
+ *
+ * ── WHY CACHE-FIRST IS SAFE HERE, WHEN IT USUALLY IS NOT ─────────────────────
+ * These URLs are effectively immutable. A library thumbnail is addressed by the
+ * asset's id or content hash, so a DIFFERENT image is a DIFFERENT url — the
+ * usual reason to revalidate (the bytes behind this name may have changed) does
+ * not apply. Re-editing an asset produces a new id, and the cache name carries a
+ * version for the case where the thumbnailer itself changes.
+ *
+ * So there is no revalidation here on purpose: it would spend a request per tile
+ * to confirm something that cannot have moved.
+ */
 export async function fetchThumb(host: AssetBrowserHost, url: string): Promise<Blob | null> {
+  // CACHE FIRST. The whole point, and the reason a revisit costs nothing.
+  try {
+    const c = await caches.open(THUMB_CACHE);
+    const hit = await c.match(url);
+    if (hit) return await hit.blob();
+  } catch { /* Cache API unavailable (insecure context) — go to the network */ }
+
+  /**
+   * A THUMBNAIL THAT IS NOT THERE STAYS NOT THERE.
+   *
+   * Libraries accumulate entries whose file has since been deleted — a render
+   * from last month, a project cleaned up. Every one of them 404s, and without
+   * this the panel re-requests them on every repaint: measured at 22 failed
+   * requests per scope switch on a real library, repeated indefinitely, each
+   * one producing a console error that buries genuine failures.
+   *
+   * Session-lived on purpose, not persisted. A missing file can legitimately
+   * come back — a mirror finishes, a drive is reconnected — and remembering the
+   * failure across reloads would hide it after it was fixed.
+   */
+  if (missing.has(url)) return null;
+
   const token = isOurOrigin(url) ? await host.getIdToken().catch(() => null) : null;
   try {
     const res = await fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
@@ -151,16 +197,19 @@ export async function fetchThumb(host: AssetBrowserHost, url: string): Promise<B
       try {
         const copy = res.clone();
         void caches.open(THUMB_CACHE).then(c => c.put(url, copy)).catch(() => {});
-      } catch { /* Cache API unavailable (insecure context) */ }
+      } catch { /* Cache API unavailable */ }
       return await res.blob();
     }
-  } catch { /* network failure — fall through to the cache */ }
+    /**
+     * ONLY 404 AND 410 ARE REMEMBERED — the server saying the thing is gone.
+     *
+     * A 401 is a token that has not arrived yet, a 500 is a bad minute, and a
+     * 429 is backpressure. Remembering those would turn a transient problem
+     * into a permanently blank tile for the rest of the session.
+     */
+    if (res.status === 404 || res.status === 410) missing.add(url);
+  } catch { /* network failure and nothing cached — the caller draws a placeholder */ }
 
-  try {
-    const c = await caches.open(THUMB_CACHE);
-    const hit = await c.match(url);
-    if (hit) return await hit.blob();
-  } catch { /* no cache */ }
   return null;
 }
 

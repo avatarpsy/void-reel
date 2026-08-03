@@ -12,10 +12,11 @@
  * render cycle.
  */
 import {
-  PAGE_SIZE, VIEW_MODES, availableScopes, clampPanelWidth, fetchAssets,
-  groupByRecency, hasMore, loadPanelWidth, loadThumbInto, loadViewMode, mergePage,
+  PAGE_SIZE, SCOPE_LABEL as SHARED_SCOPE_LABEL, VIEW_MODES, availableScopes,
+  clampPanelWidth, fetchAssetsCached, groupByRecency, hasMore, invalidateAssetCache,
+  loadPanelWidth, loadThumbInto, loadViewMode, mergePage,
   mediaSrc, nextOffset, savePanelWidth, saveViewMode, tileSrc, videoPreviewSrc,
-  type AssetBrowserHost, type AssetItem, type AssetKind, type AssetScope, type ViewMode,
+  type AssetBrowserHost, type AssetItem, type AssetKind, type AssetPage, type AssetScope, type ViewMode,
 } from '@openreel/asset-browser';
 
 import type { DragPayload } from '@blocksuite/std';
@@ -59,11 +60,21 @@ const VIEW_TITLE: Record<ViewMode, string> = {
   grid: 'Grid', compact: 'Small grid', list: 'List',
 };
 
+/**
+ * ONE VOCABULARY, from the package, with a single deliberate override.
+ *
+ * These labels were written here and drifted from the video editor's until the
+ * same words named different sources: this panel called AI generations "My
+ * files" and the on-disk media library "Library", while the video editor called
+ * generations "Generated" and the media library "My files". A user moving
+ * between the two editors saw the same tab name backed by different content.
+ *
+ * `project` is overridden because "In this board" reads better here than "In
+ * this project" — the one place a host-specific word is worth the divergence.
+ */
 const SCOPE_LABEL: Record<AssetScope, string> = {
+  ...SHARED_SCOPE_LABEL,
   project: 'In this board',
-  mine: 'My files',
-  shared: 'Library',
-  device: 'This browser',
 };
 
 /**
@@ -94,6 +105,13 @@ const SCOPE_LABEL: Record<AssetScope, string> = {
  * template" — and a user who picks one expecting to fill it gets the designer's
  * words in their video. That is worth three words on a tile.
  */
+/**
+ * A block as a browsable asset.
+ *
+ * CREDIT IS SET HERE so the Shared pill is readable: it holds both the designs
+ * that ship with Voidspace and the ones adopted from other people, and without a
+ * source on the tile those are indistinguishable.
+ */
 function blockAsset(b: BlockInfo, scope: AssetScope): AssetItem {
   const id = `block:${b.tier}/${b.name}`;
   const detail = [
@@ -111,6 +129,9 @@ function blockAsset(b: BlockInfo, scope: AssetScope): AssetItem {
     label: b.name,
     detail,
     scope,
+    // Who made it — the only thing separating a Voidspace design from one
+    // somebody published, now that both sit under the same pill.
+    credit: b.tier === 'starter' ? 'Voidspace' : b.credit,
     // Nothing to rasterise: the tile draws a live render instead. Saying so
     // stops the thumbnail machinery reaching for a url that is not one.
     hasRasterPreview: false,
@@ -146,6 +167,32 @@ function mediaFor(host: AssetBrowserHost, item: AssetItem): AssetDragEntity['med
  * Dropping onto a SHOT does not come through here: that is a list append and it
  * is instant, so there is nothing to announce.
  */
+/**
+ * UI scope → the scope PERSISTED on a media ref.
+ *
+ * ── TWO VOCABULARIES ON PURPOSE, AND THIS IS THE SEAM ────────────────────────
+ * The stored value names an ID SPACE, not a tab: "which library does this id
+ * belong to", which compile carries into the project. Boards already on disk use
+ * it, so its meaning cannot move — renaming the tabs must not silently
+ * re-attribute media in every board ever saved.
+ *
+ *   UI 'generated'  →  'mine'    ids from /api/studio/library
+ *   UI 'mine'       →  'shared'  ids from the media library
+ *   UI 'shared'     →  'shared'  same id space — a published asset is a media
+ *                                library asset, just one somebody else owns
+ *   UI 'device'     →  'device'
+ *   UI 'project'    →  whatever the asset already carried
+ *
+ * So the tabs were renamed to match the video editor and NOT ONE BYTE of stored
+ * board data changed meaning.
+ */
+export function persistedScope(uiScope: string | undefined): 'mine' | 'shared' | 'device' {
+  if (uiScope === 'device') return 'device';
+  if (uiScope === 'mine' || uiScope === 'shared') return 'shared';
+  // 'generated', 'project', or an older board's value — the generations space.
+  return 'mine';
+}
+
 async function placeOnCanvas(
   board: MountedBoard,
   media: AssetDragEntity['media'],
@@ -158,7 +205,7 @@ async function placeOnCanvas(
       originalUrl: media.url,
       kind: media.kind,
       mediaId: media.mediaId,
-      scope: media.scope === 'shared' || media.scope === 'device' ? media.scope : 'mine',
+      scope: persistedScope(media.scope),
       name: media.name,
       posterUrl: media.poster,
       bytes: media.bytes,
@@ -294,8 +341,20 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
         );
         const wanted = allBlocks().filter(b => {
           if (q.scope === 'project') return used.has(b.name);
+          // A block is never a GENERATION — it is authored or installed, so that
+          // scope is honestly empty rather than quietly showing everything.
+          if (q.scope === 'generated') return false;
           if (q.scope === 'mine') return b.tier === 'user';
-          if (q.scope === 'shared') return b.tier === 'starter';
+          /**
+           * "Shared" for blocks means EVERY DESIGN YOU DID NOT AUTHOR — the 128
+           * that ship with Voidspace and the ones adopted from other creators.
+           *
+           * Splitting them would need a fourth pill that exists for one kind, and
+           * the distinction people actually care about — who made this — is on the
+           * tile as a credit line. Mixing them under "My files" would be the real
+           * lie: it would claim authorship of 128 designs the user never touched.
+           */
+          if (q.scope === 'shared') return b.tier === 'starter' || b.tier === 'shared';
           return true; // 'device' has no block meaning; show everything
         });
         return wanted.map(b => blockAsset(b, q.scope));
@@ -304,7 +363,14 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
   };
   const scopes = availableScopes(host);
 
-  let scope: AssetScope = 'mine';
+  /**
+   * OPENS ON GENERATIONS, which is what it always showed.
+   *
+   * Before the rename this defaulted to `mine`, and `mine` WAS
+   * `/api/studio/library`. Leaving the literal unchanged would have silently
+   * moved every user's default tab to a different library on upgrade.
+   */
+  let scope: AssetScope = 'generated';
   let kind: AssetKind | 'all' = 'all';
   let query = '';
   let collapsed = false;
@@ -651,48 +717,86 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
   let seq = 0;
   let authRetried = false;
 
+  /**
+   * Draw the current results.
+   *
+   * Extracted so the FIRST paint and a background revalidation render through
+   * exactly the same path. When they were separate, a refreshed page could be
+   * drawn slightly differently from the one it replaced — the kind of difference
+   * nobody notices until a tile stops being draggable.
+   */
+  function paint(listEl: HTMLElement, semantic: boolean): void {
+    if (!results.length) {
+      // NAME THE REASON. "Nothing here yet" under Blocks · My files is true
+      // and useless — the 128 shipped blocks are one pill away.
+      const why = kind === 'block'
+        ? (scope === 'generated' || scope === 'mine'
+          ? `You haven’t made any blocks yet. Try ${SCOPE_LABEL.shared} for the ones that ship with Voidspace.`
+          : scope === 'project'
+            ? 'No shot on this board uses a block yet.'
+            : 'No blocks found. They live in ~/Voidspace/.hyperframes/blocks.')
+        : 'Nothing here yet.';
+      listEl.innerHTML = `<p class="vs-assets__muted">${why}</p>`;
+      return;
+    }
+    // Recency sections come from the CORE, so the board, video and image
+    // editors bucket identically — change it once, it lands in all three.
+    const sections = groupByRecency(results);
+    listEl.innerHTML =
+      (semantic ? '<p class="vs-assets__note">Matched by meaning</p>' : '') +
+      sections.map(sec =>
+        `<p class="vs-assets__section">${sec.bucket}</p>` + sec.items.map(tile).join(''),
+      ).join('') +
+      (hasMore(results.length, total)
+        ? `<button type="button" class="vs-assets__more" data-a="more">Load more (${results.length} of ${total})</button>`
+        : '');
+    hydrateThumbs();
+  }
+
   async function load(opts?: { append?: boolean }) {
     const listEl = el.querySelector<HTMLElement>('[data-a="list"]');
     if (!listEl) return;
     const mine = ++seq;
     const append = opts?.append === true;
-    if (!append) listEl.innerHTML = '<p class="vs-assets__muted">Searching…</p>';
+    // A spinner only when there is genuinely nothing to look at. Blanking a list
+    // that is about to be replaced by the same list is the flicker being fixed.
+    if (!append && !results.length) {
+      listEl.innerHTML = '<p class="vs-assets__muted">Searching…</p>';
+    }
     try {
-      const page = await fetchAssets(host, {
+      const q = {
         scope, kind, q: query, limit: PAGE_SIZE,
         offset: append ? nextOffset(results.length) : 0,
+      };
+
+      /**
+       * CACHED, AND ONLY BLANK THE LIST WHEN THERE IS NOTHING TO SHOW.
+       *
+       * This used to clear straight to "Searching…" and go to the network on
+       * every scope switch, every type pill and every reopen of the panel —
+       * including for a list it had just rendered. On a large library that is a
+       * visible stall on an action taken dozens of times an hour, and it reads
+       * as the app being slow rather than as a missing cache.
+       *
+       * The spinner now appears only when nothing can be drawn instead of it.
+       * `onFresh` fires solely when the revalidated page actually DIFFERS, so a
+       * repeat visit does not repaint an identical grid and throw away the
+       * user's scroll position.
+       */
+      const cached = await fetchAssetsCached(host, q, (fresh: AssetPage) => {
+        if (mine !== seq) return;          // superseded while revalidating
+        results = append ? mergePage(results, fresh.items) : fresh.items;
+        total = fresh.total;
+        paint(listEl, fresh.semantic === true);
       });
+      const page = cached.page;
       if (mine !== seq) return; // a newer search superseded this one
       // mergePage dedupes by source URL — the same file legitimately appears
       // through more than one source, and showing it twice looks like a bug.
       results = append ? mergePage(results, page.items) : page.items;
       total = page.total;
 
-      if (!results.length) {
-        // NAME THE REASON. "Nothing here yet" under Blocks · My files is true
-        // and useless — the 128 shipped blocks are one pill away.
-        const why = kind === 'block'
-          ? (scope === 'mine'
-            ? 'You haven’t made any blocks yet. Try Library for the ones that ship with Voidspace.'
-            : scope === 'project'
-              ? 'No shot on this board uses a block yet.'
-              : 'No blocks found. They live in ~/Voidspace/.hyperframes/blocks.')
-          : 'Nothing here yet.';
-        listEl.innerHTML = `<p class="vs-assets__muted">${why}</p>`;
-        return;
-      }
-      // Recency sections come from the CORE, so the board, video and image
-      // editors bucket identically — change it once, it lands in all three.
-      const sections = groupByRecency(results);
-      listEl.innerHTML =
-        (page.semantic ? '<p class="vs-assets__note">Matched by meaning</p>' : '') +
-        sections.map(sec =>
-          `<p class="vs-assets__section">${sec.bucket}</p>` + sec.items.map(tile).join(''),
-        ).join('') +
-        (hasMore(results.length, total)
-          ? `<button type="button" class="vs-assets__more" data-a="more">Load more (${results.length} of ${total})</button>`
-          : '');
-      hydrateThumbs();
+      paint(listEl, page.semantic === true);
     } catch (e) {
       if (mine !== seq) return;
       const msg = (e as Error).message;
@@ -946,6 +1050,16 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
    * when it is what is on screen.
    */
   const disposeBlocks = onBlockCatalogue(() => {
+    /**
+     * THE CATALOGUE CHANGING IS A LIBRARY MUTATION, so the cache must forget it.
+     *
+     * The board never writes to the library itself, but the agent does — saving
+     * a block, adopting one, deleting one — and the catalogue push is how that
+     * arrives here. Reloading without dropping the cached page would re-render
+     * the list from before the change and make the user's own action look like
+     * it did not happen, which is worse than a slow list.
+     */
+    invalidateAssetCache();
     if (kind === 'block' && !collapsed) void load();
   });
 

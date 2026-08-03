@@ -33,10 +33,10 @@ describe('kind normalisation', () => {
   });
 });
 
-describe('mine scope — /api/studio/library', () => {
+describe('generated scope — /api/studio/library', () => {
   it('sends auth and the user Storage dir, and normalises items', async () => {
     const f = mockFetch({ items: [{ id: 'a', url: 'https://x/img.png?sig=1', type: 'image', label: 'Hero' }], total: 1 });
-    const page = await fetchAssets(host, { scope: 'mine', q: 'hero', limit: 10 });
+    const page = await fetchAssets(host, { scope: 'generated', q: 'hero', limit: 10 });
 
     const [url, init] = f.mock.calls[0] as unknown as [string, any];
     expect(url).toContain('/api/studio/library?');
@@ -46,7 +46,7 @@ describe('mine scope — /api/studio/library', () => {
     expect(init.headers.Authorization).toBe('Bearer tok');
 
     expect(page.items).toHaveLength(1);
-    expect(page.items[0]).toMatchObject({ kind: 'image', label: 'Hero', scope: 'mine' });
+    expect(page.items[0]).toMatchObject({ kind: 'image', label: 'Hero', scope: 'generated' });
     // Key strips the query string: the same asset seen twice must dedupe even
     // when one URL carries a signature.
     expect(page.items[0].key).toBe('https://x/img.png');
@@ -55,7 +55,7 @@ describe('mine scope — /api/studio/library', () => {
 
   it('drops items with no url rather than rendering dead tiles', async () => {
     mockFetch({ items: [{ id: 'a', url: '' }, { id: 'b', url: 'https://x/y.png' }], total: 2 });
-    const page = await fetchAssets(host, { scope: 'mine' });
+    const page = await fetchAssets(host, { scope: 'generated' });
     expect(page.items.map(i => i.id)).toEqual(['b']);
   });
 
@@ -63,14 +63,14 @@ describe('mine scope — /api/studio/library', () => {
     mockFetch({}, false);
     // "No results" when the request FAILED is indistinguishable from an empty
     // library — the worst possible outcome, so it must surface.
-    await expect(fetchAssets(host, { scope: 'mine' })).rejects.toThrow(/library 500/);
+    await expect(fetchAssets(host, { scope: 'generated' })).rejects.toThrow(/library 500/);
   });
 });
 
-describe('shared scope — semantic lane', () => {
+describe('mine scope — the user’s own media library on disk', () => {
   it('POSTs to search-text when there is a query', async () => {
     const f = mockFetch({ items: [], total: 0, vector: { active: true } });
-    const page = await fetchAssets(host, { scope: 'shared', q: 'rain on a window' });
+    const page = await fetchAssets(host, { scope: 'mine', q: 'rain on a window' });
 
     const [url, init] = f.mock.calls[0] as unknown as [string, any];
     expect(url).toContain('/api/media-library/search-text');
@@ -82,7 +82,7 @@ describe('shared scope — semantic lane', () => {
 
   it('GETs the plain search when the query is empty', async () => {
     const f = mockFetch({ items: [], total: 0 });
-    await fetchAssets(host, { scope: 'shared', q: '   ' });
+    await fetchAssets(host, { scope: 'mine', q: '   ' });
 
     const [url, init] = f.mock.calls[0] as unknown as [string, any];
     // Browsing must not pay for an embedding round trip.
@@ -105,7 +105,7 @@ describe('shared scope — semantic lane', () => {
       }],
       total: 1,
     });
-    const page = await fetchAssets(host, { scope: 'shared' });
+    const page = await fetchAssets(host, { scope: 'mine' });
 
     expect(page.items[0].thumbnailUrl).toBe('/api/media-library/thumb?id=x1&w=360');
     // The 720p proxy is what makes video preview cheap — dropping it was why
@@ -125,7 +125,7 @@ describe('shared scope — semantic lane', () => {
                 thumbUrl: '/api/media-library/thumb?id=a1&w=360', hasRasterPreview: false }],
       total: 1,
     });
-    const page = await fetchAssets(host, { scope: 'shared' });
+    const page = await fetchAssets(host, { scope: 'mine' });
     expect(page.items[0].thumbnailUrl).toBeUndefined();
     expect(page.items[0].hasRasterPreview).toBe(false);
   });
@@ -134,7 +134,7 @@ describe('shared scope — semantic lane', () => {
     // The semantic lane can decline (cold model, upgrade mid-flight) and still
     // return good keyword results. A badge that lies about this is worse than none.
     mockFetch({ items: [], total: 0, vector: { active: false } });
-    const page = await fetchAssets(host, { scope: 'shared', q: 'sunset' });
+    const page = await fetchAssets(host, { scope: 'mine', q: 'sunset' });
     expect(page.semantic).toBe(false);
   });
 });

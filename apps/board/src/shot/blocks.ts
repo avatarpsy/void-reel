@@ -71,7 +71,14 @@ export interface BlockInfo {
   description?: string;
   category?: string;
   tags: string[];
-  tier: 'user' | 'starter';
+  /**
+   * `shared` is a block ADOPTED from another creator's published one. It was
+   * added when sharing gained its read half — before that a block could only be
+   * yours or shipped, and anything adopted had nowhere to live.
+   */
+  tier: 'user' | 'shared' | 'starter';
+  /** Who published it, for an adopted block. A handle, never a uid. */
+  credit?: string;
   fill: 'slots' | 'adapt';
   overlay: boolean;
   aspects: string[];

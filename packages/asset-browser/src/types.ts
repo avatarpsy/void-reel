@@ -42,7 +42,27 @@
  */
 export type AssetKind = 'video' | 'image' | 'music' | 'sfx' | 'voice' | 'block';
 
-/** Where assets are read from. A SCOPE, deliberately not a tab. */
+/**
+ * Where assets are read from. A SCOPE, deliberately not a tab.
+ *
+ * ── NAMED FOR WHAT THEY FETCH, WHICH THEY WERE NOT ───────────────────────────
+ * These names were inverted against the video editor's, and both were user
+ * facing. `mine` read `/api/studio/library` — AI generations and renders — and
+ * the board labelled it "My files", while the video editor labelled that same
+ * source "Generated" and used "My files" for the on-disk media library. So the
+ * same words named different sources in two editors, and the one place a user
+ * could reach other creators' work was called "Shared" in one editor and did
+ * not exist in the other.
+ *
+ * Fixed by naming each scope after the thing it actually reads:
+ *
+ *   generated  /api/studio/library                what YOU made here
+ *   mine       /api/media-library/search-text     what YOU have on disk
+ *   shared     /api/media-library/shared/search   what OTHER PEOPLE published
+ *
+ * The video editor's vocabulary was the correct one, so this moves toward it
+ * rather than inventing a third.
+ */
 export type AssetScope =
   /**
    * WHAT IS ALREADY IN THIS PROJECT. Only if `projectSource` is given.
@@ -54,12 +74,41 @@ export type AssetScope =
    * re-upload a duplicate instead.
    */
   | 'project'
-  /** The user's own generated + saved media (`/api/studio/library`). */
+  /** AI generations and renders from the user's projects (`/api/studio/library`). */
+  | 'generated'
+  /** The user's own media library on disk — sfx, music, footage, stills, fonts. */
   | 'mine'
-  /** The shared on-disk media library — sfx, music, footage, stills, LUTs. */
+  /** Assets OTHER creators have published. Free to use, credited to them. */
   | 'shared'
   /** Media inside the HOST's other local projects. Only if `browserSource` is given. */
   | 'device';
+
+/**
+ * ONE SET OF WORDS FOR ALL THREE EDITORS.
+ *
+ * Exported rather than written per app, because three copies is exactly how the
+ * board came to call generations "My files" while the video editor called the
+ * media library "My files". A label is part of the contract.
+ *
+ * `project` is the one that varies by host — "In this board" reads better on a
+ * board than "In this project" — so hosts may override that single entry.
+ */
+export const SCOPE_LABEL: Record<AssetScope, string> = {
+  project: 'In this project',
+  generated: 'Generated',
+  mine: 'My files',
+  shared: 'Shared',
+  device: 'This browser',
+};
+
+/** One line saying what a scope holds, for a tooltip or an empty state. */
+export const SCOPE_HINT: Record<AssetScope, string> = {
+  project: 'Media already used in this project',
+  generated: 'AI generations and renders from your projects',
+  mine: 'Your media library on this machine — sfx, music, footage, stills, fonts',
+  shared: 'Assets other creators have shared — free to use, credited to them',
+  device: 'Media in other projects saved in this browser',
+};
 
 /** One asset, normalised across every source. */
 export interface AssetItem {
@@ -96,6 +145,14 @@ export interface AssetItem {
   durationSec?: number;
   bytes?: number;
   createdAt?: string;
+  /**
+   * Who published it, when it came from another creator. A handle, never a uid.
+   *
+   * On the ITEM rather than only in the browsing UI, because credit that lives
+   * in a tile disappears the moment somebody drags the asset onto a timeline —
+   * which is exactly when attribution starts to matter.
+   */
+  credit?: string;
   /** Stable identity for "do I already have this?" — source URL, not id. */
   key: string;
   /**

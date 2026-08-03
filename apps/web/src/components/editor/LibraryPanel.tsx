@@ -13,6 +13,8 @@ import { usePlayableVideo } from "../../services/video-playback";
 import {
   BUCKET_ORDER,
   PAGE_SIZE,
+  SCOPE_HINT,
+  SCOPE_LABEL,
   bucketOf,
 } from "@openreel/asset-browser";
 
@@ -86,11 +88,23 @@ type LibType = "all" | "video" | "image" | "music" | "sfx" | "voice";
  */
 type LibScope = "generated" | "myfiles" | "device" | "shared";
 
+/**
+ * LABELS COME FROM THE SHARED PACKAGE so the three editors cannot drift.
+ *
+ * They already had: this panel called the media library "My files" while the
+ * board called AI generations "My files" and the media library "Library". One
+ * set of words, three copies, and no way to notice when one of them moved.
+ *
+ * `myfiles` is this panel's own id for the media-library scope — the package
+ * calls it `mine`. Kept as-is because it is threaded through a thousand lines of
+ * this component; only the LABEL is shared, which is the part the user reads and
+ * the part that was wrong.
+ */
 const SCOPE_PILLS: { id: LibScope; label: string; hint: string }[] = [
-  { id: "generated", label: "Generated", hint: "AI generations and renders from your projects" },
-  { id: "myfiles",   label: "My files",  hint: "Your media library on this machine — sfx, music, footage, stills, HDRI, fonts" },
-  { id: "device",    label: "This browser", hint: "Media in other projects saved in this browser" },
-  { id: "shared",    label: "Shared",      hint: "Assets other creators have shared — free to use, credited to them" },
+  { id: "generated", label: SCOPE_LABEL.generated, hint: SCOPE_HINT.generated },
+  { id: "myfiles",   label: SCOPE_LABEL.mine,      hint: SCOPE_HINT.mine },
+  { id: "device",    label: SCOPE_LABEL.device,    hint: SCOPE_HINT.device },
+  { id: "shared",    label: SCOPE_LABEL.shared,    hint: SCOPE_HINT.shared },
 ];
 
 /** Which scopes read the shared media library (vs the generations store / IndexedDB). */

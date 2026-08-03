@@ -7,5 +7,6 @@
  */
 export * from './types';
 export * from './sources';
+export * from './cache';
 export * from './thumbs';
 export * from './view-model';

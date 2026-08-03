@@ -87,6 +87,9 @@ importers:
       '@imgly/background-removal':
         specifier: ^1.7.0
         version: 1.7.0(onnxruntime-web@1.21.0)
+      '@openreel/asset-browser':
+        specifier: workspace:*
+        version: link:../../packages/asset-browser
       '@openreel/image-core':
         specifier: workspace:*
         version: link:../../packages/image-core

@@ -155,3 +155,129 @@ describe('fetchThumb — who receives the auth token', () => {
     }
   });
 });
+
+/**
+ * THE ONE THAT WAS COSTING A REQUEST PER TILE.
+ *
+ * The Cache API was consulted only when the network FAILED, which made it an
+ * offline fallback wearing the word "cache". Measured on a real library, a
+ * single scope switch issued ~120 thumbnail requests, and switching away and
+ * back issued ~120 more — for images that had just been on screen.
+ *
+ * These URLs are addressed by asset id or content hash, so a different image is
+ * a different url. Reading the cache first cannot serve the wrong picture, and
+ * revalidating would spend a request per tile to confirm something that cannot
+ * have moved.
+ */
+describe('fetchThumb — the cache is read first', () => {
+  function harness(opts: { cached?: boolean }) {
+    const netCalls: string[] = [];
+    const realFetch = globalThis.fetch;
+    const realCaches = (globalThis as { caches?: unknown }).caches;
+
+    globalThis.fetch = (async (url: string) => {
+      netCalls.push(String(url));
+      return {
+        ok: true,
+        clone: () => ({}),
+        blob: async () => new Blob(['from-network']),
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+
+    (globalThis as { caches?: unknown }).caches = {
+      open: async () => ({
+        put: async () => {},
+        match: async () => (opts.cached
+          ? ({ blob: async () => new Blob(['from-cache']) } as unknown as Response)
+          : undefined),
+      }),
+    };
+    return {
+      netCalls,
+      restore() {
+        globalThis.fetch = realFetch;
+        (globalThis as { caches?: unknown }).caches = realCaches;
+      },
+    };
+  }
+
+  it('serves a cached thumbnail without touching the network', async () => {
+    const h = harness({ cached: true });
+    try {
+      const { fetchThumb } = await import('./thumbs');
+      const blob = await fetchThumb(host, 'https://voidspace.test/api/media-library/thumb/abc');
+
+      expect(await blob!.text()).toBe('from-cache');
+      expect(h.netCalls, 'a cached thumbnail still went to the network').toEqual([]);
+    } finally { h.restore(); }
+  });
+
+  it('falls to the network when nothing is cached', async () => {
+    const h = harness({ cached: false });
+    try {
+      const { fetchThumb } = await import('./thumbs');
+      const blob = await fetchThumb(host, 'https://voidspace.test/api/media-library/thumb/xyz');
+
+      expect(await blob!.text()).toBe('from-network');
+      expect(h.netCalls).toHaveLength(1);
+    } finally { h.restore(); }
+  });
+});
+
+/**
+ * A library accumulates entries whose file has since been deleted — a render
+ * from last month, a project cleaned up. Each 404s on every repaint: 22 failed
+ * requests per scope switch on a real library, repeated indefinitely, each one
+ * a console error burying the genuine failures.
+ */
+describe('fetchThumb — a missing thumbnail is asked for once', () => {
+  function harness(status: number) {
+    const netCalls: string[] = [];
+    const realFetch = globalThis.fetch;
+    const realCaches = (globalThis as { caches?: unknown }).caches;
+    globalThis.fetch = (async (url: string) => {
+      netCalls.push(String(url));
+      return { ok: false, status, clone: () => ({}), blob: async () => new Blob() } as unknown as Response;
+    }) as unknown as typeof fetch;
+    (globalThis as { caches?: unknown }).caches = {
+      open: async () => ({ put: async () => {}, match: async () => undefined }),
+    };
+    return {
+      netCalls,
+      restore() {
+        globalThis.fetch = realFetch;
+        (globalThis as { caches?: unknown }).caches = realCaches;
+      },
+    };
+  }
+
+  it('does not re-request a 404 on every repaint', async () => {
+    const h = harness(404);
+    try {
+      const { fetchThumb } = await import('./thumbs');
+      const url = 'https://voidspace.test/api/studio/local-asset?filename=deleted.mp4';
+      expect(await fetchThumb(host, url)).toBeNull();
+      expect(await fetchThumb(host, url)).toBeNull();
+      expect(await fetchThumb(host, url)).toBeNull();
+
+      expect(h.netCalls, 'a known-missing thumbnail was requested again').toHaveLength(1);
+    } finally { h.restore(); }
+  });
+
+  /**
+   * A 401 is a token that has not arrived yet and a 500 is a bad minute.
+   * Remembering those would turn a transient problem into a permanently blank
+   * tile for the rest of the session.
+   */
+  it('keeps trying after a transient failure', async () => {
+    const h = harness(500);
+    try {
+      const { fetchThumb } = await import('./thumbs');
+      const url = 'https://voidspace.test/api/studio/local-asset?filename=flaky.mp4';
+      await fetchThumb(host, url);
+      await fetchThumb(host, url);
+
+      expect(h.netCalls).toHaveLength(2);
+    } finally { h.restore(); }
+  });
+});

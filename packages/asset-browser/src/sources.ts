@@ -84,7 +84,7 @@ export function filenameFromUrl(url: string): string {
 }
 
 /** The user's own generated + saved media. */
-async function fetchMine(host: AssetBrowserHost, q: AssetQuery): Promise<AssetPage> {
+async function fetchGenerated(host: AssetBrowserHost, q: AssetQuery): Promise<AssetPage> {
   const qs = new URLSearchParams({
     outputDir: resolveOutputDir(),
     type: q.kind && q.kind !== 'all' ? q.kind : 'all',
@@ -109,7 +109,7 @@ async function fetchMine(host: AssetBrowserHost, q: AssetQuery): Promise<AssetPa
     label: (typeof it.label === 'string' && it.label.trim())
       ? it.label
       : filenameFromUrl(String(it.url ?? '')),
-    scope: 'mine' as const,
+    scope: 'generated' as const,
     thumbnailUrl: it.thumbnailUrl,
     durationSec: Number(it.durationSec) > 0 ? Number(it.durationSec) : undefined,
     bytes: Number(it.bytes) || undefined,
@@ -119,11 +119,16 @@ async function fetchMine(host: AssetBrowserHost, q: AssetQuery): Promise<AssetPa
 }
 
 /**
- * The shared on-disk media library — sfx, music, footage, stills, LUTs.
+ * The user's OWN media library on disk — sfx, music, footage, stills, fonts.
  *
  * This is the lane that makes "rain on a window" find a clip nobody tagged.
+ *
+ * Named `fetchMyFiles` because it reads the user's own files. It used to be
+ * called `fetchShared` and sat behind a scope named `shared`, which the video
+ * editor already used for OTHER PEOPLE's published assets — so one word meant
+ * two sources depending on which editor you had open.
  */
-async function fetchShared(host: AssetBrowserHost, q: AssetQuery): Promise<AssetPage> {
+async function fetchMyFiles(host: AssetBrowserHost, q: AssetQuery): Promise<AssetPage> {
   const query = (q.q ?? '').trim();
   const sq = new URLSearchParams({
     ...(q.kind && q.kind !== 'all' ? { kind: q.kind } : {}),
@@ -153,7 +158,7 @@ async function fetchShared(host: AssetBrowserHost, q: AssetQuery): Promise<Asset
     // called "IMG_2043.jpg" becomes "img-2043" and "3.png" becomes the tile
     // label "3" — meaningless in a grid. Same order as the video editor.
     label: String(a.originalName || a.slug || a.id || ''),
-    scope: 'shared' as const,
+    scope: 'mine' as const,
     // `thumbUrl` is the field the server actually sends (media-library.ts:796).
     // This previously read `thumbnailUrl ?? previewUrl` — NEITHER EXISTS — so it
     // was always undefined and every tile fell back to proxying the full master.
@@ -224,7 +229,68 @@ export async function fetchAssets(host: AssetBrowserHost, q: AssetQuery): Promis
   if (q.scope === 'device') {
     return filterLocal((await host.browserSource?.list()) ?? [], q);
   }
-  return q.scope === 'shared' ? fetchShared(host, q) : fetchMine(host, q);
+  if (q.scope === 'shared') return fetchSharedLibrary(host, q);
+  if (q.scope === 'generated') return fetchGenerated(host, q);
+  return fetchMyFiles(host, q);
+}
+
+/**
+ * Assets OTHER creators have published.
+ *
+ * The board had no way to reach these at all — the video editor had a "Shared"
+ * tab and the board simply did not, so the same account saw a different library
+ * depending on which editor was open.
+ *
+ * ONE ENDPOINT FOR BROWSE AND SEARCH: an empty query browses by popularity, a
+ * real query fuses meaning and keyword lanes SERVER-SIDE. The client does not
+ * pick a ranking strategy — doing that here would put ranking policy in two
+ * places, which is how the local search's fusion drifted once already.
+ */
+async function fetchSharedLibrary(host: AssetBrowserHost, q: AssetQuery): Promise<AssetPage> {
+  const res = await fetch(`${base(host)}/api/media-library/shared/search`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...(await authHeaders(host)) },
+    body: JSON.stringify({
+      q: (q.q ?? '').trim(),
+      ...(q.kind && q.kind !== 'all' ? { kinds: [q.kind] } : {}),
+      limit: q.limit ?? 60,
+      offset: q.offset ?? 0,
+    }),
+  });
+  if (!res.ok) throw new Error(`shared ${res.status}`);
+  const j = await res.json();
+
+  const items: AssetItem[] = (Array.isArray(j.items) ? j.items : []).map((a: any) => ({
+    id: String(a.sha256 ?? a.id ?? ''),
+    url: `${base(host)}${a.url ?? ''}`,
+    key: keyOf(String(a.url ?? '')),
+    kind: normaliseKind(a.kind),
+    label: String(a.name || a.originalName || a.id || ''),
+    scope: 'shared' as const,
+    thumbnailUrl: a.thumbUrl ? `${base(host)}${a.thumbUrl}` : undefined,
+    proxyUrl: a.proxyUrl ?? null,
+    hasRasterPreview: a.hasRasterPreview !== false,
+    durationSec: Number(a.durationSec) > 0 ? Number(a.durationSec) : undefined,
+    bytes: Number(a.bytes) || undefined,
+    createdAt: a.publishedAt || a.createdAt,
+    /**
+     * ATTRIBUTION TRAVELS WITH THE ASSET.
+     *
+     * A handle, never a uid. It rides on the item so every tile, drag payload
+     * and placement keeps it — credit that lives only in the browsing UI is
+     * credit that disappears the moment somebody uses the thing.
+     */
+    credit: a.credit?.handle ? `@${a.credit.handle}` : (a.credit?.name || undefined),
+  })).filter((a: AssetItem) => a.url);
+
+  return {
+    items,
+    total: Number(j.total) || items.length,
+    // The server says whether the semantic lane actually ran; it can decline
+    // (cold tower, empty index) and still return good keyword results, and the
+    // badge must not claim otherwise.
+    semantic: j?.vector?.active === true,
+  };
 }
 
 /**
@@ -237,6 +303,7 @@ export async function fetchAssets(host: AssetBrowserHost, q: AssetQuery): Promis
 export function availableScopes(host: AssetBrowserHost): AssetScope[] {
   return [
     ...(host.projectSource ? (['project'] as const) : []),
+    'generated' as const,
     'mine' as const,
     'shared' as const,
     ...(host.browserSource ? (['device'] as const) : []),
