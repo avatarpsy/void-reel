@@ -1092,10 +1092,9 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
      * `src` is the card's own small proxy, not `url` — a 480px tile has no use
      * for a master, and using it would make the preview the slow path.
      */
-    'voidspace:board-thumbnail': async args => {
+    'voidspace:board-thumbnail': async () => {
       const all = readShots(board.std);
       const dataUrl = await renderBoardThumbnail({
-        theme: args?.theme === 'light' ? 'light' : 'dark',
         shots: all.map(s => {
           const pick = (s.media ?? []).find(m => m.kind === 'image')
             ?? (s.media ?? []).find(m => !!m.poster);

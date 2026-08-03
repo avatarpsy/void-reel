@@ -54,7 +54,6 @@ export interface ThumbnailOptions {
   shots: ThumbShot[];
   /** Board title, drawn as the strip's caption when there are no shots. */
   title?: string;
-  theme?: 'dark' | 'light';
 }
 
 /**
@@ -117,7 +116,20 @@ export async function renderBoardThumbnail(opts: ThumbnailOptions): Promise<stri
   const shots = (opts.shots || []).slice(0, MAX_CARDS);
   if (!shots.length) return '';
 
-  const dark = opts.theme !== 'light';
+  /**
+   * ── DELIBERATELY THEME-INDEPENDENT ──────────────────────────────────────
+   * This started out theme-aware and that was wrong by construction. A preview
+   * is rendered ONCE and stored; the viewer's theme can change afterwards, and
+   * boards last saved under different themes end up side by side in the same
+   * grid looking like two different products. Regenerating on every theme
+   * switch would be pure waste for a tile.
+   *
+   * One fixed treatment instead. Dark, because these tiles sit next to video
+   * stills and image covers — arbitrary photographs — so a dark preview reads
+   * as content in BOTH themes, exactly the way those do, rather than as chrome
+   * that has come unstuck from the page.
+   */
+  const dark = true;
   const canvas = document.createElement('canvas');
   canvas.width = W;
   canvas.height = H;
