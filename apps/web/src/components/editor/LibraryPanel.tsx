@@ -15,7 +15,15 @@ import {
   PAGE_SIZE,
   SCOPE_HINT,
   SCOPE_LABEL,
+  KIND_LABEL,
+  KIND_ORDER,
+  VIEW_MODES,
+  searchPlaceholder,
   bucketOf,
+  gridColumns,
+  loadViewMode,
+  saveViewMode,
+  type ViewMode,
 } from "@openreel/asset-browser";
 
 /**
@@ -206,14 +214,16 @@ interface DeviceItem {
   objectUrl?: string;      // lazily-created blob URL (preview/drag)
 }
 
-const TYPE_PILLS: { id: LibType; label: string; Icon: typeof Film }[] = [
-  { id: "all", label: "All", Icon: Plus },
-  { id: "video", label: "Videos", Icon: Film },
-  { id: "image", label: "Images", Icon: ImageIcon },
-  { id: "music", label: "Music", Icon: Music2 },
-  { id: "sfx", label: "SFX", Icon: AudioLines },
-  { id: "voice", label: "Voice", Icon: Mic },
-];
+/** Icons are React and stay here; the LABELS and their ORDER come from the core
+ *  so the board's pills and these cannot drift apart again. Blocks are filtered
+ *  out — the video editor has no composition blocks to browse. */
+const TYPE_ICON: Record<LibType, typeof Film> = {
+  all: Plus, video: Film, image: ImageIcon, music: Music2, sfx: AudioLines, voice: Mic,
+};
+const TYPE_PILLS: { id: LibType; label: string; Icon: typeof Film }[] =
+  KIND_ORDER
+    .filter((id): id is LibType => id !== "block")
+    .map((id) => ({ id, label: KIND_LABEL[id], Icon: TYPE_ICON[id] }));
 
 /** Type pill → media-library `kind` group. The stock library uses richer kinds
  *  (`audio-sfx`, `visual-vfx`, …) and accepts a group prefix, so this keeps ONE
@@ -428,18 +438,33 @@ export const LibraryPanel: React.FC = () => {
   // doing the same thing in one panel is just clutter.
   const [libraryRoot, setLibraryRoot] = useState<string>("");
 
-  /** Same three modes as the Media tab, so the two panels behave identically.
-   *  Persisted separately: Explorer-style, a shelf remembers its own view. */
-  const [viewMode, setViewModeRaw] = useState<"large" | "small" | "list">(() => {
+  /**
+   * The SHARED view mode — `grid | compact | list`, from
+   * `@openreel/asset-browser`.
+   *
+   * This panel used to keep its own vocabulary (`large | small | list`) under
+   * its own key, so the board and the video editor named the same three modes
+   * differently and each forgot the other's choice — a user who picked the
+   * contact-sheet view in one editor got the default in the other. The core
+   * already owns the modes, their order and one storage key; this now reads it.
+   *
+   * The old key is migrated once so nobody's existing choice is thrown away.
+   */
+  const [viewMode, setViewModeRaw] = useState<ViewMode>(() => {
     try {
-      const v = localStorage.getItem("voidspace.library.viewMode");
-      if (v === "large" || v === "small" || v === "list") return v;
-    } catch { /* default */ }
-    return "large";
+      const legacy = localStorage.getItem("voidspace.library.viewMode");
+      if (legacy && !localStorage.getItem("voidspace.assets.viewMode")) {
+        const mapped: ViewMode | null =
+          legacy === "large" ? "grid" : legacy === "small" ? "compact" : legacy === "list" ? "list" : null;
+        if (mapped) saveViewMode(mapped);
+        localStorage.removeItem("voidspace.library.viewMode");
+      }
+    } catch { /* private mode — fall through to the shared default */ }
+    return loadViewMode();
   });
-  const setViewMode = useCallback((v: "large" | "small" | "list") => {
+  const setViewMode = useCallback((v: ViewMode) => {
     setViewModeRaw(v);
-    try { localStorage.setItem("voidspace.library.viewMode", v); } catch { /* ignore */ }
+    saveViewMode(v);
   }, []);
 
   const [type, setType] = useState<LibType>("all");
@@ -1128,28 +1153,36 @@ export const LibraryPanel: React.FC = () => {
   }, [availableFacetGroups]);
 
   /** Layout for the current view mode. `list` becomes a single column of rows;
-   *  the two grid modes only differ by tile size, so the same tile is reused. */
-  const gridStyle = viewMode === "list"
-    ? { gridTemplateColumns: "1fr" }
-    : { gridTemplateColumns: `repeat(auto-fill, minmax(0, ${viewMode === "small" ? 96 : 150}px))` };
+   *  the two grid modes only differ by tile size, so the same tile is reused.
+   *  The column rule comes from the shared core, so the board's panel lays tiles
+   *  out at exactly these sizes rather than at its own. */
+  const gridStyle = { gridTemplateColumns: gridColumns(viewMode) };
 
-  const renderServerTile = (it: LibItem) => {
-    const added = importedUrls.has(it.url);
-    const isImage = it.type === "image";
-    const isVideo = it.type === "video";
-    const videoFailed = failedVideos.has(it.id);
-    const thumbSrc = it.thumbnailUrl || it.url;
-    const fullThumbSrc = /^https?:/i.test(thumbSrc) ? thumbSrc : `${apiBase()}${thumbSrc}`;
-    // WHERE this asset physically lives, derived from the URL shape rather than a
-    // new API field: an absolute http(s) URL is in cloud storage, a relative
-    // /api/studio/local-asset path is served off this machine's disk.
-    //
-    // Shown because it changes what the user can rely on: a local-only asset is
-    // not available in another browser or on another device, and that is worth
-    // knowing BEFORE building a project around it. Stock is always local, so the
-    // badge would be noise on every tile there — hence `mine` only.
-    const isCloud = /^https?:/i.test(it.url);
-    // ── SHARE WITH CREATORS ────────────────────────────────────────────────────
+  /**
+   * SHARE WITH CREATORS — component state, NOT per-tile state.
+   *
+   * ── THIS IS WHAT BROKE THE ASSETS PANEL ─────────────────────────────────────
+   * These three hooks used to live INSIDE `renderServerTile`, which is a plain
+   * function called once per tile — not a component. So the hooks belonged to
+   * LibraryPanel, and it rendered `base + 3 x tileCount` of them. Every time the
+   * tile count changed — the first page arriving, a type pill, a search, a scope
+   * switch, pagination — React saw a different number of hooks than the previous
+   * render and threw #310 ("Rendered more hooks than during the previous
+   * render"). The whole Assets panel unmounted behind its error boundary.
+   *
+   * It hid for so long because the failure needs DATA: an empty library renders
+   * zero tiles, zero extra hooks, and works perfectly — which is exactly what a
+   * signed-out reproduction shows. And the old boundary printed "failed to load,
+   * please refresh" instead of the error, so the one clue never reached anyone.
+   *
+   * The indentation made it worse: the block was written at 2 spaces, the same
+   * as component scope, inside a function body indented at 4. It READ like
+   * component state in every diff it ever appeared in.
+   *
+   * Both pieces of state are already keyed BY ITEM ID, so they were always
+   * component-level state in everything but placement.
+   */
+  // ── SHARE WITH CREATORS ────────────────────────────────────────────────────
   //
   // Available on every item the Library can show, because that is exactly the rule the server
   // enforces: /api/studio/library resolves the id, so if it appears here it is yours and it is
@@ -1197,6 +1230,24 @@ export const LibraryPanel: React.FC = () => {
       setSharingId(null);
     }
   }, [sharedIds]);
+
+  const renderServerTile = (it: LibItem) => {
+    const added = importedUrls.has(it.url);
+    const isImage = it.type === "image";
+    const isVideo = it.type === "video";
+    const videoFailed = failedVideos.has(it.id);
+    const thumbSrc = it.thumbnailUrl || it.url;
+    const fullThumbSrc = /^https?:/i.test(thumbSrc) ? thumbSrc : `${apiBase()}${thumbSrc}`;
+    // WHERE this asset physically lives, derived from the URL shape rather than a
+    // new API field: an absolute http(s) URL is in cloud storage, a relative
+    // /api/studio/local-asset path is served off this machine's disk.
+    //
+    // Shown because it changes what the user can rely on: a local-only asset is
+    // not available in another browser or on another device, and that is worth
+    // knowing BEFORE building a project around it. Stock is always local, so the
+    // badge would be noise on every tile there — hence `mine` only.
+    const isCloud = /^https?:/i.test(it.url);
+
 
   const showStorageBadge = scope === "generated";
     // Favourites only exist for media-library items (the /personal endpoint is
@@ -1522,15 +1573,14 @@ export const LibraryPanel: React.FC = () => {
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder={
-              scope === "myfiles"
-                // Once meaning-based search is live the box accepts a DESCRIPTION,
-                // not a filename — and since most of this library is opaquely
-                // named, the placeholder is the only place the user learns that.
-                ? (semanticReady ? "Describe it — \"rain on a window\", \"deep whoosh\"…" : "Search sfx, music, footage, stills…")
-                : scope === "device" ? "Search media in this browser…"
-                  : "Search your generations…"
-            }
+            // One wording, shared with the board — the placeholder is where a
+            // user learns this box takes a DESCRIPTION, not a filename, and two
+            // panels promising different things about the same box is two
+            // products. `semantic` gates that promise on the lane being live.
+            placeholder={searchPlaceholder(
+              scope === "myfiles" ? "mine" : scope === "device" ? "device" : "generated",
+              { semantic: semanticReady },
+            )}
             className={`w-full pl-9 text-xs bg-background-tertiary border border-border rounded-md text-text-primary h-9 focus:outline-none focus:border-primary ${
               semanticActive && debounced ? "pr-20" : "pr-3"
             }`}
@@ -1569,11 +1619,12 @@ export const LibraryPanel: React.FC = () => {
             language for "how do I want this laid out". `ml-auto` pushes the display
             controls to the right edge now that search no longer shares this row. */}
         <div className="ml-auto flex items-center bg-background-tertiary border border-border rounded-lg p-0.5">
-          {([
-            { mode: "large" as const, icon: LayoutGrid, title: "Large icons" },
-            { mode: "small" as const, icon: Grid2x2, title: "Small icons" },
-            { mode: "list" as const, icon: List, title: "List view" },
-          ]).map(({ mode, icon: ViewIcon, title }) => (
+          {/* Modes and their ORDER come from the shared core, so this row and
+              the board's cannot offer different sets or a different order. */}
+          {VIEW_MODES.map((mode) => {
+            const ViewIcon = mode === "grid" ? LayoutGrid : mode === "compact" ? Grid2x2 : List;
+            const title = mode === "grid" ? "Grid" : mode === "compact" ? "Small grid" : "List";
+            return (
             <button
               key={mode}
               type="button"
@@ -1587,7 +1638,8 @@ export const LibraryPanel: React.FC = () => {
             >
               <ViewIcon size={13} />
             </button>
-          ))}
+            );
+          })}
         </div>
         <button
           type="button"

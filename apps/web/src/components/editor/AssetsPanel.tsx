@@ -50,6 +50,7 @@ import {
   ContextMenuTrigger,
 } from "@openreel/ui";
 import { useKieAIStore } from "../../stores/kieai-store";
+import { mediaName, mediaId } from "../../utils/media-name";
 
 const formatDuration = (seconds: number): string => {
   const mins = Math.floor(seconds / 60);
@@ -209,8 +210,9 @@ const MediaThumbnail: React.FC<{
   // re-rolled every render, producing visible jitter during playback.
   const waveformHeights = useMemo(() => {
     let seed = 0;
-    for (let i = 0; i < item.id.length; i++) {
-      seed = (seed * 31 + item.id.charCodeAt(i)) >>> 0;
+    const id = mediaId(item);
+    for (let i = 0; i < id.length; i++) {
+      seed = (seed * 31 + id.charCodeAt(i)) >>> 0;
     }
     return Array.from({ length: 10 }, () => {
       seed = (seed * 1103515245 + 12345) >>> 0;
@@ -331,7 +333,7 @@ const MediaThumbnail: React.FC<{
         {/* Small thumbnail */}
         <div className="w-12 h-8 rounded bg-background-tertiary relative overflow-hidden flex-shrink-0">
           {showThumb ? (
-            <img src={effectiveThumb as string} alt={item.name} className="w-full h-full object-cover" onError={() => setThumbFailed(true)} />
+            <img src={effectiveThumb as string} alt={mediaName(item)} className="w-full h-full object-cover" onError={() => setThumbFailed(true)} />
           ) : (
             <div className="w-full h-full flex items-center justify-center">
               <Icon size={14} className={iconColor} />
@@ -358,9 +360,9 @@ const MediaThumbnail: React.FC<{
         <div className="flex-1 min-w-0">
           <div
             className={`text-[11px] truncate font-medium ${isSelected ? "text-primary" : "text-text-primary"}`}
-            title={item.name}
+            title={mediaName(item)}
           >
-            {item.name}
+            {mediaName(item)}
           </div>
           <div className="flex items-center gap-1.5 text-[9px] text-text-muted">
             {item.metadata?.duration && <span>{formatDuration(item.metadata.duration)}</span>}
@@ -479,7 +481,7 @@ const MediaThumbnail: React.FC<{
         {showThumb ? (
           <img
             src={effectiveThumb as string}
-            alt={item.name}
+            alt={mediaName(item)}
             className="w-full h-full object-cover"
             onError={() => setThumbFailed(true)}
           />
@@ -569,9 +571,9 @@ const MediaThumbnail: React.FC<{
           className={`text-[10px] truncate font-medium ${
             isSelected ? "text-primary" : "text-text-primary"
           }`}
-          title={item.name}
+          title={mediaName(item)}
         >
-          {item.name}
+          {mediaName(item)}
         </div>
         {viewMode === "large" && (
           <div className="flex items-center gap-1.5 text-[9px] text-text-muted mt-0.5">
@@ -770,7 +772,10 @@ export const AssetsPanel: React.FC = () => {
     updateSettings,
     setKieAIItemState,
   } = useProjectStore();
-  const mediaItems = project.mediaLibrary.items;
+  // Defensive: a project blob written by an older build (or a partial cloud
+  // restore) can arrive without a mediaLibrary at all. Reading through it
+  // unguarded crashed the panel before a single tile rendered.
+  const mediaItems = (project?.mediaLibrary?.items ?? []).filter(Boolean);
 
   // KieAI store
   const { retryTask } = useKieAIStore();
@@ -779,7 +784,9 @@ export const AssetsPanel: React.FC = () => {
   const { select, isSelected, startDrag } = useUIStore();
   // User-resizable panel width (persisted via panels.mediaLibrary.width;
   // the drag handle lives in EditorInterface as a flex sibling).
-  const assetsWidth = useUIStore((s) => s.panels.mediaLibrary.width ?? 320);
+  // `panels` is persisted wholesale, so preferences saved before this panel id
+  // existed rehydrate without it — read defensively rather than crash.
+  const assetsWidth = useUIStore((s) => s.panels?.mediaLibrary?.width ?? 320);
   // Header expand button: toggle the Assets panel between its normal width
   // and a wide preset so the user can see more columns of media at once
   // (complements the drag handle). 320 is the default; 560 is "expanded".
@@ -853,7 +860,7 @@ export const AssetsPanel: React.FC = () => {
 
   // Filter media items by search query and missing assets toggle
   const filteredItems = mediaItems.filter((item) => {
-    const matchesSearch = item.name
+    const matchesSearch = mediaName(item)
       .toLowerCase()
       .includes(searchQuery.toLowerCase());
     const matchesFilter = showOnlyMissing ? item.isPlaceholder : true;
@@ -1030,7 +1037,7 @@ export const AssetsPanel: React.FC = () => {
         const { project: currentProject } = useProjectStore.getState();
         const relinkable: RelinkableItem[] = itemsToRelink.map((item) => ({
           id: item.id,
-          name: item.name,
+          name: mediaName(item),
           type: item.type,
           originalUrl: item.originalUrl,
           category: item.category,
@@ -1102,7 +1109,7 @@ export const AssetsPanel: React.FC = () => {
 
   const handleRelinkSingleItem = useCallback(
     async (item: MediaItem) => {
-      await runRelink([item], `"${item.name}"`);
+      await runRelink([item], `"${mediaName(item)}"`);
     },
     [runRelink],
   );
@@ -1129,7 +1136,7 @@ export const AssetsPanel: React.FC = () => {
         const kind: string = String(item.type || "image").toLowerCase();
         if (url && window.parent && window.parent !== window) {
           window.parent.postMessage(
-            { type: "voidspace:ref-drag-start", media: { url, kind, name: item.name || "" } },
+            { type: "voidspace:ref-drag-start", media: { url, kind, name: mediaName(item) } },
             "*",
           );
           // One-shot dragend → tell the host the drag is over (clears its
@@ -1532,7 +1539,7 @@ export const AssetsPanel: React.FC = () => {
               // panel matches the timeline left-to-right.
               const buckets = new Map<string, typeof filteredItems>();
               for (const item of filteredItems) {
-                const key = item.category || "Imported";
+                const key = String(item.category || "Imported");
                 if (!buckets.has(key)) buckets.set(key, []);
                 buckets.get(key)!.push(item);
               }
@@ -1541,7 +1548,7 @@ export const AssetsPanel: React.FC = () => {
                   const an = a.sceneNumber ?? Number.POSITIVE_INFINITY;
                   const bn = b.sceneNumber ?? Number.POSITIVE_INFINITY;
                   if (an !== bn) return an - bn;
-                  return a.name.localeCompare(b.name);
+                  return mediaName(a).localeCompare(mediaName(b));
                 });
               }
               // Stable section order: Voidspace categories first, then
@@ -1592,9 +1599,9 @@ export const AssetsPanel: React.FC = () => {
                                 }
                           }
                         >
-                          {items.map((item) => (
+                          {items.map((item, i) => (
                             <MediaThumbnail
-                              key={item.id}
+                              key={mediaId(item) || `${section}-${i}`}
                               item={item}
                               isSelected={isSelected(item.id)}
                               viewMode={mediaViewMode}

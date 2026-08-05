@@ -12,7 +12,7 @@
  * Deliberately pure and framework-free: React renders these as sections, the
  * board as DOM, and neither can drift because neither owns the rule.
  */
-import type { AssetItem } from './types';
+import type { AssetItem, AssetKind, AssetScope } from './types';
 
 /** How many items a page requests. This is PRODUCTION's value, taken from
  *  LibraryPanel — the core adopted it rather than imposing a new one, so
@@ -100,12 +100,53 @@ export function saveViewMode(mode: ViewMode): void {
   try { localStorage.setItem(VIEW_MODE_KEY, mode); } catch { /* non-fatal */ }
 }
 
+/**
+ * TILE GEOMETRY — the last thing that made the two panels look like two panels.
+ *
+ * Both hosts already read the same sources, buckets and labels, and both offer
+ * the same three view modes. They still LOOKED different, because each picked
+ * its own tile size: the board laid grid tiles out at 96px and compact at 62px
+ * while the video editor used 150px and 96px. Same data, same modes, visibly
+ * different panel — and "same layout" is most of what a user means by "the same
+ * panel".
+ *
+ * The video editor's numbers are canonical here: it is the panel the others are
+ * being matched TO, so adopting it changes nothing a video editor user has
+ * learned. `list` has no column width — it is one column of rows.
+ *
+ * These are minimums for `repeat(auto-fill, minmax(<min>, 1fr))`, not fixed
+ * widths, so a wider panel still shows more columns rather than bigger gaps.
+ */
+export const TILE_MIN_PX: Record<ViewMode, number> = {
+  grid: 150,
+  compact: 96,
+  list: 0,
+};
+
+/** Gap between tiles, per mode. Rows sit tighter than columns in list view. */
+export const TILE_GAP_PX: Record<ViewMode, number> = {
+  grid: 6,
+  compact: 6,
+  list: 3,
+};
+
+/** The `grid-template-columns` value for a mode — one string, both hosts. */
+export function gridColumns(mode: ViewMode): string {
+  return mode === 'list'
+    ? '1fr'
+    : `repeat(auto-fill, minmax(${TILE_MIN_PX[mode]}px, 1fr))`;
+}
+
 /** Panel width, likewise shared so the layout feels like one app. */
 const PANEL_WIDTH_KEY = 'voidspace.assets.panelWidth';
 export const PANEL_MIN_WIDTH = 200;
 export const PANEL_MAX_WIDTH = 520;
 
-export function loadPanelWidth(fallback = 244): number {
+/** 320 = the video editor's Assets column. A board that opened at 244 showed
+ *  narrower tiles and fewer columns than the editor for the same library, which
+ *  is the difference you notice before any typography. A width the user has
+ *  actually dragged still wins — this is only the starting point. */
+export function loadPanelWidth(fallback = 320): number {
   try {
     const n = Number(localStorage.getItem(PANEL_WIDTH_KEY));
     return Number.isFinite(n) && n >= PANEL_MIN_WIDTH && n <= PANEL_MAX_WIDTH ? n : fallback;
@@ -148,4 +189,58 @@ export function mergePage(existing: AssetItem[], page: AssetItem[]): AssetItem[]
     out.push(a);
   }
   return out;
+}
+
+/**
+ * Is this failure "you are not authenticated (yet)" rather than a real error?
+ *
+ * ── WHY THIS IS A FUNCTION AND NOT AN INLINE REGEX ────────────────────────────
+ * It was an inline `/\b40[13]\b/` in the board's asset panel, and at some point
+ * the two `\b` escapes in that source file became literal U+0008 BACKSPACE
+ * bytes. The regex still compiled, still looked correct in most editors, and
+ * could never match an HTTP error message again — so the panel's entire
+ * auth-race recovery became dead code and a signed-in user got a permanent
+ * "Couldn't load — 401" on every cold board.
+ *
+ * A silently-unmatchable regex is not something review catches. A tested
+ * function is. Both panels now ask the same question the same way.
+ */
+export function isAuthError(message: unknown): boolean {
+  return /\b(401|403)\b/.test(String(message ?? ''));
+}
+
+/**
+ * What the search box should say it searches.
+ *
+ * Written twice before — once in each panel — and they had drifted into
+ * different promises about the same box: the board offered "Describe it — rain
+ * on a window" for every scope, while the video editor only said that for the
+ * on-disk library and said "Search your generations…" elsewhere. Since the
+ * placeholder is where a user learns that this box takes a DESCRIPTION rather
+ * than a filename, two answers is two products.
+ *
+ * `semantic` is whether the meaning-based lane is actually available: promising
+ * description-search where only substring matching is running is worse than
+ * saying nothing, because the user writes a sentence and gets no results.
+ */
+export function searchPlaceholder(
+  scope: AssetScope,
+  opts: { semantic?: boolean; kind?: AssetKind | 'all' } = {},
+): string {
+  if (opts.kind === 'block') return 'Find a block — "lower third", "stat"…';
+  switch (scope) {
+    case 'project':
+      return 'Search what this project uses…';
+    case 'device':
+      return 'Search media in this browser…';
+    case 'mine':
+      return opts.semantic
+        ? 'Describe it — "rain on a window", "deep whoosh"…'
+        : 'Search sfx, music, footage, stills…';
+    case 'shared':
+      return 'Search what other creators shared…';
+    case 'generated':
+    default:
+      return 'Search your generations…';
+  }
 }

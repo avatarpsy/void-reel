@@ -12,18 +12,20 @@
  * render cycle.
  */
 import {
-  PAGE_SIZE, SCOPE_LABEL as SHARED_SCOPE_LABEL, VIEW_MODES, availableScopes,
-  clampPanelWidth, fetchAssetsCached, groupByRecency, hasMore, invalidateAssetCache,
+  PAGE_SIZE, SCOPE_LABEL as SHARED_SCOPE_LABEL, TILE_GAP_PX, TILE_MIN_PX,
+  VIEW_MODES, KIND_LABEL, KIND_ORDER, QUICK_FILTERS, availableScopes, fetchPersonalCounts, searchPlaceholder, setAssetFavourite, uploadToLibrary,
+  clampPanelWidth, fetchAssetsCached, groupByRecency, hasMore, invalidateAssetCache, isAuthError,
   loadPanelWidth, loadThumbInto, loadViewMode, mergePage,
   mediaSrc, nextOffset, savePanelWidth, saveViewMode, tileSrc, videoPreviewSrc,
-  type AssetBrowserHost, type AssetItem, type AssetKind, type AssetPage, type AssetScope, type ViewMode,
+  type AssetBrowserHost, type AssetItem, type AssetKind, type AssetPage, type AssetScope,
+  type PersonalCounts, type QuickFilter, type ViewMode,
 } from '@openreel/asset-browser';
 
 import type { DragPayload } from '@blocksuite/std';
 import { GfxControllerIdentifier } from '@blocksuite/std/gfx';
 
 import { placeAsset } from '../board/asset-media';
-import { getParentToken } from '../board/parent-auth';
+import { getParentToken, onParentToken } from '../board/parent-auth';
 import type { MediaRole } from '../shot/model';
 import { boardMedia } from './media-inspector';
 import { allBlocks, onBlockCatalogue, type BlockInfo } from '../shot/blocks';
@@ -37,18 +39,13 @@ import { pendingToast, toast } from './toast';
 import { fitBoard } from './viewport';
 import type { MountedBoard } from '../blocksuite/editor';
 
-const KINDS: Array<{ id: AssetKind | 'all'; label: string }> = [
-  { id: 'all', label: 'All' },
-  { id: 'video', label: 'Video' },
-  { id: 'image', label: 'Images' },
-  { id: 'music', label: 'Music' },
-  { id: 'sfx', label: 'SFX' },
-  { id: 'voice', label: 'Voice' },
-  // LAST, and on purpose. The five above are the user's own footage; blocks are
-  // designs they pick from. Putting templates first would suggest the board is
-  // for assembling stock rather than for their material.
-  { id: 'block', label: 'Blocks' },
-];
+/**
+ * The type pills. Labels and ORDER both come from the core so this panel and
+ * the video editor's Library cannot say "Video" where the other says "Videos",
+ * or sort the same six filters differently.
+ */
+const KINDS: Array<{ id: AssetKind | 'all'; label: string }> =
+  KIND_ORDER.map(id => ({ id, label: KIND_LABEL[id] }));
 
 /** View-mode glyphs, matching the video editor's grid / compact-grid / list. */
 const VIEW_ICON: Record<ViewMode, string> = {
@@ -56,6 +53,12 @@ const VIEW_ICON: Record<ViewMode, string> = {
   compact: '<svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor"><rect x="1" y="1" width="3.6" height="3.6" rx=".8"/><rect x="6.2" y="1" width="3.6" height="3.6" rx=".8"/><rect x="11.4" y="1" width="3.6" height="3.6" rx=".8"/><rect x="1" y="6.2" width="3.6" height="3.6" rx=".8"/><rect x="6.2" y="6.2" width="3.6" height="3.6" rx=".8"/><rect x="11.4" y="6.2" width="3.6" height="3.6" rx=".8"/><rect x="1" y="11.4" width="3.6" height="3.6" rx=".8"/><rect x="6.2" y="11.4" width="3.6" height="3.6" rx=".8"/><rect x="11.4" y="11.4" width="3.6" height="3.6" rx=".8"/></svg>',
   list: '<svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor"><rect x="1.5" y="2.5" width="3" height="3" rx=".7"/><rect x="6" y="3.4" width="8.5" height="1.4" rx=".7"/><rect x="1.5" y="6.5" width="3" height="3" rx=".7"/><rect x="6" y="7.4" width="8.5" height="1.4" rx=".7"/><rect x="1.5" y="10.5" width="3" height="3" rx=".7"/><rect x="6" y="11.4" width="8.5" height="1.4" rx=".7"/></svg>',
 };
+/** Attribute-safe text. Module scope: both `shell()` and `tile()` need it. */
+const esc = (t: string) => String(t ?? '').replace(/"/g, '&quot;');
+
+const ICON_UPLOAD = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>';
+const ICON_REFRESH = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>';
+
 const VIEW_TITLE: Record<ViewMode, string> = {
   grid: 'Grid', compact: 'Small grid', list: 'List',
 };
@@ -383,12 +386,39 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
   el.className = 'vs-assets';
   container.append(el);
 
+  /**
+   * The narrowing row. Each chip appears ONLY when it can actually change the
+   * result — Favourites once something is starred, Most-used once something has
+   * been used. A filter that cannot narrow is worse than no filter, because the
+   * user still has to read it. Same rule, same wording as the video editor.
+   */
+  function quickRow(): string {
+    if (scope !== 'mine') return '';
+    const chips = QUICK_FILTERS.filter(({ id }) => {
+      if (id === 'favourites') return personal.favorite > 0 || quick === 'favourites';
+      if (id === 'used') return personal.used > 0 || quick === 'used';
+      return true;
+    });
+    if (!chips.length) return '';
+    return `<div class="vs-assets__quick">${chips.map(({ id, label, hint }) => {
+      const n = id === 'favourites' ? personal.favorite : id === 'used' ? personal.used : 0;
+      return `<button type="button" data-a="quick" data-v="${id}" title="${esc(hint)}"
+        class="vs-assets__chip${quick === id ? ' is-on' : ''}">${esc(label)}${n ? ` (${n})` : ''}</button>`;
+    }).join('')}${quick !== 'none'
+      ? '<button type="button" data-a="quick" data-v="none" class="vs-assets__chip vs-assets__chip--clear">Clear</button>'
+      : ''}</div>`;
+  }
+
   function shell(): string {
     return `
-      <button type="button" class="vs-assets__toggle" data-a="toggle"
-              title="${collapsed ? 'Show your media' : 'Hide media'}">
+      ${collapsed ? '' : `
+      <div class="vs-assets__bar">
         <img class="vs-assets__logo" src="/images/logo/logo.png" alt="Voidspace" />
-        <span>Media</span>
+        <a class="vs-assets__back" href="/studio/projects?tab=boards" target="_top">Back to Projects</a>
+      </div>`}
+      <button type="button" class="vs-assets__toggle" data-a="toggle"
+              title="${collapsed ? 'Show your assets' : 'Hide assets'}">
+        ${collapsed ? '<img class="vs-assets__logo" src="/images/logo/logo.png" alt="Voidspace" />' : '<span>Assets</span>'}
         <span class="vs-assets__chev">${collapsed ? '▸' : '◂'}</span>
       </button>
       ${collapsed ? '' : `
@@ -397,20 +427,33 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
           ${scopes.map(s => `<button type="button" data-a="scope" data-v="${s}"
               class="vs-assets__scope${s === scope ? ' is-on' : ''}">${SCOPE_LABEL[s]}</button>`).join('')}
         </div>
-        <input class="vs-assets__q" data-a="q" type="search" value="${query.replace(/"/g, '&quot;')}"
-               placeholder="${kind === 'block'
-                 ? 'Find a block — &quot;lower third&quot;, &quot;stat&quot;'
-                 : 'Describe it — &quot;rain on a window&quot;'}" />
+        <label class="vs-assets__search">
+          <input class="vs-assets__q" data-a="q" type="search" value="${esc(query)}"
+                 placeholder="${esc(searchPlaceholder(scope, { kind, semantic: true }))}" />
+        </label>
         <div class="vs-assets__kinds">
           ${KINDS.map(k => `<button type="button" data-a="kind" data-v="${k.id}"
               class="vs-assets__kind${k.id === kind ? ' is-on' : ''}">${k.label}</button>`).join('')}
         </div>
-        <div class="vs-assets__views">
-          ${VIEW_MODES.map(m => `<button type="button" data-a="view" data-v="${m}"
-              class="vs-assets__view${m === viewMode ? ' is-on' : ''}"
-              title="${VIEW_TITLE[m]}">${VIEW_ICON[m]}</button>`).join('')}
+        <!-- Add · views · refresh — the editor's toolbar row, same order.
+             Add was missing entirely, so the board could browse the library and
+             never put anything INTO it; refresh was missing, so a file added
+             from another surface needed a full reload to appear. -->
+        <div class="vs-assets__tools">
+          <button type="button" class="vs-assets__add" data-a="add-media" title="Add a file to your library">
+            ${ICON_UPLOAD}<span>Add</span>
+          </button>
+          <span class="vs-assets__tools-gap"></span>
+          <div class="vs-assets__views">
+            ${VIEW_MODES.map(m => `<button type="button" data-a="view" data-v="${m}"
+                class="vs-assets__view${m === viewMode ? ' is-on' : ''}"
+                title="${VIEW_TITLE[m]}">${VIEW_ICON[m]}</button>`).join('')}
+          </div>
+          <button type="button" class="vs-assets__refresh" data-a="refresh" title="Refresh library">${ICON_REFRESH}</button>
         </div>
-        <div class="vs-assets__list vs-assets__list--${viewMode}" data-a="list"><p class="vs-assets__muted">Loading…</p></div>
+        ${quickRow()}
+        <div class="vs-assets__list vs-assets__list--${viewMode}" data-a="list"
+             style="--vs-tile-min:${TILE_MIN_PX[viewMode]}px;--vs-tile-gap:${TILE_GAP_PX[viewMode]}px"><p class="vs-assets__muted">Loading…</p></div>
       </div>
       <div class="vs-assets__grip" data-a="grip" title="Drag to resize"></div>`}`;
   }
@@ -418,7 +461,6 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
   function tile(a: AssetItem): string {
     const isBlock = a.kind === 'block';
     const glyph = isBlock ? '◫' : a.kind === 'video' ? '🎬' : a.kind === 'image' ? '🖼' : '🔊';
-    const esc = (t: string) => t.replace(/"/g, '&quot;');
     // CLICK PREVIEWS, the + ADDS — the same split the video editor uses. Clicking
     // a tile to silently drop it on the canvas made it impossible to check what
     // something was before committing to it.
@@ -433,7 +475,11 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
         <span class="vs-assets__name">${a.label || a.kind}</span>
         ${a.detail ? `<span class="vs-assets__detail">${esc(a.detail)}</span>` : ''}
       </span>
-      <button type="button" class="vs-assets__add" data-a="add" data-id="${a.id}"
+      ${scope === 'mine' ? `<button type="button" class="vs-assets__star${favourites.has(a.id) ? ' is-on' : ''}"
+              data-a="star" data-id="${a.id}"
+              title="${favourites.has(a.id) ? 'Remove from Favourites' : 'Add to Favourites'}"
+              aria-pressed="${favourites.has(a.id)}">${favourites.has(a.id) ? '★' : '☆'}</button>` : ''}
+      <button type="button" class="vs-assets__place" data-a="add" data-id="${a.id}"
               title="${isBlock ? 'Use on the selected shot' : 'Add to the board'}">+</button>
     </div>`;
   }
@@ -716,6 +762,17 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
   let total = 0;
   let seq = 0;
   let authRetried = false;
+  /** Quick filter + the personal signals that decide which chips are worth
+   *  showing. Only meaningful for the media-library scope. */
+  let quick: QuickFilter = 'none';
+  let personal: PersonalCounts = { favorite: 0, rated: 0, used: 0 };
+  let uploading = false;
+  /** Starred ids, held locally so a tick flips instantly and reverts if the
+   *  write fails. Only the media-library scope has personal signals. */
+  const favourites = new Set<string>();
+  /** Subscribed to `onParentToken` after an auth failure — see the catch below. */
+  let authWaiting = false;
+  let stopAuthWait: (() => void) | null = null;
 
   /**
    * Draw the current results.
@@ -745,7 +802,7 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
     listEl.innerHTML =
       (semantic ? '<p class="vs-assets__note">Matched by meaning</p>' : '') +
       sections.map(sec =>
-        `<p class="vs-assets__section">${sec.bucket}</p>` + sec.items.map(tile).join(''),
+        `<p class="vs-assets__section">${sec.bucket}<span class="vs-assets__count">(${sec.items.length})</span></p>` + sec.items.map(tile).join(''),
       ).join('') +
       (hasMore(results.length, total)
         ? `<button type="button" class="vs-assets__more" data-a="more">Load more (${results.length} of ${total})</button>`
@@ -765,7 +822,7 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
     }
     try {
       const q = {
-        scope, kind, q: query, limit: PAGE_SIZE,
+        scope, kind, q: query, quick, limit: PAGE_SIZE,
         offset: append ? nextOffset(results.length) : 0,
       };
 
@@ -806,10 +863,26 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
       // so the first ask times out, we send no Authorization header, and the
       // library answers 401. That is a startup ordering artefact, not a signed-out
       // user, and showing it as a hard failure makes a working library look broken.
-      if (!authRetried && /40[13]/.test(msg)) {
-        authRetried = true;
+      // The 1.2 s retry below is a GUESS at how long the parent needs, and the
+      // guess loses whenever restoring the Firebase session is slower than that
+      // — the common case on a cold load. So we also wait for the token ITSELF:
+      // `onParentToken` fires the instant one arrives (asked for or pushed),
+      // which is a fact rather than an estimate.
+      if (isAuthError(msg)) {
         listEl.innerHTML = '<p class="vs-assets__muted">Connecting…</p>';
-        setTimeout(() => { void load(); }, 1200);
+        if (!authWaiting) {
+          authWaiting = true;
+          stopAuthWait = onParentToken(() => {
+            stopAuthWait?.();
+            stopAuthWait = null;
+            authWaiting = false;
+            void load();
+          });
+        }
+        if (!authRetried) {
+          authRetried = true;
+          setTimeout(() => { void load(); }, 1200);
+        }
         return;
       }
 
@@ -817,6 +890,57 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
       // indistinguishable from an empty library — the worst thing to show.
       listEl.innerHTML = `<p class="vs-assets__muted">Couldn’t load — ${msg}</p>`;
     }
+  }
+
+  /**
+   * ADD A FILE TO THE LIBRARY.
+   *
+   * The board could browse the library and never put anything into it, so the
+   * only way in from this surface was to leave and use another one. Posts to
+   * the same `/api/media-library/upload` the video editor's Add uses — one
+   * ingest path, one dedupe, one ownership rule — then lands the user on the
+   * scope the file went to so they can SEE it arrive.
+   */
+  async function addMediaFromDisk(): Promise<void> {
+    if (uploading) return;
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.multiple = true;
+    input.accept = 'image/*,video/*,audio/*';
+    input.onchange = async () => {
+      const files = [...(input.files ?? [])];
+      if (!files.length) return;
+      uploading = true;
+      const listEl = el.querySelector('[data-a="list"]') as HTMLElement | null;
+      if (listEl) listEl.innerHTML = `<p class="vs-assets__muted">Adding ${files.length} file${files.length === 1 ? '' : 's'}…</p>`;
+      // ONE ingest path, shared with the video editor: same dedupe, same
+      // ownership rule, same per-file isolation so a bad file loses only itself.
+      const { ok, failed } = await uploadToLibrary(host, files, (done, total, name) => {
+        if (listEl) listEl.innerHTML = `<p class="vs-assets__muted">Adding ${done + 1}/${total} — ${esc(name)}…</p>`;
+      });
+      for (const name of failed) toast(`Could not add ${name}`, 'error');
+      uploading = false;
+      if (ok) {
+        toast(`Added ${ok} file${ok === 1 ? '' : 's'} to your library`, 'info');
+        // The upload lands in the media library, so show that scope — telling
+        // someone it worked while they stare at an unchanged grid is not
+        // telling them it worked.
+        scope = 'mine';
+        invalidateAssetCache();
+        void refreshPersonal();
+      }
+      render();
+    };
+    input.click();
+  }
+
+  /** Personal signals, refreshed so the chips appear the moment they mean
+   *  something (a first star, a first use) rather than on the next reload. */
+  async function refreshPersonal(): Promise<void> {
+    const next = await fetchPersonalCounts(host);
+    const changed = next.favorite !== personal.favorite || next.used !== personal.used;
+    personal = next;
+    if (changed) render();
   }
 
   function render() {
@@ -889,6 +1013,36 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
       saveViewMode(viewMode);
       render();
     }
+    else if (a === 'star') {
+      e.stopPropagation();
+      const id = t.dataset.id || '';
+      const next = !favourites.has(id);
+      // Flip first: a star that waits for a round trip feels broken. Reverted
+      // below if the write is refused.
+      if (next) favourites.add(id); else favourites.delete(id);
+      personal = { ...personal, favorite: Math.max(0, personal.favorite + (next ? 1 : -1)) };
+      render();
+      void setAssetFavourite(host, id, next).then(ok => {
+        if (ok) return;
+        if (next) favourites.delete(id); else favourites.add(id);
+        personal = { ...personal, favorite: Math.max(0, personal.favorite + (next ? -1 : 1)) };
+        toast('Could not save that star', 'error');
+        render();
+      });
+    }
+    else if (a === 'quick') {
+      const next = (t.dataset.v || 'none') as QuickFilter;
+      quick = next === quick ? 'none' : next;
+      render();
+    }
+    else if (a === 'refresh') {
+      // Drop the cached page as well as refetching — a plain reload would be
+      // served straight back out of the cache the refresh exists to bypass.
+      invalidateAssetCache();
+      void refreshPersonal();
+      render();
+    }
+    else if (a === 'add-media') { void addMediaFromDisk(); }
     else if (a === 'more') { void load({ append: true }); }
     else if (a === 'add') {
       e.stopPropagation();
@@ -1026,6 +1180,9 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
     : () => {};
 
   render();
+  // Personal signals decide which quick-filter chips exist, so ask once on
+  // mount rather than waiting for the user to hit refresh.
+  void refreshPersonal();
 
   /**
    * Keep "In this board" live.
@@ -1068,6 +1225,10 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
     lightShot(null, null);
     sub.unsubscribe?.();
     disposeBlocks();
+    // A panel torn down while still waiting for a token must not reload into a
+    // detached DOM when one finally arrives.
+    stopAuthWait?.();
+    stopAuthWait = null;
     if (projectRefresh) clearTimeout(projectRefresh);
     thumbCleanups.forEach(fn => fn());
     el.remove();

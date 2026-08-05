@@ -1,4 +1,5 @@
 export { cn } from "./lib/utils"
+export { readSiteTheme, resolveBootTheme, watchSiteTheme, type SiteTheme } from "./lib/site-theme"
 
 export { Alert, AlertTitle, AlertDescription } from "./components/alert"
 export { Button, buttonVariants, type ButtonProps } from "./components/button"

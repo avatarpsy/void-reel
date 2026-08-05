@@ -94,7 +94,32 @@ export const useVoidspaceStore = create<VoidspaceState>((set, get) => ({
 
   setSceneList: (ctx) => set({ sceneList: ctx }),
 
+  /**
+   * A Voidspace auth token, or null when genuinely signed out.
+   *
+   * ── A STARTUP RACE IS NOT A SIGNED-OUT USER ────────────────────────────────
+   * This read `auth.currentUser` synchronously. That property is null until the
+   * SDK finishes restoring the persisted session from IndexedDB, which is
+   * asynchronous and, in a freshly-mounted iframe, has almost never finished by
+   * the time the editor's first request goes out.
+   *
+   * So the Library panel mounted, asked for a token, was told "signed out",
+   * fetched `/api/studio/library` with no Authorization header, got a 401, and
+   * rendered a permanent failure — for a signed-in user, on every cold load.
+   * Nothing was broken; the token was asked for one tick too early. Thumbnails
+   * failed the same way, since every one of them goes through here too.
+   *
+   * `authStateReady()` resolves once that restore has settled either way, so a
+   * null return past this point means the user really is signed out. This is
+   * the same lesson `apps/board/src/board/parent-auth.ts` already records for
+   * the board's token bridge — the video editor never got the fix.
+   */
   getIdToken: async () => {
+    try {
+      await auth.authStateReady();
+    } catch {
+      /* older SDK / unexpected failure — fall through to the live read */
+    }
     const user = auth.currentUser;
     if (!user) return null;
     try {

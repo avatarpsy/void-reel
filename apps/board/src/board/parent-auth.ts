@@ -192,6 +192,7 @@ export function installParentAuth(): () => void {
       fetchedAt = Date.now();
       // A real sign-in must not be held back by a stale "no token" answer.
       deniedAt = 0;
+      notifyArrival();
     }
   };
   window.addEventListener('message', onMsg);
@@ -211,4 +212,29 @@ export function __setToken(value: string | null): void {
   token = value;
   fetchedAt = value ? Date.now() : 0;
   deniedAt = 0;
+  if (value) notifyArrival();
+}
+
+/**
+ * Tell interested views that a token has ARRIVED.
+ *
+ * Anything that failed for lack of auth needs to know the moment that stops
+ * being true. The asset panel used to retry once on a 1.2 s timer, which is a
+ * guess about how long the parent takes to restore a Firebase session — and
+ * when the guess is wrong the panel shows "Couldn't load — 401" to a signed-in
+ * user until the next reload. Reacting to the token itself removes the guess.
+ */
+type TokenListener = () => void;
+const listeners = new Set<TokenListener>();
+
+function notifyArrival(): void {
+  for (const fn of [...listeners]) {
+    try { fn(); } catch { /* one bad listener must not stop the rest */ }
+  }
+}
+
+/** Subscribe to token arrivals. Returns an unsubscribe. */
+export function onParentToken(fn: TokenListener): () => void {
+  listeners.add(fn);
+  return () => listeners.delete(fn);
 }

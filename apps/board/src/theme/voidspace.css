@@ -120,6 +120,28 @@
   --vs-shot-field: rgba(15, 23, 42, 0.03);
 }
 
+
+/* ── Panel-scoped tokens, measured off the editor ──────────────────────────
+   SCOPED TO `.vs-assets` on purpose. The board's global --vs-* tokens also
+   dress the canvas and the shot cards; retuning those to match a side panel
+   would restyle the whole storyboard. These stay inside the panel, so the two
+   asset browsers match without the board's artwork surface moving at all.
+
+   Values: editor light = surface-tertiary #f3f4f6, border #e4e4e7, text
+   #18181b / muted #52525b, accent #6467f2 at 15% for the active segment. */
+.vs-assets {
+  --vs-surface-2: rgba(255, 255, 255, 0.06);
+  --vs-surface-3: rgba(255, 255, 255, 0.13);
+  --vs-accent-a: #6467f2;
+  --vs-accent-tint: rgba(100, 103, 242, 0.18);
+  --vs-search-icon: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round'><circle cx='11' cy='11' r='7'/><path d='M20 20l-3.2-3.2'/></svg>");
+}
+:root[data-theme='light'] .vs-assets {
+  --vs-surface-2: #f3f4f6;
+  --vs-surface-3: #ffffff;
+  --vs-accent-tint: rgba(100, 103, 242, 0.15);
+}
+
 /* ── Shell ──────────────────────────────────────────────────────────────── */
 html,
 body {
@@ -382,10 +404,18 @@ editor-host {
    Left rail over the canvas, matching the video editor's Assets panel in
    structure (scope pills → semantic search → kind filters → grid) so the two
    read as the same feature in two places. */
+/* ── 1:1 WITH THE VIDEO EDITOR'S ASSETS PANEL ──────────────────────────────
+   Every number below was MEASURED off `AssetsPanel.tsx` rendered in the
+   browser, not guessed from reading Tailwind classes. The editor is the
+   reference because it is the panel users spend most time in; the board moves
+   to it so the two stop being "similar". Keep them in step: if you change one,
+   re-measure the other. */
 .vs-assets {
   position: absolute;
   top: 0; left: 0; bottom: 0;
-  width: 244px;
+  /* Editor panel width. Was 244px, which made every tile column narrower and
+     was the first thing that read as "a different panel". */
+  width: 320px;
   display: flex; flex-direction: column;
   background: var(--vs-panel);
   border-right: 1px solid var(--vs-border);
@@ -395,45 +425,87 @@ editor-host {
 }
 .vs-assets.is-collapsed { width: 38px; }
 
+/* Title row — editor: 18px/700, letter-spacing -0.45px, padding 16px 20px. */
 .vs-assets__toggle {
-  display: flex; align-items: center; gap: 6px;
-  height: 34px; padding: 0 10px;
-  border: 0; border-bottom: 1px solid var(--vs-border);
-  background: transparent; color: var(--vs-text-dim);
-  font: 600 11.5px/1 var(--affine-font-family); cursor: pointer;
+  display: flex; align-items: center; gap: 8px;
+  padding: 16px 20px;
+  border: 0;
+  background: transparent; color: var(--vs-text);
+  font: 700 18px/1.2 var(--affine-font-family); letter-spacing: -0.45px;
+  cursor: pointer;
 }
 .vs-assets__toggle:hover { color: var(--vs-text); background: var(--affine-hover-color); }
 .vs-assets__toggle { width: 100%; justify-content: flex-start; }
 /* The mark is the affordance: clicking it opens and closes the panel, so it is
    the one control that stays visible when collapsed. */
 .vs-assets__logo {
-  flex: 0 0 auto; width: 18px; height: 18px; object-fit: contain; border-radius: 4px;
+  flex: 0 0 auto; width: 20px; height: 20px; object-fit: contain; border-radius: 4px;
 }
 .vs-assets__chev { margin-left: auto; opacity: 0.6; font-size: 10px; }
 .is-collapsed .vs-assets__toggle { justify-content: center; padding: 8px 0; }
 .is-collapsed .vs-assets__toggle span { display: none; }
 
-.vs-assets__body { display: flex; flex-direction: column; min-height: 0; flex: 1; padding: 8px; gap: 8px; }
+/* Editor gutter is 20px, and its rows sit 12px apart. */
+.vs-assets__body { display: flex; flex-direction: column; min-height: 0; flex: 1; padding: 0 20px 12px; gap: 12px; }
 /* In a column flex container every child stretches to fill by default — which
    turned the search box into a full-height rectangle. Only the LIST may grow. */
 .vs-assets__body > * { flex: 0 0 auto; }
 .vs-assets__body > .vs-assets__list { flex: 1 1 auto; }
-.vs-assets__scopes, .vs-assets__kinds { display: flex; flex-wrap: wrap; gap: 4px; }
-.vs-assets__scope, .vs-assets__kind {
-  flex: 0 0 auto; /* size to their label, never to the panel */
-  border: 1px solid var(--vs-border); border-radius: 999px;
-  padding: 3px 9px; background: transparent; cursor: pointer;
-  color: var(--vs-text-mute); font: 500 10.5px/1.4 var(--affine-font-family);
+/* SCOPES — the editor draws these as one SEGMENTED control (a tinted track
+   with the active segment lifted), not as separate outlined pills. Measured:
+   track bg = surface-tertiary, radius 8px, padding 2px, gap 2px; active
+   segment 11px/500 in the accent at 15% tint, radius 6px, padding 6px 8px. */
+.vs-assets__scopes {
+  display: flex; gap: 2px; padding: 2px;
+  background: var(--vs-surface-2); border-radius: 8px;
 }
-.vs-assets__scope.is-on, .vs-assets__kind.is-on {
-  background: var(--vs-accent-b); border-color: var(--vs-accent-b); color: #fff;
+.vs-assets__scope {
+  flex: 1 1 0; min-width: 0;
+  border: 0; border-radius: 6px;
+  padding: 6px 8px; background: transparent; cursor: pointer;
+  color: var(--vs-text-mute); font: 500 11px/1.3 var(--affine-font-family);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+.vs-assets__scope:hover:not(.is-on) { color: var(--vs-text); }
+.vs-assets__scope.is-on {
+  background: var(--vs-accent-tint); color: var(--vs-accent-a);
+}
+
+/* KINDS — the editor keeps these as rounded pills: 11px/500, radius 9999px,
+   padding 4px 10px, 1px border, tertiary fill. */
+.vs-assets__kinds { display: flex; flex-wrap: wrap; gap: 4px; }
+.vs-assets__kind {
+  flex: 0 0 auto;
+  border: 1px solid var(--vs-border); border-radius: 9999px;
+  padding: 4px 10px; background: var(--vs-surface-2); cursor: pointer;
+  color: var(--vs-text-mute); font: 500 11px/1.3 var(--affine-font-family);
+}
+.vs-assets__kind:hover:not(.is-on) { color: var(--vs-text); }
+.vs-assets__kind.is-on {
+  background: var(--vs-accent-tint); border-color: transparent; color: var(--vs-accent-a);
+}
+/* Editor: h 36, radius 6, bg surface-tertiary, 1px border, pad 8/12/8/36 —
+   the 36px left inset is the room its magnifier icon sits in. */
 .vs-assets__q {
   width: 100%; box-sizing: border-box;
-  height: 28px; min-height: 28px; max-height: 28px; padding: 0 9px;
-  border: 1px solid var(--vs-border); border-radius: 8px;
-  background: transparent; color: var(--vs-text);
-  font: 400 11.5px/1 var(--affine-font-family); outline: none;
+  height: 36px; min-height: 36px; max-height: 36px;
+  padding: 8px 12px 8px 36px;
+  border: 1px solid var(--vs-border); border-radius: 6px;
+  background: var(--vs-surface-2); color: var(--vs-text);
+  font: 400 12px/1.2 var(--affine-font-family); outline: none;
+}
+.vs-assets__q::placeholder { color: var(--vs-text-mute); }
+/* The icon the editor's box has. Drawn on the WRAPPER so the input keeps its
+   own padding, exactly as the React version composes it. */
+.vs-assets__search {
+  position: relative; display: block;
+}
+.vs-assets__search::before {
+  content: ''; position: absolute; left: 12px; top: 50%;
+  width: 14px; height: 14px; margin-top: -7px; pointer-events: none;
+  background: currentColor; color: var(--vs-text-mute); opacity: 0.9;
+  -webkit-mask: var(--vs-search-icon) center / contain no-repeat;
+  mask: var(--vs-search-icon) center / contain no-repeat;
 }
 .vs-assets__q:focus { border-color: var(--vs-accent-a); }
 
@@ -520,13 +592,13 @@ editor-host {
 
 /* Tile: click previews, the + adds. */
 .vs-assets__item { position: relative; }
-.vs-assets__add {
+.vs-assets__place {
   position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
   width: 20px; height: 20px; border: 0; border-radius: 5px; cursor: pointer;
   background: var(--vs-accent-b); color: #fff; font: 600 13px/1 var(--affine-font-family);
   opacity: 0; transition: opacity 0.12s ease;
 }
-.vs-assets__item:hover .vs-assets__add { opacity: 1; }
+.vs-assets__item:hover .vs-assets__place { opacity: 1; }
 
 /* Preview overlay — the board's equivalent of MediaPreviewOverlay. */
 .vs-preview {
@@ -560,10 +632,13 @@ editor-host {
 .vs-preview__fail { color: var(--vs-text-mute); font: 400 12px/1.5 var(--affine-font-family); padding: 24px; }
 
 /* Recency section headers + Load more — shared rules, board rendering. */
+.vs-assets__count {
+  margin-left: 6px; opacity: 0.75; font-weight: 400; letter-spacing: 0;
+}
 .vs-assets__section {
   position: sticky; top: 0; z-index: 1;
   margin: 8px 2px 2px; padding: 3px 4px;
-  font: 600 10px/1.3 var(--affine-font-family); letter-spacing: 0.04em;
+  font: 500 11px/1.3 var(--affine-font-family); letter-spacing: 0.04em;
   text-transform: uppercase; color: var(--vs-text-mute);
   background: var(--vs-panel);
 }
@@ -602,24 +677,42 @@ editor-host {
    size while only the CONTENT reflows; a toolbar that resizes with its container
    reads as a zoom, not a resize. */
 .vs-assets__views { display: flex; gap: 2px; justify-content: flex-end; }
+/* Editor: one tinted track (radius 8, 2px padding, 1px border) holding three
+   icon buttons; the active one is LIFTED to the elevated surface, not filled
+   with the accent. */
+/* HUGS its three buttons and sits right, as in the editor. In a column flex
+   container the default `align-items: stretch` made this track span the whole
+   panel — a wide empty box with the icons stranded at one end. */
+.vs-assets__views {
+  display: inline-flex; align-items: center; gap: 0;
+  align-self: flex-end; width: fit-content;
+  padding: 2px; background: var(--vs-surface-2);
+  border: 1px solid var(--vs-border); border-radius: 8px;
+}
 .vs-assets__view {
-  flex: 0 0 auto; width: 26px; height: 24px;
+  flex: 0 0 auto; width: 25px; height: 25px;
   display: grid; place-items: center;
-  border: 1px solid var(--vs-border); border-radius: 6px; cursor: pointer;
+  border: 0; border-radius: 4px; cursor: pointer;
   background: transparent; color: var(--vs-text-mute);
 }
-.vs-assets__view.is-on { background: var(--vs-accent-b); border-color: var(--vs-accent-b); color: #fff; }
-.vs-assets__view:hover:not(.is-on) { color: var(--vs-text); background: var(--affine-hover-color); }
+.vs-assets__view.is-on { background: var(--vs-surface-3); color: var(--vs-text); }
+.vs-assets__view:hover:not(.is-on) { color: var(--vs-text-dim); }
 
 /* LIST — a row per asset, name beside a small thumb. The default. */
 .vs-assets__list--list { display: grid; gap: 3px; }
 
 /* GRID / COMPACT — thumbnail-first, name underneath, auto-fill so the columns
-   follow the panel's dragged width instead of a fixed count. */
+   follow the panel's dragged width instead of a fixed count.
+   ── TILE SIZE COMES FROM THE SHARED CORE ───────────────────────────────────
+   `--vs-tile-min` / `--vs-tile-gap` are written by asset-panel.ts from
+   `TILE_MIN_PX` / `TILE_GAP_PX` in `@openreel/asset-browser`, so this panel and
+   the video editor's Library lay tiles out at the SAME size. They used to be
+   96/62 here against 150/96 there — same data, same modes, visibly different
+   panel. The literals below are only a pre-script fallback. */
 .vs-assets__list--grid,
-.vs-assets__list--compact { display: grid; gap: 6px; align-content: start; }
-.vs-assets__list--grid { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
-.vs-assets__list--compact { grid-template-columns: repeat(auto-fill, minmax(62px, 1fr)); }
+.vs-assets__list--compact { display: grid; gap: var(--vs-tile-gap, 6px); align-content: start; }
+.vs-assets__list--grid { grid-template-columns: repeat(auto-fill, minmax(var(--vs-tile-min, 150px), 1fr)); }
+.vs-assets__list--compact { grid-template-columns: repeat(auto-fill, minmax(var(--vs-tile-min, 96px), 1fr)); }
 
 .vs-assets__list--grid .vs-assets__item,
 .vs-assets__list--compact .vs-assets__item {
@@ -627,14 +720,15 @@ editor-host {
 }
 .vs-assets__list--grid .vs-assets__thumb,
 .vs-assets__list--compact .vs-assets__thumb {
-  width: 100%; height: auto; aspect-ratio: 4 / 3; border-radius: 7px;
+  /* 16/9, matching the video editor's `aspect-video` tiles. It was 4/3 here,
+     which is the difference you SEE first when the two panels sit side by
+     side — every thumbnail was a different shape. */
+  width: 100%; height: auto; aspect-ratio: 16 / 9; border-radius: 7px;
 }
 .vs-assets__list--grid .vs-assets__name,
 .vs-assets__list--compact .vs-assets__name { padding: 0 2px 4px; }
-/* Compact is a contact sheet — names would dominate the tile. */
-.vs-assets__list--compact .vs-assets__name { display: none; }
-.vs-assets__list--grid .vs-assets__add,
-.vs-assets__list--compact .vs-assets__add { top: 6px; right: 6px; transform: none; }
+.vs-assets__list--grid .vs-assets__place,
+.vs-assets__list--compact .vs-assets__place { top: 6px; right: 6px; transform: none; }
 
 /* Section headers span every column rather than becoming a grid cell. */
 .vs-assets__list--grid .vs-assets__section,
@@ -1199,3 +1293,80 @@ editor-host {
 }
 .vs-assets__thumb { position: relative; }
 .vs-assets__item--block .vs-assets__thumb .vs-blockprev__note { display: none; }
+
+/* ── Top bar: logo + Back to Projects ──────────────────────────────────────
+   The editor shows these above its Assets panel, so the board does too. The
+   link targets `_top` because this panel lives in an iframe — navigating the
+   frame alone would strand the user inside a board-shaped viewport with no
+   site chrome around it. */
+.vs-assets__bar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 20px 0;
+}
+.vs-assets__back {
+  display: inline-flex; align-items: center;
+  padding: 6px 12px;
+  border: 1px solid var(--vs-border); border-radius: 8px;
+  background: var(--vs-surface-2); color: var(--vs-text-dim);
+  font: 500 12px/1.2 var(--affine-font-family);
+  text-decoration: none; white-space: nowrap;
+}
+.vs-assets__back:hover { color: var(--vs-text); }
+.is-collapsed .vs-assets__bar { display: none; }
+
+/* ── Toolbar row: Add · views · refresh ────────────────────────────────────
+   The editor's row, same order and same weights. Add and refresh did not exist
+   on the board at all — you could browse the library from here but never put a
+   file into it, and a file added elsewhere needed a full reload to appear. */
+.vs-assets__tools { display: flex; align-items: center; gap: 8px; }
+.vs-assets__tools-gap { flex: 1 1 auto; }
+.vs-assets__add,
+.vs-assets__refresh {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  border: 1px solid var(--vs-border); border-radius: 8px;
+  background: transparent; color: var(--vs-text-dim); cursor: pointer;
+  font: 500 12px/1.2 var(--affine-font-family);
+}
+.vs-assets__add { padding: 8px 12px; }
+.vs-assets__refresh { width: 34px; height: 34px; padding: 0; }
+.vs-assets__add:hover,
+.vs-assets__refresh:hover { color: var(--vs-text); border-color: var(--vs-text-mute); }
+
+/* ── Quick filters ─────────────────────────────────────────────────────────
+   Amber when active, matching the editor: these narrow by a PERSONAL signal
+   (starred, most-used), which is a different kind of filter from the type
+   pills, and colouring them the same would flatten that distinction. */
+.vs-assets__quick { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.vs-assets__chip {
+  padding: 4px 10px; border-radius: 9999px; cursor: pointer;
+  border: 1px solid var(--vs-border); background: var(--vs-surface-2);
+  color: var(--vs-text-dim); font: 500 11px/1.3 var(--affine-font-family);
+}
+.vs-assets__chip:hover:not(.is-on) { color: var(--vs-text); }
+.vs-assets__chip.is-on {
+  background: rgba(251, 191, 36, 0.15); border-color: rgba(251, 191, 36, 0.7); color: #b45309;
+}
+:root[data-theme='dark'] .vs-assets__chip.is-on { color: #fcd34d; }
+.vs-assets__chip--clear { background: transparent; }
+
+/* ── Star ──────────────────────────────────────────────────────────────────
+   Only on media-library items: personal signals are keyed on a library asset
+   id, so a star on a generation would have nowhere to write. Amber when set,
+   matching the Favourites chip it feeds. */
+.vs-assets__star {
+  flex: 0 0 auto; width: 22px; height: 22px; padding: 0;
+  display: grid; place-items: center;
+  border: 0; border-radius: 6px; cursor: pointer;
+  background: transparent; color: var(--vs-text-mute);
+  font-size: 13px; line-height: 1;
+}
+.vs-assets__star:hover { color: var(--vs-text); background: var(--affine-hover-color); }
+.vs-assets__star.is-on { color: #f59e0b; }
+.vs-assets__list--grid .vs-assets__star,
+.vs-assets__list--compact .vs-assets__star {
+  position: absolute; top: 6px; left: 6px; z-index: 2;
+  background: rgba(0, 0, 0, 0.45); color: #fff;
+}
+.vs-assets__list--grid .vs-assets__star.is-on,
+.vs-assets__list--compact .vs-assets__star.is-on { color: #fbbf24; }
+

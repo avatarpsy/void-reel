@@ -5,6 +5,7 @@ import {
   Type,
   Shapes,
   Upload,
+  RefreshCw,
   Search,
   Plus,
   Folder,
@@ -49,7 +50,7 @@ import {
 import { useUIStore, Panel } from '../../../stores/ui-store';
 import { useProjectStore } from '../../../stores/project-store';
 import { LayerPanel } from '../layers/LayerPanel';
-import { SCOPE_LABEL } from '@openreel/asset-browser';
+import { SCOPE_LABEL, gridColumns, setAssetFavourite, uploadToLibrary } from '@openreel/asset-browser';
 import {
   fetchVoidspaceLibrary,
   libraryImageToAsset,
@@ -131,6 +132,53 @@ function AssetsPanel() {
   const [libError, setLibError] = useState<string | null>(null);
   const [addingId, setAddingId] = useState<string | null>(null);
   const [debounced, setDebounced] = useState('');
+  const [uploading, setUploading] = useState(false);
+  /** Starred ids, optimistic. Reverted if the write is refused, so a tick never
+   *  claims something the server did not record. */
+  const [starred, setStarred] = useState<Record<string, boolean>>({});
+  const toggleStar = async (id: string) => {
+    const next = !starred[id];
+    setStarred((m) => ({ ...m, [id]: next }));
+    const ok = await setAssetFavourite({ getIdToken: async () => libToken }, id, next);
+    if (!ok) setStarred((m) => ({ ...m, [id]: !next }));
+  };
+  /** Bumping this re-runs the library effect — the seam a manual Refresh and a
+   *  finished upload both need, so neither has to duplicate the fetch. */
+  const [libRev, setLibRev] = useState(0);
+  const reloadLibrary = async () => { setLibRev((n) => n + 1); };
+
+  /**
+   * Add files to the library, through the SHARED uploader.
+   *
+   * Same endpoint, dedupe and ownership rule as the video editor's Add and the
+   * board's — one ingest path means a file added here is the same asset
+   * everywhere, not a second copy under a different owner.
+   */
+  const pickAndUpload = () => {
+    if (uploading) return;
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.multiple = true;
+    input.accept = 'image/*';
+    input.onchange = async () => {
+      const files = [...(input.files ?? [])];
+      if (!files.length) return;
+      setUploading(true);
+      try {
+        const { ok, failed } = await uploadToLibrary(
+          { getIdToken: async () => libToken },
+          files,
+        );
+        if (failed.length) console.warn('[assets] upload failed for:', failed.join(', '));
+        // Land the user where the file went: telling someone it worked while
+        // they look at an unchanged grid is not telling them it worked.
+        if (ok) { setTab('library'); await reloadLibrary(); }
+      } finally {
+        setUploading(false);
+      }
+    };
+    input.click();
+  };
 
   useEffect(() => {
     const t = setTimeout(() => setDebounced(searchQuery.trim()), 250);
@@ -152,7 +200,7 @@ function AssetsPanel() {
       .catch((e) => { if (!cancelled) setLibError(e?.message ?? 'Failed to load library'); })
       .finally(() => { if (!cancelled) setLibLoading(false); });
     return () => { cancelled = true; };
-  }, [tab, debounced]);
+  }, [tab, debounced, libRev]);
 
   // Hide legacy per-stroke intermediates ("*-edited", "filled-*") that the old
   // flatten path used to spawn — Phase 2 edits in place, so these are just junk.
@@ -181,13 +229,18 @@ function AssetsPanel() {
   return (
     <div className="p-3 h-full overflow-y-auto flex flex-col">
       {/* Project / Library toggle */}
-      <div className="flex gap-1 mb-3 p-0.5 bg-secondary rounded-lg">
+      {/* Scope segmented control — the SAME shape the video editor's Library
+          uses: a tinted track with the active segment lifted in the accent at
+          low opacity, not a solid primary fill. A solid fill reads as a
+          committed action (a button you pressed) rather than as "you are
+          looking at this one of four". */}
+      <div className="flex gap-0.5 mb-3 p-0.5 bg-secondary rounded-lg">
         {(['project', 'library'] as AssetTab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
-            className={`flex-1 py-1.5 rounded-md text-xs font-medium transition-colors ${
-              tab === t ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'
+            className={`flex-1 px-2 py-1.5 rounded-md text-[11px] font-medium transition-colors ${
+              tab === t ? 'bg-primary/15 text-primary' : 'text-muted-foreground hover:text-foreground'
             }`}
           >
             {t === 'project' ? SCOPE_LABEL.project : SCOPE_LABEL.generated}
@@ -195,15 +248,41 @@ function AssetsPanel() {
         ))}
       </div>
 
+      {/* Add — the same ingest the video editor and the board use, so a file
+          added from any surface lands in one library with one dedupe rule. */}
+      <div className="flex items-center gap-2 mb-2">
+        <button
+          type="button"
+          onClick={pickAndUpload}
+          disabled={uploading}
+          className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg border border-input bg-secondary text-xs font-medium text-muted-foreground hover:text-foreground disabled:opacity-60"
+          title="Add a file to your library"
+        >
+          <Upload size={13} />
+          {uploading ? 'Adding…' : 'Add'}
+        </button>
+        <span className="flex-1" />
+        <button
+          type="button"
+          onClick={() => { void reloadLibrary(); }}
+          className="h-8 w-8 grid place-items-center rounded-lg border border-input bg-secondary text-muted-foreground hover:text-foreground"
+          title="Refresh library"
+        >
+          <RefreshCw size={13} />
+        </button>
+      </div>
+
       <div className="mb-3">
         <div className="relative">
-          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+          {/* Matches the video editor's search box exactly: 36px tall, 12px
+              text, tertiary fill, 6px radius, 36px left inset for the icon. */}
+          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
           <input
             type="text"
             placeholder={tab === 'library' ? 'Search your images…' : 'Search assets...'}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full pl-9 pr-3 py-2 text-sm bg-background border border-input rounded-lg focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary"
+            className="w-full h-9 pl-9 pr-3 text-xs bg-secondary border border-input rounded-md focus:outline-none focus:border-primary"
           />
         </div>
       </div>
@@ -221,7 +300,7 @@ function AssetsPanel() {
             <p className="text-xs text-muted-foreground">No matching assets</p>
           </div>
         ) : (
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid gap-1.5" style={{ gridTemplateColumns: gridColumns('grid') }}>
             {filteredAssets.map((asset) => (
               <button
                 key={asset.id}
@@ -256,13 +335,26 @@ function AssetsPanel() {
           <p className="text-xs text-muted-foreground mt-1">Generated &amp; saved images show up here</p>
         </div>
       ) : (
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid gap-1.5" style={{ gridTemplateColumns: gridColumns('grid') }}>
           {libItems.map((item) => (
+            <div key={item.id} className="group relative aspect-square">
+            {/* Star sits OUTSIDE the tile button: a button inside a button is
+                invalid, and the outer click would swallow it. */}
             <button
-              key={item.id}
+              type="button"
+              onClick={(e) => { e.stopPropagation(); void toggleStar(item.id); }}
+              className={`absolute top-1 left-1 z-10 w-6 h-6 grid place-items-center rounded-md bg-black/45 text-xs transition-colors ${
+                starred[item.id] ? 'text-amber-400' : 'text-white/80 hover:text-white'
+              }`}
+              title={starred[item.id] ? 'Remove from Favourites' : 'Add to Favourites'}
+              aria-pressed={starred[item.id] ? 'true' : 'false'}
+            >
+              {starred[item.id] ? '★' : '☆'}
+            </button>
+            <button
               onClick={() => handleAddLibraryImage(item)}
               disabled={addingId === item.id}
-              className="group relative aspect-square rounded-lg bg-muted overflow-hidden hover:ring-2 hover:ring-primary transition-all disabled:opacity-60"
+              className="w-full h-full relative rounded-lg bg-muted overflow-hidden hover:ring-2 hover:ring-primary transition-all disabled:opacity-60"
               title={`Add "${item.label}" to canvas`}
             >
               <img
@@ -282,6 +374,7 @@ function AssetsPanel() {
                 <p className="text-[9px] text-white truncate">{item.label}</p>
               </div>
             </button>
+            </div>
           ))}
         </div>
       )}

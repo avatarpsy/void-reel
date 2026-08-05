@@ -47,7 +47,17 @@ export default [
       "no-unused-vars": "off",
       "no-empty": "warn",
       "no-case-declarations": "warn",
-      "react-hooks/rules-of-hooks": "warn",
+      // ERROR, not warn. A violation of this rule is not a style opinion — it is
+      // a guaranteed runtime crash the moment the render count changes, and it
+      // takes a whole panel down behind its error boundary.
+      //
+      // It was set to "warn", and `pnpm build` runs `tsc --noEmit && vite build`
+      // — never eslint. So the one tool that could see the Assets panel bug
+      // reported it to nobody, for weeks, while the panel was reported as
+      // "fails to load, root cause never diagnosed". (Three hooks were sitting
+      // inside `renderServerTile`, a per-tile function, making LibraryPanel's
+      // hook count scale with the number of assets.)
+      "react-hooks/rules-of-hooks": "error",
       "react-hooks/exhaustive-deps": "warn",
     },
     linterOptions: {

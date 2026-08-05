@@ -18,7 +18,8 @@
  *     upgrade mid-flight) and still return good keyword results. A badge that
  *     lies about this is worse than no badge.
  */
-import type { AssetBrowserHost, AssetItem, AssetKind, AssetPage, AssetQuery, AssetScope } from './types';
+import { quickFilterParams } from './types';
+import type { AssetBrowserHost, AssetItem, AssetKind, AssetPage, AssetQuery, AssetScope, PersonalCounts } from './types';
 
 /** Voidspace origin. These apps are iframed, so relative URLs are wrong. */
 export function defaultApiBase(): string {
@@ -135,6 +136,10 @@ async function fetchMyFiles(host: AssetBrowserHost, q: AssetQuery): Promise<Asse
     ...(query ? { q: query } : {}),
     limit: String(q.limit ?? 60),
     offset: String(q.offset ?? 0),
+    // Quick filters map onto server-side filters/sorts, never client-side —
+    // narrowing a page after it arrives silently drops results and yields short
+    // pages. Same mapping the video editor sends.
+    ...quickFilterParams(q.quick ?? 'none'),
   });
   const headers = await authHeaders(host);
 
@@ -308,4 +313,96 @@ export function availableScopes(host: AssetBrowserHost): AssetScope[] {
     'shared' as const,
     ...(host.browserSource ? (['device'] as const) : []),
   ];
+}
+
+/**
+ * The user's personal signals (starred / used counts).
+ *
+ * Drives whether a quick-filter chip is worth showing at all: a "Favourites"
+ * chip with nothing starred behind it is a control that cannot narrow, and the
+ * user still has to read it. Returns zeros on any failure — the chips simply
+ * stay hidden rather than the panel failing over a secondary signal.
+ */
+export async function fetchPersonalCounts(host: AssetBrowserHost): Promise<PersonalCounts> {
+  const empty: PersonalCounts = { favorite: 0, rated: 0, used: 0 };
+  try {
+    const res = await fetch(`${base(host)}/api/media-library/personal`, {
+      headers: await authHeaders(host),
+    });
+    if (!res.ok) return empty;
+    const j = await res.json();
+    const c = j?.personalCounts ?? j?.counts ?? {};
+    return {
+      favorite: Number(c.favorite) || 0,
+      rated: Number(c.rated) || 0,
+      used: Number(c.used) || 0,
+    };
+  } catch {
+    return empty;
+  }
+}
+
+/**
+ * Star / unstar a media-library asset.
+ *
+ * ONE WRITE PATH for every panel. The video editor had this and the board and
+ * image editor did not, so a library you starred in one editor looked unstarred
+ * in the others — the signal existed but only one surface could set it, which
+ * makes the Favourites filter feel broken rather than empty.
+ *
+ * Only media-library items have personal signals: the endpoint is keyed on a
+ * library asset id, and generations / in-browser projects have none. Callers
+ * should hide the control outside the `mine` scope rather than let it fail.
+ *
+ * Returns whether the write landed, so a host can revert its optimistic tick.
+ */
+export async function setAssetFavourite(
+  host: AssetBrowserHost,
+  id: string,
+  favorite: boolean,
+): Promise<boolean> {
+  try {
+    const res = await fetch(`${base(host)}/api/media-library/personal`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...(await authHeaders(host)) },
+      body: JSON.stringify({ id, favorite }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Upload files into the user's media library.
+ *
+ * The same ingest the video editor's Add uses — one dedupe, one ownership rule,
+ * one catalogue. Sent ONE AT A TIME on purpose: a single failure in a batch of
+ * ten must not lose the other nine, and per-file progress is the only honest
+ * thing to report. Resolves with how many landed.
+ */
+export async function uploadToLibrary(
+  host: AssetBrowserHost,
+  files: File[],
+  onProgress?: (done: number, total: number, name: string) => void,
+): Promise<{ ok: number; failed: string[] }> {
+  let ok = 0;
+  const failed: string[] = [];
+  const headers = await authHeaders(host);
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
+    onProgress?.(i, files.length, f.name);
+    try {
+      const fd = new FormData();
+      fd.append('file', f);
+      const res = await fetch(`${base(host)}/api/media-library/upload`, {
+        method: 'POST', headers, body: fd,
+      });
+      if (res.ok) ok++; else failed.push(f.name);
+    } catch {
+      failed.push(f.name);
+    }
+  }
+  onProgress?.(files.length, files.length, '');
+  return { ok, failed };
 }

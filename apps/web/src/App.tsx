@@ -20,6 +20,7 @@ import {
   loadSceneListAsProject,
   subscribeSceneListAsProject,
 } from "./services/voidspace-loader";
+import { resolveBootTheme, watchSiteTheme } from "@openreel/ui";
 import { autoSaveManager } from "./services/auto-save";
 import { freshTrackInsertIndex } from "./services/track-order";
 import { loadMediaBlobForProject, saveMediaBlob } from "./services/media-storage";
@@ -1291,15 +1292,18 @@ function App() {
 
   useKieAIPoller();
 
-  // ── Theme sync from parent (Voidspace website top-bar toggle) ──
+  // ── Theme sync with the Voidspace site ──
   //
-  // When the editor is embedded in the studio-ai page, the website's
-  // light/dark toggle is the single source of truth. Two channels:
-  //   1. ?theme=light|dark URL param on initial mount
-  //   2. window.postMessage({type:'voidspace:theme', mode}) on changes
-  // Both feed useThemeStore.setMode so the editor flips in lockstep
-  // with the parent. The internal Sun/Moon toggle was removed in the
-  // toolbar, leaving the parent as the only knob.
+  // The site's light/dark toggle is the single source of truth — the editor's
+  // own Sun/Moon control was removed. Three channels, in order of authority:
+  //   1. ?theme=light|dark — an embedding host stating it outright
+  //   2. the site's saved preference in localStorage (SAME ORIGIN as /studio/)
+  //   3. window.postMessage({type:'voidspace:theme', mode}) on later changes
+  //
+  // (2) is what makes the LANDING pages behave. "Create a video project" opens
+  // /studio/?forceWelcome=1 as a top-level navigation — no host, no message, no
+  // ?theme — so the welcome screen used to render dark on a light site. It
+  // never needed a message: the preference is readable right there.
   useEffect(() => {
     const applyMode = (mode: string | null | undefined) => {
       if (mode !== "light" && mode !== "dark" && mode !== "system") return;
@@ -1311,9 +1315,12 @@ function App() {
         }).catch(() => { /* ignore */ });
       } catch { /* ignore */ }
     };
+    let stopWatching = () => {};
     try {
       const params = new URLSearchParams(window.location.search);
-      applyMode(params.get("theme"));
+      applyMode(resolveBootTheme(params.get("theme")));
+      // Follow the site if the user flips the toggle in another tab.
+      stopWatching = watchSiteTheme(applyMode);
     } catch { /* ignore */ }
     const onMessage = (e: MessageEvent) => {
       const msg: any = e?.data;
@@ -1321,7 +1328,10 @@ function App() {
       applyMode(msg.mode);
     };
     window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
+    return () => {
+      window.removeEventListener("message", onMessage);
+      stopWatching();
+    };
   }, []);
 
   // ── Editor surface mode (mode=music boots the audio-first skin) ──

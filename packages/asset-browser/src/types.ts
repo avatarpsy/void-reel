@@ -101,6 +101,35 @@ export const SCOPE_LABEL: Record<AssetScope, string> = {
   device: 'This browser',
 };
 
+/**
+ * ONE SET OF WORDS FOR THE TYPE FILTER, for the same reason as SCOPE_LABEL.
+ *
+ * The board's pills said "Video" where the video editor's said "Videos" — one
+ * character, on the control a user hits most, on two panels that are supposed
+ * to be the same panel. `block` is board-only (the video editor has no
+ * composition blocks) and simply never appears in a host that does not offer it.
+ */
+export const KIND_LABEL: Record<AssetKind | 'all', string> = {
+  all: 'All',
+  video: 'Videos',
+  image: 'Images',
+  music: 'Music',
+  sfx: 'SFX',
+  voice: 'Voice',
+  block: 'Blocks',
+};
+
+/**
+ * The order the type pills appear in, so neither host can re-sort them.
+ *
+ * `block` is deliberately LAST: the five before it are the user's own media,
+ * blocks are designs they pick from, and leading with templates would suggest
+ * the surface is for assembling stock rather than for their own material.
+ */
+export const KIND_ORDER: Array<AssetKind | 'all'> = [
+  'all', 'video', 'image', 'music', 'sfx', 'voice', 'block',
+];
+
 /** One line saying what a scope holds, for a tooltip or an empty state. */
 export const SCOPE_HINT: Record<AssetScope, string> = {
   project: 'Media already used in this project',
@@ -168,6 +197,8 @@ export interface AssetItem {
 
 export interface AssetQuery {
   scope: AssetScope;
+  /** Quick filter, applied SERVER-side. Only meaningful for the `mine` scope. */
+  quick?: QuickFilter;
   /** Free text. Routed to the SEMANTIC lane when the source supports it, so
    *  "rain on a window" finds footage nobody tagged. */
   q?: string;
@@ -242,4 +273,41 @@ export interface AssetBrowserHost {
   blockSource?: {
     list(q: AssetQuery): AssetItem[];
   };
+}
+
+/**
+ * Quick filters — the answer to "never open on everything".
+ *
+ * Shared for the same reason the scope labels are: these are a promise about
+ * what a control DOES. The video editor shipped them; the board had none, so
+ * the same library offered two different ways to narrow it depending on which
+ * editor you opened.
+ *
+ * They only apply to the media-library scope. The generations store and the
+ * browser's own projects carry neither personal signals nor server-side sorts,
+ * so offering the chips there would be offering controls that cannot narrow.
+ */
+export type QuickFilter = 'none' | 'favourites' | 'used' | 'recent';
+
+export const QUICK_FILTERS: { id: Exclude<QuickFilter, 'none'>; label: string; hint: string }[] = [
+  { id: 'favourites', label: '★ Favourites', hint: 'Assets you starred' },
+  { id: 'used', label: 'Most used', hint: 'What you keep coming back to — counted automatically' },
+  { id: 'recent', label: 'Newest', hint: 'Most recent first, by capture date where known' },
+];
+
+/** Personal signals the server counts for the current user. */
+export interface PersonalCounts { favorite: number; rated: number; used: number }
+
+/**
+ * The QUERY PARAMS a quick filter maps to.
+ *
+ * Server-side, never client-side: filtering a page after it arrives silently
+ * drops results and yields short pages. Kept here so both panels send the same
+ * thing — the video editor's mapping, verbatim.
+ */
+export function quickFilterParams(quick: QuickFilter): Record<string, string> {
+  if (quick === 'favourites') return { favourites: '1' };
+  if (quick === 'used') return { used: '1', sort: 'used' };
+  if (quick === 'recent') return { sort: 'newest' };
+  return {};
 }

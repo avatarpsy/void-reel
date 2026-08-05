@@ -14,6 +14,7 @@ import { openCloudCarouselById } from './services/carousel-cloud';
 import { openCloudImageProject } from './services/project-cloud-open';
 import { installImageRpc } from './agent/rpc';
 import { useProjectStore } from './stores/project-store';
+import { resolveBootTheme, watchSiteTheme } from '@openreel/ui';
 
 // Was the app opened to DIRECTLY load a project (carousel deep-link or an
 // "edit this image" handoff)? Read once, synchronously, before first paint —
@@ -48,8 +49,12 @@ export default function App() {
   // `voidspace:theme` message the video editor already answers, so both editors
   // follow the site through one mechanism.
   //
-  // Dark stays the default until a host says otherwise: standalone /image/ has
-  // no host to ask, and the editor's own palette is authored dark-first.
+  // But a message only arrives once the host is listening, and it never arrives
+  // at all for a standalone /image/ session — which is how the landing (the
+  // format picker) came up dark on a light site, then snapped to light a beat
+  // later once embedded. So the FIRST paint resolves the theme itself: /image/
+  // is served from the site's own origin, so the site's saved preference is
+  // readable directly. Messages remain the live-update channel.
   useEffect(() => {
     const apply = (mode: string) => {
       document.documentElement.classList.toggle('dark', mode !== 'light');
@@ -58,7 +63,9 @@ export default function App() {
       // the OLD theme's grey until the next edit.
       window.dispatchEvent(new Event('resize'));
     };
-    apply('dark');
+    const params = new URLSearchParams(window.location.search);
+    apply(resolveBootTheme(params.get('theme')));
+    const stopWatching = watchSiteTheme(apply);
 
     const onMessage = (e: MessageEvent) => {
       const msg: any = e?.data;
@@ -66,7 +73,10 @@ export default function App() {
       apply(String(msg.mode || 'dark'));
     };
     window.addEventListener('message', onMessage);
-    return () => window.removeEventListener('message', onMessage);
+    return () => {
+      window.removeEventListener('message', onMessage);
+      stopWatching();
+    };
   }, []);
 
   // Chat ↔ editor RPC. Installed unconditionally: it only ever answers

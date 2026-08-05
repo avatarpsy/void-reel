@@ -291,6 +291,19 @@ export function Toolbar() {
         />
       </a>
 
+      {/* LABELLED, like the video editor's. The mark alone is only legible to
+          someone who already knows where it goes — the video editor spells the
+          destination out, so this does too, in the same words and the same
+          button shape. */}
+      <a
+        href="/studio/projects?tab=images"
+        onClick={onTopLinkClick('/studio/projects?tab=images')}
+        className="h-9 px-3 rounded-lg border border-border bg-secondary text-sm text-muted-foreground hover:text-foreground transition-colors whitespace-nowrap shrink-0 inline-flex items-center"
+        title="Back to Studio Projects"
+      >
+        Back to Projects
+      </a>
+
       <div className="w-px h-6 bg-border mx-1" />
 
       <button
