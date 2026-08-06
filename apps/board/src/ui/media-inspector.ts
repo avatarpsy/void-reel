@@ -25,6 +25,7 @@
  */
 import type { MountedBoard } from '../blocksuite/editor';
 import { readBlockMeta } from '../board/board-meta';
+import { stopInlinePlayback } from '../board/inline-player';
 import { decodeMediaRef } from '../board/media-ref';
 import { getParentToken, withToken } from '../board/parent-auth';
 import {
@@ -314,6 +315,62 @@ export function installMediaInspector(board: MountedBoard, container: HTMLElemen
       </label>`;
   }
 
+  /**
+   * WHERE THIS CAME FROM — shown for loose canvas media.
+   *
+   * A canvas item has no shot, so the inspector used to open with the picture
+   * and an empty right-hand side. For a GENERATED picture that is the wrong
+   * moment to say nothing: this is exactly when someone is deciding whether to
+   * keep it, iterate on it, or throw it away, and the question they have is
+   * "what did I ask for?" — which, nine pictures later, nobody remembers.
+   *
+   * Read-only on purpose. It is a record of what happened, not a form.
+   */
+  function provenanceMarkup(blockId: string): string {
+    const meta = readBlockMeta(board.doc, blockId);
+    if (!meta) return '';
+
+    const esc = (s: string) => s.replace(/[&<>"]/g, c =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
+    const rows: string[] = [];
+
+    if (meta.prompt) {
+      rows.push(`
+        <label class="vs-inspect__field vs-inspect__field--grow">
+          <span>WHAT IT WAS MADE FROM</span>
+          <p class="vs-inspect__prov">${esc(meta.prompt)}</p>
+        </label>`);
+    }
+    if (meta.referenceIds?.length) {
+      rows.push(`
+        <label class="vs-inspect__field">
+          <span>REFERENCES</span>
+          <p class="vs-inspect__prov">${meta.referenceIds.length} image${meta.referenceIds.length === 1 ? '' : 's'} from this board</p>
+        </label>`);
+    }
+    if (meta.model) {
+      rows.push(`
+        <label class="vs-inspect__field">
+          <span>MODEL</span>
+          <p class="vs-inspect__prov">${esc(meta.model)}</p>
+        </label>`);
+    }
+    if (meta.sourceUrl) {
+      rows.push(`
+        <label class="vs-inspect__field">
+          <span>SOURCE</span>
+          <p class="vs-inspect__prov"><a href="${esc(meta.sourceUrl)}" target="_blank" rel="noopener noreferrer">${esc(meta.credit || meta.sourceUrl)}</a></p>
+        </label>`);
+    }
+
+    if (!rows.length) return '';
+    return `<aside class="vs-inspect__side">${rows.join('')}
+      <p class="vs-inspect__hint">
+        Ask for “the same but…” and the agent works from this, rather than guessing.
+      </p>
+    </aside>`;
+  }
+
   function trimMarkup(item: ShotMedia): string {
     if (!isTimed(item.kind)) return '';
     return `
@@ -335,6 +392,11 @@ export function installMediaInspector(board: MountedBoard, container: HTMLElemen
   }
 
   async function open(t: Target): Promise<void> {
+    // TWO THINGS PLAYING AT ONCE IS THE WORST OUTCOME. A card can be streaming
+    // inline when the user double-clicks it to see it properly, and without this
+    // the dialog's own player starts over the top of it — two copies of the same
+    // audio, a fraction of a second apart.
+    stopInlinePlayback();
     target = t;
     // A fresh token per open: a board left open for an hour has a stale one, and
     // an element `src` cannot carry an Authorization header.
@@ -371,7 +433,11 @@ export function installMediaInspector(board: MountedBoard, container: HTMLElemen
             <div class="vs-inspect__stage">${body}</div>
             ${trimMarkup(item)}
           </div>
-          ${shot ? `<aside class="vs-inspect__side">${fieldsMarkup(item, shot)}</aside>` : ''}
+          ${shot
+            ? `<aside class="vs-inspect__side">${fieldsMarkup(item, shot)}</aside>`
+            // No shot — this is loose canvas media. It has no role and no tag to
+            // set, but it may well have a story worth reading.
+            : provenanceMarkup(item.id)}
         </div>
       </div>`;
     el.hidden = false;

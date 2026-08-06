@@ -17,12 +17,27 @@
  *    selecting and dragging the card.
  *
  * So a card on the canvas is a POSTER TILE — a still, a badge saying what it is,
- * and its name. It costs one small image, or nothing at all for audio. Playback
- * happens in the inspector (`ui/media-inspector.ts`), full screen, where it belongs and
- * where streaming actually starts.
+ * and its name. It costs one small image, or nothing at all for audio.
  *
- * "Load instantly, stream on play" falls straight out of that: the canvas never
- * opens a media stream, so a board of fifty clips costs fifty thumbnails.
+ * ── WHERE THAT WAS TOO STRICT, AND THE SHARPER RULE ──────────────────────────
+ * All three reasons are about players that exist WITHOUT BEING ASKED FOR. None
+ * of them is a reason that pressing play should have to open a modal — and for a
+ * while it did: the badge was a picture of a play button that did nothing, and
+ * the only way to hear a track was a full-screen dialog.
+ *
+ * The rule is therefore:
+ *
+ *   NOTHING STREAMS UNTIL SOMEBODY PRESSES PLAY, and at most one thing streams
+ *   at a time (`board/inline-player.ts`).
+ *
+ * A board of fifty clips still costs fifty thumbnails and opens as fast as an
+ * empty one — the property that mattered is untouched. Pressing play builds
+ * exactly one element, pointed at the 720p proxy, and it is torn down when
+ * something else plays or when its card leaves the screen.
+ *
+ * The inspector is still where a reference is JUDGED: it loads the MASTER for
+ * stills and it owns the trim bar. This is for the question asked far more
+ * often — "what is this clip, again?"
  *
  * WHY A ViewExtensionProvider SUBCLASS AND NOT A PLAIN `{ setup }` OBJECT
  * The view spec list holds CLASSES and the loader instantiates each entry. A bare
@@ -38,6 +53,7 @@ import {
 import { html } from 'lit';
 import { styleMap } from 'lit/directives/style-map.js';
 
+import { playInline } from './inline-player';
 import { decodeMediaRef, isMediaRef } from './media-ref';
 import { withToken } from './parent-auth';
 
@@ -68,13 +84,57 @@ const NOTE_BADGE = html`<svg viewBox="0 0 24 24" width="24" height="24" aria-hid
 </svg>`;
 
 /**
+ * PLAY, WHERE THE CARD IS.
+ *
+ * The badge used to be decoration — a triangle saying "this is a clip" that did
+ * nothing when you pressed it, which is the most disappointing kind of button
+ * there is. It now starts playback in place: one `<video>` streaming the proxy,
+ * torn down when something else plays or when the card leaves the screen.
+ *
+ * The card stays pointer-transparent (the canvas must be able to drag the block
+ * it lives in) and this ONE element opts back in — which is why it is a real
+ * button rather than a click handler on the card.
+ *
+ * `stopPropagation` on pointerdown as well as click: without it the press starts
+ * a canvas drag and the card moves out from under the finger before the click
+ * lands.
+ */
+function playButton(start: (host: HTMLElement) => void, badge: unknown) {
+  const onPlay = (e: Event) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const host = (e.currentTarget as HTMLElement).closest<HTMLElement>('[data-vs-media]');
+    if (host) start(host);
+  };
+  return html`<button
+    type="button"
+    title="Play here — double-click the card to open it full size"
+    style=${styleMap({
+      position: 'absolute', inset: '0', display: 'grid', placeItems: 'center',
+      appearance: 'none', border: '0', background: 'transparent', padding: '0',
+      cursor: 'pointer', pointerEvents: 'auto', zIndex: '1',
+    })}
+    @pointerdown=${(e: Event) => e.stopPropagation()}
+    @click=${onPlay}
+  >${badge}</button>`;
+}
+
+/**
  * One card, whatever the medium.
  *
  * `data-vs-media` is what the viewer listens for: a double-click anywhere on a
  * card opens it. Marking the element rather than hit-testing coordinates means
- * the target is exactly what the user sees.
+ * the target is exactly what the user sees. It is also what the play button
+ * mounts its player into.
  */
-function card(opts: { poster: string; name: string; badge: unknown; tint: string }) {
+function card(opts: {
+  poster: string;
+  name: string;
+  badge: unknown;
+  tint: string;
+  /** Given for video and audio; a still has nothing to play. */
+  play?: (host: HTMLElement) => void;
+}) {
   return html`<div
     data-vs-media
     style=${styleMap({
@@ -89,19 +149,25 @@ function card(opts: { poster: string; name: string; badge: unknown; tint: string
         ? `#0d1016 center/cover no-repeat url("${opts.poster}")`
         : opts.tint,
       // The card is a picture, not a control: it must never eat the pointer
-      // events that select and drag the block it lives in.
+      // events that select and drag the block it lives in. The play button
+      // above opts back in for its own 40px.
       pointerEvents: 'none',
       cursor: 'pointer',
     })}
   >
-    <div style=${styleMap({
-      position: 'absolute', inset: '0', display: 'grid', placeItems: 'center',
-    })}>${opts.badge}</div>
+    ${opts.play
+      ? playButton(opts.play, opts.badge)
+      : html`<div style=${styleMap({
+          position: 'absolute', inset: '0', display: 'grid', placeItems: 'center',
+        })}>${opts.badge}</div>`}
     <div style=${styleMap({
       position: 'relative', width: '100%', padding: '4px 6px',
       font: '500 10px/1.25 var(--affine-font-family, sans-serif)',
       color: '#fff', background: 'linear-gradient(transparent, rgba(0,0,0,0.72))',
       whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+      // Under the player, so a running clip is not captioned across its middle.
+      zIndex: '3',
+      pointerEvents: 'none',
     })}>${opts.name}</div>
   </div>`;
 }
@@ -125,6 +191,9 @@ const videoConfig: AttachmentEmbedConfig = {
       name: model.props.name || 'Clip',
       badge: PLAY_BADGE,
       tint: '#141821',
+      // STREAMS THE PROXY, not the master — `ref.src` is the display variant the
+      // panel chose. Nothing is fetched until this runs.
+      play: host => ref?.src && playInline(host, { src: ref.src, kind: 'video' }),
     });
   },
 };
@@ -135,15 +204,21 @@ const audioConfig: AttachmentEmbedConfig = {
   action: model => {
     model.store.updateBlock(model, { embed: true });
   },
-  render: model => card({
-    // Audio has no still, so the card is a tinted tile of the SAME shape as the
-    // others. A native transport bar here was the "music looks weird" report:
-    // a wide grey pill among rectangles, with controls too small to use.
-    poster: '',
-    name: model.props.name || 'Audio',
-    badge: NOTE_BADGE,
-    tint: 'linear-gradient(135deg,#2b2350,#1b2340)',
-  }),
+  render: model => {
+    const ref = refOf(model);
+    return card({
+      // Audio has no still, so the card is a tinted tile of the SAME shape as the
+      // others. A native transport bar here was the "music looks weird" report:
+      // a wide grey pill among rectangles, with controls too small to use. The
+      // transport now appears only while it is playing, along the bottom edge,
+      // and leaves when it stops.
+      poster: '',
+      name: model.props.name || 'Audio',
+      badge: NOTE_BADGE,
+      tint: 'linear-gradient(135deg,#2b2350,#1b2340)',
+      play: host => ref?.src && playInline(host, { src: ref.src, kind: 'audio' }),
+    });
+  },
 };
 
 export class VoidspaceMediaViewExtension extends ViewExtensionProvider {

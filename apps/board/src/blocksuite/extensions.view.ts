@@ -32,6 +32,11 @@ import { VoidspaceMediaViewExtension } from '../board/media-embed';
 // from, so a picture moved between shots was claimed by both; a shot's media are
 // now props, so there is no membership to reconcile.
 import { ShotViewExtension } from '../shot/view';
+// Dragging media that is already ON the canvas into a shot. Registered as a gfx
+// INTERACTIVITY extension rather than a drop target: a block on the canvas is
+// moved by BlockSuite's own gfx layer, so no HTML5 drop event is ever fired and
+// the panel's `std.dnd.dropTarget` never sees the gesture. See canvas-drop.ts.
+import { CanvasMediaToShotExtension } from '../shot/canvas-drop';
 import { ImageViewExtension } from '@blocksuite/affine/blocks/image/view';
 import { EmbedViewExtension } from '@blocksuite/affine/blocks/embed/view';
 import { ShapeViewExtension } from '@blocksuite/affine/gfx/shape/view';
@@ -73,6 +78,38 @@ import { EdgelessTextViewExtension } from '@blocksuite/affine/blocks/edgeless-te
 // Edgeless-specific note behaviour (a sticky note on the canvas).
 import { NoteViewExtension as GfxNoteViewExtension } from '@blocksuite/affine/gfx/note/view';
 
+// ── The brainstorming set ───────────────────────────────────────────────────
+// Paired with the store halves — see the long note in extensions.store.ts for
+// what each one is for and why database/linked-doc are still refused.
+//
+// BOOKMARK IS A BUG FIX, not only a feature. `LinkViewExtension` (below) puts a
+// "Link" button on the native toolbar, and its handler runs
+// `insertLinkByQuickSearchCommand` from `affine-block-bookmark`. That block was
+// never registered, so the schema rejected it: the button was there, the paste
+// dialog opened, and nothing was ever created. Silently — the failure is a
+// schema warning in the console and an id that resolves to undefined.
+import { BookmarkViewExtension } from '@blocksuite/affine/blocks/bookmark/view';
+import { DividerViewExtension } from '@blocksuite/affine/blocks/divider/view';
+import { CalloutViewExtension } from '@blocksuite/affine/blocks/callout/view';
+import { TableViewExtension } from '@blocksuite/affine/blocks/table/view';
+
+/**
+ * THE SLASH MENU — how anyone finds any of the above.
+ *
+ * Every block package contributes its own entry (`SlashMenuConfigExtension`,
+ * which is why `AttachmentViewExtension` and the rest already register one), so
+ * this single line turns the whole registered set into something discoverable by
+ * typing `/` in a note. Without it, headings, lists, code, tables, dividers and
+ * callouts are all present in the schema and reachable only by someone who
+ * already knows the markdown shortcut.
+ *
+ * It was previously listed as "deliberately NOT registered". That was the right
+ * call when a note could hold paragraphs and lists and nothing else — a menu of
+ * two items is noise. It is the wrong call now that there is a set worth
+ * browsing.
+ */
+import { SlashMenuViewExtension } from '@blocksuite/affine/widgets/slash-menu/view';
+
 // ── Edgeless widgets ────────────────────────────────────────────────────────
 // NOT optional. Blocks and gfx elements alone give you a document that is
 // CORRECT and INVISIBLE: frames created via the store were present in the tree
@@ -90,8 +127,10 @@ import { EdgelessDraggingAreaViewExtension } from '@blocksuite/affine/widgets/ed
 import { DragHandleViewExtension } from '@blocksuite/affine/widgets/drag-handle/view';
 import { ViewportOverlayViewExtension } from '@blocksuite/affine/widgets/viewport-overlay/view';
 import { EdgelessAutoConnectViewExtension } from '@blocksuite/affine/widgets/edgeless-auto-connect/view';
-// Deliberately NOT registered: edgeless-toolbar (AFFiNE's own floating toolbar —
-// the board ships its own), slash-menu, linked-doc, drag-handle, scroll-anchoring.
+// Still NOT registered: linked-doc (a board is one document, so every link would
+// resolve to nothing), scroll-anchoring and page-dragging-area (page-mode
+// widgets; the board is edgeless-only), remote-selection (no multiplayer cursors
+// yet — the board syncs whole snapshots, not awareness).
 
 const VIEW_PROVIDERS = [
   FoundationViewExtension,
@@ -143,6 +182,12 @@ const VIEW_PROVIDERS = [
   EdgelessZoomToolbarViewExtension,
   EdgelessTextViewExtension,
   GfxNoteViewExtension,
+  // The brainstorming set, and the menu that makes it findable.
+  BookmarkViewExtension,
+  DividerViewExtension,
+  CalloutViewExtension,
+  TableViewExtension,
+  SlashMenuViewExtension,
 ];
 
 /**
@@ -155,6 +200,11 @@ const VIEW_PROVIDERS = [
  * for. One surface, one meaning.
  */
 export function boardViewExtensions(): ExtensionType[] {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return new ViewExtensionManager(VIEW_PROVIDERS as any).get('edgeless');
+  return [
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ...new ViewExtensionManager(VIEW_PROVIDERS as any).get('edgeless'),
+    // OURS, appended: a plain extension rather than a provider, same as the
+    // shot block's schema half.
+    CanvasMediaToShotExtension,
+  ];
 }
