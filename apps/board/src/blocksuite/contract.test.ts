@@ -249,7 +249,13 @@ describe('BlockSuite contract — the allowlist holds', () => {
   // "schema for flavour: X not found" and creates nothing. Note it does NOT
   // throw synchronously from addBlock — asserting `.toThrow()` passes a board
   // full of blocks that were never created. Assert on the tree instead.
-  it.each(['affine:database', 'affine:code', 'affine:bookmark', 'affine:callout'])(
+  //
+  // `bookmark` and `callout` moved OUT of this list when the brainstorming set
+  // was registered — see `extensions.store.ts`. `database` and `data-view` stay:
+  // they are a second data model with their own views and persistence, and
+  // `table` covers the need they were being considered for. `code` stays for a
+  // measured reason (shiki's ~10 MB of grammars), also documented there.
+  it.each(['affine:database', 'affine:data-view', 'affine:surface-ref', 'affine:code'])(
     'creates no block for unregistered %s',
     flavour => {
       const { store } = makeStore();
@@ -257,6 +263,46 @@ describe('BlockSuite contract — the allowlist holds', () => {
       const before = store.root!.children.length;
       store.addBlock(flavour as never, {}, pageId);
       expect(store.root!.children.length).toBe(before);
+    },
+  );
+
+  /**
+   * THE BROKEN LINK TOOL, pinned.
+   *
+   * `LinkViewExtension` puts a "Link" button on the native toolbar and its
+   * handler runs `insertLinkByQuickSearchCommand`, which creates an
+   * `affine:bookmark`. That block was not registered, so the button opened its
+   * dialog, accepted a URL, and created nothing — silently, because a rejected
+   * flavour logs a schema warning and returns an id resolving to undefined.
+   *
+   * The tool has no test of its own (it is a toolbar button in a widget we do
+   * not own), so this asserts the thing it actually depends on.
+   */
+  it('registers affine:bookmark — without it the toolbar’s Link tool silently does nothing', () => {
+    const { store } = makeStore();
+    const { surfaceId } = seed(store);
+    // ON THE SURFACE. `affine:bookmark` is
+    // `parent: ['affine:note', 'affine:surface', 'affine:edgeless-text']` — NOT
+    // `@root` — so a link card dropped on the canvas is a surface child, exactly
+    // like a shot. Adding it to the page would be rejected the same way a frame
+    // on the page is.
+    const id = store.addBlock(
+      'affine:bookmark',
+      { url: 'https://example.test/reference' } as never,
+      surfaceId,
+    );
+    expect(store.getBlock(id)?.model.flavour).toBe('affine:bookmark');
+  });
+
+  /** Note content — the brainstorming set. Children of a note, not canvas objects. */
+  it.each(['affine:divider', 'affine:callout', 'affine:table'])(
+    'registers %s so a note can hold it',
+    flavour => {
+      const { store } = makeStore();
+      const { pageId } = seed(store);
+      const noteId = store.addBlock('affine:note', {}, pageId);
+      const id = store.addBlock(flavour as never, {}, noteId);
+      expect(store.getBlock(id)?.model.flavour).toBe(flavour);
     },
   );
 

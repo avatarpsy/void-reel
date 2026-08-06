@@ -11,6 +11,10 @@
  *   theme  — 'light' | 'dark'; thereafter the parent sends voidspace:board-theme
  */
 import './theme/voidspace.css';
+// Its own file, not an appendix to the theme: it carries a `@media print` block
+// that has to be read as one piece to be maintainable, and it is the only place
+// in the app that reasons in inches.
+import './theme/screenplay-focus.css';
 
 import { IndexeddbPersistence } from 'y-indexeddb';
 import * as Y from 'yjs';
@@ -23,9 +27,11 @@ import * as boardMeta from './board/board-meta';
 import { installCloudSync } from './board/cloud-sync';
 import { installParentAuth } from './board/parent-auth';
 import { installBoardRpc, getBoardRev } from './agent/rpc';
+import { installScreenplayFocus } from './ui/screenplay-focus';
 import { installBoardUi } from './ui/board-ui';
 import { installAssetPanel } from './ui/asset-panel';
 import { installMediaInspector } from './ui/media-inspector';
+import { installSpacePan } from './ui/space-pan';
 import { installToasts, toast } from './ui/toast';
 
 /** Replace the boot overlay with a message the user can act on. Reachable before
@@ -142,7 +148,14 @@ async function boot(): Promise<void> {
   // user wait for it.
   if (!emptyLocally) void cloud.pull();
 
-  installBoardRpc(board, { flushCloud: () => cloud.flush() });
+  /** Assigned by the chrome install below; read lazily by the RPC — see the
+   *  note on `BoardRpcOptions.screenplay`. */
+  let screenplay: ReturnType<typeof installScreenplayFocus> | null = null;
+
+  installBoardRpc(board, {
+    flushCloud: () => cloud.flush(),
+    screenplay: () => screenplay,
+  });
 
   /**
    * Stop the BROWSER zooming the page on ctrl/⌘+wheel — nothing else.
@@ -198,6 +211,12 @@ async function boot(): Promise<void> {
   installBoardUi(board, chromeHost);
   installAssetPanel(board, chromeHost);
   installMediaInspector(board, chromeHost);
+  // Hold space and drag to pan — a gesture every other canvas tool has and
+  // BlockSuite does not implement at all. See space-pan.ts.
+  installSpacePan(board, chromeHost);
+  // The screenplay at page size. Installed after the panel so its overlay sits
+  // above it in paint order without needing a higher z-index than the toasts.
+  screenplay = installScreenplayFocus(board, chromeHost);
 
   // Theme is pushed, never re-navigated — an iframe reload would throw away the
   // in-memory editor state and the user's viewport. Same rule apps/web follows.

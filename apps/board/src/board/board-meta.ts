@@ -38,6 +38,32 @@ export interface BlockMeta {
   name?: string;
   /** Who put it there. Lets the agent avoid re-offering what it already made. */
   createdBy?: 'user' | 'agent';
+
+  /**
+   * ── WHERE THIS CAME FROM ───────────────────────────────────────────────────
+   *
+   * THE FIX FOR THE THING THAT ACTUALLY BREAKS ITERATION. Someone generates an
+   * image from three references. Five minutes and nine pictures later they say
+   * "that one, but warmer" — and nobody in the room knows what "that one" was
+   * made from. Not the user, who has scrolled past the chat message, and not the
+   * agent, which has no record at all. So "but warmer" becomes a fresh guess
+   * rather than an edit, the result does not match, and the user concludes the
+   * model is bad at following instructions.
+   *
+   * This is deliberately the answer to "let the user mark things up" rather than
+   * a tagging system: it costs the user NOTHING. Nobody has to remember to label
+   * anything mid-flow, which is the reason tag systems on canvases go unused.
+   * The board remembers instead.
+   */
+  /** The prompt that made it. Present on generated media only. */
+  prompt?: string;
+  /** The canvas blocks used as references, so "the same but…" can re-use them. */
+  referenceIds?: string[];
+  /** Which model made it — a look is partly the model, and they change. */
+  model?: string;
+  /** The page a web import came from, and who to credit. */
+  sourceUrl?: string;
+  credit?: string;
 }
 
 function map(doc: Y.Doc): Y.Map<BlockMeta> {

@@ -30,10 +30,9 @@ import { css, html, nothing } from 'lit';
 import { state } from 'lit/decorators.js';
 import { repeat } from 'lit/directives/repeat.js';
 
-import { parseFountain, type Element } from './fountain';
-import { readShots } from './shots';
-import { coverage } from './resolution';
-import { readScript, type ScreenplayBlockModel } from './screenplay-doc';
+import { offsetOfLine } from './fountain';
+import { type ScreenplayBlockModel } from './screenplay-doc';
+import { rowClass, screenplayView, type ScreenplayRow } from './screenplay-view';
 
 /** Shown on a board whose screenplay has not been started. */
 const PLACEHOLDER = `Title: Untitled
@@ -257,8 +256,17 @@ export class ScreenplayBlockComponent extends GfxBlockComponent<ScreenplayBlockM
 
   override connectedCallback(): void {
     super.connectedCallback();
+    // Coalesced to one frame — same reasoning as the shot card. This page's
+    // render is the most expensive on the board (parse + coverage over every
+    // shot), and `blockUpdated` fires on every pointermove of a drag.
+    let queued = false;
     const sub = this.store.slots.blockUpdated.subscribe(({ id }) => {
-      if (id !== this.model.id) this.requestUpdate();
+      if (id === this.model.id || queued) return;
+      queued = true;
+      requestAnimationFrame(() => {
+        queued = false;
+        if (this.isConnected) this.requestUpdate();
+      });
     });
     this.disposeDoc = () => sub.unsubscribe();
   }
@@ -276,62 +284,122 @@ export class ScreenplayBlockComponent extends GfxBlockComponent<ScreenplayBlockM
       this.store.updateBlock(this.model, { text: next });
     }
     this._editing = false;
-  }
 
-  private startEditing(seed?: string): void {
-    if (seed !== undefined && !this.model.props.text.trim()) {
-      this.store.captureSync();
-      this.store.updateBlock(this.model, { text: seed });
-    }
-    this._editing = true;
-    // Focus after the textarea exists.
+    /**
+     * PUT THE READER BACK WHERE IT WAS.
+     *
+     * The page is re-rendered from the new text, so its scroll container is a
+     * fresh element at the top. After editing scene 12 that meant being returned
+     * to the title page — which reads as the edit having reset something, and is
+     * the reason people avoided the Edit button and asked the agent instead.
+     *
+     * Restored on the next frame, once the page has been laid out; before that
+     * the container has no scroll height and the assignment is a no-op.
+     */
+    const at = this._readScroll;
     requestAnimationFrame(() => {
-      const ta = this.querySelector<HTMLTextAreaElement>('.editor');
-      ta?.focus();
-      ta?.setSelectionRange(ta.value.length, ta.value.length);
+      const scroll = this.querySelector<HTMLElement>('.sp__scroll');
+      if (scroll) scroll.scrollTop = at;
     });
   }
 
+  /**
+   * Enter the editor WHERE THE USER CLICKED.
+   *
+   * It used to put the caret at the end of the document, always. On a two-scene
+   * sketch that is harmless; on a forty-scene screenplay, double-clicking scene
+   * 12 scrolled to the bottom of the file and left the caret four hundred lines
+   * from the thing being looked at — so every edit began with hunting for the
+   * place you had just been pointing at. That is the single reason writing on
+   * this board felt like a mode rather than a document.
+   *
+   * `line` comes from the element that was clicked (`data-line`), which the
+   * parser records for exactly this. No line — the Edit button, an empty page —
+   * still means the end.
+   */
+  private startEditing(opts: { seed?: string; line?: number } = {}): void {
+    if (opts.seed !== undefined && !this.model.props.text.trim()) {
+      this.store.captureSync();
+      this.store.updateBlock(this.model, { text: opts.seed });
+    }
+    // Remember where the page was, so leaving the editor does not also scroll
+    // the reader back to the top of the script.
+    this._readScroll = this.querySelector<HTMLElement>('.sp__scroll')?.scrollTop ?? 0;
+    this._editing = true;
+
+    // Focus after the textarea exists.
+    requestAnimationFrame(() => {
+      const ta = this.querySelector<HTMLTextAreaElement>('.editor');
+      if (!ta) return;
+      const at = opts.line === undefined
+        ? ta.value.length
+        : offsetOfLine(ta.value, opts.line);
+      ta.focus();
+      ta.setSelectionRange(at, at);
+
+      /**
+       * SCROLL THE CARET INTO VIEW — a textarea does not do it for a
+       * programmatic selection, only for a typed one. Without this the caret is
+       * correctly placed on line 312 and the view is showing line 1, which looks
+       * exactly like the click was ignored.
+       *
+       * Measured from the line index and the computed line height rather than
+       * with a mirror element: this is a fixed-width monospace block with no
+       * wrapping tricks, so the arithmetic is exact and costs nothing.
+       */
+      if (opts.line !== undefined) {
+        const lineHeight = parseFloat(getComputedStyle(ta).lineHeight) || 17;
+        ta.scrollTop = Math.max(0, (opts.line - 3) * lineHeight);
+      }
+    });
+  }
+
+  /** Where the READ view was scrolled to, so returning to it does not jump. */
+  private _readScroll = 0;
+
   /** Group elements so a scene heading and its body share one marker element. */
-  private renderElement(e: Element, mark: string | null, covered: boolean) {
-    const cls = `el-${e.type}${mark !== null ? ' marker' : ''}`;
-    if (e.type === 'blank') return html`<div class="el-blank"></div>`;
-    if (e.type === 'page_break') return html`<div class="el-page_break"></div>`;
+  private renderElement(row: ScreenplayRow) {
+    if (row.type === 'blank') return html`<div class="el-blank"></div>`;
+    if (row.type === 'page_break') return html`<div class="el-page_break"></div>`;
     return html`<div
-      class=${cls}
-      data-depth=${e.depth ?? ''}
-      data-mark=${mark ?? ''}
-      data-covered=${covered ? 'yes' : 'no'}
-    >${e.text}</div>`;
+      class=${rowClass(row)}
+      data-depth=${row.depth ?? ''}
+      data-mark=${row.mark ?? ''}
+      data-covered=${row.covered ? 'yes' : 'no'}
+      data-line=${row.line}
+    >${row.text}</div>`;
   }
 
   override renderGfxBlock() {
-    const text = readScript(this.std);
-    const script = parseFountain(text);
-    const shots = readShots(this.std);
-    const cov = coverage(script, shots);
-    const byKey = new Map(cov.scenes.map(s => [s.key, s] as const));
-
-    // Which line each scene heading sits on, so the margin mark lands on it.
-    const markAtLine = new Map<number, { mark: string; covered: boolean }>();
-    for (const scene of script.scenes) {
-      const c = byKey.get(scene.key);
-      markAtLine.set(scene.fromLine, {
-        mark: c && c.shots > 0 ? `${c.shots}` : '—',
-        covered: !!c && c.shots > 0,
-      });
-    }
-
-    const covered = cov.scenes.filter(s => s.shots > 0).length;
-    const stat = script.scenes.length
-      ? `${covered}/${script.scenes.length} scenes covered${cov.offScript ? ` · ${cov.offScript} off-script` : ''}`
-      : '';
+    // ONE description of the page, shared with the focus overlay — see
+    // `screenplay-view.ts`. Memoised per document revision underneath, which
+    // matters because this render runs whenever ANY block changes.
+    const { script, text, rows, stat } = screenplayView(this.std);
 
     return html`<div class="sp">
       <div class="sp__head">
         <span class="sp__kind">Screenplay</span>
         <span class="sp__title">${script.title || 'Untitled'}</span>
         ${stat ? html`<span class="sp__stat">${stat}</span>` : nothing}
+        <!--
+          FOCUS — the way out of a 640px card and into a page.
+
+          A screenplay is READ at page size and WRITTEN at page size; judging
+          pace is the whole reason the format is fixed, and you cannot judge it
+          through a porthole on a canvas. This is the primary action on the card
+          once there is a script, which is why it sits before Edit.
+        -->
+        <button
+          class="sp__btn sp__btn--primary"
+          title="Open full size — write, read and export from here"
+          @pointerdown=${(e: Event) => e.stopPropagation()}
+          @click=${(e: Event) => {
+            e.stopPropagation();
+            this.dispatchEvent(new CustomEvent('voidspace-open-screenplay', {
+              bubbles: true, composed: true,
+            }));
+          }}
+        >Focus</button>
         <button
           class="sp__btn"
           @pointerdown=${(e: Event) => e.stopPropagation()}
@@ -350,6 +418,7 @@ export class ScreenplayBlockComponent extends GfxBlockComponent<ScreenplayBlockM
         ? html`<textarea
             class="editor"
             spellcheck="false"
+            data-range-sync-exclude="true"
             .value=${text}
             @pointerdown=${(e: Event) => e.stopPropagation()}
             @dblclick=${(e: Event) => e.stopPropagation()}
@@ -367,7 +436,14 @@ export class ScreenplayBlockComponent extends GfxBlockComponent<ScreenplayBlockM
             class="sp__scroll"
             @pointerdown=${(e: Event) => e.stopPropagation()}
             @wheel=${(e: WheelEvent) => e.stopPropagation()}
-            @dblclick=${(e: Event) => { e.stopPropagation(); this.startEditing(); }}
+            @dblclick=${(e: MouseEvent) => {
+              e.stopPropagation();
+              // The line under the pointer, so editing opens where the user was
+              // reading rather than at the end of the file.
+              const line = (e.target as HTMLElement | null)
+                ?.closest<HTMLElement>('[data-line]')?.dataset.line;
+              this.startEditing(line === undefined ? {} : { line: Number(line) });
+            }}
           >
             ${script.empty
               ? html`<div class="empty">
@@ -376,14 +452,7 @@ export class ScreenplayBlockComponent extends GfxBlockComponent<ScreenplayBlockM
                   or double-click here to start typing.
                 </div>`
               : html`<div class="page">
-                  ${repeat(
-                    script.elements,
-                    e => e.line,
-                    e => {
-                      const m = markAtLine.get(e.line);
-                      return this.renderElement(e, m ? m.mark : null, !!m?.covered);
-                    },
-                  )}
+                  ${repeat(rows, r => r.line, r => this.renderElement(r))}
                 </div>`}
           </div>`}
     </div>`;

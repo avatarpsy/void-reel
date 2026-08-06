@@ -11,7 +11,7 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { findScene, outline, parseFountain, sceneText, sequenceOf } from './fountain';
+import { findScene, offsetOfLine, outline, parseFountain, sceneText, sequenceOf } from './fountain';
 import { coverage, nextScene, renderScene, renderScriptContext } from './resolution';
 
 const SCRIPT = `Title: Why most AI demos fail
@@ -244,5 +244,44 @@ describe('resolution — constant context at any script length', () => {
     expect(o).toContain('INT. BOARDROOM — DAY');
     expect(o).toContain('SEQUENCE 2');
     expect(o.split('\n').length).toBeLessThan(12);
+  });
+});
+
+/**
+ * The read↔write bridge for the screenplay page.
+ *
+ * A click on the formatted page has to land in the right place in the raw text,
+ * or editing a long script means hunting for the line you were just pointing at.
+ */
+describe('offsetOfLine', () => {
+  const script = 'Title: X\n\nINT. KITCHEN — DAY\n\nShe turns.\n';
+
+  it('resolves line 0 to the start', () => {
+    expect(offsetOfLine(script, 0)).toBe(0);
+  });
+
+  it('lands exactly on the start of a line', () => {
+    expect(script.slice(offsetOfLine(script, 2))).toMatch(/^INT\. KITCHEN/);
+    expect(script.slice(offsetOfLine(script, 4))).toMatch(/^She turns\./);
+  });
+
+  /** A click on an element whose source has since been rewritten. The end is the
+   *  honest answer; throwing or returning 0 would silently move the caret. */
+  it('clamps a line past the end to the end', () => {
+    expect(offsetOfLine(script, 999)).toBe(script.length);
+  });
+
+  it('treats a negative or non-finite line as the start', () => {
+    expect(offsetOfLine(script, -3)).toBe(0);
+    expect(offsetOfLine(script, Number.NaN)).toBe(0);
+  });
+
+  /** Every parsed element must map back into the text it was parsed from. */
+  it('round-trips every element the parser produced', () => {
+    const parsed = parseFountain(script);
+    for (const el of parsed.elements) {
+      if (!el.text) continue;
+      expect(script.slice(offsetOfLine(script, el.line))).toContain(el.text);
+    }
   });
 });

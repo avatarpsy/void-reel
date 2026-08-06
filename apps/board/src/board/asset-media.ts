@@ -70,6 +70,13 @@ export interface PlaceAssetInput {
   createdBy?: 'user' | 'agent';
   /** Screen coordinates of the drop, when there was one. */
   clientPoint?: [number, number];
+  /** Where it came from — see `BlockMeta`. Recorded so "that one, but warmer"
+   *  is an edit of a known thing rather than a fresh guess. */
+  prompt?: string;
+  referenceIds?: string[];
+  model?: string;
+  sourceUrl?: string;
+  credit?: string;
 }
 
 export type PlaceResult =
@@ -180,6 +187,13 @@ export async function placeAsset(
       originalUrl: absoluteUrl(input.originalUrl || input.displayUrl),
       name: input.name?.trim() || undefined,
       createdBy: input.createdBy ?? 'user',
+      // Provenance, when the caller knows it. Omitted rather than stored empty
+      // so "generated" and "dropped in" stay distinguishable.
+      ...(input.prompt ? { prompt: input.prompt.slice(0, 2000) } : {}),
+      ...(input.referenceIds?.length ? { referenceIds: input.referenceIds } : {}),
+      ...(input.model ? { model: input.model } : {}),
+      ...(input.sourceUrl ? { sourceUrl: input.sourceUrl } : {}),
+      ...(input.credit ? { credit: input.credit } : {}),
     });
   };
 

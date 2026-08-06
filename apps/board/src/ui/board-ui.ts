@@ -17,6 +17,8 @@
  * not that they can add a shot themselves. It is the difference between "this is
  * broken" and "oh, I talk to it".
  */
+import { GfxControllerIdentifier } from '@blocksuite/std/gfx';
+
 import { estimateShotCredits, onModelCatalogue, plannedSeconds } from '../shot/models';
 import { createShots, readShots } from '../shot/shots';
 import { fitBoard } from './viewport';
@@ -66,10 +68,15 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
 
       <div class="vs-board-guide">
         <p class="vs-board-guide__lead">
-          A <strong>shot</strong> is one scene. Drop media <strong>onto</strong> a shot and it joins
-          that scene — stills, clips and audio each land in their own row, and you say what each one
-          is for. Anything on the <strong>open canvas</strong> is yours to think with, and is never
-          used in the video.
+          <strong>Think out loud here first.</strong> Ask for a mind map, a diagram, a mood board or
+          a page of notes and it appears on the canvas where you can drag it around and argue with
+          it. None of that ends up in the video — it is how you work out what the video is.
+        </p>
+        <p class="vs-board-guide__lead">
+          When you know the shape, it becomes <strong>shots</strong>. A shot is one scene. Drop media
+          <strong>onto</strong> a shot and it joins that scene — stills, clips and audio each land in
+          their own row, and you say what each one is for. Anything left on the open canvas stays
+          thinking space.
         </p>
         <p class="vs-board-guide__lead">
           A shot is either a <strong>video clip</strong> a model generates, or a
@@ -79,9 +86,12 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
         </p>
         <ul class="vs-board-guide__keys">
           <li><b>Drop on a shot</b><span>adds it to that scene · drop on a slot to set its role</span></li>
-          <li><b>Toolbar below</b><span>sticky notes, pen, shapes, text, images, connectors</span></li>
+          <li><b>Toolbar below</b><span>notes, pen, shapes, text, mind maps, images, arrows, links</span></li>
+          <li><b>Type <kbd>/</kbd> in a note</b><span>headings, lists, tables, callouts, dividers</span></li>
+          <li><b>▶ on a clip</b><span>plays it right there — nothing streams until you ask</span></li>
+          <li><b>Double-click</b><span>a card title to rename · the script to edit it where you clicked</span></li>
           <li><b>Scroll</b><span>pan · over a row it scrolls the row · ⌘/Ctrl + scroll to zoom</span></li>
-          <li><b>Ctrl + Z</b><span>undo — including anything the agent did</span></li>
+          <li><b>Ctrl + Z</b><span>undo — including anything the agent did, in one step</span></li>
         </ul>
       </div>
     </div>`;
@@ -103,7 +113,22 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
       ${ICONS.fit}<span>Fit</span>
     </button>
     <span class="vs-board-sep"></span>
-    <div class="vs-board-total" data-total hidden></div>`;
+    <div class="vs-board-total" data-total hidden></div>
+    <!--
+      WHAT THE SELECTION IS FOR.
+
+      Selecting a few references and asking the agent to generate from them is
+      the board's central loop — and it was completely invisible. A selection
+      looks the same whether or not anything can be done with it, so the feature
+      existed and nobody would ever have found it.
+
+      A line in the bar that is already there, rather than a floating toolbar
+      over the canvas: it appears in one place the eye already goes, it cannot
+      cover the thing being selected, and it costs no new layer. Shown only when
+      the selection actually CONTAINS media, because that is the only case where
+      the sentence is true.
+    -->
+    <div class="vs-board-sel" data-sel hidden></div>`;
 
   container.append(empty, bar);
 
@@ -224,6 +249,27 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
     requestAnimationFrame(() => { totalQueued = false; syncTotal(); });
   }
 
+  /**
+   * Tell the user what a selection of references is good for.
+   *
+   * Counts only MEDIA, because "3 selected" is not the point — "you can ask for
+   * a new one made from these" is, and that is only true of pictures and clips.
+   * A note and a shape selected together get no hint, correctly.
+   */
+  const selEl = bar.querySelector<HTMLElement>('[data-sel]')!;
+  const gfx = board.std.get(GfxControllerIdentifier);
+  const selectionSub = gfx.selection.slots.updated.subscribe(() => {
+    const media = gfx.selection.selectedIds.filter(id => {
+      const flavour = board.store.getBlock(id)?.flavour;
+      return flavour === 'affine:image' || flavour === 'affine:attachment';
+    });
+    if (media.length < 1) { selEl.hidden = true; return; }
+    selEl.textContent = media.length === 1
+      ? '1 reference selected — ask the agent to generate from it'
+      : `${media.length} references selected — ask the agent to generate from them`;
+    selEl.hidden = false;
+  });
+
   const sub = board.store.slots.blockUpdated.subscribe(e => {
     // Re-arm on a delete: the board can become empty again.
     if ((e as { type?: string })?.type === 'delete') hidden = false;
@@ -239,6 +285,7 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
 
   return () => {
     sub.unsubscribe?.();
+    selectionSub.unsubscribe?.();
     stopModels();
     empty.remove();
     bar.remove();

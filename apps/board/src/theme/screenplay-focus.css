@@ -1,0 +1,367 @@
+/* ══ Screenplay focus ═══════════════════════════════════════════════════════
+   The screenplay at page size — where it is actually written.
+
+   WHY ITS OWN TYPOGRAPHY AND NOT THE CARD'S. The card's `.page` rules live in
+   the block's Lit styles, which BlockSuite injects while the block is CONNECTED
+   and removes when it disconnects — and `gfx-viewport` culls by visibility, so
+   panning away from the screenplay would strip the stylesheet out from under
+   this overlay. They are also genuinely different renderings: the card is a
+   thumbnail in px, this is a page in inches. What the two share is the ROW
+   MODEL (`shot/screenplay-view.ts`), which is the part that must not drift.
+
+   MEASUREMENTS ARE THE INDUSTRY SPEC, not taste: 12pt Courier, 1.5in left and
+   1in elsewhere, character cues at 3.7in from the page edge, dialogue at 2.5in,
+   ~55 lines to a page. They are fixed so that one page runs about one minute —
+   which is the only reason a writer can judge pacing by looking at a script.
+   Get these wrong and the page count lies. */
+
+/* FIRST, AND IT IS NOT A NICETY: `display: flex` on the class BEATS the `hidden`
+   attribute's UA rule, because a class selector outranks it. Without this line
+   the overlay is invisible, still `inset: 0`, and still takes every pointer
+   event — so the whole board becomes unclickable the moment this stylesheet
+   loads, with nothing on screen to explain why. `.vs-inspect` already carries
+   the same guard; this one was missed and an E2E run found it in seconds. */
+.vs-focus[hidden] { display: none !important; }
+
+.vs-focus {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  background: var(--vs-page-gutter, #e8eaf0);
+}
+[data-theme='dark'] .vs-focus { background: #14161c; }
+
+/* The board underneath is hidden rather than merely covered: its chrome sits in
+   the same host and would otherwise still take clicks along the edges. */
+[data-focus-mode='screenplay'] .vs-board-bar,
+[data-focus-mode='screenplay'] .vs-assets,
+[data-focus-mode='screenplay'] .vs-board-empty { display: none; }
+
+.vs-focus__bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--vs-panel);
+  border-bottom: 1px solid var(--vs-border);
+}
+.vs-focus__back {
+  flex: none;
+  appearance: none;
+  border: 1px solid var(--vs-border);
+  border-radius: 8px;
+  padding: 6px 11px;
+  background: transparent;
+  color: var(--vs-text);
+  font: 500 12px/1 var(--affine-font-family);
+  cursor: pointer;
+}
+.vs-focus__back:hover { background: var(--vs-hover); }
+
+.vs-focus__title {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  overflow: hidden;
+}
+.vs-focus__title strong {
+  font: 600 14px/1.3 var(--affine-font-family);
+  color: var(--vs-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.vs-focus__title span {
+  font: 400 11px/1 var(--affine-font-family);
+  color: var(--vs-text-mute);
+  white-space: nowrap;
+}
+
+.vs-focus__actions { flex: none; display: flex; gap: 8px; }
+.vs-focus__btn {
+  appearance: none;
+  border: 1px solid var(--vs-border);
+  border-radius: 8px;
+  padding: 6px 11px;
+  background: transparent;
+  color: var(--vs-text);
+  font: 500 12px/1 var(--affine-font-family);
+  cursor: pointer;
+}
+.vs-focus__btn:hover { background: var(--vs-hover); }
+.vs-focus__btn--primary {
+  border-color: transparent;
+  background: var(--vs-accent-b);
+  color: #fff;
+}
+.vs-focus__btn--primary:hover { filter: brightness(1.08); }
+
+.vs-focus__scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 28px 24px 64px; }
+
+/* THE SHEET. 6in of content inside 1.5in + 1in margins is 8.5in of paper; at
+   96dpi that is 816px, and the padding below is those margins to scale. */
+.vs-focus .page {
+  width: 100%;
+  max-width: 816px;
+  margin: 0 auto;
+  box-sizing: border-box;
+  background: var(--vs-page, #fffef9);
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  box-shadow: 0 4px 24px rgba(15, 23, 42, 0.12);
+  padding: 96px 96px 96px 144px;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 16px;
+  line-height: 1.5;
+  color: #14151a;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Indents as a FRACTION of the 6in content box, so they hold at any width:
+   character 2.2/6, parenthetical 1.5/6, dialogue 1.0/6 with 1.5/6 off the right. */
+.vs-focus .el-scene_heading {
+  text-transform: uppercase;
+  font-weight: 700;
+  margin: 24px 0 10px;
+  letter-spacing: 0.02em;
+}
+.vs-focus .el-action { margin: 0 0 10px; }
+.vs-focus .el-character { margin: 16px 0 0 36.7%; text-transform: uppercase; }
+.vs-focus .el-parenthetical { margin: 0 0 0 25%; }
+.vs-focus .el-dialogue { margin: 0 25% 0 16.7%; }
+.vs-focus .el-transition { text-align: right; text-transform: uppercase; margin: 14px 0 16px; }
+.vs-focus .el-centered { text-align: center; margin: 14px 0; }
+.vs-focus .el-blank { height: 1em; }
+.vs-focus .el-page_break {
+  border-top: 1px dashed rgba(15, 23, 42, 0.25);
+  margin: 24px 0;
+  height: 0;
+}
+
+/* Sections and synopses are NOT part of the script — every Fountain tool omits
+   them from the printed page, so they read as margin voice here and vanish in
+   print (see the print block below). */
+.vs-focus .el-section {
+  font-family: var(--affine-font-family);
+  color: #7c3aed;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin: 32px 0 4px;
+  border-top: 1px solid rgba(124, 58, 237, 0.22);
+  padding-top: 14px;
+  font-size: 13px;
+}
+.vs-focus .el-synopsis {
+  font-family: var(--affine-font-family);
+  font-style: italic;
+  font-size: 13px;
+  color: #6b7280;
+  margin: 0 0 12px;
+}
+
+/* Coverage marks, in the margin — never in the prose. */
+.vs-focus .marker { position: relative; }
+.vs-focus .marker::before {
+  content: attr(data-mark);
+  position: absolute;
+  left: -46px;
+  top: 26px;
+  width: 36px;
+  text-align: right;
+  font-family: var(--affine-font-family);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #b45309;
+}
+.vs-focus .marker[data-covered='yes']::before { color: #16a34a; font-weight: 500; }
+
+/* Click a line to edit it there — say so before the click. */
+.vs-focus .page > div[data-line] { cursor: text; border-radius: 3px; }
+.vs-focus .page > div[data-line]:hover { background: rgba(74, 155, 217, 0.1); }
+
+.vs-focus__editor {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  max-width: 880px;
+  margin: 0 auto;
+  box-sizing: border-box;
+  border: none;
+  outline: none;
+  resize: none;
+  padding: 32px 40px 64px;
+  background: var(--vs-page, #fffef9);
+  color: #14151a;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 15px;
+  line-height: 1.6;
+  tab-size: 4;
+}
+
+.vs-focus__empty {
+  max-width: 560px;
+  margin: 48px auto;
+  padding: 32px;
+  background: var(--vs-page, #fffef9);
+  border: 1px dashed rgba(15, 23, 42, 0.18);
+  border-radius: 10px;
+  text-align: center;
+  font: 400 13px/1.7 var(--affine-font-family);
+  color: var(--vs-muted);
+}
+.vs-focus__empty b { display: block; margin-bottom: 8px; font-size: 15px; color: var(--vs-text); }
+.vs-focus__empty code {
+  font-family: 'Courier New', monospace;
+  background: var(--vs-hover);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.vs-focus__foot {
+  flex: none;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  border-top: 1px solid var(--vs-border);
+  background: var(--vs-panel);
+  font: 400 11px/1 var(--affine-font-family);
+  color: var(--vs-text-mute);
+}
+
+/* ══ Print — a real screenplay PDF ══════════════════════════════════════════
+   The browser's own print pipeline rather than a JS PDF builder: the page is
+   already correct typography, so a library would only add a second, worse
+   implementation of it plus a megabyte of bundle. This restates the page in
+   REAL INCHES and lets the browser paginate, which also gets widow and orphan
+   control and a paper size the user can change in the print dialog.
+
+   Printing happens from inside the board iframe, so this frame prints alone. */
+@media print {
+  @page {
+    size: letter;
+    /* THE SPEC: 1.5in left, which is room for the three-hole punch; 1in else. */
+    margin: 1in 1in 1in 1.5in;
+  }
+
+  /*
+   * GATED ON FOCUS MODE, and the overlay is NESTED — both matter.
+   *
+   * `.vs-focus` lives inside `#board-root`, which is itself a child of `body`.
+   * So the obvious rule — hide every `body > *` that is not the overlay — hides
+   * `#board-root` and takes the overlay down with it: a print that produces a
+   * blank page, and one that looks correct in the stylesheet.
+   *
+   * Instead: name the chrome to hide, and UNWRAP the ancestors so the page is
+   * laid out by the print context rather than by an absolutely-positioned
+   * overlay inside a fixed-height app shell.
+   *
+   * Gating on the mode means Ctrl+P on the canvas does whatever the browser
+   * would normally do, rather than printing an empty sheet where a hidden
+   * overlay used to be.
+   */
+  [data-focus-mode='screenplay'] .vs-focus__bar,
+  [data-focus-mode='screenplay'] .vs-focus__foot,
+  [data-focus-mode='screenplay'] .vs-focus__editor,
+  [data-focus-mode='screenplay'] .affine-edgeless-viewport,
+  [data-focus-mode='screenplay'] .vs-board-bar,
+  [data-focus-mode='screenplay'] .vs-assets,
+  [data-focus-mode='screenplay'] .vs-board-empty,
+  [data-focus-mode='screenplay'] .vs-toasts,
+  [data-focus-mode='screenplay'] .vs-inspect { display: none !important; }
+
+  /* The app shell is a fixed-height, overflow-hidden box on screen. For print
+     it has to become an ordinary flowing document, or the browser paginates one
+     screenful and stops. */
+  [data-focus-mode='screenplay'],
+  [data-focus-mode='screenplay'] body,
+  [data-focus-mode='screenplay'] #board-root {
+    position: static !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+    background: #fff !important;
+  }
+
+  [data-focus-mode='screenplay'] .vs-focus {
+    position: static !important;
+    display: block !important;
+    height: auto !important;
+    background: #fff !important;
+  }
+  .vs-focus__scroll {
+    overflow: visible !important;
+    padding: 0 !important;
+    height: auto !important;
+    /* The scroller is a flex child on screen; flex sizing would clip the page
+       to one viewport in print. */
+    flex: none !important;
+  }
+
+  .vs-focus .page {
+    max-width: none;
+    width: auto;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    box-shadow: none;
+    background: #fff;
+    /* 12pt Courier is the standard, and the reason a page runs a minute. */
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 12pt;
+    line-height: 1;
+    color: #000;
+  }
+
+  /* Indents from the CONTENT box, which the @page margin has already inset to
+     1.5in — so each is (spec position − 1.5in). */
+  .vs-focus .el-scene_heading {
+    margin: 1em 0;
+    text-transform: uppercase;
+    font-weight: 400;
+    /* A slugline stranded at the foot of a page is the classic formatting
+       error: it promises a scene the page never shows. */
+    break-after: avoid-page;
+    page-break-after: avoid;
+  }
+  .vs-focus .el-action { margin: 0 0 1em; }
+  .vs-focus .el-character { margin: 1em 0 0 2.2in; text-transform: uppercase; }
+  .vs-focus .el-parenthetical { margin: 0 0 0 1.5in; }
+  .vs-focus .el-dialogue { margin: 0 1.5in 0 1in; }
+  /* A character cue must never be split from the line it introduces. */
+  .vs-focus .el-character,
+  .vs-focus .el-parenthetical {
+    break-after: avoid-page;
+    page-break-after: avoid;
+  }
+  .vs-focus .el-dialogue {
+    break-inside: avoid-page;
+    page-break-inside: avoid;
+  }
+  .vs-focus .el-transition { text-align: right; text-transform: uppercase; margin: 1em 0; }
+  .vs-focus .el-centered { text-align: center; margin: 1em 0; }
+  .vs-focus .el-blank { height: 1em; }
+  .vs-focus .el-page_break {
+    break-before: page;
+    page-break-before: always;
+    border: 0;
+    height: 0;
+    margin: 0;
+  }
+
+  /* SECTIONS, SYNOPSES AND COVERAGE MARKS ARE NOT THE SCRIPT. Every Fountain
+     tool omits them from the printed page — they are the writer's scaffolding,
+     and the PDF someone sends out must contain the film and nothing else. */
+  .vs-focus .el-section,
+  .vs-focus .el-synopsis { display: none !important; }
+  .vs-focus .marker::before { content: none !important; }
+  .vs-focus .page > div[data-line]:hover { background: none !important; }
+}

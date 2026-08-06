@@ -394,3 +394,28 @@ function acts_before(script: ParsedScript, line: number): number {
   script.acts.forEach((a, i) => { if (a.line <= line) idx = i; });
   return idx;
 }
+
+/**
+ * Where line `line` starts in `text`, as a character offset.
+ *
+ * THE BRIDGE BETWEEN READING AND WRITING. The screenplay renders as a formatted
+ * page built from parsed `Element`s, each of which remembers the source line it
+ * came from, and it EDITS as raw Fountain in a textarea. Without a mapping
+ * between those two the halves are unrelated documents that happen to be about
+ * the same script — which is what made double-clicking scene 12 open the editor
+ * at the end of the file, four hundred lines from the thing being pointed at.
+ *
+ * Clamped at both ends: a line past the end of the text resolves to the end,
+ * which is the honest answer for a click on an element whose source has since
+ * been rewritten.
+ */
+export function offsetOfLine(text: string, line: number): number {
+  if (!Number.isFinite(line) || line <= 0) return 0;
+  let at = 0;
+  for (let i = 0; i < line; i++) {
+    const next = text.indexOf('\n', at);
+    if (next === -1) return text.length;
+    at = next + 1;
+  }
+  return at;
+}
