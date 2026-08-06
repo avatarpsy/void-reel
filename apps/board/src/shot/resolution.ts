@@ -29,7 +29,12 @@
  *
  * Pure and deterministic — no I/O, no time — so every rule here is a unit test.
  */
+import type { BlockStdScope } from '@blocksuite/std';
+
+import { perRev } from '../board/doc-cache';
 import { findScene, sequenceOf, type ParsedScript } from './fountain';
+import { readParsed } from './screenplay-doc';
+import { readShots } from './shots';
 
 export interface ScriptContext {
   body: string;
@@ -226,6 +231,21 @@ export function coverage(
      */
     offScript: shots.filter(s => !s.sceneKey || !known.has(s.sceneKey)).length,
   };
+}
+
+/**
+ * Coverage for THIS BOARD, computed once per document revision.
+ *
+ * `coverage` itself stays pure and argument-driven — it is the unit-tested rule,
+ * and compile and the agent digest both call it with lists they already hold.
+ * This is the render path's door to it: the screenplay page draws a margin mark
+ * per scene and repaints whenever any block changes, so without the memo one
+ * pointermove re-derived the whole script's coverage.
+ */
+export function boardCoverage(
+  std: BlockStdScope,
+): { scenes: Coverage[]; uncovered: string[]; offScript: number } {
+  return perRev(std, 'script:coverage', () => coverage(readParsed(std), readShots(std)));
 }
 
 /**

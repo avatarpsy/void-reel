@@ -34,6 +34,7 @@ import { BlockModel, BlockSchemaExtension, defineBlockSchema } from '@blocksuite
 import type { BlockStdScope } from '@blocksuite/std';
 import { GfxCompatible, type GfxCommonBlockProps } from '@blocksuite/std/gfx';
 
+import { perRev } from '../board/doc-cache';
 import { parseFountain, type ParsedScript } from './fountain';
 
 export interface ScreenplayProps extends GfxCommonBlockProps {
@@ -87,9 +88,16 @@ export function readScript(std: BlockStdScope): string {
   return typeof model?.props.text === 'string' ? model.props.text : '';
 }
 
-/** The screenplay, parsed. */
+/**
+ * The screenplay, parsed.
+ *
+ * MEMOISED PER DOCUMENT REVISION — see `board/doc-cache.ts`. Every shot card
+ * calls this to draw its sequence pill, and the screenplay page calls it to draw
+ * itself, so an uncached parse ran once per card per repaint. A four-hundred
+ * line script on a sixty-shot board is sixty full parses for one pointermove.
+ */
 export function readParsed(std: BlockStdScope): ParsedScript {
-  return parseFountain(readScript(std));
+  return perRev(std, 'script:parsed', () => parseFountain(readScript(std)));
 }
 
 /**

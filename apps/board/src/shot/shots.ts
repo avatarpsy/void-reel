@@ -21,6 +21,7 @@ import type { BlockStdScope } from '@blocksuite/std';
 import { GfxControllerIdentifier } from '@blocksuite/std/gfx';
 import { generateKeyBetween } from 'fractional-indexing';
 
+import { perRev } from '../board/doc-cache';
 import {
   SHOT_GAP, SHOT_H, SHOT_W, normaliseTag,
   type MediaRole, type RefKind, type ShotBlockModel, type ShotKind, type ShotMedia,
@@ -59,51 +60,127 @@ export function shotBounds(order: number): { x: number; y: number; w: number; h:
   return { x: order * (SHOT_W + SHOT_GAP), y: 0, w: SHOT_W, h: SHOT_H };
 }
 
-/** Every shot, in filmstrip order. */
-export function readShots(std: BlockStdScope): ShotView[] {
-  return std.store
-    .getBlocksByFlavour('voidspace:shot')
-    .map(block => {
-      const p = block.model.props as ShotBlockModel['props'];
-      const [x] = JSON.parse(p.xywh || '[0,0,0,0]') as number[];
-      return {
-        id: block.id,
-        title: p.title ?? '',
-        action: p.action ?? '',
-        voiceover: p.voiceover ?? '',
-        camera: p.camera ?? '',
-        media: p.media ?? [],
-        model: p.model ?? '',
-        durationSec: p.durationSec ?? 0,
-        // Boards written before graphic shots existed have neither prop. A
-        // shot with no kind is a CLIP — that is what every one of them was.
-        kind: (p.kind as ShotKind) ?? 'clip',
-        composition: p.composition ?? '',
-        /**
-         * COPIED, not referenced.
-         *
-         * This prop is backed by Yjs, so what the store hands back is a
-         * REACTIVE PROXY. Structured clone refuses a proxy — so the moment a
-         * shot had any composition variables, every `postMessage` carrying a
-         * digest died with "could not be cloned" and `board_read` returned an
-         * error for the WHOLE board, not just that shot. Measured: two shots on
-         * the canvas, one stat card, and the agent could no longer read
-         * anything.
-         *
-         * The same trap the model catalogue fell into from the other direction
-         * (a Vue reactive proxy going in). Both boundaries now hand over plain
-         * data; `media` was already safe because the digest rebuilds each entry.
-         */
-        compositionVars: { ...(p.compositionVars ?? {}) },
-        sceneKey: p.sceneKey ?? '',
-        x,
-      };
-    })
-    .sort((a, b) => a.x - b.x);
+/**
+ * THE FILMSTRIP ORDER — the expensive half of reading the board, cached.
+ *
+ * ── WHAT IS CACHED, AND WHAT DELIBERATELY IS NOT ─────────────────────────────
+ * The cost of `readShots` is almost entirely in getting to the shots in the
+ * right order: walking the block map for a flavour, `JSON.parse`-ing every
+ * `xywh`, and sorting. Building the view objects afterwards is a handful of
+ * property reads each.
+ *
+ * So the ORDER is memoised per document revision and the VIEWS are rebuilt on
+ * every call. That split is not a compromise, it is the point: a shared view
+ * object would be a live handle that a caller could write into, and the next
+ * reader would see the tampering as though it were document state — a worse
+ * failure than the slow read, and one `shots.test.ts` pins directly.
+ *
+ * Measured effect on the render path: painting an n-shot strip went from n
+ * flavour-scans and n·m `JSON.parse` calls per frame to one of each.
+ */
+interface ShotOrder {
+  /** Block ids, left to right. */
+  ids: string[];
+  /** id → x, so a view can be built without re-parsing `xywh`. */
+  x: Map<string, number>;
+  /** id → position, so a scene number is a lookup rather than a scan. */
+  at: Map<string, number>;
 }
 
+function shotOrder(std: BlockStdScope): ShotOrder {
+  return perRev(std, 'shots:order', () => {
+    const rows = std.store
+      .getBlocksByFlavour('voidspace:shot')
+      .map(block => {
+        const p = block.model.props as ShotBlockModel['props'];
+        let x = 0;
+        try { x = (JSON.parse(p.xywh || '[0,0,0,0]') as number[])[0] ?? 0; } catch { x = 0; }
+        return { id: block.id, x };
+      })
+      .sort((a, b) => a.x - b.x);
+
+    return {
+      ids: rows.map(r => r.id),
+      x: new Map(rows.map(r => [r.id, r.x] as const)),
+      at: new Map(rows.map((r, i) => [r.id, i] as const)),
+    };
+  });
+}
+
+/** Build one view. Fresh every time — see the note on `shotOrder`. */
+function viewOf(std: BlockStdScope, id: string, x: number): ShotView | null {
+  const p = propsOf(std, id);
+  if (!p) return null;
+  return {
+    id,
+    title: p.title ?? '',
+    action: p.action ?? '',
+    voiceover: p.voiceover ?? '',
+    camera: p.camera ?? '',
+    media: p.media ?? [],
+    model: p.model ?? '',
+    durationSec: p.durationSec ?? 0,
+    // Boards written before graphic shots existed have neither prop. A shot
+    // with no kind is a CLIP — that is what every one of them was.
+    kind: (p.kind as ShotKind) ?? 'clip',
+    composition: p.composition ?? '',
+    /**
+     * COPIED, not referenced.
+     *
+     * This prop is backed by Yjs, so what the store hands back is a REACTIVE
+     * PROXY. Structured clone refuses a proxy — so the moment a shot had any
+     * composition variables, every `postMessage` carrying a digest died with
+     * "could not be cloned" and `board_read` returned an error for the WHOLE
+     * board, not just that shot. Measured: two shots on the canvas, one stat
+     * card, and the agent could no longer read anything.
+     *
+     * The same trap the model catalogue fell into from the other direction (a
+     * Vue reactive proxy going in). Both boundaries now hand over plain data;
+     * `media` was already safe because the digest rebuilds each entry.
+     *
+     * It is also what stops a caller writing into the document through a read —
+     * pinned by `shots.test.ts`, and the reason the cache above holds the order
+     * rather than these objects.
+     */
+    compositionVars: { ...(p.compositionVars ?? {}) },
+    sceneKey: p.sceneKey ?? '',
+    x,
+  };
+}
+
+/** Every shot, in filmstrip order. */
+export function readShots(std: BlockStdScope): ShotView[] {
+  const order = shotOrder(std);
+  const out: ShotView[] = [];
+  for (const id of order.ids) {
+    const view = viewOf(std, id, order.x.get(id) ?? 0);
+    // A block deleted between the cached scan and now. Skipping is right: the
+    // revision has already moved, so the next read rebuilds the order anyway.
+    if (view) out.push(view);
+  }
+  return out;
+}
+
+/** One shot, by id. Does not build the other n-1 views. */
 export function readShot(std: BlockStdScope, id: string): ShotView | null {
-  return readShots(std).find(s => s.id === id) ?? null;
+  const order = shotOrder(std);
+  if (!order.at.has(id)) return null;
+  return viewOf(std, id, order.x.get(id) ?? 0);
+}
+
+/**
+ * A shot's position in the filmstrip, 1-based — its SCENE number.
+ *
+ * Here rather than in the card because the card computed it by scanning and
+ * sorting every shot on the board on every render, which made painting the strip
+ * quadratic. Off the shared order it is a map lookup.
+ *
+ * 0 when the id is not a shot on this board, which is what a card mid-delete
+ * sees for one frame.
+ */
+export function sceneNumberOf(std: BlockStdScope, id: string): number {
+  const at = shotOrder(std).at.get(id);
+  return at === undefined ? 0 : at + 1;
 }
 
 /**
