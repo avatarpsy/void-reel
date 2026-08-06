@@ -23,13 +23,14 @@ import { state } from 'lit/decorators.js';
 import { repeat } from 'lit/directives/repeat.js';
 
 import { withToken } from '../board/parent-auth';
-import { takeCaret } from '../ui/field-caret';
+import { focusField, takeCaret } from '../ui/field-caret';
 import {
   FIELD_SPECS, REF_KIND_LABEL, roleLabel, SHOT_KIND_HINT, SHOT_KIND_LABEL, SHOT_KINDS,
   formatTime, isTimed, rolesFor, trimWindow,
   type MediaRole, type ShotBlockModel, type ShotKind, type ShotMedia,
 } from './model';
 import { allBlocks, findBlock, onBlockCatalogue, searchBlocks, type BlockInfo } from './blocks';
+import { sceneNumberOf } from './shots';
 import { resolveSlots, slotFills } from './slots';
 import { readParsed } from './screenplay-doc';
 import { lazyBlockPreview, openBlockLightbox, type LazyPreview } from '../ui/block-preview';
@@ -224,7 +225,18 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
       user-select: none;
       cursor: grab;
     }
-    .shot__title:focus { user-select: text; cursor: text; }
+    .shot__title:focus {
+      user-select: text;
+      cursor: text;
+      /* SAY THAT IT IS NOW A TEXT FIELD. Without this, rename mode is
+         indistinguishable from a title you happen to have clicked, and the
+         first thing people did was click away to check. */
+      background: var(--vs-shot-bg, #fff);
+      box-shadow: 0 0 0 2px var(--vs-accent-a, #4a9bd9);
+      border-radius: 6px;
+      margin: -2px -4px;
+      padding: 2px 4px;
+    }
     .shot__title:empty::before {
       content: attr(data-placeholder);
       color: var(--vs-text-mute, rgba(26, 26, 46, 0.42));
@@ -479,29 +491,65 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
        dropdowns rather than like text fields. The lane is the only thing here
        allowed to take the slack. */
     .fields { display: flex; flex-direction: column; gap: 8px; flex: none; }
+    /* THE WHOLE BOX IS THE TARGET, not the text node inside it.
+       Only .field__text used to accept a click, so the label, the padding and
+       the empty space under one short line were all dead — which on a card with
+       an empty ACTION is most of the control. Clicking a box that looks like a
+       text field and getting nothing is exactly the "I can't select the text
+       box" report. The text cursor says so before the click. */
     .field {
       display: flex;
       flex-direction: column;
-      gap: 2px;
+      gap: 3px;
       border: 1px solid var(--vs-border, rgba(15, 23, 42, 0.1));
       border-radius: 9px;
       padding: 7px 10px;
       background: var(--vs-shot-field, rgba(127, 140, 170, 0.06));
       flex: 1;
       min-height: 0;
+      cursor: text;
+      transition: border-color 0.12s ease, box-shadow 0.12s ease, background 0.12s ease;
+    }
+    .field:hover { border-color: var(--vs-border-strong, rgba(15, 23, 42, 0.22)); }
+    /* THE FOCUS RING IS NOT DECORATION. A canvas has no window chrome and no tab
+       order a person can see, so without it there is no way to tell which of
+       three identical boxes is receiving what you type — and typing into the
+       wrong one is silent. */
+    .field:focus-within {
+      border-color: var(--vs-accent-a, #4a9bd9);
+      box-shadow: 0 0 0 2px rgba(74, 155, 217, 0.22);
+      background: var(--vs-shot-bg, #fff);
     }
     .field__label {
       font: 500 9px/1 var(--affine-font-family, sans-serif);
       letter-spacing: 0.08em;
       color: var(--vs-text-mute, rgba(26, 26, 46, 0.45));
+      /* The label is part of the target — clicking it focuses the field (see
+         focusFieldBox) — so it must not swallow the pointer itself. */
+      pointer-events: none;
+      user-select: none;
     }
+    .field:focus-within .field__label { color: var(--vs-accent-b, #2f6fa3); }
+    /* ROOM TO WRITE. A flex:1 child inside a flex:none column resolves to the
+       content height, so an empty ACTION was a one-line sliver you had to hit
+       within about eleven pixels. Three lines minimum gives a real target and a
+       place to see what you wrote; past eight it scrolls rather than pushing the
+       footer off a fixed-height card. */
     .field__text {
       font: 400 11.5px/1.45 var(--affine-font-family, sans-serif);
       outline: none;
       overflow-y: auto;
+      overscroll-behavior: contain;
       flex: 1;
-      min-height: 0;
+      min-height: 3.1em;
+      max-height: 8.5em;
+      /* Selection has to be VISIBLE to be trusted. The canvas suppresses text
+         selection broadly to keep drags clean; a field is the one place that
+         must opt back in. */
+      user-select: text;
+      -webkit-user-select: text;
     }
+    .field__text::selection { background: rgba(74, 155, 217, 0.32); }
     .field__text:empty::before {
       content: attr(data-placeholder);
       color: var(--vs-text-mute, rgba(26, 26, 46, 0.38));
@@ -927,10 +975,29 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
     // dirty when they land.
     this.disposeCatalogue = onModelCatalogue(() => this.requestUpdate());
     this.disposeBlocks = onBlockCatalogue(() => this.requestUpdate());
+    /**
+     * COALESCED TO ONE FRAME, and that matters more than it looks.
+     *
+     * `blockUpdated` fires on every pointermove of a drag, and a drag across a
+     * sixty-shot board therefore queued sixty `requestUpdate()` calls per move
+     * event — several hundred per frame. Lit batches its own renders, so the
+     * repaint count was already bounded, but the CALLS were not free and the
+     * pattern hid the real cost: each of those renders recomputed the script and
+     * the shot list from scratch (now memoised — see `board/doc-cache.ts`).
+     *
+     * One request per frame is the honest rate: nothing a person can see changes
+     * faster than that.
+     */
+    let queued = false;
     const sub = this.store.slots.blockUpdated.subscribe(({ id }) => {
       // Only for OTHER blocks: this card's own props already trigger a render,
       // and re-requesting on them would double the work on every keystroke.
-      if (id !== this.model.id) this.requestUpdate();
+      if (id === this.model.id || queued) return;
+      queued = true;
+      requestAnimationFrame(() => {
+        queued = false;
+        if (this.isConnected) this.requestUpdate();
+      });
     });
     this.disposeDoc = () => sub.unsubscribe();
   }
@@ -1019,13 +1086,16 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
     this.store.updateBlock(this.model, { media: next });
   }
 
-  /** Scene number, from position on the board. The filmstrip IS the order. */
+  /**
+   * Scene number, from position on the board. The filmstrip IS the order.
+   *
+   * Off the SHARED shot list rather than rescanning. This used to walk every
+   * shot block, JSON.parse each `xywh` and sort — per card, per render — so
+   * painting an n-shot strip cost O(n²) parses. `readShots` is memoised per
+   * document revision, so the whole strip now shares one scan.
+   */
   private get sceneNumber(): number {
-    const shots = this.store
-      .getBlocksByFlavour('voidspace:shot')
-      .map(b => ({ id: b.id, x: JSON.parse((b.model.props as { xywh: string }).xywh)[0] as number }))
-      .sort((a, b) => a.x - b.x);
-    return shots.findIndex(s => s.id === this.model.id) + 1;
+    return sceneNumberOf(this.std, this.model.id);
   }
 
   // ── Editing ───────────────────────────────────────────────────────────────
@@ -1092,10 +1162,46 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
    * The editor's dispatcher listens on the host for keys — Backspace deletes the
    * selected block, space starts panning. Without this, typing in a field would
    * delete the shot you are typing into.
+   *
+   * ESCAPE leaves the field. On a canvas that is the only unambiguous way out:
+   * clicking away might be the start of a drag, and there is no OK button.
+   *
+   * TAB WALKS THE CARD, and is claimed rather than left to the browser. Every
+   * contenteditable is focusable, so the native order runs off the card and into
+   * whatever block Lit rendered next — which on a filmstrip is the shot beside
+   * this one, and the user is then typing the wrong scene's voiceover. Title →
+   * action → voiceover → camera → out is the order the card is read in.
    */
   private readonly stopKeys = (e: KeyboardEvent) => {
     e.stopPropagation();
-    if (e.key === 'Escape') (e.target as HTMLElement).blur();
+    if (e.key === 'Escape') {
+      (e.target as HTMLElement).blur();
+      return;
+    }
+    if (e.key === 'Tab') {
+      const fields = [...this.querySelectorAll<HTMLElement>('.shot__title, .field__text')];
+      const at = fields.indexOf(e.target as HTMLElement);
+      const next = fields[at + (e.shiftKey ? -1 : 1)];
+      // Past either end, fall out of the card entirely rather than wrapping —
+      // wrapping traps the keyboard inside one shot with no way off it.
+      if (at < 0 || !next) { (e.target as HTMLElement).blur(); return; }
+      e.preventDefault();
+      focusField(this.std, next);
+    }
+  };
+
+  /**
+   * Wheel inside a written field.
+   *
+   * Claimed only when the field has somewhere to scroll — a three-line ACTION in
+   * an eight-line box has nothing to scroll, and swallowing the gesture there
+   * would make a dead zone in the middle of the card where the board refuses to
+   * pan. Same rule as the reference lanes, for the same reason.
+   */
+  private readonly onFieldWheel = (e: WheelEvent) => {
+    const el = e.currentTarget as HTMLElement;
+    if (el.scrollHeight <= el.clientHeight) return;
+    e.stopPropagation();
   };
 
   /** See `ui/field-caret.ts` — the reasoning lives with the code. */
@@ -1193,23 +1299,86 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
     </div>`;
   }
 
+  /**
+   * A click that started on the field's own text.
+   *
+   * `stopPropagation` and NOT `preventDefault`: the canvas must not see this
+   * gesture, but the BROWSER must — the native default for a pointerdown on a
+   * contenteditable is caret placement and the start of a drag-selection, and
+   * cancelling it is what makes a field look editable and behave like a picture.
+   */
   private readonly claimCaret = (e: PointerEvent) => {
     e.stopPropagation();
     this.takeCaret(e.currentTarget as HTMLElement, e.clientX, e.clientY);
   };
 
   /**
-   * Rename, on a deliberate double-click. See the note in the header markup.
+   * A click anywhere else in the field's BOX — the label, the padding, the empty
+   * space under a short line.
    *
-   * Caret at the click rather than select-all: a select-all does not survive
-   * the browser's own double-click handling — it collapses, and the rename then
-   * appends to the old title instead of replacing it, which is worse than
-   * either. Ctrl+A still selects the line for anyone who wants to replace it.
+   * All of that used to be dead: only the inner text node had a handler, so on a
+   * card with an empty ACTION the clickable region was about eleven pixels tall
+   * inside a forty-pixel box that looked exactly like a text field. That is the
+   * "struggling to select the text box" report, and it is a hit-target bug
+   * rather than a caret bug.
+   *
+   * Forwards to the text and puts the caret at the END, because a click on the
+   * chrome of a field is "let me write here", not "put the caret at this exact
+   * pixel" — the pixel they clicked is not in the text.
+   */
+  private readonly focusFieldBox = (e: PointerEvent) => {
+    const box = e.currentTarget as HTMLElement;
+    const text = box.querySelector<HTMLElement>('.field__text');
+    if (!text || text.contains(e.target as Node)) return;   // the text handles its own
+    e.stopPropagation();
+    e.preventDefault();   // nothing native to preserve — the target is not text
+    focusField(this.std, text);
+  };
+
+  /**
+   * Rename, on a deliberate double-click.
+   *
+   * SELECT-ALL, not a caret. Double-clicking a card's title means "rename this"
+   * everywhere else on a canvas, and the first thing you type should replace the
+   * name rather than land in the middle of it. An earlier build placed a caret
+   * instead, on the grounds that a select-all "does not survive the browser's own
+   * double-click handling" — true then, because the focus guard collapsed the
+   * selection a frame later. It no longer does (see `field-caret.ts`), so the
+   * behaviour people expect is available again.
+   *
+   * No `preventDefault`: there is nothing to cancel here, and cancelling it was
+   * suppressing the browser's word-selection for anyone who wanted it.
    */
   private readonly editTitle = (e: MouseEvent) => {
     e.stopPropagation();
-    e.preventDefault();
-    this.takeCaret(e.currentTarget as HTMLElement, e.clientX, e.clientY);
+    const el = e.currentTarget as HTMLElement;
+    focusField(this.std, el);
+    const sel = this.ownerDocument.defaultView?.getSelection();
+    if (sel && el.textContent) {
+      const all = this.ownerDocument.createRange();
+      all.selectNodeContents(el);
+      sel.removeAllRanges();
+      sel.addRange(all);
+    }
+  };
+
+  /**
+   * The title's pointerdown, and it is deliberately conditional.
+   *
+   * The title is `flex: 1` and covers nearly the whole header, which is also the
+   * only place to grab the card — so claiming every pointerdown here would make
+   * a shot immovable. But once the title IS being edited, the canvas stealing
+   * the gesture means you cannot click to move the caret inside the name you are
+   * halfway through typing.
+   *
+   * So: while it has focus the field owns its pointer events; otherwise the
+   * header does, and the card drags.
+   */
+  private readonly titlePointerDown = (e: PointerEvent) => {
+    const el = e.currentTarget as HTMLElement;
+    if (this.ownerDocument.activeElement !== el) return;   // let it drag
+    e.stopPropagation();
+    this.takeCaret(el, e.clientX, e.clientY);
   };
 
   // ── Media ─────────────────────────────────────────────────────────────────
@@ -1382,8 +1551,10 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
         <div
           class="shot__title"
           contenteditable="plaintext-only"
+          data-range-sync-exclude="true"
           data-placeholder="Name this shot…"
           title="Double-click to rename · drag to move"
+          @pointerdown=${this.titlePointerDown}
           @dblclick=${this.editTitle}
           @keydown=${this.stopKeys}
           @blur=${(e: FocusEvent) => this.commit('title', e.target as HTMLElement)}
@@ -1530,15 +1701,20 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
             cleared, so switching back to a clip restores what was written.
           -->
           ${FIELD_SPECS.filter(spec => !(isGraphic && spec.key === 'camera'))
-            .map(spec => html`<div class="field">
+            .map(spec => html`<div
+              class="field"
+              @pointerdown=${this.focusFieldBox}
+              @dblclick=${(e: Event) => e.stopPropagation()}
+            >
             <span class="field__label">${spec.label}</span>
             <div
               class="field__text"
               contenteditable="plaintext-only"
+              data-range-sync-exclude="true"
               data-placeholder=${spec.placeholder}
               @pointerdown=${this.claimCaret}
               @keydown=${this.stopKeys}
-              @wheel=${(e: WheelEvent) => e.stopPropagation()}
+              @wheel=${this.onFieldWheel}
               @blur=${(e: FocusEvent) => this.commit(spec.key, e.target as HTMLElement)}
             >${this.model.props[spec.key]}</div>
           </div>`)}

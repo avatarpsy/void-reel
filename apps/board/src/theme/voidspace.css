@@ -350,6 +350,25 @@ editor-host {
 /* `display: flex` below OUTRANKS the UA's `[hidden] { display: none }`, so an
    empty board drew an empty pill floating next to Fit — a control with nothing
    in it, which reads as broken. Explicit, and before the flex rule. */
+/* WHAT THE SELECTION IS FOR — see the note in `board-ui.ts`.
+   Same pill geometry as the running total beside it so the bar reads as one
+   row, but accented rather than neutral: this is an OFFER, and it appears and
+   disappears with the selection, where the total is always-on furniture. */
+.vs-board-sel[hidden] { display: none; }
+.vs-board-sel {
+  display: flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 8px;
+  background: rgba(74, 155, 217, 0.14);
+  border: 1px solid rgba(74, 155, 217, 0.4);
+  color: var(--vs-text);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: default;
+}
+
 .vs-board-total[hidden] { display: none; }
 .vs-board-total {
   display: flex;
@@ -391,14 +410,35 @@ editor-host {
 .vs-board-guide__keys { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
 .vs-board-guide__keys li {
   display: grid;
-  grid-template-columns: 96px 1fr;
+  /* 96px fitted the old four rows and clipped "Type / in a note" the moment the
+     canvas tools were added. `max-content` sizes to the longest label there
+     actually is, so adding a row can never silently truncate one. */
+  grid-template-columns: max-content 1fr;
   gap: 10px;
   align-items: baseline;
   font-size: 11.5px;
   color: var(--vs-text-mute);
 }
 .vs-board-guide__keys b { color: var(--vs-text-dim); font-weight: 600; }
-.vs-board-empty__card { max-width: 460px; }
+/* The one literal keystroke in the guide. Drawn as a key so it reads as
+   something to press rather than as a stray punctuation mark — a bare "/" in a
+   sentence is invisible. */
+.vs-board-guide__keys kbd {
+  display: inline-block;
+  min-width: 1.15em;
+  padding: 0 4px;
+  border: 1px solid var(--vs-border-strong);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--vs-hover);
+  font: 600 10.5px/1.5 var(--affine-font-family, ui-monospace, monospace);
+  text-align: center;
+  color: var(--vs-text);
+}
+/* The guide grew a paragraph and three rows when the canvas tools arrived.
+   Wider so the two-column key list does not wrap every `span` onto its own
+   line, which turned a scannable table into a wall. */
+.vs-board-empty__card { max-width: 560px; }
 
 /* ══ Asset panel ═══════════════════════════════════════════════════════════
    Left rail over the canvas, matching the video editor's Assets panel in
@@ -1120,6 +1160,29 @@ editor-host {
   opacity: 0.85;
 }
 .vs-inspect__field--grow { flex: 1; min-height: 0; }
+/* PROVENANCE — a record, not a form. Styled as a read-only value rather than a
+   disabled input: a greyed-out textarea invites clicking and then refuses, which
+   is worse than plainly not being a control. */
+.vs-inspect__prov {
+  margin: 0;
+  padding: 7px 9px;
+  border: 1px solid var(--vs-border);
+  border-radius: 8px;
+  background: var(--vs-bg);
+  font: 400 11.5px/1.5 var(--affine-font-family);
+  color: var(--vs-text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-y: auto;
+  /* Selectable — copying a prompt to reuse it elsewhere is the whole point. */
+  user-select: text;
+}
+.vs-inspect__prov a { color: var(--vs-accent-a); }
+.vs-inspect__hint {
+  margin: 0;
+  font: 400 10.5px/1.5 var(--affine-font-family);
+  color: var(--vs-text-mute);
+}
 .vs-inspect__field input,
 .vs-inspect__field select,
 .vs-inspect__field textarea {
@@ -1370,3 +1433,29 @@ editor-host {
 .vs-assets__list--grid .vs-assets__star.is-on,
 .vs-assets__list--compact .vs-assets__star.is-on { color: #fbbf24; }
 
+
+/* ══ Space-drag panning over a card ═════════════════════════════════════════
+   A shot panel and the screenplay page claim their own pointer events — they
+   must, or typing in a field would drive the canvas and a wheel over a
+   reference row would zoom the board. The price is that the one gesture which
+   is supposed to work EVERYWHERE stopped working over half the board: hold
+   space and drag, and nothing happened unless the cursor was over empty canvas.
+
+   That does not read as a bug anyone can report precisely. It reads as a canvas
+   that feels sticky.
+
+   While space is held, the cards go pointer-transparent and every gesture
+   belongs to the canvas again. Driven by `gfx.keyboard.spaceKey$` — the same
+   signal `default-tool.ts` reads to decide it is panning — so the CSS and the
+   tool can never disagree about whether a pan is in progress. */
+[data-space-pan='true'] voidspace-shot,
+[data-space-pan='true'] voidspace-screenplay,
+[data-space-pan='true'] voidspace-blockdraft {
+  pointer-events: none !important;
+}
+/* The whole viewport says "you are panning", not just the empty parts of it. */
+[data-space-pan='true'] .affine-edgeless-viewport,
+[data-space-pan='true'] voidspace-shot,
+[data-space-pan='true'] voidspace-screenplay {
+  cursor: grab !important;
+}

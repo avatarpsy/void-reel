@@ -28,8 +28,15 @@
  * only report block flavours, so the agent knew a shot "contained an image"
  * without knowing what that image was for, and could not address it to change it.
  */
+import { GfxControllerIdentifier } from '@blocksuite/std/gfx';
+
 import type { MountedBoard } from '../blocksuite/editor';
 import { placeAsset } from '../board/asset-media';
+import {
+  COLOR_NAMES, drawOnCanvas, editCanvas, mediaUrlOf, readCanvas, readSelection,
+  type EditOp, type ElementSpec,
+} from '../board/canvas';
+import { pendingToast } from '../ui/toast';
 import { renderBoardThumbnail } from '../board/thumbnail';
 import { compileBoard, describeShot } from '../shot/screenplay';
 import {
@@ -37,6 +44,7 @@ import {
   type MediaRole, type RefKind,
 } from '../shot/model';
 import { allBlocks, findBlock, searchBlocks, setBlockCatalogue } from '../shot/blocks';
+import { canvasMediaFor } from '../shot/canvas-drop';
 import { readParsed, readScript, writeScript } from '../shot/screenplay-doc';
 import { coverage, nextScene, renderScene, renderScriptContext } from '../shot/resolution';
 import { sequenceOf } from '../shot/fountain';
@@ -78,6 +86,39 @@ export function getBoardRev(): number {
 /** Refusal shape shared by every handler, mirroring the image editor's. */
 function fail(reason: string, message: string) {
   return { ok: false as const, reason, message };
+}
+
+/**
+ * An array argument, WHETHER OR NOT THE MODEL STRINGIFIED IT.
+ *
+ * ── A REAL FAILURE, FOUR TIMES IN ONE TURN ───────────────────────────────────
+ * Smaller/cheaper models routinely emit a nested array as a JSON STRING:
+ *
+ *   "elements": "[{\"kind\": \"text\", ...}]"     ← not an array
+ *
+ * `Array.isArray` then says no, the handler answers "Send at least one element",
+ * and the agent — which did nothing wrong and has no way to see the difference —
+ * retries the identical call. Observed on a live board: two of the four
+ * `board_draw` attempts in one turn died this way, each costing a full LLM round
+ * trip, and the user watched a spinner for minutes before anything appeared.
+ *
+ * Parsing it is not leniency for its own sake. The tool schema is unambiguous,
+ * the model's intent is unambiguous, and the only thing standing between them is
+ * a pair of quotes we can remove for free.
+ */
+function asArray<T>(value: unknown): T[] {
+  if (Array.isArray(value)) return value as T[];
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (!text.startsWith('[')) return [];
+    try {
+      const parsed = JSON.parse(text);
+      return Array.isArray(parsed) ? (parsed as T[]) : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
 }
 
 /**
@@ -268,6 +309,21 @@ export interface BoardRpcOptions {
   /** Force a cloud snapshot. Compile calls it so the stored document can never
    *  be older than the project built from it. */
   flushCloud?: () => Promise<void>;
+  /**
+   * The screenplay focus overlay, fetched lazily.
+   *
+   * A getter rather than the object, because the RPC is installed before the
+   * chrome is — the handshake that tells the parent the board is ready must not
+   * wait on panels — and reordering boot to satisfy one handler would be
+   * trading a real invariant for a convenience.
+   */
+  screenplay?: () => {
+    open(): void;
+    close(): void;
+    isOpen(): boolean;
+    print(): void;
+    downloadFountain(): void;
+  } | null;
 }
 
 export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {}): () => void {
@@ -276,12 +332,62 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
   // shot takes its references with it and there is no sidecar left to prune.
   const sub = board.store.slots.blockUpdated.subscribe(() => { rev++; });
 
+  /** Open pending toasts, by the parent's id — see `board-progress`. */
+  const progress = new Map<string, () => void>();
+
+  /**
+   * TELL THE PARENT WHAT IS SELECTED, AS IT CHANGES.
+   *
+   * Pushed rather than polled. The agent's per-turn context is assembled when
+   * the user hits send, and asking the iframe at that moment would add a round
+   * trip to every message; pushing means the page always already knows.
+   *
+   * Ids and counts only — the urls are fetched with `board-selection` when a
+   * generation actually needs them, because a selection change fires on every
+   * click and most of them are never used for anything.
+   */
+  const gfx = board.std.get(GfxControllerIdentifier);
+  const selectionSub = gfx.selection.slots.updated.subscribe(() => {
+    const items = readCanvas(board.std, true);
+    window.parent?.postMessage({
+      type: 'voidspace:board-selection-changed',
+      ids: items.map(i => i.id),
+      // A one-line description, so the page can say "3 images selected" without
+      // a second call and the agent's context can carry it for free.
+      summary: items.map(i => `${i.kind}${i.text ? `: ${i.text.slice(0, 40)}` : ''}`),
+    }, '*');
+  });
+
   /** Every mutating handler starts the same way. */
   const guard = (args: Record<string, unknown>) => {
     const locked = checkWritable(board);
     if (!locked.ok) return locked;
     return checkRev(args.expectRev);
   };
+
+  /**
+   * ADDITIVE WRITES DO NOT NEED THE REVISION GUARD, and enforcing it there was
+   * actively breaking the board.
+   *
+   * `expectRev` exists for ONE failure: the agent reads a shot, thinks for a few
+   * seconds, and writes back a value computed from state the user has since
+   * changed. That is a genuine lost update, and it is why every shot mutation
+   * still checks it.
+   *
+   * Drawing a note is not that. It overwrites nothing, so there is nothing to
+   * lose — and the check was refusing it constantly, because `rev` counts EVERY
+   * `blockUpdated` on the document, not just the user's edits. Measured on a
+   * live board: a freshly-opened, empty canvas already reported `rev: 444`, and
+   * by the time the agent had finished reading the journal it had moved again.
+   * Two of four `board_draw` attempts in one turn came back `board_changed`
+   * about a board nobody had touched, and the agent — correctly following the
+   * error's own advice — re-read and retried, twice, at a full LLM round trip
+   * each.
+   *
+   * A guard that fires on a board nobody edited is not a safety feature; it is a
+   * random failure with a reassuring name.
+   */
+  const addGuard = (_args: Record<string, unknown>) => checkWritable(board);
 
   /** Resolve a shot id, or say plainly that it is gone. */
   const needShot = (id: string) =>
@@ -571,8 +677,66 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
       const shotId = String(args.shotId ?? '');
       const missing = needShot(shotId); if (missing) return missing;
 
+      /**
+       * FROM THE CANVAS — the hole this closes.
+       *
+       * The user can drag a picture off the board onto a shot (`canvas-drop.ts`)
+       * and the agent could not do the same thing, because attaching took a URL
+       * and a canvas read deliberately withholds URLs (they are long, signed, and
+       * not something a language model should hold). So "put that one on scene 2"
+       * — about a picture the agent had just generated and could see — was
+       * unanswerable. Two collaborators, one board, and only one of them could
+       * move a reference into a scene.
+       *
+       * Resolved HERE, board-side, so the URL still never crosses to the model.
+       * Behaves exactly like the drag: it MOVES, because leaving a copy behind
+       * gives the user two of the same thing and no way to tell which one the
+       * video will use. `keepOnCanvas` covers the honest exception — the same
+       * reference wanted in two scenes.
+       */
+      const canvasId = String(args.canvasId ?? '');
+      if (canvasId) {
+        const from = canvasMediaFor(board.std, canvasId);
+        if (!from) {
+          return fail(
+            'not_found',
+            `${canvasId} is not media on the canvas. Call board_canvas_read for the current ids.`,
+          );
+        }
+        const target = readShot(board.std, shotId);
+        const legal = rolesFor(
+          target?.kind ?? 'clip',
+          from.kind,
+          findBlock(target?.composition ?? '')?.slots,
+        );
+        const asked = String(args.role ?? '');
+        const role: MediaRole = legal.includes(asked)
+          ? asked
+          : from.kind === 'audio' ? 'sfx' : 'reference';
+
+        board.store.captureSync();
+        const newId = addMedia(board.std, shotId, { ...from, role });
+        if (!newId) return fail('rejected', 'That shot would not take this asset.');
+
+        if (typeof args.tag === 'string' || typeof args.note === 'string') {
+          tagMedia(board.std, shotId, newId, {
+            ...(typeof args.tag === 'string' && args.tag.trim() ? { tag: args.tag } : {}),
+            ...(typeof args.note === 'string' && args.note.trim() ? { note: args.note } : {}),
+          });
+        }
+
+        if (args.keepOnCanvas !== true) {
+          const block = board.std.store.getBlock(canvasId);
+          if (block) board.std.store.deleteBlock(block.model);
+        }
+        rev++;
+        return { ...digest(board), attachedId: newId, movedFromCanvas: canvasId };
+      }
+
       const url = String(args.url ?? args.originalUrl ?? '');
-      if (!url) return fail('empty', 'No media url was given.');
+      if (!url) {
+        return fail('empty', 'Give a `url` from search_media, or a `canvasId` from board_canvas_read.');
+      }
       const kind = args.kind === 'video' ? 'video' : args.kind === 'audio' ? 'audio' : 'image';
       /**
        * ASK WHAT IS LEGAL FOR THIS SHOT, not what is in the fixed list.
@@ -985,33 +1149,331 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
     },
 
     /**
-     * Place a Library asset on the OPEN CANVAS — thinking space, not a shot.
+     * Place Library media on the OPEN CANVAS — thinking space, not a shot.
      *
-     * Kept for the agent's "put this where I can see it" case: mood boards,
-     * alternatives to compare, anything not yet committed to a scene. Anything
-     * meant for a scene goes through `board-attach-media`, which is both cheaper
-     * and the only route compile reads.
+     * The agent's "put these where I can see them" case: mood boards,
+     * alternatives to compare, the reference pile a decision gets made from.
+     * Anything meant for a scene goes through `board-attach-media`, which is
+     * cheaper and is the only route compile reads.
+     *
+     * ── A BATCH, LAID OUT AS A GRID ──────────────────────────────────────────
+     * A mood board is six pictures, and six calls would be six network round
+     * trips, six undo steps, and six cards stacked on the same coordinate. So
+     * this takes a list and arranges it — which is the whole difference between
+     * "the agent can add an image" and "the agent can put a mood board up".
+     *
+     * The single-asset shape still works: an older client sending flat fields
+     * gets exactly what it used to.
+     *
+     * ── LOW-RES ON THE CANVAS, ALWAYS ────────────────────────────────────────
+     * `displayUrl` is what gets fetched and `url` is only recorded, so a board of
+     * fifty stills costs fifty thumbnails and never fifty masters. When the agent
+     * sends only one url this now warns rather than silently pulling a 4K master
+     * into a 300px card — the panel's own drag path always sends both, so a
+     * missing `displayUrl` means the agent skipped `search_media`.
      */
     'voidspace:board-insert-media': async args => {
+      const g = addGuard(args); if (!g.ok) return g;
+
+      const parsedItems = asArray<Record<string, unknown>>(args.items);
+      const rows = parsedItems.length ? parsedItems : [args];
+
+      /** A tidy grid in clear space, unless the caller said where. */
+      const COLS = 4;
+      const CELL_W = 340;
+      const CELL_H = 250;
+      const origin = { x: 0, y: SHOT_H + 240 };
+
+      const placedIds: string[] = [];
+      const problems: string[] = [];
+      let missingDisplay = 0;
+
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        const url = String(row.displayUrl ?? row.url ?? '');
+        if (!url) { problems.push(`Item ${i + 1} had no url.`); continue; }
+        if (!row.displayUrl) missingDisplay++;
+
+        const kind = row.kind === 'video' || row.kind === 'audio' ? row.kind : 'image';
+        const at = rows.length > 1
+          ? {
+              x: origin.x + (i % COLS) * CELL_W,
+              y: origin.y + Math.floor(i / COLS) * CELL_H,
+            }
+          : null;
+
+        const placed = await placeAsset(board.std, {
+          displayUrl: url,
+          originalUrl: typeof row.originalUrl === 'string'
+            ? row.originalUrl
+            : typeof row.url === 'string' ? row.url : undefined,
+          kind,
+          mediaId: typeof row.mediaId === 'string' ? row.mediaId : undefined,
+          scope: row.scope === 'shared' || row.scope === 'device' ? row.scope : 'mine',
+          name: typeof row.name === 'string' ? row.name : undefined,
+          posterUrl: typeof row.posterUrl === 'string' ? row.posterUrl : undefined,
+          bytes: typeof row.bytes === 'number' ? row.bytes : undefined,
+          createdBy: 'agent',
+          // Provenance travels with the asset — see `BlockMeta`.
+          ...(typeof row.prompt === 'string' ? { prompt: row.prompt } : {}),
+          ...(Array.isArray(row.referenceIds) ? { referenceIds: row.referenceIds.map(String) } : {}),
+          ...(typeof row.model === 'string' ? { model: row.model } : {}),
+          ...(typeof row.sourceUrl === 'string' ? { sourceUrl: row.sourceUrl } : {}),
+          ...(typeof row.credit === 'string' ? { credit: row.credit } : {}),
+        });
+
+        // A DEAD LINK IS NOT A CRASH. The agent needs to be told an asset could
+        // not be loaded so it can say so, rather than reporting success over an
+        // empty canvas.
+        if (!placed.ok) { problems.push(`${row.name ?? url}: ${placed.message}`); continue; }
+        placedIds.push(placed.blockId);
+
+        // Arranged AFTER placement: the insert helpers size a card from the real
+        // media, so overriding the box here would undo the aspect they just
+        // worked out. Only the position moves.
+        if (at) {
+          const model = board.store.getBlock(placed.blockId)?.model;
+          const box = model ? bounds(model.props as { xywh?: string }) : null;
+          if (model && box) {
+            board.store.updateBlock(model, { xywh: `[${at.x},${at.y},${box.w},${box.h}]` });
+          }
+        }
+      }
+
+      if (!placedIds.length) {
+        return fail(
+          'unavailable',
+          problems.join(' ') || 'Nothing could be placed on the canvas.',
+        );
+      }
+
+      rev++;
+      const boxes = placedIds
+        .map(id => board.store.getBlock(id)?.model)
+        .map(m => (m ? bounds(m.props as { xywh?: string }) : null))
+        .filter((b): b is { x: number; y: number; w: number; h: number } => !!b);
+      if (boxes.length) {
+        ensureVisible({
+          x: Math.min(...boxes.map(b => b.x)),
+          y: Math.min(...boxes.map(b => b.y)),
+          w: Math.max(...boxes.map(b => b.x + b.w)) - Math.min(...boxes.map(b => b.x)),
+          h: Math.max(...boxes.map(b => b.y + b.h)) - Math.min(...boxes.map(b => b.y)),
+        });
+      }
+
+      return {
+        ok: true as const,
+        rev,
+        placed: placedIds.length,
+        insertedIds: placedIds,
+        // Kept so a single-asset caller reads the same field it always did.
+        insertedId: placedIds[0],
+        ...(problems.length ? { problems } : {}),
+        ...(missingDisplay
+          ? {
+              note: `${missingDisplay} item(s) had no displayUrl, so the canvas loaded the `
+                + 'full-quality file. Pass the `displayUrl` from search_media — the canvas '
+                + 'only ever needs the small variant.',
+            }
+          : {}),
+      };
+    },
+
+    /**
+     * WHAT IS ON THE OPEN CANVAS — the half of the board the agent was blind to.
+     *
+     * Read-only and free. Includes the board's own blocks (shots, the
+     * screenplay, block drafts) marked `owned`: without them the agent's picture
+     * of the board was a lie, so it would place a note straight on top of scene
+     * 3 and could not draw an arrow from an idea to the shot it was about.
+     */
+    'voidspace:board-canvas-read': args => {
+      /**
+       * SELECTION-ONLY IS THE COMMON CASE, not a filter.
+       *
+       * "Use these four" is the sentence the canvas exists to make sayable, and
+       * answering it by returning the whole board and hoping the agent guesses
+       * which four is how you get the wrong four. The selection is also usually
+       * tiny, so this is the cheap read as well as the right one.
+       */
+      const selectionOnly = args?.selectionOnly === true;
+      const items = readCanvas(board.std, selectionOnly);
+      const selection = readSelection(board.std);
+      return {
+        ok: true as const,
+        rev,
+        count: items.length,
+        /** The vocabulary `board_draw` takes, so a read teaches the write. */
+        colors: COLOR_NAMES,
+        items,
+        /** What the user is pointing at, always — even on a full read. */
+        selectedIds: selection.ids,
+      };
+    },
+
+    /**
+     * WHAT IS SELECTED — or the media behind any ids the caller names.
+     *
+     * Split from the canvas read because the PAGE needs it, not the agent. The
+     * page assembles a generation's references from this and never puts the urls
+     * in front of the model: signed Library urls are long, they burn context,
+     * and a model that can see them can be talked into repeating one.
+     *
+     * With no `ids` it answers for the selection, which is the case that matters
+     * — "use these four" is the sentence this exists for.
+     */
+    'voidspace:board-selection': args => {
+      const ids = Array.isArray(args.ids) ? args.ids.map(String) : null;
+      if (!ids) return { ok: true as const, rev, ...readSelection(board.std) };
+
+      const items = readCanvas(board.std).filter(i => ids.includes(i.id));
+      return {
+        ok: true as const,
+        rev,
+        ids: items.map(i => i.id),
+        items,
+        // ORDER FOLLOWS THE CALLER, not the canvas. A model receives references
+        // positionally, so "use the first one as the style" only means anything
+        // if the order the agent asked for survives.
+        mediaUrls: ids
+          .map(id => mediaUrlOf(board.std, id))
+          .filter((u): u is string => !!u),
+      };
+    },
+
+    /**
+     * Say that something slow is happening, ON THE CANVAS.
+     *
+     * Generation runs in the PARENT (it owns the session, the credits and the
+     * model picks), and takes a minute or two. The user is looking at the board,
+     * not at the chat — so without this the canvas is silent for ninety seconds
+     * after they asked for a picture, which reads as nothing having happened.
+     *
+     * Reuses the board's own pending toast rather than inventing a progress
+     * surface: the parent says "started" and later "done", and the toast handles
+     * the rest.
+     */
+    'voidspace:board-progress': args => {
+      const id = String(args.id ?? '');
+      if (!id) return fail('empty', 'A progress message needs an id.');
+      if (args.done) {
+        progress.get(id)?.();
+        progress.delete(id);
+      } else {
+        progress.get(id)?.();
+        progress.set(id, pendingToast(String(args.message ?? 'Working…'), 0));
+      }
+      return { ok: true as const, rev };
+    },
+
+    /**
+     * DRAW ON THE CANVAS — notes, text, shapes, arrows, mind maps, frames.
+     *
+     * ONE BATCH, one transaction, ONE undo step. A flowchart is boxes AND the
+     * arrows between them; as separate calls that is a dozen round trips, a
+     * dozen undo steps, and a diagram the user watches assemble itself one
+     * wrong-looking fragment at a time. Specs may refer to each other by `ref`
+     * before any of them have ids, which is what makes that possible.
+     *
+     * Partial failure is REPORTED, never fatal: eight boxes and one bad arrow
+     * leaves eight boxes and a sentence about the arrow.
+     */
+    'voidspace:board-draw': args => {
+      const g = addGuard(args); if (!g.ok) return g;
+      const specs = asArray<ElementSpec>(args.elements);
+      if (!specs.length) {
+        return fail('empty', 'Send at least one element in `elements`.');
+      }
+      if (specs.length > 200) {
+        return fail(
+          'too_many',
+          `That is ${specs.length} elements in one call. Draw at most 200 at a time — `
+          + 'past that the user cannot review what appeared.',
+        );
+      }
+
+      const result = drawOnCanvas(board.std, specs);
+      rev++;
+
+      // SHOW WHAT WAS JUST MADE. A diagram the user has to go and find reads as
+      // a diagram that was never drawn — the same reasoning as `board-add-shots`.
+      const made = result.ids.filter((id): id is string => !!id);
+      const boxes = readCanvas(board.std).filter(i => made.includes(i.id));
+      if (boxes.length) {
+        ensureVisible({
+          x: Math.min(...boxes.map(b => b.x)),
+          y: Math.min(...boxes.map(b => b.y)),
+          w: Math.max(...boxes.map(b => b.x + b.w)) - Math.min(...boxes.map(b => b.x)),
+          h: Math.max(...boxes.map(b => b.y + b.h)) - Math.min(...boxes.map(b => b.y)),
+        });
+      }
+
+      return {
+        ok: true as const,
+        rev,
+        created: made.length,
+        ids: result.ids,
+        refs: result.refs,
+        ...(result.problems.length ? { problems: result.problems } : {}),
+      };
+    },
+
+    /** Move, resize, retext, recolour or delete things already on the canvas. */
+    'voidspace:board-edit-canvas': args => {
       const g = guard(args); if (!g.ok) return g;
-      const url = String(args.displayUrl ?? args.url ?? '');
-      if (!url) return fail('empty', 'No media url was given.');
-      const kind = args.kind === 'video' || args.kind === 'audio' ? args.kind : 'image';
-      const placed = await placeAsset(board.std, {
-        displayUrl: url,
-        originalUrl: typeof args.originalUrl === 'string' ? args.originalUrl : undefined,
-        kind,
-        mediaId: typeof args.mediaId === 'string' ? args.mediaId : undefined,
-        scope: args.scope === 'shared' || args.scope === 'device' ? args.scope : 'mine',
-        name: typeof args.name === 'string' ? args.name : undefined,
-        posterUrl: typeof args.posterUrl === 'string' ? args.posterUrl : undefined,
-        bytes: typeof args.bytes === 'number' ? args.bytes : undefined,
-      });
-      // A DEAD LINK IS NOT A CRASH. The agent needs to be told the asset could
-      // not be loaded so it can say so, rather than reporting success over an
-      // empty canvas.
-      if (!placed.ok) return fail(placed.reason, placed.message);
-      return { ...digest(board), insertedId: placed.blockId };
+      const ops = asArray<EditOp>(args.ops);
+      if (!ops.length) return fail('empty', 'Send at least one operation in `ops`.');
+
+      const result = editCanvas(board.std, ops);
+      rev++;
+      return {
+        ok: true as const,
+        rev,
+        changed: result.changed,
+        ...(result.problems.length ? { problems: result.problems } : {}),
+      };
+    },
+
+    /**
+     * OPEN, CLOSE OR EXPORT THE SCREENPLAY AT PAGE SIZE.
+     *
+     * The agent gets the same three actions the toolbar has, because the reason
+     * the chat is still on screen in focus mode is that "tighten scene four,
+     * then send me the PDF" is one sentence and should be one exchange.
+     *
+     * `pdf` hands the page to the browser's print pipeline, which opens the
+     * user's own print dialog — so the agent can prepare an export but never
+     * silently writes a file to their machine.
+     */
+    'voidspace:board-screenplay': args => {
+      const focus = opts.screenplay?.();
+      if (!focus) return fail('unavailable', 'The screenplay view is not ready yet.');
+
+      const action = String(args.action ?? 'open');
+      if (action === 'close') { focus.close(); return { ok: true as const, rev, open: false }; }
+      if (action === 'pdf') {
+        focus.print();
+        return {
+          ok: true as const,
+          rev,
+          open: true,
+          // Said plainly, because the agent must not claim to have saved a file.
+          note: 'The print dialog is open on the user’s screen — they choose "Save as PDF" '
+            + 'and where it goes. Tell them to look at it.',
+        };
+      }
+      if (action === 'fountain') {
+        focus.downloadFountain();
+        return {
+          ok: true as const,
+          rev,
+          open: focus.isOpen(),
+          note: 'Downloaded the .fountain source — it opens in Final Draft, Highland and '
+            + 'Slugline.',
+        };
+      }
+      focus.open();
+      return { ok: true as const, rev, open: true };
     },
 
     /**
@@ -1149,5 +1611,9 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
   return () => {
     window.removeEventListener('message', onMessage);
     sub.unsubscribe?.();
+    selectionSub.unsubscribe?.();
+    // A remount must not leave a "Generating…" toast on screen forever.
+    progress.forEach(close => close());
+    progress.clear();
   };
 }
