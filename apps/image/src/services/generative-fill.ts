@@ -223,8 +223,34 @@ async function throwGenFillError(res: Response): Promise<never> {
 }
 
 /** Fetch a result image URL and return it as a data URL. */
-async function fetchAsDataUrl(url: string): Promise<string> {
-  const imgRes = await fetch(url);
+/**
+ * Fetch a result and return it as a data URL.
+ *
+ * ── WHY THE TOKEN IS NOT OPTIONAL FOR A LOCAL RESULT ────────────────────────
+ * The cloud paths hand this a PUBLIC provider URL (Kie, fal), which needs no
+ * credentials — which is why it was written without any. A local result is the
+ * opposite: `/api/studio/local-gen-file` serves bytes off the user's own disk and
+ * is gated by `requireUserId`, so a bare fetch gets a 401.
+ *
+ * That produced the single worst failure shape in this whole feature. The render
+ * SUCCEEDED — GPU spiked, the node logged the saved file, the job read `done` —
+ * and then the browser could not collect it, so the user saw a failure for work
+ * that had actually been done. Every server-side test passed because they all set
+ * the header explicitly; only a real browser could find this.
+ *
+ * A `data:` URL is passed through untouched: the mesh path already carries the
+ * bytes inline (no route to a remote node's disk exists) and re-fetching it would
+ * be a pointless round trip through the FileReader.
+ */
+async function fetchAsDataUrl(url: string, token?: string): Promise<string> {
+  if (url.startsWith('data:')) return url;
+  // Same-origin means it is one of ours and therefore authed. An absolute
+  // provider URL must NOT receive the token — sending a Voidspace bearer to a
+  // third party would leak it.
+  const sameOrigin = url.startsWith('/') || url.startsWith(window.location.origin);
+  const imgRes = await fetch(url, {
+    headers: sameOrigin && token ? { Authorization: `Bearer ${token}` } : undefined,
+  });
   if (!imgRes.ok) throw new Error(`fetch result failed (${imgRes.status})`);
   const blob = await imgRes.blob();
   return await new Promise<string>((resolve, reject) => {
@@ -363,7 +389,8 @@ export async function runLocalFill(opts: {
       throw new LocalFillError(p.message || p.logTail?.slice(-1)[0] || 'The local fill failed.');
     }
     if (!p.url) throw new LocalFillError('The local fill produced no image.');
-    return fetchAsDataUrl(p.url);
+    // The token: this URL is ours and authed. See fetchAsDataUrl.
+    return fetchAsDataUrl(p.url, token);
   }
   throw new LocalFillError('The local fill timed out.');
 }
