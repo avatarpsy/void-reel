@@ -45,6 +45,26 @@ export function GenerativeFillPanel() {
    * and context-sensitive edits want it well up.
    */
   const [context, setContext] = useState(0.2);
+  /**
+   * How strongly the WHOLE picture guides the edit.
+   *
+   * The window the model samples is a crop and cannot see the rest of the image.
+   * A recipe with an IP-Adapter takes the full picture as a visual reference and
+   * injects it through cross-attention — global context that costs no window
+   * resolution, which widening the crop can never buy. Above ~0.7 it starts
+   * reproducing the reference instead of informing the edit.
+   */
+  const [referenceWeight, setReferenceWeight] = useState(0.5);
+  /**
+   * How hard the ORIGINAL structure is held.
+   *
+   * Measured on a real photograph, sweeping this with everything else fixed: at
+   * 0.2 and above the structure already wins and the prompt is ignored — asking
+   * for a potted plant returned a retouched version of what was there. That is
+   * correct for retouching and wrong for a fill tool, so it ships at 0 and is
+   * offered as a deliberate choice rather than a default.
+   */
+  const [keepStructure, setKeepStructure] = useState(0);
 
   /**
    * The picker's list, INCLUDING anything on the user's own machine.
@@ -129,6 +149,8 @@ export function GenerativeFillPanel() {
         nativePixelsFrom(selected?.local?.resolutions),
         strength,
         context,
+        referenceWeight,
+        keepStructure,
       );
       showNotification('success', 'Generative fill added on a new layer');
       setOpen(false);
@@ -235,6 +257,56 @@ export function GenerativeFillPanel() {
             <p className="text-[9px] text-muted-foreground leading-tight">
               Lower keeps more of what is there, so the edit matches the surrounding
               light and texture. Higher replaces the region outright.
+            </p>
+          </div>
+        )}
+
+        {/* MATCH THE IMAGE — only for recipes that actually take a reference.
+            A slider bound to nothing is worse than no slider. */}
+        {selected?.engine === 'local' && !notReady && selected.local?.acceptsReference && (
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <label className="text-[10px] text-muted-foreground">Match the image</label>
+              <span className="text-[10px] tabular-nums text-muted-foreground">
+                {referenceWeight <= 0.05 ? 'off'
+                  : referenceWeight >= 0.75 ? 'strong · may copy'
+                  : referenceWeight.toFixed(2)}
+              </span>
+            </div>
+            <input
+              type="range" min={0} max={1} step={0.05}
+              value={referenceWeight}
+              onChange={(e) => setReferenceWeight(Number(e.target.value))}
+              className="w-full accent-primary"
+            />
+            <p className="text-[9px] text-muted-foreground leading-tight">
+              Shows the model the whole picture so the edit matches its palette,
+              light and style — without giving up detail on the selection.
+            </p>
+          </div>
+        )}
+
+        {/* KEEP WHAT'S THERE — the replace/retouch dial. Off by default; see the
+            note on keepStructure for why. */}
+        {selected?.engine === 'local' && !notReady && selected.local?.acceptsControl && (
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <label className="text-[10px] text-muted-foreground">Keep what's there</label>
+              <span className="text-[10px] tabular-nums text-muted-foreground">
+                {keepStructure <= 0.02 ? 'replace'
+                  : keepStructure >= 0.5 ? 'retouch only'
+                  : keepStructure.toFixed(2)}
+              </span>
+            </div>
+            <input
+              type="range" min={0} max={0.8} step={0.05}
+              value={keepStructure}
+              onChange={(e) => setKeepStructure(Number(e.target.value))}
+              className="w-full accent-primary"
+            />
+            <p className="text-[9px] text-muted-foreground leading-tight">
+              Holds the shapes already in the selection. Raise it to retouch or
+              relight what is there; leave it at zero to replace it with your prompt.
             </p>
           </div>
         )}

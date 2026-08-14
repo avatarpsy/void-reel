@@ -105,6 +105,13 @@ export interface FillModelOption {
     resolutions?: string[];
     /** A self-test; filtered out of this picker. */
     diagnostic?: boolean;
+    /** True when the recipe declares a `reference` input, i.e. it can be shown
+     *  the whole picture. Drives whether the reference control is offered — a
+     *  slider bound to nothing is worse than no slider. */
+    acceptsReference?: boolean;
+    /** True when the recipe binds `controlStrength`, i.e. it can hold the
+     *  original structure. Drives whether that control is offered. */
+    acceptsControl?: boolean;
   };
 }
 
@@ -152,6 +159,8 @@ export async function loadFillModels(): Promise<FillModelOption[]> {
           nodeName: m.local.nodeName, ready: !!m.local.ready, missing: m.local.missing,
           resolutions: m.local?.caps?.resolutions ?? m.resolutions,
           diagnostic: m.local?.diagnostic === true,
+          acceptsReference: Array.isArray(m.local?.inputs) && m.local.inputs.includes('reference'),
+          acceptsControl: Array.isArray(m.local?.inputs) && m.local.inputs.includes('controlStrength'),
         },
       }));
     // Ready local models FIRST: someone who has set up their own GPU wants it to
@@ -323,9 +332,65 @@ export async function runGenerativeFill(opts: GenerativeFillOpts): Promise<strin
  * it as a job. Polling means a reload does not abandon a render that is still
  * going — the same reason `gen-clip-start` was split from its status call.
  */
+/**
+ * Assemble the multipart body.
+ *
+ * Split out from `runLocalFill` for one reason: every optional field here fails
+ * SILENTLY when it is wrong. The server drops anything the chosen recipe does not
+ * declare — which is correct, and is how a recipe with no IP-Adapter ignores a
+ * reference — so "the client forgot to send it" and "the recipe cannot use it"
+ * produce byte-identical behaviour. Building the form in a function that can be
+ * called without a GPU is what lets CI hold that contract.
+ *
+ * Note the `Number.isFinite` guards rather than truthiness: `controlStrength` of
+ * 0 is the shipped default and MEANS something ("replace freely"). A falsy check
+ * would drop it and silently restore the structure lock that made the model
+ * ignore the user's prompt.
+ */
+function buildFillForm(opts: {
+  imageBlob: Blob; maskBlob: Blob; referenceBlob?: Blob;
+  prompt: string; model: FillModelId; negative?: string; seed?: number;
+  strength?: number; referenceWeight?: number; controlStrength?: number;
+}): FormData {
+  const form = new FormData();
+  form.append('model', String(opts.model));
+  form.append('prompt', opts.prompt ?? '');
+  if (opts.negative) form.append('negative', opts.negative);
+  if (Number.isFinite(opts.seed)) form.append('seed', String(opts.seed));
+  if (Number.isFinite(opts.strength)) form.append('denoise', String(opts.strength));
+  form.append('image', new File([opts.imageBlob], 'fill-source.png', { type: 'image/png' }));
+  form.append('mask', new File([opts.maskBlob], 'fill-mask.png', { type: 'image/png' }));
+  if (opts.referenceBlob) {
+    form.append('reference', new File([opts.referenceBlob], 'fill-reference.png', { type: 'image/png' }));
+  }
+  if (Number.isFinite(opts.referenceWeight)) {
+    form.append('referenceWeight', String(opts.referenceWeight));
+  }
+  if (Number.isFinite(opts.controlStrength)) {
+    form.append('controlStrength', String(opts.controlStrength));
+  }
+  return form;
+}
+
+/** Test seam: build the body and post it, skipping the sign-in lookup and the
+ *  poll loop. Asserts on what actually goes over the wire. */
+export async function __startLocalFillForTest(
+  opts: Parameters<typeof buildFillForm>[0] & { token: string },
+): Promise<void> {
+  await fetch('/api/studio/local-gen-fill', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${opts.token}` },
+    body: buildFillForm(opts),
+  });
+}
+
 export async function runLocalFill(opts: {
   imageBlob: Blob;
   maskBlob: Blob;
+  /** The WHOLE picture, for recipes that accept a visual reference. See the note
+   *  in apply-generative-fill: this is global context that costs no window
+   *  resolution, which padding cannot provide. */
+  referenceBlob?: Blob;
   prompt: string;
   model: FillModelId;
   negative?: string;
@@ -344,19 +409,19 @@ export async function runLocalFill(opts: {
    * so there is nothing for a lower value to preserve and its graph pins 1.0.
    */
   strength?: number;
+  /** 0..1. How strongly the reference guides. Above ~0.7 it starts reproducing
+   *  the reference rather than informing the edit. */
+  referenceWeight?: number;
+  /** 0..1. How hard the ORIGINAL structure is held. 0 = replace freely (what a
+   *  fill tool is for); high = retouch in place. Measured: at 0.2 and above the
+   *  prompt stops being able to win. */
+  controlStrength?: number;
   onProgress?: (phase: string, pct: number | null) => void;
 }): Promise<string> {
   const token = await getVoidspaceIdToken();
   if (!token) throw new NotSignedInError();
 
-  const form = new FormData();
-  form.append('model', String(opts.model));
-  form.append('prompt', opts.prompt ?? '');
-  if (opts.negative) form.append('negative', opts.negative);
-  if (Number.isFinite(opts.seed)) form.append('seed', String(opts.seed));
-  if (Number.isFinite(opts.strength)) form.append('denoise', String(opts.strength));
-  form.append('image', new File([opts.imageBlob], 'fill-source.png', { type: 'image/png' }));
-  form.append('mask', new File([opts.maskBlob], 'fill-mask.png', { type: 'image/png' }));
+  const form = buildFillForm(opts);
 
   const res = await fetch('/api/studio/local-gen-fill', {
     method: 'POST',

@@ -378,6 +378,10 @@ export async function applyGenerativeFill(
   /** 0 tight .. 1 wide. How much of the picture goes to the model with the
    *  selection. See CONTEXT_DEFAULT. */
   context?: number,
+  /** How strongly the whole-image reference guides the edit. 0 disables it. */
+  referenceWeight?: number,
+  /** How hard the original structure is held. 0 = replace freely. */
+  controlStrength?: number,
 ): Promise<string> {
   const projStore = useProjectStore.getState();
   const { project, selectedArtboardId } = projStore;
@@ -457,12 +461,32 @@ export async function applyGenerativeFill(
     // the target: translate by the window origin, then scale to the target size.
     const maskC = buildWindowMask(selection, win);
 
+    /**
+     * THE WHOLE PICTURE, as a visual reference.
+     *
+     * The window the model samples is a crop, so it cannot see the rest of the
+     * image — that is the structural limit of crop-and-stitch and the reason an
+     * edit can be locally convincing and globally wrong. A recipe with an
+     * IP-Adapter takes this second image and injects it through cross-attention,
+     * which is global context at NO cost in window resolution. Padding can never
+     * buy that; it only trades detail away.
+     *
+     * The already-downscaled composite is sent rather than the master: the
+     * reference is encoded to a fixed-size embedding regardless, so full
+     * resolution here would be megabytes for no gain. A recipe with no reference
+     * binding simply ignores it.
+     */
+    const referenceBlob = await canvasToBlob(sc, 'image/png');
+
     const filledWindow = await runLocalFill({
       imageBlob: await canvasToBlob(winC, 'image/png'),
       maskBlob: await canvasToBlob(maskC, 'image/png'),
+      referenceBlob,
       prompt,
       model: model!,
       strength,
+      referenceWeight,
+      controlStrength,
     });
 
     // Expand back to a full-artboard-shaped image. Everything after this point

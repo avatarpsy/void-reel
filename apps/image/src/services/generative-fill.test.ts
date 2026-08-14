@@ -23,7 +23,9 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { fillEngine, FILL_MODELS, __fetchResultForTest } from './generative-fill';
+import {
+  fillEngine, FILL_MODELS, __fetchResultForTest, __startLocalFillForTest,
+} from './generative-fill';
 
 describe('fillEngine', () => {
   it('routes a local model id by SHAPE, not by a catalogue lookup', () => {
@@ -97,5 +99,62 @@ describe('collecting a result', () => {
   it('does not invent a header when there is no token', async () => {
     await __fetchResultForTest('/api/studio/local-gen-file?f=a/b.png', undefined);
     expect(seen[0].auth).toBeUndefined();
+  });
+});
+
+/**
+ * THE REFERENCE AND THE STRUCTURE DIAL.
+ *
+ * Both are optional fields, and optional fields fail quietly: the server drops
+ * anything the recipe does not declare (correct — that is how a recipe without an
+ * IP-Adapter ignores a reference), so a client that never sent the field and a
+ * recipe that cannot accept it look identical from the outside. The end-to-end
+ * proof for this lives in `prove_web_reference.py`, which runs the same fill twice
+ * changing only the reference weight and asserts the pixels differ. That needs a
+ * GPU, so these hold the client half of the contract in CI.
+ */
+describe('optional fill inputs', () => {
+  let form: FormData;
+
+  beforeEach(() => {
+    vi.stubGlobal('window', { location: { origin: 'https://voidspace.ai' } });
+    vi.stubGlobal('File', class { constructor(public parts: any, public name: string) {} } as any);
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: any) => {
+      form = init?.body;
+      return { ok: true, status: 200, json: async () => ({ jobId: 'j1', via: 'loopback' }) } as any;
+    }));
+  });
+
+  const start = (extra: Record<string, unknown>) => __startLocalFillForTest({
+    imageBlob: new Blob(['i']),
+    maskBlob: new Blob(['m']),
+    prompt: 'a plant',
+    model: 'local:this-machine/edit-pro' as any,
+    token: 'tok',
+    ...extra,
+  });
+
+  it('sends the whole-image reference when one is supplied', async () => {
+    await start({ referenceBlob: new Blob(['r']) });
+    expect(form.has('reference')).toBe(true);
+  });
+
+  it('omits the reference entirely when there is none, rather than sending an empty part', async () => {
+    await start({});
+    expect(form.has('reference')).toBe(false);
+  });
+
+  it('carries referenceWeight and controlStrength through as their own fields', async () => {
+    await start({ referenceBlob: new Blob(['r']), referenceWeight: 0.5, controlStrength: 0 });
+    expect(form.get('referenceWeight')).toBe('0.5');
+    // 0 is meaningful — it is the shipped default and means "replace freely".
+    // A truthiness check here would drop it and silently re-enable structure lock.
+    expect(form.get('controlStrength')).toBe('0');
+  });
+
+  it('leaves both out when the caller did not choose, so recipe defaults win', async () => {
+    await start({ referenceBlob: new Blob(['r']) });
+    expect(form.has('referenceWeight')).toBe(false);
+    expect(form.has('controlStrength')).toBe(false);
   });
 });
