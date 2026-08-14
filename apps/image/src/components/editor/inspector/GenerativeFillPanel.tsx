@@ -29,6 +29,13 @@ export function GenerativeFillPanel() {
   const [referenceName, setReferenceName] = useState<string | null>(null);
   const [uploadingRef, setUploadingRef] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  /**
+   * A1111's Denoising strength, exposed because it is the control that decides
+   * whether an edit blends or looks pasted in. Low values refine what is there and
+   * inherit the surrounding lighting and texture; high values replace it outright.
+   * 0.65 is a blending default — A1111 ships 0.75 and retouching work lives lower.
+   */
+  const [strength, setStrength] = useState(0.65);
 
   /**
    * The picker's list, INCLUDING anything on the user's own machine.
@@ -111,6 +118,7 @@ export function GenerativeFillPanel() {
       await applyGenerativeFill(
         prompt.trim(), model, referenceUrl ?? undefined,
         nativePixelsFrom(selected?.local?.resolutions),
+        strength,
       );
       showNotification('success', 'Generative fill added on a new layer');
       setOpen(false);
@@ -196,6 +204,30 @@ export function GenerativeFillPanel() {
             ))}
           </select>
         </div>
+
+        {/* STRENGTH — local recipes only. A cloud editor has no equivalent knob,
+            and a slider that silently does nothing is worse than no slider. */}
+        {selected?.engine === 'local' && !notReady && (
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <label className="text-[10px] text-muted-foreground">Strength</label>
+              <span className="text-[10px] tabular-nums text-muted-foreground">
+                {strength.toFixed(2)}
+                {strength <= 0.45 ? ' · subtle' : strength >= 0.9 ? ' · replaces' : ' · blends'}
+              </span>
+            </div>
+            <input
+              type="range" min={0.2} max={1} step={0.05}
+              value={strength}
+              onChange={(e) => setStrength(Number(e.target.value))}
+              className="w-full accent-primary"
+            />
+            <p className="text-[9px] text-muted-foreground leading-tight">
+              Lower keeps more of what is there, so the edit matches the surrounding
+              light and texture. Higher replaces the region outright.
+            </p>
+          </div>
+        )}
 
         {/* What a local model is waiting for, in the panel where it was chosen.
             The alternative is finding out after pressing Generate. */}

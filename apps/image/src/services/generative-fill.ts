@@ -330,6 +330,20 @@ export async function runLocalFill(opts: {
   model: FillModelId;
   negative?: string;
   seed?: number;
+  /**
+   * A1111's Denoising strength, and the single most useful control here.
+   *
+   * How much of the original region the model is allowed to discard. Low values
+   * refine what is there — the edit inherits the lighting, texture and
+   * perspective of its surroundings. High values replace it outright, which is
+   * how an edit ends up looking pasted in: at 0.85 the model has effectively
+   * stopped answering to the rest of the picture.
+   *
+   * Only meaningful for a recipe whose latent keeps the original (VAEEncode +
+   * SetLatentNoiseMask). A recipe built on VAEEncodeForInpaint erases the region,
+   * so there is nothing for a lower value to preserve and its graph pins 1.0.
+   */
+  strength?: number;
   onProgress?: (phase: string, pct: number | null) => void;
 }): Promise<string> {
   const token = await getVoidspaceIdToken();
@@ -340,6 +354,7 @@ export async function runLocalFill(opts: {
   form.append('prompt', opts.prompt ?? '');
   if (opts.negative) form.append('negative', opts.negative);
   if (Number.isFinite(opts.seed)) form.append('seed', String(opts.seed));
+  if (Number.isFinite(opts.strength)) form.append('denoise', String(opts.strength));
   form.append('image', new File([opts.imageBlob], 'fill-source.png', { type: 'image/png' }));
   form.append('mask', new File([opts.maskBlob], 'fill-mask.png', { type: 'image/png' }));
 

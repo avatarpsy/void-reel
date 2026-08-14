@@ -297,6 +297,9 @@ export async function applyGenerativeFill(
   /** The chosen model's native pixel budget, from its recipe. Only meaningful for
    *  a local model; the cloud engines size their own requests. */
   nativePixels?: number | null,
+  /** A1111's Denoising strength — how much of the region may be discarded.
+   *  Local recipes only; the cloud engines have no equivalent knob. */
+  strength?: number,
 ): Promise<string> {
   const projStore = useProjectStore.getState();
   const { project, selectedArtboardId } = projStore;
@@ -381,6 +384,7 @@ export async function applyGenerativeFill(
       maskBlob: await canvasToBlob(maskC, 'image/png'),
       prompt,
       model: model!,
+      strength,
     });
 
     // Expand back to a full-artboard-shaped image. Everything after this point
