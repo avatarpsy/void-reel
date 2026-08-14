@@ -27,6 +27,31 @@ export class GenFillError extends Error {
   }
 }
 
+/**
+ * A LOCAL fill that failed, carrying the reason.
+ *
+ * ── WHY THIS IS NOT `GenFillError` ──────────────────────────────────────────
+ * `GenFillError` deliberately carries no server text: a cloud fill goes through
+ * a provider, and provider internals have no business reaching a user's screen.
+ * That rule is right, and applying it here was wrong. A local fill has no
+ * provider — it is the user's own ComfyUI on their own machine, and the message
+ * is the single most useful thing we have: which weight file is missing, which
+ * node errored, that they need to start ComfyUI.
+ *
+ * The whole client surfaces ComfyUI's own errors verbatim precisely so this
+ * moment is diagnosable. Reducing it to "Couldn't generate. Please try again."
+ * at the final hop threw all of that away.
+ */
+export class LocalFillError extends Error {
+  /** HTTP status, when the failure was the request rather than the render. */
+  status?: number;
+  constructor(message: string, status?: number) {
+    super(message);
+    this.name = 'LocalFillError';
+    this.status = status;
+  }
+}
+
 /** The user's billing situation, used to tailor the out-of-credits popup
  *  (subscribed → top up; not → subscribe). Best-effort; defaults to not-subscribed. */
 export async function fetchCreditSituation(): Promise<{ isSubscribed: boolean }> {
@@ -57,10 +82,106 @@ export const FILL_MODELS = [
   { id: 'gpt-image-2', label: 'GPT Image 2 (edit)', credits: 4, engine: 'kie', refMode: 'optional' },
 ] as const;
 
-export type FillModelId = typeof FILL_MODELS[number]['id'];
+/** Widened to a plain string: a LOCAL model's id is `local:<node>/<recipe>` and
+ *  is only known at runtime, so it cannot be part of a literal union. The cloud
+ *  ids above still autocomplete because they are what the array holds. */
+export type FillModelId = typeof FILL_MODELS[number]['id'] | (string & {});
+
+/** One entry in the picker — cloud or local. */
+export interface FillModelOption {
+  id: string;
+  label: string;
+  credits: number;
+  engine: 'fal' | 'kie' | 'local';
+  refMode: 'none' | 'optional' | 'required';
+  /** Local only: whether the machine can run it, and what it needs if not. */
+  local?: {
+    nodeName: string;
+    ready: boolean;
+    missing?: string;
+    /** The recipe's declared native resolutions, e.g. ["512x512"]. Drives the
+     *  crop-and-stitch window size — a model run far outside its training
+     *  resolution produces incoherent output, not merely softer output. */
+    resolutions?: string[];
+    /** A self-test; filtered out of this picker. */
+    diagnostic?: boolean;
+    /** True when the recipe declares a `reference` input, i.e. it can be shown
+     *  the whole picture. Drives whether the reference control is offered — a
+     *  slider bound to nothing is worse than no slider. */
+    acceptsReference?: boolean;
+    /** True when the recipe binds `controlStrength`, i.e. it can hold the
+     *  original structure. Drives whether that control is offered. */
+    acceptsControl?: boolean;
+  };
+}
+
+/**
+ * Models the user can fill with, INCLUDING any on their own hardware.
+ *
+ * ── WHY THIS IS FETCHED AND NOT A CONSTANT ──────────────────────────────────
+ * A cloud model exists for everyone. A local one exists only while a particular
+ * machine of theirs is switched on, so the list genuinely differs per request and
+ * cannot be baked in. `/api/studio/models` already merges the two — that endpoint
+ * is the single catalogue every picker in the product reads, which is what stops
+ * this from becoming a second source of truth about what exists.
+ *
+ * Falls back to the static cloud list if the catalogue cannot be reached: the
+ * editor must keep working offline-ish, and a picker that empties itself because
+ * a fetch failed is worse than one that is merely missing the local rows.
+ */
+export async function loadFillModels(): Promise<FillModelOption[]> {
+  const cloud: FillModelOption[] = FILL_MODELS.map((m) => ({ ...m }));
+  try {
+    const token = await getVoidspaceIdToken();
+    if (!token) return cloud;
+    const res = await fetch('/api/studio/models?category=image', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return cloud;
+    const j = await res.json();
+    const local: FillModelOption[] = (j?.models ?? [])
+      .filter((m: any) => m?.surface === 'local' && m?.local)
+      // Only workflows that EDIT. A text-to-image recipe cannot honour a mask,
+      // and offering it here would produce a full-frame replacement that the
+      // editor would then crop to the selection — a confusing, expensive no-op.
+      .filter((m: any) => ['image.inpaint', 'image.edit'].includes(m.local?.task ?? ''))
+      // Self-tests are not editing tools. `pipeline-check-inpaint` inverts the
+      // selection to prove the plumbing; offering that beside real models would
+      // be offering a feature nobody wants.
+      .filter((m: any) => m.local?.diagnostic !== true)
+      .map((m: any) => ({
+        id: m.id,
+        label: m.label,
+        credits: 0,
+        engine: 'local' as const,
+        refMode: 'none' as const,
+        local: {
+          nodeName: m.local.nodeName, ready: !!m.local.ready, missing: m.local.missing,
+          resolutions: m.local?.caps?.resolutions ?? m.resolutions,
+          diagnostic: m.local?.diagnostic === true,
+          acceptsReference: Array.isArray(m.local?.inputs) && m.local.inputs.includes('reference'),
+          acceptsControl: Array.isArray(m.local?.inputs) && m.local.inputs.includes('controlStrength'),
+        },
+      }));
+    // Ready local models FIRST: someone who has set up their own GPU wants it to
+    // be the obvious choice, not something they scroll past. Unready ones go last
+    // — visible, so the setup is discoverable, but never the default.
+    return [
+      ...local.filter((m) => m.local?.ready),
+      ...cloud,
+      ...local.filter((m) => !m.local?.ready),
+    ];
+  } catch {
+    return cloud;
+  }
+}
 
 /** The engine backing a model id (defaults to 'fal'). */
-export function fillEngine(id: FillModelId): 'fal' | 'kie' {
+export function fillEngine(id: FillModelId): 'fal' | 'kie' | 'local' {
+  // Checked by ID SHAPE, not by a lookup: the picker's list is async, and a fill
+  // can be triggered (agent tool, re-run of a saved layer) before it has loaded.
+  // The `local:` scheme is `registry.ts#LOCAL_MODEL_PREFIX`.
+  if (typeof id === 'string' && id.startsWith('local:')) return 'local';
   return (FILL_MODELS.find((m) => m.id === id)?.engine ?? 'fal') as 'fal' | 'kie';
 }
 
@@ -129,8 +250,40 @@ async function throwGenFillError(res: Response): Promise<never> {
 }
 
 /** Fetch a result image URL and return it as a data URL. */
-async function fetchAsDataUrl(url: string): Promise<string> {
-  const imgRes = await fetch(url);
+/**
+ * Fetch a result and return it as a data URL.
+ *
+ * ── WHY THE TOKEN IS NOT OPTIONAL FOR A LOCAL RESULT ────────────────────────
+ * The cloud paths hand this a PUBLIC provider URL (Kie, fal), which needs no
+ * credentials — which is why it was written without any. A local result is the
+ * opposite: `/api/studio/local-gen-file` serves bytes off the user's own disk and
+ * is gated by `requireUserId`, so a bare fetch gets a 401.
+ *
+ * That produced the single worst failure shape in this whole feature. The render
+ * SUCCEEDED — GPU spiked, the node logged the saved file, the job read `done` —
+ * and then the browser could not collect it, so the user saw a failure for work
+ * that had actually been done. Every server-side test passed because they all set
+ * the header explicitly; only a real browser could find this.
+ *
+ * A `data:` URL is passed through untouched: the mesh path already carries the
+ * bytes inline (no route to a remote node's disk exists) and re-fetching it would
+ * be a pointless round trip through the FileReader.
+ */
+/** Test seam for the auth rule above. Exported under a deliberately awkward name
+ *  so it reads as internal at every call site: the rule it guards (token for
+ *  same-origin, never for a provider) shipped wrong once and cannot be verified
+ *  from outside a browser any other way. */
+export const __fetchResultForTest = (url: string, token?: string) => fetchAsDataUrl(url, token);
+
+async function fetchAsDataUrl(url: string, token?: string): Promise<string> {
+  if (url.startsWith('data:')) return url;
+  // Same-origin means it is one of ours and therefore authed. An absolute
+  // provider URL must NOT receive the token — sending a Voidspace bearer to a
+  // third party would leak it.
+  const sameOrigin = url.startsWith('/') || url.startsWith(window.location.origin);
+  const imgRes = await fetch(url, {
+    headers: sameOrigin && token ? { Authorization: `Bearer ${token}` } : undefined,
+  });
   if (!imgRes.ok) throw new Error(`fetch result failed (${imgRes.status})`);
   const blob = await imgRes.blob();
   return await new Promise<string>((resolve, reject) => {
@@ -161,6 +314,189 @@ export async function runGenerativeFill(opts: GenerativeFillOpts): Promise<strin
   const resultUrl: string = j.url;
   if (!resultUrl) throw new Error('Generative fill returned no image');
   return fetchAsDataUrl(resultUrl);
+}
+
+/**
+ * Run a masked fill on the USER'S OWN MACHINE. Returns the result as a data URL.
+ *
+ * ── WHAT IS DELETED HERE, NOT ADAPTED ───────────────────────────────────────
+ * The cloud paths above begin by uploading the composite and the mask to Kie's
+ * temp storage, because fal and Kie need a public URL to fetch from. This path
+ * has no upload at all — the bytes go to the website, which hands them to a node
+ * on the same machine. That absence IS the privacy property of local editing: the
+ * user's photograph never leaves their computer, and it has to be true in the code
+ * rather than merely claimed.
+ *
+ * ── WHY IT POLLS ────────────────────────────────────────────────────────────
+ * An inpaint is seconds on a 4090 and a minute on a laptop GPU, and the node runs
+ * it as a job. Polling means a reload does not abandon a render that is still
+ * going — the same reason `gen-clip-start` was split from its status call.
+ */
+/**
+ * Assemble the multipart body.
+ *
+ * Split out from `runLocalFill` for one reason: every optional field here fails
+ * SILENTLY when it is wrong. The server drops anything the chosen recipe does not
+ * declare — which is correct, and is how a recipe with no IP-Adapter ignores a
+ * reference — so "the client forgot to send it" and "the recipe cannot use it"
+ * produce byte-identical behaviour. Building the form in a function that can be
+ * called without a GPU is what lets CI hold that contract.
+ *
+ * Note the `Number.isFinite` guards rather than truthiness: `controlStrength` of
+ * 0 is the shipped default and MEANS something ("replace freely"). A falsy check
+ * would drop it and silently restore the structure lock that made the model
+ * ignore the user's prompt.
+ */
+function buildFillForm(opts: {
+  imageBlob: Blob; maskBlob: Blob; referenceBlob?: Blob;
+  prompt: string; model: FillModelId; negative?: string; seed?: number;
+  strength?: number; referenceWeight?: number; controlStrength?: number;
+}): FormData {
+  const form = new FormData();
+  form.append('model', String(opts.model));
+  form.append('prompt', opts.prompt ?? '');
+  if (opts.negative) form.append('negative', opts.negative);
+  if (Number.isFinite(opts.seed)) form.append('seed', String(opts.seed));
+  if (Number.isFinite(opts.strength)) form.append('denoise', String(opts.strength));
+  form.append('image', new File([opts.imageBlob], 'fill-source.png', { type: 'image/png' }));
+  form.append('mask', new File([opts.maskBlob], 'fill-mask.png', { type: 'image/png' }));
+  if (opts.referenceBlob) {
+    form.append('reference', new File([opts.referenceBlob], 'fill-reference.png', { type: 'image/png' }));
+  }
+  if (Number.isFinite(opts.referenceWeight)) {
+    form.append('referenceWeight', String(opts.referenceWeight));
+  }
+  if (Number.isFinite(opts.controlStrength)) {
+    form.append('controlStrength', String(opts.controlStrength));
+  }
+  return form;
+}
+
+/** Test seam: build the body and post it, skipping the sign-in lookup and the
+ *  poll loop. Asserts on what actually goes over the wire. */
+export async function __startLocalFillForTest(
+  opts: Parameters<typeof buildFillForm>[0] & { token: string },
+): Promise<void> {
+  await fetch('/api/studio/local-gen-fill', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${opts.token}` },
+    body: buildFillForm(opts),
+  });
+}
+
+export async function runLocalFill(opts: {
+  imageBlob: Blob;
+  maskBlob: Blob;
+  /** The WHOLE picture, for recipes that accept a visual reference. See the note
+   *  in apply-generative-fill: this is global context that costs no window
+   *  resolution, which padding cannot provide. */
+  referenceBlob?: Blob;
+  prompt: string;
+  model: FillModelId;
+  negative?: string;
+  seed?: number;
+  /**
+   * A1111's Denoising strength, and the single most useful control here.
+   *
+   * How much of the original region the model is allowed to discard. Low values
+   * refine what is there — the edit inherits the lighting, texture and
+   * perspective of its surroundings. High values replace it outright, which is
+   * how an edit ends up looking pasted in: at 0.85 the model has effectively
+   * stopped answering to the rest of the picture.
+   *
+   * Only meaningful for a recipe whose latent keeps the original (VAEEncode +
+   * SetLatentNoiseMask). A recipe built on VAEEncodeForInpaint erases the region,
+   * so there is nothing for a lower value to preserve and its graph pins 1.0.
+   */
+  strength?: number;
+  /** 0..1. How strongly the reference guides. Above ~0.7 it starts reproducing
+   *  the reference rather than informing the edit. */
+  referenceWeight?: number;
+  /** 0..1. How hard the ORIGINAL structure is held. 0 = replace freely (what a
+   *  fill tool is for); high = retouch in place. Measured: at 0.2 and above the
+   *  prompt stops being able to win. */
+  controlStrength?: number;
+  onProgress?: (phase: string, pct: number | null) => void;
+}): Promise<string> {
+  const token = await getVoidspaceIdToken();
+  if (!token) throw new NotSignedInError();
+
+  const form = buildFillForm(opts);
+
+  const res = await fetch('/api/studio/local-gen-fill', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  });
+  if (!res.ok) {
+    /**
+     * A MISSING ROUTE IS ITS OWN DIAGNOSIS.
+     *
+     * The website server is what carries the local-generation routes, and a
+     * build that predates them answers with a redirect to the SPA shell or a
+     * 404 — never JSON. Reported as "try again" that is unfixable advice for a
+     * problem retrying cannot touch, and it is exactly what happens when the
+     * editor bundle is newer than the server it is talking to.
+     */
+    if (res.status === 404 || res.status === 302 || res.redirected) {
+      throw new LocalFillError(
+        'This website build does not support local generation yet — its server is older than the editor.',
+        res.status,
+      );
+    }
+    // The server's own sentence, which for a local failure names the exact
+    // thing to fix (a weight file, ComfyUI being closed).
+    let detail = '';
+    try {
+      const j = await res.clone().json();
+      detail = String(j?.statusMessage || j?.message || j?.data?.error || '');
+    } catch {
+      detail = (await res.text().catch(() => '')).slice(0, 300);
+    }
+    throw new LocalFillError(
+      detail || `The local render could not start (HTTP ${res.status}).`,
+      res.status,
+    );
+  }
+  const started = await res.json();
+  const jobId: string = started?.jobId;
+  if (!jobId) throw new LocalFillError('The local fill did not start.');
+  // Echoed on every poll. A job id only means something on the node that owns
+  // it, so with a workstation and a laptop both online, losing this would ask
+  // the wrong machine and report a perfectly healthy render as missing.
+  const via: string = started?.via ?? 'loopback';
+  const node: string | undefined = started?.node;
+
+  // ~15 min. An inpaint that has not finished by then is wedged, and a poll loop
+  // with no ceiling is a spinner that never resolves.
+  const DEADLINE = Date.now() + 15 * 60_000;
+  while (Date.now() < DEADLINE) {
+    await new Promise((r) => setTimeout(r, 1200));
+    const sres = await fetch('/api/studio/local-gen-status', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jobId, via, node }),
+    });
+    if (!sres.ok) {
+      if (sres.status === 404) throw new LocalFillError('That local render is no longer on this machine.', 404);
+      continue;                       // a blip; the job is safe on the node
+    }
+    const p = await sres.json();
+    if (p.state === 'running') {
+      const pct = typeof p.progress?.pct === 'number' ? p.progress.pct : null;
+      opts.onProgress?.(String(p.progress?.phase ?? 'rendering'), pct);
+      continue;
+    }
+    if (p.state === 'failed' || p.state === 'cancelled') {
+      // ComfyUI's own message, carried the whole way — it names the node and the
+      // missing file. Ours would say "generation failed".
+      throw new LocalFillError(p.message || p.logTail?.slice(-1)[0] || 'The local fill failed.');
+    }
+    if (!p.url) throw new LocalFillError('The local fill produced no image.');
+    // The token: this URL is ours and authed. See fetchAsDataUrl.
+    return fetchAsDataUrl(p.url, token);
+  }
+  throw new LocalFillError('The local fill timed out.');
 }
 
 /** Run a mask-free Kie edit (nano-banana / gpt-image-2). Uploads the outlined

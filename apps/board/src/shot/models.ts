@@ -50,6 +50,26 @@ export interface ModelCaps {
   referenceTagSyntax: 'Image' | 'image';
   deliveryModes: Array<'first-frame' | 'reference'>;
   defaultDelivery: 'first-frame' | 'reference';
+
+  /**
+   * Present when this model runs on ONE OF THE USER'S OWN MACHINES.
+   *
+   * A local model is not a cheaper cloud model, it is a different kind of thing,
+   * and the two facts the card has to carry are both here: it costs nothing, and
+   * it can be temporarily impossible. A cloud model is either offered or locked;
+   * a local one can be offered, listed, chosen — and still be waiting on a 19 GB
+   * download. `ready: false` is not an error state, it is a to-do, and `missing`
+   * is the sentence that says what.
+   */
+  local?: {
+    /** The machine, as the user calls it. Already inside `label` too, because a
+     *  picker showing two identical rows is a coin flip. */
+    nodeName: string;
+    recipe: string;
+    ready: boolean;
+    /** One sentence naming the FIRST thing to fix. Empty when ready. */
+    missing?: string;
+  };
 }
 
 let catalogue: ModelCaps[] = [];
@@ -165,6 +185,13 @@ export function estimateShotCredits(
   const caps = effectiveModel(shot.model);
   if (!caps) return null;
 
+  // A LOCAL MODEL IS FREE, and that is zero rather than "unknown". Falling
+  // through would reach `return null` — the catalogue sends `credits: 0` and
+  // `pricePerSec: {}`, neither of which passes the `> 0` guards below — and the
+  // card would then print nothing at all where "no gen cost" belongs. Silence
+  // reads as a missing price, not as a free one.
+  if (caps.local) return 0;
+
   // Not planned yet: priced at the model's shortest allowed clip, which is the
   // floor rather than a guess at what they will choose. See `plannedSeconds`.
   const seconds = plannedSeconds(shot);
@@ -239,6 +266,26 @@ export function checkShot(
   const caps = effectiveModel(shot.model);
   if (!caps) return [];
   const out: ShotWarning[] = [];
+
+  /**
+   * A LOCAL MODEL THAT CANNOT RUN YET, said here rather than at generation time.
+   *
+   * This is the whole argument for warnings-not-errors applied to hardware. The
+   * user picks a model on the card, and the card is where they find out that the
+   * machine needs a 19 GB file — while it is still cheap to either go and get it
+   * or pick something else. Discovering it after pressing Generate, having
+   * arranged twelve shots around it, is the same information delivered at the
+   * worst possible moment.
+   *
+   * First in the list, because nothing else about the shot matters until the
+   * model can actually run.
+   */
+  if (caps.local && !caps.local.ready) {
+    out.push({
+      message: `${caps.label} is not ready on ${caps.local.nodeName}. `
+        + (caps.local.missing || 'It needs setting up before this shot can be generated.'),
+    });
+  }
 
   for (const m of shot.media) {
     if (m.role === 'lastFrame' && !caps.supportsLastFrame) {

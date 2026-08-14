@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Sparkles, X, Loader2, Upload } from 'lucide-react';
 import { useUIStore } from '../../../stores/ui-store';
 import { useSelectionStore } from '../../../stores/selection-store';
 import { applyGenerativeFill } from '../../../services/apply-generative-fill';
-import { FILL_MODELS, type FillModelId, GenFillError, fetchCreditSituation, uploadReferenceImage, uploadReferenceFromUrl } from '../../../services/generative-fill';
+import { FILL_MODELS, loadFillModels, type FillModelId, type FillModelOption, GenFillError, LocalFillError, fetchCreditSituation, uploadReferenceImage, uploadReferenceFromUrl } from '../../../services/generative-fill';
+import { nativePixelsFrom } from '../../../services/apply-generative-fill';
 import { NotSignedInError } from '../../../services/voidspace-storage';
 
 /**
@@ -28,12 +29,70 @@ export function GenerativeFillPanel() {
   const [referenceName, setReferenceName] = useState<string | null>(null);
   const [uploadingRef, setUploadingRef] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  /**
+   * A1111's Denoising strength, exposed because it is the control that decides
+   * whether an edit blends or looks pasted in. Low values refine what is there and
+   * inherit the surrounding lighting and texture; high values replace it outright.
+   * 0.65 is a blending default — A1111 ships 0.75 and retouching work lives lower.
+   */
+  const [strength, setStrength] = useState(0.65);
+  /**
+   * How much of the picture travels with the selection.
+   *
+   * A cropped window is the only way to get detail on a small selection, but the
+   * model can condition ONLY on what is inside it — crop tight and it has no idea
+   * what the rest of the image looks like. A1111 calls this "Only masked padding"
+   * and context-sensitive edits want it well up.
+   */
+  const [context, setContext] = useState(0.2);
+  /**
+   * How strongly the WHOLE picture guides the edit.
+   *
+   * The window the model samples is a crop and cannot see the rest of the image.
+   * A recipe with an IP-Adapter takes the full picture as a visual reference and
+   * injects it through cross-attention — global context that costs no window
+   * resolution, which widening the crop can never buy. Above ~0.7 it starts
+   * reproducing the reference instead of informing the edit.
+   */
+  const [referenceWeight, setReferenceWeight] = useState(0.5);
+  /**
+   * How hard the ORIGINAL structure is held.
+   *
+   * Measured on a real photograph, sweeping this with everything else fixed: at
+   * 0.2 and above the structure already wins and the prompt is ignored — asking
+   * for a potted plant returned a retouched version of what was there. That is
+   * correct for retouching and wrong for a fill tool, so it ships at 0 and is
+   * offered as a deliberate choice rather than a default.
+   */
+  const [keepStructure, setKeepStructure] = useState(0);
+
+  /**
+   * The picker's list, INCLUDING anything on the user's own machine.
+   *
+   * Async because a local model exists only while their node is running, so the
+   * list is a fact about right now rather than a constant. Seeded with the cloud
+   * models so the panel is never briefly empty, and re-read whenever the panel
+   * opens — a user who starts ComfyUI and comes straight back should see it
+   * without reloading the editor.
+   */
+  const [models, setModels] = useState<FillModelOption[]>(() => FILL_MODELS.map((m) => ({ ...m })));
+  useEffect(() => {
+    if (!open) return;
+    let live = true;
+    void loadFillModels().then((list) => { if (live) setModels(list); });
+    return () => { live = false; };
+  }, [open]);
 
   // refMode: 'none' hides the upload UI; 'optional' shows it (kie editors);
   // 'required' also gates Generate (FLUX Kontext needs a reference).
-  const refMode = FILL_MODELS.find((m) => m.id === model)?.refMode ?? 'none';
+  const selected = models.find((m) => m.id === model);
+  const refMode = selected?.refMode ?? 'none';
   const showRef = refMode !== 'none';
   const refRequired = refMode === 'required';
+  // A local model that is present but not set up yet is SELECTABLE and shows what
+  // it needs — hiding it would make the setup undiscoverable — but Generate is
+  // blocked, because pressing it could only ever fail.
+  const notReady = selected?.engine === 'local' && selected.local?.ready === false;
 
   if (!open) return null;
 
@@ -82,7 +141,17 @@ export function GenerativeFillPanel() {
     setBusy(true);
     setError(null);
     try {
-      await applyGenerativeFill(prompt.trim(), model, referenceUrl ?? undefined);
+      // The chosen model's native resolution travels with the call: a local
+      // recipe declaring 512x512 must be driven at 512x512, and running it at
+      // 1024 produces incoherent output rather than merely softer output.
+      await applyGenerativeFill(
+        prompt.trim(), model, referenceUrl ?? undefined,
+        nativePixelsFrom(selected?.local?.resolutions),
+        strength,
+        context,
+        referenceWeight,
+        keepStructure,
+      );
       showNotification('success', 'Generative fill added on a new layer');
       setOpen(false);
       setPrompt('');
@@ -93,6 +162,18 @@ export function GenerativeFillPanel() {
         // The USER is out of credits → show the top-up / subscribe popup.
         const sit = await fetchCreditSituation();
         setCredits({ available: e.available, required: e.required, subscribed: sit.isSubscribed });
+      } else if (e instanceof LocalFillError) {
+        /**
+         * A LOCAL failure says exactly what went wrong, and that is deliberate.
+         *
+         * The "never surface server details" rule below protects users from
+         * provider internals — right for a cloud model, and precisely wrong
+         * here. This ran on the user's own machine, in their own ComfyUI, and
+         * the message names the missing weight file or the node that errored.
+         * Collapsing it to "please try again" tells someone to retry a thing
+         * that will fail identically every time.
+         */
+        setError(e.message);
       } else if (e instanceof GenFillError && (e.code === 503 || e.code === 429)) {
         setError('Generative Fill is busy right now — please try again in a moment.');
       } else {
@@ -145,11 +226,121 @@ export function GenerativeFillPanel() {
             onChange={(e) => setModel(e.target.value as FillModelId)}
             className="flex-1 px-2 py-1 text-[11px] bg-background border border-input rounded-md focus:outline-none focus:ring-1 focus:ring-primary"
           >
-            {FILL_MODELS.map((m) => (
-              <option key={m.id} value={m.id}>{m.label} — {m.credits} cr</option>
+            {models.map((m) => (
+              <option key={m.id} value={m.id}>
+                {/* Free is stated as a WORD, not as "0 cr". A zero next to every
+                    other row's price reads as a missing number; "free" reads as
+                    the point of having set the machine up. */}
+                {m.label} — {m.engine === 'local' ? 'free' : `${m.credits} cr`}
+              </option>
             ))}
           </select>
         </div>
+
+        {/* STRENGTH — local recipes only. A cloud editor has no equivalent knob,
+            and a slider that silently does nothing is worse than no slider. */}
+        {selected?.engine === 'local' && !notReady && (
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <label className="text-[10px] text-muted-foreground">Strength</label>
+              <span className="text-[10px] tabular-nums text-muted-foreground">
+                {strength.toFixed(2)}
+                {strength <= 0.45 ? ' · subtle' : strength >= 0.9 ? ' · replaces' : ' · blends'}
+              </span>
+            </div>
+            <input
+              type="range" min={0.2} max={1} step={0.05}
+              value={strength}
+              onChange={(e) => setStrength(Number(e.target.value))}
+              className="w-full accent-primary"
+            />
+            <p className="text-[9px] text-muted-foreground leading-tight">
+              Lower keeps more of what is there, so the edit matches the surrounding
+              light and texture. Higher replaces the region outright.
+            </p>
+          </div>
+        )}
+
+        {/* MATCH THE IMAGE — only for recipes that actually take a reference.
+            A slider bound to nothing is worse than no slider. */}
+        {selected?.engine === 'local' && !notReady && selected.local?.acceptsReference && (
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <label className="text-[10px] text-muted-foreground">Match the image</label>
+              <span className="text-[10px] tabular-nums text-muted-foreground">
+                {referenceWeight <= 0.05 ? 'off'
+                  : referenceWeight >= 0.75 ? 'strong · may copy'
+                  : referenceWeight.toFixed(2)}
+              </span>
+            </div>
+            <input
+              type="range" min={0} max={1} step={0.05}
+              value={referenceWeight}
+              onChange={(e) => setReferenceWeight(Number(e.target.value))}
+              className="w-full accent-primary"
+            />
+            <p className="text-[9px] text-muted-foreground leading-tight">
+              Shows the model the whole picture so the edit matches its palette,
+              light and style — without giving up detail on the selection.
+            </p>
+          </div>
+        )}
+
+        {/* KEEP WHAT'S THERE — the replace/retouch dial. Off by default; see the
+            note on keepStructure for why. */}
+        {selected?.engine === 'local' && !notReady && selected.local?.acceptsControl && (
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <label className="text-[10px] text-muted-foreground">Keep what's there</label>
+              <span className="text-[10px] tabular-nums text-muted-foreground">
+                {keepStructure <= 0.02 ? 'replace'
+                  : keepStructure >= 0.5 ? 'retouch only'
+                  : keepStructure.toFixed(2)}
+              </span>
+            </div>
+            <input
+              type="range" min={0} max={0.8} step={0.05}
+              value={keepStructure}
+              onChange={(e) => setKeepStructure(Number(e.target.value))}
+              className="w-full accent-primary"
+            />
+            <p className="text-[9px] text-muted-foreground leading-tight">
+              Holds the shapes already in the selection. Raise it to retouch or
+              relight what is there; leave it at zero to replace it with your prompt.
+            </p>
+          </div>
+        )}
+
+        {selected?.engine === 'local' && !notReady && (
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <label className="text-[10px] text-muted-foreground">Context</label>
+              <span className="text-[10px] tabular-nums text-muted-foreground">
+                {context <= 0.3 ? 'tight · most detail'
+                  : context >= 0.8 ? 'wide · most context'
+                  : 'balanced'}
+              </span>
+            </div>
+            <input
+              type="range" min={0} max={1} step={0.05}
+              value={context}
+              onChange={(e) => setContext(Number(e.target.value))}
+              className="w-full accent-primary"
+            />
+            <p className="text-[9px] text-muted-foreground leading-tight">
+              How much of the picture goes to the model with your selection. Wider
+              matches the scene better; tighter puts more detail on the selection.
+            </p>
+          </div>
+        )}
+
+        {/* What a local model is waiting for, in the panel where it was chosen.
+            The alternative is finding out after pressing Generate. */}
+        {notReady && (
+          <p className="text-[10px] text-amber-500 leading-snug">
+            Not ready on {selected?.local?.nodeName}. {selected?.local?.missing}
+          </p>
+        )}
 
         {/* Reference image — used by reference-guided models (FLUX Kontext, and
             optionally nano-banana / gpt-image) to fill with the uploaded object/style. */}
@@ -176,7 +367,14 @@ export function GenerativeFillPanel() {
         {error && <p className="text-[10px] text-destructive">{error}</p>}
         <button
           onClick={generate}
-          disabled={busy || uploadingRef || !prompt.trim() || !hasSelection || (refRequired && !referenceUrl)}
+          // `!prompt.trim()` is deliberately NOT required for a local workflow
+          // that declares no prompt input — the pipeline self-test takes none,
+          // and gating on a field it will ignore would make it unrunnable.
+          disabled={
+            busy || uploadingRef || !hasSelection || notReady
+            || (refRequired && !referenceUrl)
+            || (!prompt.trim() && selected?.engine !== 'local')
+          }
           className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs rounded-md bg-primary text-primary-foreground font-medium hover:bg-primary/90 transition-colors disabled:opacity-50"
         >
           {busy ? (
