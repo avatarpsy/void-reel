@@ -36,6 +36,15 @@ export function GenerativeFillPanel() {
    * 0.65 is a blending default — A1111 ships 0.75 and retouching work lives lower.
    */
   const [strength, setStrength] = useState(0.65);
+  /**
+   * How much of the picture travels with the selection.
+   *
+   * A cropped window is the only way to get detail on a small selection, but the
+   * model can condition ONLY on what is inside it — crop tight and it has no idea
+   * what the rest of the image looks like. A1111 calls this "Only masked padding"
+   * and context-sensitive edits want it well up.
+   */
+  const [context, setContext] = useState(0.2);
 
   /**
    * The picker's list, INCLUDING anything on the user's own machine.
@@ -119,6 +128,7 @@ export function GenerativeFillPanel() {
         prompt.trim(), model, referenceUrl ?? undefined,
         nativePixelsFrom(selected?.local?.resolutions),
         strength,
+        context,
       );
       showNotification('success', 'Generative fill added on a new layer');
       setOpen(false);
@@ -225,6 +235,29 @@ export function GenerativeFillPanel() {
             <p className="text-[9px] text-muted-foreground leading-tight">
               Lower keeps more of what is there, so the edit matches the surrounding
               light and texture. Higher replaces the region outright.
+            </p>
+          </div>
+        )}
+
+        {selected?.engine === 'local' && !notReady && (
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <label className="text-[10px] text-muted-foreground">Context</label>
+              <span className="text-[10px] tabular-nums text-muted-foreground">
+                {context <= 0.3 ? 'tight · most detail'
+                  : context >= 0.8 ? 'wide · most context'
+                  : 'balanced'}
+              </span>
+            </div>
+            <input
+              type="range" min={0} max={1} step={0.05}
+              value={context}
+              onChange={(e) => setContext(Number(e.target.value))}
+              className="w-full accent-primary"
+            />
+            <p className="text-[9px] text-muted-foreground leading-tight">
+              How much of the picture goes to the model with your selection. Wider
+              matches the scene better; tighter puts more detail on the selection.
             </p>
           </div>
         )}

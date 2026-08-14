@@ -171,3 +171,85 @@ describe('nativePixelsFrom', () => {
     expect(sd15.tw * sd15.th).toBeLessThan(sdxl.tw * sdxl.th);
   });
 });
+
+/**
+ * How much of the picture the model gets to see.
+ *
+ * ── THE FAILURE THIS GUARDS ─────────────────────────────────────────────────
+ * A cropped window is the only way to get detail on a small selection, and it is
+ * also the reason a result can be locally convincing and globally wrong: the model
+ * conditions ONLY on what is inside the window. At the original 0.6 padding a
+ * 163px selection on a 1225x816 frame was sent inside a 359x359 window —
+ * THIRTEEN PERCENT of the picture — which is not enough context to match a palette,
+ * a light direction, or a scene.
+ *
+ * A1111 exposes the same dial ("Only masked padding, pixels"). These pin the
+ * relationship so nobody quietly tightens it again.
+ */
+describe('context window', () => {
+  const FRAME = { W: 1225, H: 816 };
+  const pct = (w: ReturnType<typeof planFillWindow>) => w.framePct;
+
+  it('sends a materially larger share of the frame than a tight crop', () => {
+    const sel = { x: 531, y: 327, width: 163, height: 163 };
+    const tight = planFillWindow(sel, FRAME.W, FRAME.H, 1024 * 1024, 0);
+    const balanced = planFillWindow(sel, FRAME.W, FRAME.H, 1024 * 1024, 0.55);
+    expect(pct(tight)).toBeLessThan(15);
+    expect(pct(balanced)).toBeGreaterThan(35);
+  });
+
+  it('is monotonic — more context never sends less of the picture', () => {
+    const sel = { x: 400, y: 300, width: 180, height: 180 };
+    let last = -1;
+    for (const c of [0, 0.2, 0.4, 0.6, 0.8, 1]) {
+      const w = planFillWindow(sel, FRAME.W, FRAME.H, 1024 * 1024, c);
+      expect(pct(w)).toBeGreaterThanOrEqual(last);
+      last = pct(w);
+    }
+  });
+
+  it('always contains the whole selection, at every context setting', () => {
+    // If the window clipped the selection, part of what the user asked to change
+    // would silently never be sent.
+    const sel = { x: 531, y: 327, width: 163, height: 163 };
+    for (const c of [0, 0.3, 0.55, 0.8, 1]) {
+      const w = planFillWindow(sel, FRAME.W, FRAME.H, 1024 * 1024, c);
+      expect(w.sx).toBeLessThanOrEqual(sel.x);
+      expect(w.sy).toBeLessThanOrEqual(sel.y);
+      expect(w.sx + w.sw).toBeGreaterThanOrEqual(sel.x + sel.width);
+      expect(w.sy + w.sh).toBeGreaterThanOrEqual(sel.y + sel.height);
+    }
+  });
+
+  it('slides inside the frame near an edge rather than shrinking', () => {
+    // A corner selection must still get its context — shrinking the window there
+    // would silently give edge edits the worst conditioning of all.
+    const corner = { x: 4, y: 4, width: 120, height: 120 };
+    const middle = { x: 550, y: 350, width: 120, height: 120 };
+    const c = planFillWindow(corner, FRAME.W, FRAME.H, 1024 * 1024, 0.55);
+    const m = planFillWindow(middle, FRAME.W, FRAME.H, 1024 * 1024, 0.55);
+    expect(c.sw).toBe(m.sw);
+    expect(c.sh).toBe(m.sh);
+    expect(c.sx).toBeGreaterThanOrEqual(0);
+    expect(c.sy).toBeGreaterThanOrEqual(0);
+  });
+
+  it('never exceeds the frame at maximum context', () => {
+    const w = planFillWindow({ x: 600, y: 400, width: 300, height: 300 }, FRAME.W, FRAME.H, 1024 * 1024, 1);
+    expect(w.sx + w.sw).toBeLessThanOrEqual(FRAME.W);
+    expect(w.sy + w.sh).toBeLessThanOrEqual(FRAME.H);
+    expect(w.framePct).toBeLessThanOrEqual(100);
+  });
+
+  it('still lands near the native budget whatever the context', () => {
+    // Context changes WHAT is sent, never the resolution it is sampled at — that
+    // belongs to the recipe.
+    const sel = { x: 500, y: 300, width: 163, height: 163 };
+    for (const c of [0, 0.55, 1]) {
+      const w = planFillWindow(sel, FRAME.W, FRAME.H, 1024 * 1024, c);
+      const ratio = (w.tw * w.th) / (1024 * 1024);
+      expect(ratio).toBeGreaterThan(0.8);
+      expect(ratio).toBeLessThan(1.25);
+    }
+  });
+});

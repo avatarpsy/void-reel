@@ -75,9 +75,62 @@ export function nativePixelsFrom(resolutions?: string[]): number | null {
   const px = Number(m[1]) * Number(m[2]);
   return Number.isFinite(px) && px > 0 ? px : null;
 }
-/** How much context to include around the selection, as a share of its size.
- *  0.6 means a 200px selection is sent inside a ~520px window. */
-const CONTEXT_PAD_RATIO = 0.6;
+/**
+ * HOW MUCH OF THE PICTURE THE MODEL GETS TO SEE.
+ *
+ * ── THE TRADE THIS CONTROLS, AND WHY IT IS THE WHOLE GAME ───────────────────
+ * A cropped window is the only way to get real detail on a small selection — but
+ * the model can condition ONLY on what is inside that window. Crop tight and it
+ * has no idea what the rest of the picture looks like, so it invents content that
+ * is locally plausible and globally wrong: the wrong palette, the wrong light, a
+ * subject that does not belong to the scene.
+ *
+ * Measured on a 1225x816 frame: at the old 0.6 padding a 163px selection was sent
+ * inside a 359x359 window — THIRTEEN PERCENT of the picture. That is not enough
+ * context to match anything, and it is the honest explanation for "the model does
+ * not know the image".
+ *
+ * A1111 exposes the same dial as "Only masked padding, pixels" and context-
+ * sensitive edits want it turned well up. So it is a control here rather than a
+ * constant, and the default is generous.
+ *
+ * ── AND WHY IT IS A TRADE, NOT A FREE WIN ──────────────────────────────────
+ * Context costs magnification, directly. Measured on this frame with a 204px
+ * selection:
+ *
+ *     context 0.0   368px window   14% of frame   2.78x   sharp, scene-blind
+ *     context 0.2   546px window   30% of frame   1.88x   the default
+ *     context 0.55  860px window   70% of frame   1.19x   BLURRY
+ *
+ * At 0.55 the selection is sampled at ~249px and the result visibly softens. So
+ * "more context" is not simply better, and the honest default sits nearer the
+ * detail end: 0.2 more than doubles what the old fixed padding sent (13% -> 30%)
+ * while keeping most of the magnification.
+ *
+ * A SINGLE WINDOW CANNOT GIVE BOTH, and no tuning of this number changes that —
+ * it is a structural limit of crop-and-stitch, and A1111 has exactly the same one.
+ * Injecting global context WITHOUT paying window resolution needs a different
+ * mechanism entirely (IP-Adapter, or a reference-style ControlNet), which is what
+ * better ComfyUI flows reach for and what this should grow into.
+ *
+ * `context` runs 0 (tight, maximum magnification) to 1 (nearly the whole frame,
+ * minimum magnification). There is no universally correct value — a texture patch
+ * wants tight, a face in a busy scene wants wider — which is why the user gets it.
+ */
+const CONTEXT_DEFAULT = 0.2;
+
+/** Padding as a share of the selection, at a given context setting. */
+function padRatioFor(context: number): number {
+  const c = Math.min(1, Math.max(0, context));
+  return 0.4 + c * 2.2;                 // 0.4 .. 2.6
+}
+
+/** The window must also cover at least this share of the SHORTER frame edge, so a
+ *  tiny selection still arrives with real scene around it rather than a swatch. */
+function minFrameFractionFor(context: number): number {
+  const c = Math.min(1, Math.max(0, context));
+  return 0.25 + c * 0.6;                // 25% .. 85%
+}
 /** Latents work in 8-pixel blocks; a non-multiple is either rejected or silently
  *  rounded, and a silent round is how a fill comes back very slightly offset. */
 const LATENT_BLOCK = 8;
@@ -97,22 +150,44 @@ export function planFillWindow(
   /** The model's native pixel budget. See `nativePixelsFrom` — a recipe that
    *  declares 512x512 must be driven at 512x512. */
   nativePixels: number = DEFAULT_NATIVE_PIXELS,
-): { sx: number; sy: number; sw: number; sh: number; tw: number; th: number; upscaled: boolean } {
-  const pad = Math.round(Math.max(region.width, region.height) * CONTEXT_PAD_RATIO);
-  let sx = Math.max(0, Math.floor(region.x - pad));
-  let sy = Math.max(0, Math.floor(region.y - pad));
-  let sw = Math.min(W - sx, Math.ceil(region.width + pad * 2));
-  let sh = Math.min(H - sy, Math.ceil(region.height + pad * 2));
-  // Clamp back if the pad pushed the far edge past the artboard.
-  sw = Math.max(1, Math.min(sw, W - sx));
-  sh = Math.max(1, Math.min(sh, H - sy));
+  /** 0 = tight crop, maximum detail. 1 = nearly the whole frame, maximum context. */
+  context: number = CONTEXT_DEFAULT,
+): { sx: number; sy: number; sw: number; sh: number; tw: number; th: number; upscaled: boolean; framePct: number } {
+  const longest = Math.max(region.width, region.height);
+  const pad = Math.round(longest * padRatioFor(context));
+
+  // The window, centred on the selection rather than grown from its corner — a
+  // corner-anchored pad puts the selection off-centre, and a model conditioned on
+  // lopsided context tends to continue the side it has more of.
+  const cx = region.x + region.width / 2;
+  const cy = region.y + region.height / 2;
+  const floor = minFrameFractionFor(context) * Math.min(W, H);
+  let want = Math.max(region.width + pad * 2, region.height + pad * 2, floor);
+  // Never larger than the frame: a window running past the edge would be padded
+  // with nothing, and the model reads that void as part of the picture.
+  want = Math.min(want, Math.min(W, H) * 2);
+
+  let sw = Math.min(W, Math.ceil(want));
+  let sh = Math.min(H, Math.ceil(want));
+  let sx = Math.round(cx - sw / 2);
+  let sy = Math.round(cy - sh / 2);
+  // Slide back inside the frame rather than shrinking, so the requested amount of
+  // context survives even for a selection near an edge.
+  sx = Math.max(0, Math.min(sx, W - sw));
+  sy = Math.max(0, Math.min(sy, H - sh));
 
   // Scale the window to the model's native budget — UP for a small selection
   // (that is the whole point) and down for one larger than native.
   const factor = Math.sqrt(nativePixels / (sw * sh));
   const tw = snap(sw * factor);
   const th = snap(sh * factor);
-  return { sx, sy, sw, sh, tw, th, upscaled: factor > 1 };
+  return {
+    sx, sy, sw, sh, tw, th,
+    upscaled: factor > 1,
+    // How much of the picture the model will actually see. Worth reporting: it is
+    // the number that explains a contextually wrong result.
+    framePct: Math.round((100 * sw * sh) / (W * H)),
+  };
 }
 
 function blobToImage(blob: Blob): Promise<HTMLImageElement> {
@@ -300,6 +375,9 @@ export async function applyGenerativeFill(
   /** A1111's Denoising strength — how much of the region may be discarded.
    *  Local recipes only; the cloud engines have no equivalent knob. */
   strength?: number,
+  /** 0 tight .. 1 wide. How much of the picture goes to the model with the
+   *  selection. See CONTEXT_DEFAULT. */
+  context?: number,
 ): Promise<string> {
   const projStore = useProjectStore.getState();
   const { project, selectedArtboardId } = projStore;
@@ -361,7 +439,7 @@ export async function applyGenerativeFill(
     // The recipe's own native size decides the window. Falls back to the SDXL
     // default when a recipe does not say — never to a guess that could be an
     // octave out, which is what produced letterforms instead of brickwork.
-    const win = planFillWindow(region, W, H, nativePixels ?? undefined);
+    const win = planFillWindow(region, W, H, nativePixels ?? undefined, context ?? CONTEXT_DEFAULT);
 
     // The window, at native resolution, drawn from the FULL-RESOLUTION composite
     // so upscaling a small selection samples real pixels rather than the
