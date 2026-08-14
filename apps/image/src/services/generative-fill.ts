@@ -103,6 +103,8 @@ export interface FillModelOption {
      *  crop-and-stitch window size — a model run far outside its training
      *  resolution produces incoherent output, not merely softer output. */
     resolutions?: string[];
+    /** A self-test; filtered out of this picker. */
+    diagnostic?: boolean;
   };
 }
 
@@ -136,6 +138,10 @@ export async function loadFillModels(): Promise<FillModelOption[]> {
       // and offering it here would produce a full-frame replacement that the
       // editor would then crop to the selection — a confusing, expensive no-op.
       .filter((m: any) => ['image.inpaint', 'image.edit'].includes(m.local?.task ?? ''))
+      // Self-tests are not editing tools. `pipeline-check-inpaint` inverts the
+      // selection to prove the plumbing; offering that beside real models would
+      // be offering a feature nobody wants.
+      .filter((m: any) => m.local?.diagnostic !== true)
       .map((m: any) => ({
         id: m.id,
         label: m.label,
@@ -145,6 +151,7 @@ export async function loadFillModels(): Promise<FillModelOption[]> {
         local: {
           nodeName: m.local.nodeName, ready: !!m.local.ready, missing: m.local.missing,
           resolutions: m.local?.caps?.resolutions ?? m.resolutions,
+          diagnostic: m.local?.diagnostic === true,
         },
       }));
     // Ready local models FIRST: someone who has set up their own GPU wants it to
