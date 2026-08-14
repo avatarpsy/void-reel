@@ -242,6 +242,12 @@ async function throwGenFillError(res: Response): Promise<never> {
  * bytes inline (no route to a remote node's disk exists) and re-fetching it would
  * be a pointless round trip through the FileReader.
  */
+/** Test seam for the auth rule above. Exported under a deliberately awkward name
+ *  so it reads as internal at every call site: the rule it guards (token for
+ *  same-origin, never for a provider) shipped wrong once and cannot be verified
+ *  from outside a browser any other way. */
+export const __fetchResultForTest = (url: string, token?: string) => fetchAsDataUrl(url, token);
+
 async function fetchAsDataUrl(url: string, token?: string): Promise<string> {
   if (url.startsWith('data:')) return url;
   // Same-origin means it is one of ours and therefore authed. An absolute
