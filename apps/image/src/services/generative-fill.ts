@@ -27,6 +27,31 @@ export class GenFillError extends Error {
   }
 }
 
+/**
+ * A LOCAL fill that failed, carrying the reason.
+ *
+ * ── WHY THIS IS NOT `GenFillError` ──────────────────────────────────────────
+ * `GenFillError` deliberately carries no server text: a cloud fill goes through
+ * a provider, and provider internals have no business reaching a user's screen.
+ * That rule is right, and applying it here was wrong. A local fill has no
+ * provider — it is the user's own ComfyUI on their own machine, and the message
+ * is the single most useful thing we have: which weight file is missing, which
+ * node errored, that they need to start ComfyUI.
+ *
+ * The whole client surfaces ComfyUI's own errors verbatim precisely so this
+ * moment is diagnosable. Reducing it to "Couldn't generate. Please try again."
+ * at the final hop threw all of that away.
+ */
+export class LocalFillError extends Error {
+  /** HTTP status, when the failure was the request rather than the render. */
+  status?: number;
+  constructor(message: string, status?: number) {
+    super(message);
+    this.name = 'LocalFillError';
+    this.status = status;
+  }
+}
+
 /** The user's billing situation, used to tailor the out-of-credits popup
  *  (subscribed → top up; not → subscribe). Best-effort; defaults to not-subscribed. */
 export async function fetchCreditSituation(): Promise<{ isSubscribed: boolean }> {
@@ -273,10 +298,39 @@ export async function runLocalFill(opts: {
     headers: { Authorization: `Bearer ${token}` },
     body: form,
   });
-  if (!res.ok) await throwGenFillError(res);
+  if (!res.ok) {
+    /**
+     * A MISSING ROUTE IS ITS OWN DIAGNOSIS.
+     *
+     * The website server is what carries the local-generation routes, and a
+     * build that predates them answers with a redirect to the SPA shell or a
+     * 404 — never JSON. Reported as "try again" that is unfixable advice for a
+     * problem retrying cannot touch, and it is exactly what happens when the
+     * editor bundle is newer than the server it is talking to.
+     */
+    if (res.status === 404 || res.status === 302 || res.redirected) {
+      throw new LocalFillError(
+        'This website build does not support local generation yet — its server is older than the editor.',
+        res.status,
+      );
+    }
+    // The server's own sentence, which for a local failure names the exact
+    // thing to fix (a weight file, ComfyUI being closed).
+    let detail = '';
+    try {
+      const j = await res.clone().json();
+      detail = String(j?.statusMessage || j?.message || j?.data?.error || '');
+    } catch {
+      detail = (await res.text().catch(() => '')).slice(0, 300);
+    }
+    throw new LocalFillError(
+      detail || `The local render could not start (HTTP ${res.status}).`,
+      res.status,
+    );
+  }
   const started = await res.json();
   const jobId: string = started?.jobId;
-  if (!jobId) throw new Error('The local fill did not start.');
+  if (!jobId) throw new LocalFillError('The local fill did not start.');
   // Echoed on every poll. A job id only means something on the node that owns
   // it, so with a workstation and a laptop both online, losing this would ask
   // the wrong machine and report a perfectly healthy render as missing.
@@ -294,7 +348,7 @@ export async function runLocalFill(opts: {
       body: JSON.stringify({ jobId, via, node }),
     });
     if (!sres.ok) {
-      if (sres.status === 404) throw new Error('That local render is no longer on this machine.');
+      if (sres.status === 404) throw new LocalFillError('That local render is no longer on this machine.', 404);
       continue;                       // a blip; the job is safe on the node
     }
     const p = await sres.json();
@@ -306,12 +360,12 @@ export async function runLocalFill(opts: {
     if (p.state === 'failed' || p.state === 'cancelled') {
       // ComfyUI's own message, carried the whole way — it names the node and the
       // missing file. Ours would say "generation failed".
-      throw new Error(p.message || p.logTail?.slice(-1)[0] || 'The local fill failed.');
+      throw new LocalFillError(p.message || p.logTail?.slice(-1)[0] || 'The local fill failed.');
     }
-    if (!p.url) throw new Error('The local fill produced no image.');
+    if (!p.url) throw new LocalFillError('The local fill produced no image.');
     return fetchAsDataUrl(p.url);
   }
-  throw new Error('The local fill timed out.');
+  throw new LocalFillError('The local fill timed out.');
 }
 
 /** Run a mask-free Kie edit (nano-banana / gpt-image-2). Uploads the outlined

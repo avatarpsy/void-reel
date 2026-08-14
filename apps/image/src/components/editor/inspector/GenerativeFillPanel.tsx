@@ -3,7 +3,7 @@ import { Sparkles, X, Loader2, Upload } from 'lucide-react';
 import { useUIStore } from '../../../stores/ui-store';
 import { useSelectionStore } from '../../../stores/selection-store';
 import { applyGenerativeFill } from '../../../services/apply-generative-fill';
-import { FILL_MODELS, loadFillModels, type FillModelId, type FillModelOption, GenFillError, fetchCreditSituation, uploadReferenceImage, uploadReferenceFromUrl } from '../../../services/generative-fill';
+import { FILL_MODELS, loadFillModels, type FillModelId, type FillModelOption, GenFillError, LocalFillError, fetchCreditSituation, uploadReferenceImage, uploadReferenceFromUrl } from '../../../services/generative-fill';
 import { NotSignedInError } from '../../../services/voidspace-storage';
 
 /**
@@ -115,6 +115,18 @@ export function GenerativeFillPanel() {
         // The USER is out of credits → show the top-up / subscribe popup.
         const sit = await fetchCreditSituation();
         setCredits({ available: e.available, required: e.required, subscribed: sit.isSubscribed });
+      } else if (e instanceof LocalFillError) {
+        /**
+         * A LOCAL failure says exactly what went wrong, and that is deliberate.
+         *
+         * The "never surface server details" rule below protects users from
+         * provider internals — right for a cloud model, and precisely wrong
+         * here. This ran on the user's own machine, in their own ComfyUI, and
+         * the message names the missing weight file or the node that errored.
+         * Collapsing it to "please try again" tells someone to retry a thing
+         * that will fail identically every time.
+         */
+        setError(e.message);
       } else if (e instanceof GenFillError && (e.code === 503 || e.code === 429)) {
         setError('Generative Fill is busy right now — please try again in a moment.');
       } else {
