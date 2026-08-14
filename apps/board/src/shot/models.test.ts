@@ -304,3 +304,98 @@ describe('plannedSeconds', () => {
     expect(plannedSeconds({ model: '', durationSec: 0 })).toBe(0);
   });
 });
+
+/**
+ * A model on the USER'S OWN MACHINE.
+ *
+ * Two things about it are genuinely different from every cloud model, and both
+ * are visible on the card: it costs nothing, and it can be temporarily
+ * impossible to run because a 19 GB weight file has not been downloaded yet.
+ * Modelled on the MiniMax H3 recipe, which is the first one shipped.
+ */
+const LOCAL_H3: ModelCaps = {
+  id: 'local:this-machine/minimax-h3-i2v',
+  label: 'MiniMax H3 (image to video) · This computer',
+  credits: 0,
+  pricePerSec: {},
+  minDurationSec: 4,
+  maxDurationSec: 15,
+  allowedDurations: [],
+  nativeDialogue: true,
+  nativeAudio: true,
+  acceptsVoiceReference: false,
+  supportsLastFrame: true,
+  usesReferenceTags: false,
+  referenceTagSyntax: 'Image',
+  deliveryModes: ['first-frame'],
+  defaultDelivery: 'first-frame',
+  local: { nodeName: 'This computer', recipe: 'minimax-h3-i2v', ready: true },
+};
+
+const LOCAL_NOT_READY: ModelCaps = {
+  ...LOCAL_H3,
+  id: 'local:workhorse/minimax-h3-i2v',
+  label: 'MiniMax H3 (image to video) · WORKHORSE',
+  local: {
+    nodeName: 'WORKHORSE',
+    recipe: 'minimax-h3-i2v',
+    ready: false,
+    missing: 'Needs 4 model files (~40 GB), starting with minimax_h3_fl2va_pruned_int8_convrot.safetensors in models/diffusion_models.',
+  },
+};
+
+describe('a model on the user’s own hardware', () => {
+  beforeEach(() => setModelCatalogue([SEEDANCE, LOCAL_H3, LOCAL_NOT_READY], SEEDANCE.id));
+
+  it('costs zero, not "unknown"', () => {
+    // The catalogue sends credits: 0 and an empty pricePerSec, neither of which
+    // passes the `> 0` guards — so without an explicit local branch this would
+    // fall through to null and the card would print NOTHING where "no gen cost"
+    // belongs. Silence reads as a missing price, not as a free one.
+    expect(estimateShotCredits({ model: LOCAL_H3.id, durationSec: 8 })).toBe(0);
+    expect(formatCredits(0)).toBe('no gen cost');
+  });
+
+  it('still clamps duration to what the workflow can render', () => {
+    expect(plannedSeconds({ model: LOCAL_H3.id, durationSec: 30 })).toBe(15);
+    expect(plannedSeconds({ model: LOCAL_H3.id, durationSec: 1 })).toBe(4);
+  });
+
+  it('says nothing extra while the machine can actually run it', () => {
+    const warnings = checkShot({
+      model: LOCAL_H3.id, durationSec: 8, voiceover: 'hello', media: [],
+    });
+    expect(warnings.map(w => w.message).join(' ')).not.toMatch(/not ready/i);
+  });
+
+  it('names the machine and the first missing thing when it cannot run yet', () => {
+    const warnings = checkShot({
+      model: LOCAL_NOT_READY.id, durationSec: 8, voiceover: '', media: [],
+    });
+    expect(warnings.length).toBeGreaterThan(0);
+    // The MACHINE is named: with two nodes online, "not ready" without a name is
+    // a message the user cannot act on.
+    expect(warnings[0].message).toContain('WORKHORSE');
+    expect(warnings[0].message).toContain('minimax_h3_fl2va_pruned_int8_convrot.safetensors');
+  });
+
+  it('does not warn about TTS for a model that speaks natively', () => {
+    // H3 generates its own dialogue, so a voiceover line is NOT laid over the
+    // clip afterwards. Getting this wrong would tell the user to expect a
+    // separate TTS pass that never happens.
+    const warnings = checkShot({
+      model: LOCAL_H3.id, durationSec: 8, voiceover: 'she turns and speaks', media: [],
+    });
+    expect(warnings.map(w => w.message).join(' ')).not.toMatch(/does not speak/i);
+  });
+
+  it('accepts a last frame, because the fl2va checkpoint takes one', () => {
+    const warnings = checkShot({
+      model: LOCAL_H3.id,
+      durationSec: 8,
+      voiceover: '',
+      media: [{ id: 'm1', role: 'lastFrame', kind: 'image' }],
+    });
+    expect(warnings.map(w => w.message).join(' ')).not.toMatch(/end-frame/i);
+  });
+});

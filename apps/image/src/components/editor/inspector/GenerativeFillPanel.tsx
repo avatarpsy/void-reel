@@ -1,9 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Sparkles, X, Loader2, Upload } from 'lucide-react';
 import { useUIStore } from '../../../stores/ui-store';
 import { useSelectionStore } from '../../../stores/selection-store';
 import { applyGenerativeFill } from '../../../services/apply-generative-fill';
-import { FILL_MODELS, type FillModelId, GenFillError, fetchCreditSituation, uploadReferenceImage, uploadReferenceFromUrl } from '../../../services/generative-fill';
+import { FILL_MODELS, loadFillModels, type FillModelId, type FillModelOption, GenFillError, fetchCreditSituation, uploadReferenceImage, uploadReferenceFromUrl } from '../../../services/generative-fill';
 import { NotSignedInError } from '../../../services/voidspace-storage';
 
 /**
@@ -29,11 +29,33 @@ export function GenerativeFillPanel() {
   const [uploadingRef, setUploadingRef] = useState(false);
   const [dragOver, setDragOver] = useState(false);
 
+  /**
+   * The picker's list, INCLUDING anything on the user's own machine.
+   *
+   * Async because a local model exists only while their node is running, so the
+   * list is a fact about right now rather than a constant. Seeded with the cloud
+   * models so the panel is never briefly empty, and re-read whenever the panel
+   * opens — a user who starts ComfyUI and comes straight back should see it
+   * without reloading the editor.
+   */
+  const [models, setModels] = useState<FillModelOption[]>(() => FILL_MODELS.map((m) => ({ ...m })));
+  useEffect(() => {
+    if (!open) return;
+    let live = true;
+    void loadFillModels().then((list) => { if (live) setModels(list); });
+    return () => { live = false; };
+  }, [open]);
+
   // refMode: 'none' hides the upload UI; 'optional' shows it (kie editors);
   // 'required' also gates Generate (FLUX Kontext needs a reference).
-  const refMode = FILL_MODELS.find((m) => m.id === model)?.refMode ?? 'none';
+  const selected = models.find((m) => m.id === model);
+  const refMode = selected?.refMode ?? 'none';
   const showRef = refMode !== 'none';
   const refRequired = refMode === 'required';
+  // A local model that is present but not set up yet is SELECTABLE and shows what
+  // it needs — hiding it would make the setup undiscoverable — but Generate is
+  // blocked, because pressing it could only ever fail.
+  const notReady = selected?.engine === 'local' && selected.local?.ready === false;
 
   if (!open) return null;
 
@@ -145,11 +167,24 @@ export function GenerativeFillPanel() {
             onChange={(e) => setModel(e.target.value as FillModelId)}
             className="flex-1 px-2 py-1 text-[11px] bg-background border border-input rounded-md focus:outline-none focus:ring-1 focus:ring-primary"
           >
-            {FILL_MODELS.map((m) => (
-              <option key={m.id} value={m.id}>{m.label} — {m.credits} cr</option>
+            {models.map((m) => (
+              <option key={m.id} value={m.id}>
+                {/* Free is stated as a WORD, not as "0 cr". A zero next to every
+                    other row's price reads as a missing number; "free" reads as
+                    the point of having set the machine up. */}
+                {m.label} — {m.engine === 'local' ? 'free' : `${m.credits} cr`}
+              </option>
             ))}
           </select>
         </div>
+
+        {/* What a local model is waiting for, in the panel where it was chosen.
+            The alternative is finding out after pressing Generate. */}
+        {notReady && (
+          <p className="text-[10px] text-amber-500 leading-snug">
+            Not ready on {selected?.local?.nodeName}. {selected?.local?.missing}
+          </p>
+        )}
 
         {/* Reference image — used by reference-guided models (FLUX Kontext, and
             optionally nano-banana / gpt-image) to fill with the uploaded object/style. */}
@@ -176,7 +211,14 @@ export function GenerativeFillPanel() {
         {error && <p className="text-[10px] text-destructive">{error}</p>}
         <button
           onClick={generate}
-          disabled={busy || uploadingRef || !prompt.trim() || !hasSelection || (refRequired && !referenceUrl)}
+          // `!prompt.trim()` is deliberately NOT required for a local workflow
+          // that declares no prompt input — the pipeline self-test takes none,
+          // and gating on a field it will ignore would make it unrunnable.
+          disabled={
+            busy || uploadingRef || !hasSelection || notReady
+            || (refRequired && !referenceUrl)
+            || (!prompt.trim() && selected?.engine !== 'local')
+          }
           className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs rounded-md bg-primary text-primary-foreground font-medium hover:bg-primary/90 transition-colors disabled:opacity-50"
         >
           {busy ? (

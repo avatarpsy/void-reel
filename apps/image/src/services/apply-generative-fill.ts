@@ -15,7 +15,7 @@
 import { useProjectStore } from '../stores/project-store';
 import { useSelectionStore } from '../stores/selection-store';
 import { exportArtboard } from './export-service';
-import { runGenerativeFill, runKieEditFill, fillEngine, type FillModelId } from './generative-fill';
+import { runGenerativeFill, runKieEditFill, runLocalFill, fillEngine, type FillModelId } from './generative-fill';
 import { buildMaskData } from '../utils/mask-builder';
 import type { MediaAsset } from '../types/project';
 import type { Selection } from '../types/selection';
@@ -202,6 +202,19 @@ export async function applyGenerativeFill(prompt: string, model?: FillModelId, r
       aspectRatio: 'auto',
       inverted: selection.inverted === true,
     });
+  } else if (engine === 'local') {
+    // The user's own GPU. Same two artefacts as the fal path — full composite and
+    // a white-is-the-hole mask — because a local inpaint node wants exactly what
+    // FLUX Fill wants. Only the transport differs, so the mask maths, the
+    // feathering and the placement below are shared rather than reimplemented.
+    //
+    // PNG, not JPEG. The fal path sends JPEG because it is uploading over the
+    // internet and a megabyte matters there; here the bytes travel to a process
+    // on the same machine, so paying nothing for them buys a source image with no
+    // block artefacts for the model to reproduce inside the selection.
+    const sourceBlob = await canvasToBlob(sc, 'image/png');
+    const maskBlob = await canvasToBlob(buildFalMask(selection, tw, th, scale), 'image/png');
+    resultDataUrl = await runLocalFill({ imageBlob: sourceBlob, maskBlob, prompt, model: model! });
   } else {
     // True masked inpaint: full composite + mask.
     const sourceBlob = await canvasToBlob(sc, 'image/jpeg');

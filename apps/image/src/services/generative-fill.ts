@@ -57,10 +57,79 @@ export const FILL_MODELS = [
   { id: 'gpt-image-2', label: 'GPT Image 2 (edit)', credits: 4, engine: 'kie', refMode: 'optional' },
 ] as const;
 
-export type FillModelId = typeof FILL_MODELS[number]['id'];
+/** Widened to a plain string: a LOCAL model's id is `local:<node>/<recipe>` and
+ *  is only known at runtime, so it cannot be part of a literal union. The cloud
+ *  ids above still autocomplete because they are what the array holds. */
+export type FillModelId = typeof FILL_MODELS[number]['id'] | (string & {});
+
+/** One entry in the picker — cloud or local. */
+export interface FillModelOption {
+  id: string;
+  label: string;
+  credits: number;
+  engine: 'fal' | 'kie' | 'local';
+  refMode: 'none' | 'optional' | 'required';
+  /** Local only: whether the machine can run it, and what it needs if not. */
+  local?: { nodeName: string; ready: boolean; missing?: string };
+}
+
+/**
+ * Models the user can fill with, INCLUDING any on their own hardware.
+ *
+ * ── WHY THIS IS FETCHED AND NOT A CONSTANT ──────────────────────────────────
+ * A cloud model exists for everyone. A local one exists only while a particular
+ * machine of theirs is switched on, so the list genuinely differs per request and
+ * cannot be baked in. `/api/studio/models` already merges the two — that endpoint
+ * is the single catalogue every picker in the product reads, which is what stops
+ * this from becoming a second source of truth about what exists.
+ *
+ * Falls back to the static cloud list if the catalogue cannot be reached: the
+ * editor must keep working offline-ish, and a picker that empties itself because
+ * a fetch failed is worse than one that is merely missing the local rows.
+ */
+export async function loadFillModels(): Promise<FillModelOption[]> {
+  const cloud: FillModelOption[] = FILL_MODELS.map((m) => ({ ...m }));
+  try {
+    const token = await getVoidspaceIdToken();
+    if (!token) return cloud;
+    const res = await fetch('/api/studio/models?category=image', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return cloud;
+    const j = await res.json();
+    const local: FillModelOption[] = (j?.models ?? [])
+      .filter((m: any) => m?.surface === 'local' && m?.local)
+      // Only workflows that EDIT. A text-to-image recipe cannot honour a mask,
+      // and offering it here would produce a full-frame replacement that the
+      // editor would then crop to the selection — a confusing, expensive no-op.
+      .filter((m: any) => ['image.inpaint', 'image.edit'].includes(m.local?.task ?? ''))
+      .map((m: any) => ({
+        id: m.id,
+        label: m.label,
+        credits: 0,
+        engine: 'local' as const,
+        refMode: 'none' as const,
+        local: { nodeName: m.local.nodeName, ready: !!m.local.ready, missing: m.local.missing },
+      }));
+    // Ready local models FIRST: someone who has set up their own GPU wants it to
+    // be the obvious choice, not something they scroll past. Unready ones go last
+    // — visible, so the setup is discoverable, but never the default.
+    return [
+      ...local.filter((m) => m.local?.ready),
+      ...cloud,
+      ...local.filter((m) => !m.local?.ready),
+    ];
+  } catch {
+    return cloud;
+  }
+}
 
 /** The engine backing a model id (defaults to 'fal'). */
-export function fillEngine(id: FillModelId): 'fal' | 'kie' {
+export function fillEngine(id: FillModelId): 'fal' | 'kie' | 'local' {
+  // Checked by ID SHAPE, not by a lookup: the picker's list is async, and a fill
+  // can be triggered (agent tool, re-run of a saved layer) before it has loaded.
+  // The `local:` scheme is `registry.ts#LOCAL_MODEL_PREFIX`.
+  if (typeof id === 'string' && id.startsWith('local:')) return 'local';
   return (FILL_MODELS.find((m) => m.id === id)?.engine ?? 'fal') as 'fal' | 'kie';
 }
 
@@ -161,6 +230,88 @@ export async function runGenerativeFill(opts: GenerativeFillOpts): Promise<strin
   const resultUrl: string = j.url;
   if (!resultUrl) throw new Error('Generative fill returned no image');
   return fetchAsDataUrl(resultUrl);
+}
+
+/**
+ * Run a masked fill on the USER'S OWN MACHINE. Returns the result as a data URL.
+ *
+ * ── WHAT IS DELETED HERE, NOT ADAPTED ───────────────────────────────────────
+ * The cloud paths above begin by uploading the composite and the mask to Kie's
+ * temp storage, because fal and Kie need a public URL to fetch from. This path
+ * has no upload at all — the bytes go to the website, which hands them to a node
+ * on the same machine. That absence IS the privacy property of local editing: the
+ * user's photograph never leaves their computer, and it has to be true in the code
+ * rather than merely claimed.
+ *
+ * ── WHY IT POLLS ────────────────────────────────────────────────────────────
+ * An inpaint is seconds on a 4090 and a minute on a laptop GPU, and the node runs
+ * it as a job. Polling means a reload does not abandon a render that is still
+ * going — the same reason `gen-clip-start` was split from its status call.
+ */
+export async function runLocalFill(opts: {
+  imageBlob: Blob;
+  maskBlob: Blob;
+  prompt: string;
+  model: FillModelId;
+  negative?: string;
+  seed?: number;
+  onProgress?: (phase: string, pct: number | null) => void;
+}): Promise<string> {
+  const token = await getVoidspaceIdToken();
+  if (!token) throw new NotSignedInError();
+
+  const form = new FormData();
+  form.append('model', String(opts.model));
+  form.append('prompt', opts.prompt ?? '');
+  if (opts.negative) form.append('negative', opts.negative);
+  if (Number.isFinite(opts.seed)) form.append('seed', String(opts.seed));
+  form.append('image', new File([opts.imageBlob], 'fill-source.png', { type: 'image/png' }));
+  form.append('mask', new File([opts.maskBlob], 'fill-mask.png', { type: 'image/png' }));
+
+  const res = await fetch('/api/studio/local-gen-fill', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  });
+  if (!res.ok) await throwGenFillError(res);
+  const started = await res.json();
+  const jobId: string = started?.jobId;
+  if (!jobId) throw new Error('The local fill did not start.');
+  // Echoed on every poll. A job id only means something on the node that owns
+  // it, so with a workstation and a laptop both online, losing this would ask
+  // the wrong machine and report a perfectly healthy render as missing.
+  const via: string = started?.via ?? 'loopback';
+  const node: string | undefined = started?.node;
+
+  // ~15 min. An inpaint that has not finished by then is wedged, and a poll loop
+  // with no ceiling is a spinner that never resolves.
+  const DEADLINE = Date.now() + 15 * 60_000;
+  while (Date.now() < DEADLINE) {
+    await new Promise((r) => setTimeout(r, 1200));
+    const sres = await fetch('/api/studio/local-gen-status', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jobId, via, node }),
+    });
+    if (!sres.ok) {
+      if (sres.status === 404) throw new Error('That local render is no longer on this machine.');
+      continue;                       // a blip; the job is safe on the node
+    }
+    const p = await sres.json();
+    if (p.state === 'running') {
+      const pct = typeof p.progress?.pct === 'number' ? p.progress.pct : null;
+      opts.onProgress?.(String(p.progress?.phase ?? 'rendering'), pct);
+      continue;
+    }
+    if (p.state === 'failed' || p.state === 'cancelled') {
+      // ComfyUI's own message, carried the whole way — it names the node and the
+      // missing file. Ours would say "generation failed".
+      throw new Error(p.message || p.logTail?.slice(-1)[0] || 'The local fill failed.');
+    }
+    if (!p.url) throw new Error('The local fill produced no image.');
+    return fetchAsDataUrl(p.url);
+  }
+  throw new Error('The local fill timed out.');
 }
 
 /** Run a mask-free Kie edit (nano-banana / gpt-image-2). Uploads the outlined
