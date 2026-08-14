@@ -95,7 +95,15 @@ export interface FillModelOption {
   engine: 'fal' | 'kie' | 'local';
   refMode: 'none' | 'optional' | 'required';
   /** Local only: whether the machine can run it, and what it needs if not. */
-  local?: { nodeName: string; ready: boolean; missing?: string };
+  local?: {
+    nodeName: string;
+    ready: boolean;
+    missing?: string;
+    /** The recipe's declared native resolutions, e.g. ["512x512"]. Drives the
+     *  crop-and-stitch window size — a model run far outside its training
+     *  resolution produces incoherent output, not merely softer output. */
+    resolutions?: string[];
+  };
 }
 
 /**
@@ -134,7 +142,10 @@ export async function loadFillModels(): Promise<FillModelOption[]> {
         credits: 0,
         engine: 'local' as const,
         refMode: 'none' as const,
-        local: { nodeName: m.local.nodeName, ready: !!m.local.ready, missing: m.local.missing },
+        local: {
+          nodeName: m.local.nodeName, ready: !!m.local.ready, missing: m.local.missing,
+          resolutions: m.local?.caps?.resolutions ?? m.resolutions,
+        },
       }));
     // Ready local models FIRST: someone who has set up their own GPU wants it to
     // be the obvious choice, not something they scroll past. Unready ones go last

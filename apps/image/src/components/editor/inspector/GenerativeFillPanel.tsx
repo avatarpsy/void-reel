@@ -4,6 +4,7 @@ import { useUIStore } from '../../../stores/ui-store';
 import { useSelectionStore } from '../../../stores/selection-store';
 import { applyGenerativeFill } from '../../../services/apply-generative-fill';
 import { FILL_MODELS, loadFillModels, type FillModelId, type FillModelOption, GenFillError, LocalFillError, fetchCreditSituation, uploadReferenceImage, uploadReferenceFromUrl } from '../../../services/generative-fill';
+import { nativePixelsFrom } from '../../../services/apply-generative-fill';
 import { NotSignedInError } from '../../../services/voidspace-storage';
 
 /**
@@ -104,7 +105,13 @@ export function GenerativeFillPanel() {
     setBusy(true);
     setError(null);
     try {
-      await applyGenerativeFill(prompt.trim(), model, referenceUrl ?? undefined);
+      // The chosen model's native resolution travels with the call: a local
+      // recipe declaring 512x512 must be driven at 512x512, and running it at
+      // 1024 produces incoherent output rather than merely softer output.
+      await applyGenerativeFill(
+        prompt.trim(), model, referenceUrl ?? undefined,
+        nativePixelsFrom(selected?.local?.resolutions),
+      );
       showNotification('success', 'Generative fill added on a new layer');
       setOpen(false);
       setPrompt('');
