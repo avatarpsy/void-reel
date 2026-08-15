@@ -1230,6 +1230,38 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
       }
 
       const caps = effectiveModel(shot.model);
+
+      /**
+       * A LOCAL MODEL CANNOT GO DOWN THIS PATH — refused here, loudly.
+       *
+       * `useStudioPipeline` branches on `local:` and routes to
+       * `/api/studio/local-gen-start`; `useStudioMediaGenerator`, which the
+       * board's Generate button runs through, has no such branch and always
+       * posts to `/api/studio/gen-clip-start`. That endpoint resolves the id
+       * through `findModel` and throws `Unknown video model` — so the user
+       * would press Generate, wait, and get an error naming a model they can
+       * see in the picker and just chose.
+       *
+       * Local models ARE in that picker (`surface: 'local'` merges into the
+       * catalogue), so this is reachable, not theoretical. Refusing at the
+       * earliest point costs nothing and spends nothing: no take is written,
+       * no credits move, and the message says what to do.
+       *
+       * The real fix is a local branch inside `useStudioMediaGenerator`, per
+       * the rule that this composable owns generation and anything it cannot
+       * do gets added THERE. Until that lands, a clear refusal beats a
+       * confusing failure four steps downstream.
+       */
+      if (shot.model.startsWith('local:')) {
+        return fail(
+          'local_not_supported_here',
+          'That shot is set to a model that runs on your own hardware, and the board’s '
+          + 'Generate button does not reach local generation yet — it would fail at the '
+          + 'provider. Pick a cloud model for this shot, or generate it from the studio '
+          + 'chat, which does route local.',
+        );
+      }
+
       const written = [shot.action, shot.camera].map(s => s.trim()).filter(Boolean).join(' ');
       if (!written) {
         return fail(
