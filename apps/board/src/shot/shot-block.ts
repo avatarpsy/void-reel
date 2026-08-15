@@ -2197,15 +2197,31 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
           ${allModels().length
             ? allModels().map(m => html`<button
                 class="shot__modelopt ${m.id === this.model.props.model ? 'is-on' : ''}"
-                title=${m.locked ? `${m.label} — needs a Plus plan` : m.label}
+                title=${m.locked
+                  ? `${m.label} — needs a Plus plan`
+                  : m.local
+                    ? `${m.label} runs on ${m.local.nodeName}. The board’s Generate button `
+                      + 'cannot reach local generation yet — pick a cloud model here, or run '
+                      + 'this shot from the studio chat.'
+                    : m.label}
                 @click=${(e: Event) => { e.stopPropagation(); this.chooseModel(m.id); }}
               >
                 <span class="shot__modelname">${m.label}${m.locked ? ' · Plus' : ''}</span>
+                <!--
+                  A LOCAL MODEL SAYS SO HERE, because everything else about it
+                  reads as the best row in the list: it is offered, it is
+                  selectable, and it costs zero credits. The one thing it cannot
+                  do is be generated from this button, and that was discovered
+                  only by pressing it. Still selectable — the choice is
+                  legitimate and the studio chat can run it — but no longer
+                  silent about what it means.
+                -->
                 <span class="shot__modelcaps">${[
                   `${m.maxDurationSec}s`,
                   m.nativeDialogue ? 'speaks' : '',
                   m.supportsLastFrame ? 'end frame' : '',
                   m.usesReferenceTags ? '@tags' : '',
+                  m.local ? 'not from the board yet' : '',
                 ].filter(Boolean).join(' · ')}</span>
               </button>`)
             : html`<span class="shot__pickempty">
