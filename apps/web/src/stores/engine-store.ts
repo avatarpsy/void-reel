@@ -84,6 +84,17 @@ export interface EngineState {
   audioLevels: AudioLevelData | null;
   initialize: () => Promise<void>;
   dispose: () => void;
+  /**
+   * Replace the current frame, CLOSING the one it replaces.
+   *
+   * `currentFrame.image` is an `ImageBitmap` — native memory the GC does not
+   * hurry to reclaim, which is why `dispose` closes it. Assigning a new one
+   * with `setState` dropped the old handle instead of closing it, so every
+   * frame rendered this way leaked a full-size bitmap: ~8 MB at 1080p, at
+   * preview frame rate. Both writers go through here so the store owns that
+   * lifetime in one place rather than two that can disagree.
+   */
+  setCurrentFrame: (frame: RenderedFrame | null) => void;
   renderFrame: (time: number) => Promise<RenderedFrame | null>;
   getAudioLevels: () => AudioLevelData;
   updateAudioLevels: (
@@ -261,6 +272,16 @@ export const useEngineStore = create<EngineState>()(
       }
     },
 
+    setCurrentFrame: (frame: RenderedFrame | null) => {
+      const previous = get().currentFrame;
+      // Never close the frame we are being handed back — a caller re-setting
+      // the same object would otherwise blank the preview.
+      if (previous && previous !== frame) {
+        try { previous.image.close(); } catch { /* already closed */ }
+      }
+      set({ currentFrame: frame });
+    },
+
     dispose: () => {
       const state = get();
 
@@ -272,7 +293,7 @@ export const useEngineStore = create<EngineState>()(
       state.graphicsEngine?.clearCache();
 
       if (state.currentFrame) {
-        state.currentFrame.image.close();
+        try { state.currentFrame.image.close(); } catch { /* already closed */ }
       }
 
       lazyEngineCache.clear();

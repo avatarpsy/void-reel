@@ -45,6 +45,9 @@ import {
   // must be the same one the export path uses, or the two disagree about what
   // is even a sequence.
   compoundIdOfClip,
+  // …and the same flattener the export mixer uses, so preview and export
+  // agree about what a nested sequence SOUNDS like, not just what it looks like.
+  flattenCompoundAudio,
 } from "@openreel/core";
 import { useEngineStore } from "../../stores/engine-store";
 import { useSettingsStore } from "../../stores/settings-store";
@@ -1216,12 +1219,34 @@ export const Preview: React.FC = () => {
 
   const getAudioClipsForScheduler = useCallback(
     (time: number): AudioClipSchedule[] => {
-      const tracks = timelineTracksRef.current;
+      const projectStore = useProjectStore.getState();
+
+      /**
+       * NESTED SEQUENCES ARE FLATTENED BEFORE SCHEDULING.
+       *
+       * A compound instance's `mediaId` names a sequence, so the buffer lookup
+       * below misses and the clip is skipped — the sequence played SILENTLY in
+       * preview while the exported file had sound. That split is the exact
+       * failure `compoundIdOfClip` exists to prevent, and it had opened up
+       * again one layer down.
+       *
+       * The ref, not the store's tracks: it is the live copy this scheduler is
+       * driven from. Only flattened when the project actually has compounds, so
+       * the ordinary timeline does not allocate on a hot path.
+       */
+      const liveTracks = timelineTracksRef.current;
+      const proj = projectStore.project;
+      const tracks = proj?.compoundClips?.length
+        ? flattenCompoundAudio({
+            ...proj,
+            timeline: { ...proj.timeline, tracks: liveTracks },
+          }).tracks
+        : liveTracks;
+
       const tracksWithAudio = tracks.filter(
         (t) => (t.type === "audio" || t.type === "video") && !t.hidden && !t.muted,
       );
       const schedules: AudioClipSchedule[] = [];
-      const projectStore = useProjectStore.getState();
 
       for (const track of tracksWithAudio) {
         for (const clip of track.clips) {

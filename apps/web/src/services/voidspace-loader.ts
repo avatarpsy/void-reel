@@ -207,6 +207,31 @@ export function mergeSavedArrangement(rebuilt: Project, saved: Project): Project
   const allEnds = tracks.flatMap((t) => t.clips.map((c) => c.startTime + c.duration));
   const textClips = [...(saved.textClips ?? []), ...newTextClips.map(shift)];
 
+  /**
+   * THE SEQUENCES THE NEW CLIPS POINT AT.
+   *
+   * A nested sequence lives in two pieces: the INSTANCE, an ordinary clip on a
+   * track, and the CONTENT, held once on `compoundClips`. The instance merges in
+   * above with every other new clip — but the content is not on a track, so
+   * without this it stayed behind in `rebuilt` and the merged project got an
+   * instance pointing at a sequence that does not exist. That renders as a hole
+   * and plays as silence, with nothing naming the cause.
+   *
+   * Union by id, SAVED FIRST — same rule as the media library, and for the same
+   * reason: if the user has opened that sequence and edited it, their version is
+   * the true one and a rebuild copy must not overwrite it. Sending to the editor
+   * adds; it never overwrites.
+   *
+   * Still absent when neither side has any, so an ordinary project keeps no such
+   * key at all.
+   */
+  const savedCompounds = saved.compoundClips ?? [];
+  const savedCompoundIds = new Set(savedCompounds.map((c) => c.id));
+  const compoundClips = [
+    ...savedCompounds,
+    ...(rebuilt.compoundClips ?? []).filter((c) => !savedCompoundIds.has(c.id)),
+  ];
+
   return {
     ...saved,
     mediaLibrary: { items },
@@ -220,6 +245,7 @@ export function mergeSavedArrangement(rebuilt: Project, saved: Project): Project
       ),
     },
     textClips,
+    ...(compoundClips.length ? { compoundClips } : {}),
     modifiedAt: Date.now(),
   };
 }

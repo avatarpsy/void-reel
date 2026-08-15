@@ -305,6 +305,75 @@ describe("mergeSavedArrangement", () => {
 
     expect(mergeSavedArrangement(rebuilt, saved).timeline.duration).toBe(12);
   });
+
+  /**
+   * A NESTED SEQUENCE ARRIVES IN TWO PIECES, AND BOTH HAVE TO MAKE THE TRIP.
+   *
+   * The INSTANCE is an ordinary clip and merges with the rest. The CONTENT sits
+   * on `compoundClips`, which is not a track — so it has to be carried
+   * deliberately, and until this it was not. The result was an instance
+   * referencing a sequence that did not exist: a hole in the picture and
+   * silence under it, with nothing naming the cause.
+   */
+  const compound = (id: string, duration = 6) => ({
+    id, name: id, createdAt: 0, modifiedAt: 0, color: "#8b5cf6",
+    content: { clips: [], tracks: [], duration },
+  }) as any;
+
+  const instance = (id: string, compoundId: string, startTime: number) =>
+    ({ ...clip(id, startTime), mediaId: `compound:${compoundId}` }) as any;
+
+  it("carries the sequences the newly merged instances point at", () => {
+    const saved = proj([track("track-video", [clip("c1", 0)])]);
+    const rebuilt = proj([
+      track("track-video", [clip("c1", 0), instance("i1", "seq-a", 5)]),
+    ]);
+    (rebuilt as any).compoundClips = [compound("seq-a")];
+
+    const out = mergeSavedArrangement(rebuilt, saved);
+
+    // The instance came across…
+    const ids = out.timeline.tracks[0]!.clips.map((c: any) => c.id);
+    expect(ids).toContain("i1");
+    // …and so did the sequence it needs to render.
+    expect((out as any).compoundClips?.map((c: any) => c.id)).toEqual(["seq-a"]);
+  });
+
+  it("does NOT overwrite a sequence the user has already edited", () => {
+    // Same id on both sides means the user opened that sequence and changed it.
+    // Their version is the true one — a rebuild copy replacing it would silently
+    // undo an edit made INSIDE the container.
+    const saved = proj([track("track-video", [clip("c1", 0)])]);
+    (saved as any).compoundClips = [compound("seq-a", 99)];
+    const rebuilt = proj([
+      track("track-video", [clip("c1", 0), instance("i1", "seq-a", 5)]),
+    ]);
+    (rebuilt as any).compoundClips = [compound("seq-a", 6)];
+
+    const out = mergeSavedArrangement(rebuilt, saved);
+    expect((out as any).compoundClips).toHaveLength(1);
+    expect((out as any).compoundClips[0].content.duration).toBe(99);
+  });
+
+  it("keeps a saved sequence the rebuild no longer knows about", () => {
+    // Sending to the editor ADDS. A sequence the user built by hand in the
+    // editor has no counterpart on the board and must survive a recompile.
+    const saved = proj([track("track-video", [clip("c1", 0)])]);
+    (saved as any).compoundClips = [compound("hand-made")];
+    const rebuilt = proj([track("track-video", [clip("c1", 0), clip("c2", 5)])]);
+
+    const out = mergeSavedArrangement(rebuilt, saved);
+    expect((out as any).compoundClips?.map((c: any) => c.id)).toEqual(["hand-made"]);
+  });
+
+  it("attaches no compoundClips key at all when neither side has one", () => {
+    // An ordinary film must stay byte-identical in shape to what it was before
+    // nested sequences existed.
+    const saved = proj([track("track-video", [clip("c1", 0)])]);
+    const rebuilt = proj([track("track-video", [clip("c1", 0), clip("c2", 5)])]);
+
+    expect("compoundClips" in mergeSavedArrangement(rebuilt, saved)).toBe(false);
+  });
 });
 
 /**

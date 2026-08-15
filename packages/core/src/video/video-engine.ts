@@ -2483,6 +2483,24 @@ export class VideoEngine {
    * Call when the engine is no longer needed to free memory.
    */
   dispose(): void {
+    /**
+     * THE NESTED ENGINES GO TOO.
+     *
+     * `renderCompoundFrame` builds a whole VideoEngine per compound and keeps
+     * it — each one holding its own frame cache, video elements, decode canvas
+     * and mediabunny instance. Disposing only the outer engine left every one
+     * of those alive with its ImageBitmaps never closed, which is native memory
+     * a heap profile does not show you.
+     *
+     * They are disposed before the outer caches so a nested engine cannot be
+     * handed more work while this is running.
+     */
+    for (const engine of this.compoundEngines.values()) {
+      try { engine.dispose(); } catch { /* one bad engine must not strand the rest */ }
+    }
+    this.compoundEngines.clear();
+    this.renderingCompounds.clear();
+
     this.clearCache();
     this.clearVideoElementCache();
     for (const bitmap of this.staticImageCache.values()) {

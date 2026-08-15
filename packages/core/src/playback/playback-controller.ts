@@ -23,6 +23,7 @@ import {
   type AudioClipSchedule,
 } from "../audio/realtime-audio-graph";
 import { rewriteToProxy } from "../utils/cors-proxy";
+import { flattenCompoundAudio } from "../timeline/flatten-compounds";
 
 export class PlaybackController {
   private videoEngine: VideoEngine | null = null;
@@ -640,8 +641,21 @@ export class PlaybackController {
   private async preloadAudioBuffers(): Promise<void> {
     if (!this.project) return;
 
-    const { timeline, mediaLibrary } = this.project;
+    const { mediaLibrary } = this.project;
     const mediaIdsToPreload = new Set<string>();
+
+    /**
+     * FLATTENED, so the media INSIDE a nested sequence gets decoded too.
+     *
+     * A compound instance's `mediaId` names a sequence, not a file, so the
+     * lookup below finds nothing and skips it — and the audio actually inside
+     * that sequence was never decoded, never cached, and therefore never
+     * scheduled. The sequence played silently while its export had sound.
+     *
+     * Same function the export mixer uses, so both paths agree on what is
+     * audible. Returns the timeline by reference when nothing is nested.
+     */
+    const timeline = flattenCompoundAudio(this.project);
 
     for (const track of timeline.tracks) {
       if (track.type !== "audio" && track.type !== "video") continue;

@@ -179,7 +179,8 @@ export class RenderBridge {
       this.updateRenderStats(renderTime);
 
       // Update engine store with current frame
-      useEngineStore.setState({ currentFrame: frame });
+      // Through the action, not setState — it closes the bitmap this replaces.
+      useEngineStore.getState().setCurrentFrame(frame);
 
       this.lastRenderedTime = time;
 

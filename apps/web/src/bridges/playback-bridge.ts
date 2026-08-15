@@ -76,7 +76,10 @@ export class PlaybackBridge {
         case "framerendered":
           // Update current frame in engine store if needed
           if (event.frame) {
-            useEngineStore.setState({ currentFrame: event.frame });
+            // Through the action, not setState — it closes the bitmap this
+            // replaces. This path predates nested sequences and leaked the
+            // same way.
+            useEngineStore.getState().setCurrentFrame(event.frame);
           }
           break;
       }
