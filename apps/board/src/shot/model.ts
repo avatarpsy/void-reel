@@ -352,6 +352,126 @@ export function isTimed(kind: ShotMedia['kind']): boolean {
   return kind === 'video' || kind === 'audio';
 }
 
+/**
+ * WHERE A TAKE CAME FROM.
+ *
+ * A take is anything this shot PRODUCED, not only a model output. A recording,
+ * an upload, a file dragged in from somewhere else — if it is an attempt at
+ * this shot, it is a take, and it should sit beside the generated ones and be
+ * choosable in the same way.
+ *
+ * Modelling it any other way means a second mechanism for "the footage I shot
+ * myself", and then two things that both mean "this is the shot" — which is the
+ * drift this whole design exists to avoid.
+ */
+export type TakeSource = 'generated' | 'recorded' | 'uploaded' | 'imported';
+
+/**
+ * ONE ATTEMPT AT THIS SHOT.
+ *
+ * ── TAKES ARE OUTPUTS; `media` ARE INPUTS ────────────────────────────────────
+ * They are a separate list rather than a `ShotMedia` with a `take` role, and the
+ * separation is the point: references are what the shot is MADE FROM and takes
+ * are what it BECAME. Folding them together would make every existing consumer
+ * of `media` — the lanes, the wells, `rolesFor`, compile's reference legend —
+ * filter takes back out, and the first one that forgot would put the finished
+ * clip into the model's own reference set.
+ *
+ * ── APPEND-ONLY, AND THAT IS A PRODUCT DECISION ──────────────────────────────
+ * Generating never replaces. It adds. So trying again is free, an agent cannot
+ * destroy work somebody paid for, and "the one before was better" is always
+ * recoverable. `chosenTakeId` is the only thing that ever changes.
+ */
+export interface ShotTake {
+  /** Stable within the shot. What the agent, the card and the timeline address. */
+  id: string;
+
+  /**
+   * Voidspace Library id — and THE FILE BELONGS TO THE LIBRARY, not to this
+   * block.
+   *
+   * Load-bearing: a take may already be cut into the film when its shot is
+   * deleted. Because the timeline clip references Library media rather than
+   * this block, deleting the shot can never break the cut. Absent only while a
+   * generation is still running.
+   */
+  mediaId?: string;
+
+  /** What the CARD draws — a poster or 720p proxy. Never the master: a tile is
+   *  a hundred pixels and pulling a 4K file for one is the slow path. */
+  src: string;
+  /** FULL QUALITY. The card draws `src`; the render must use this. The recurring
+   *  silent bug in this codebase is these two being swapped. */
+  url: string;
+  /** A still, so a take tile costs one small image and never a stream. */
+  poster?: string;
+
+  /** A clip shot yields video; a graphic yields its render. Decides which track
+   *  the take lands on when the film is assembled. */
+  kind: 'video' | 'image';
+  /** Real length, measured. What the shot's slot on the timeline becomes. */
+  durationSec: number;
+
+  /**
+   * `running` is a REAL, PERSISTED state, not a UI flag.
+   *
+   * A generation outlives the tab it was started in. Storing the state (and
+   * `jobId` below) is what lets a reload show "still working" and resume
+   * polling, instead of showing a shot that quietly lost the thing it was
+   * making — which is indistinguishable from never having started.
+   */
+  status: 'running' | 'ready' | 'failed';
+  /** Why it failed, in words a person can read. */
+  error?: string;
+  /** The provider/job handle to resume polling after a reload. */
+  jobId?: string;
+
+  /** ISO 8601. Orders the strip, and answers "is there a newer take than the
+   *  one on the timeline?". */
+  createdAt: string;
+  /** The user's own name for it — "the good one". */
+  label?: string;
+
+  source: TakeSource;
+  /** Registry id of the model that made it. Shown on the tile, and what "same
+   *  again" reuses. Absent for anything not generated. */
+  model?: string;
+  /** Which surface ran it. `local` is what tells the user this one was free. */
+  runtime?: 'local' | 'cloud';
+  /** Reproducibility. "Same, but at night, same seed" is the core iteration
+   *  loop for anyone on their own hardware. */
+  seed?: number;
+  /** What ACTUALLY went to the model, after the prompt was composed. Provenance
+   *  the card cannot otherwise reconstruct three edits later. */
+  promptUsed?: string;
+  /** What it cost, as charged. */
+  costCredits?: number;
+}
+
+/** Takes worth putting on a timeline: finished, and with something to play. */
+export function readyTakes(takes: readonly ShotTake[] | undefined): ShotTake[] {
+  return (takes ?? []).filter(t => t.status === 'ready' && (t.url || t.src));
+}
+
+/**
+ * The take that IS the shot.
+ *
+ * Falls back to the newest ready take when nothing is chosen, so a shot that
+ * generated once and was never explicitly ticked still has an answer — the
+ * common case, and asking the user to confirm the only candidate would be
+ * ceremony. Returns null when there is genuinely nothing to show.
+ */
+export function chosenTake(
+  takes: readonly ShotTake[] | undefined,
+  chosenTakeId: string | undefined,
+): ShotTake | null {
+  const ready = readyTakes(takes);
+  if (!ready.length) return null;
+  const picked = chosenTakeId ? ready.find(t => t.id === chosenTakeId) : undefined;
+  if (picked) return picked;
+  return ready.reduce((newest, t) => (t.createdAt > newest.createdAt ? t : newest), ready[0]);
+}
+
 /** `72.4` → `1:12.4`. Short form, because a trim readout is glanced at. */
 export function formatTime(sec: number): string {
   if (!Number.isFinite(sec) || sec < 0) return '0:00';
@@ -419,12 +539,63 @@ export interface ShotFields {
   camera: string;
 }
 
+/**
+ * TWO BOXES ON THE CARD, NOT THREE — and the third is not deleted.
+ *
+ * ACTION and CAMERA were separate boxes feeding the same thing: the motion
+ * prompt. That is not how anybody writes a shot. A shot list says
+ *
+ *   "Wide — she turns to the window as the kettle screams, slow push in."
+ *
+ * in ONE sentence, with the framing inside it, because the framing is part of
+ * the description. Split across two boxes, the second one is a question nobody
+ * knows how to answer, and it sat empty on almost every shot.
+ *
+ * VOICEOVER IS THE ONE THAT MUST STAY SEPARATE, and this is the whole reason
+ * the merge stops at two. The line reaches TTS **verbatim**. Fold it into prose
+ * and something has to extract it again — and an extractor that paraphrases by
+ * one word ships a video that says the wrong thing, with no error anywhere in
+ * the chain. It is also the storyboard convention: panel description above,
+ * dialogue below.
+ *
+ * `camera` KEEPS ITS PROP. Boards written before this carry text in it, and
+ * deleting the field would silently drop a line of somebody's direction.
+ * `renderFields` shows the box only when it already holds something, so an old
+ * shot stays editable and a new one is never offered it. `screenplay.ts` already
+ * emits `CAMERA:` conditionally, so an empty one costs nothing downstream.
+ */
 export const FIELD_SPECS: ReadonlyArray<{
   key: keyof ShotFields; label: string; placeholder: string;
 }> = [
-  { key: 'action', label: 'ACTION', placeholder: 'What happens in this shot' },
-  { key: 'voiceover', label: 'VOICEOVER', placeholder: 'The line that gets spoken' },
-  { key: 'camera', label: 'CAMERA', placeholder: 'Framing, movement, how long' },
+  {
+    key: 'action',
+    label: 'SHOT',
+    placeholder:
+      'The video: what happens, how it is framed, what it sounds like — “Wide, she turns to '
+      + 'the window as the kettle screams, slow push in”',
+  },
+  /**
+   * SEPARATE FROM THE SHOT, and that separation is the feature.
+   *
+   * Anything written in SHOT is a description of the VIDEO, and a model with
+   * native dialogue speaks the lines it finds there, in the scene, on camera.
+   * This is the other thing: a voice laid OVER the picture — the explainer
+   * track, the infographic read, the documentary narrator.
+   *
+   * They are independent on purpose (see `voiceMode`): a shot may have both,
+   * either, or neither. Merging them would force a choice the user has not made
+   * and cannot express afterwards.
+   */
+  {
+    key: 'voiceover',
+    label: 'NARRATION',
+    placeholder: 'A voice over the top, if you want one — spoken separately, not by the video',
+  },
+  {
+    key: 'camera',
+    label: 'CAMERA (older shot)',
+    placeholder: 'Framing and movement — now written into SHOT above',
+  },
 ] as const;
 
 type ShotProps = {
@@ -451,6 +622,55 @@ type ShotProps = {
   /** Planned length in seconds. Clamped to the model's allowed values at
    *  generation time; kept here because the pacing is a story decision. */
   durationSec: number;
+  /**
+   * Every attempt this shot has produced. See `ShotTake`.
+   *
+   * ⚠ READ IT AS `props.takes ?? []`, ALWAYS. Boards created before this field
+   * existed have no `takes` key in their Yjs document at all — `props()` supplies
+   * a default for NEW blocks only, it does not backfill old ones. Anything that
+   * assumes an array here works on a board made today and returns `undefined` on
+   * one made last week, which is the worst kind of bug: invisible until a real
+   * user opens real work. `shots.ts` centralises the fix in `editTakes`.
+   */
+  takes: ShotTake[];
+  /**
+   * Which take IS the shot — the one that lands on the main video track.
+   *
+   * Empty means "not decided", and `chosenTake()` then falls back to the newest
+   * ready take. It is a POINTER, never a copy: the take itself is never marked,
+   * so changing your mind rewrites one string rather than editing two records
+   * that could disagree.
+   */
+  chosenTakeId: string;
+  /**
+   * DOES THE VIDEO MODEL MAKE ITS OWN SOUND?
+   *
+   * ── WHY THIS IS THE USER'S CHOICE AND NOT A RULE ─────────────────────────
+   * All four combinations are legitimate films, and nothing can pick between
+   * them automatically, because the difference is intent:
+   *
+   *   silent   + no narration → a clean visual. B-roll, a cutaway, a title bed.
+   *   silent   + narration    → an explainer. The picture illustrates and the
+   *                             voice carries it. TTS, laid over.
+   *   dialogue + no narration → a scene. The character speaks on camera, and a
+   *                             narrator over the top would ruin it.
+   *   dialogue + narration    → both, deliberately. A documentary beat where a
+   *                             subject talks and a narrator frames it.
+   *
+   * So the shot carries the decision and the two written fields stay
+   * independent: SHOT describes the video (including any dialogue spoken in
+   * it), NARRATION is a separate voice over the top.
+   *
+   * `'silent' | 'dialogue'` are the SERVER'S OWN WORDS — `gen-clip-start` reads
+   * exactly these — so nothing is translated on the way out. Renaming them for
+   * the card would invent a second vocabulary for one concept, which is how two
+   * ends drift apart.
+   *
+   * Empty means "not decided" and resolves to silent: it is what every shot
+   * generated before this existed, and it is the answer that cannot surprise
+   * somebody with a voice they never asked for.
+   */
+  voiceMode: '' | 'silent' | 'dialogue';
   /** `clip` (generated) or `hyperframes` (a composition). See `ShotKind`. */
   kind: ShotKind;
   /**
@@ -500,10 +720,41 @@ type ShotProps = {
   sceneKey: string;
 } & GfxCommonBlockProps;
 
-/** Panel geometry. Width is fixed; height is whatever the content needs, and the
- *  component keeps `xywh` in step so canvas selection matches what is drawn. */
+/**
+ * Panel geometry.
+ *
+ * WHY 760 AND NOT 720. A clip card holds a kind row, three slot wells at 16:9,
+ * three reference lanes, the written fields and a footer. Measured against the
+ * card's own CSS that is roughly 730px of content inside a 720px box — so the
+ * last thing in the column, the footer with the model and the duration, was cut
+ * off the bottom on every clip shot. Padding cannot fix an overflow; the box has
+ * to be big enough, and the footer has to live somewhere the content cannot push
+ * it (it is now a sibling of the scrolling body — see `.shot__foot`).
+ *
+ * UNIFORM, still. A graphic needs less and gets slack, which its REFERENCES lane
+ * absorbs — that lane is already the one element allowed to take the slack. A
+ * per-kind height means `shotBounds`, `relayoutShots` and the filmstrip all have
+ * to know each shot's kind to lay out the strip, which is a real change and
+ * belongs with the takes work rather than smuggled in beside a padding fix.
+ */
 export const SHOT_W = 640;
-export const SHOT_H = 720;
+/**
+ * 845, RAISED FROM 760 WHEN TAKES ARRIVED.
+ *
+ * The TAKES row costs about 85px — a label line plus a 62px strip plus its rule
+ * and padding — and only a generated shot has one. The body scrolls, so nothing
+ * is ever clipped either way; the difference is whether a shot you have just
+ * generated shows its result and its writing at the same time, or makes you
+ * scroll a card to see what you made.
+ *
+ * STILL UNIFORM, and still deliberately. A per-kind height means `shotBounds`,
+ * `relayoutShots` and the filmstrip all have to know each shot's kind and its
+ * take count to lay out the strip — and the height would then CHANGE under the
+ * user the first time a generation landed, moving every card to its right. A
+ * strip of equal cards that is occasionally roomier is a better trade than one
+ * that reflows while you are working in it.
+ */
+export const SHOT_H = 845;
 export const SHOT_GAP = 56;
 
 export const ShotBlockSchema = defineBlockSchema({
@@ -514,6 +765,9 @@ export const ShotBlockSchema = defineBlockSchema({
     voiceover: '',
     camera: '',
     media: [],
+    takes: [],
+    chosenTakeId: '',
+    voiceMode: '',
     model: '',
     durationSec: 0,
     kind: 'clip',

@@ -37,6 +37,7 @@ import { ShotViewExtension } from '../shot/view';
 // moved by BlockSuite's own gfx layer, so no HTML5 drop event is ever fired and
 // the panel's `std.dnd.dropTarget` never sees the gesture. See canvas-drop.ts.
 import { CanvasMediaToShotExtension } from '../shot/canvas-drop';
+import { ShotReflowExtension } from '../shot/reflow';
 import { ImageViewExtension } from '@blocksuite/affine/blocks/image/view';
 import { EmbedViewExtension } from '@blocksuite/affine/blocks/embed/view';
 import { ShapeViewExtension } from '@blocksuite/affine/gfx/shape/view';
@@ -206,5 +207,8 @@ export function boardViewExtensions(): ExtensionType[] {
     // OURS, appended: a plain extension rather than a provider, same as the
     // shot block's schema half.
     CanvasMediaToShotExtension,
+    // Snaps the filmstrip back onto its pitch after a shot is dragged to a new
+    // place in it. Order was always correct; the tidying was missing.
+    ShotReflowExtension,
   ];
 }

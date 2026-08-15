@@ -82,6 +82,19 @@ export interface MediaItem {
   readonly category?: string;
   /** Scene number this asset belongs to (1-indexed). Voidspace only. */
   readonly sceneNumber?: number;
+  /**
+   * The BOARD SHOT this asset was made for — `source_shot_id` on the scene.
+   *
+   * `sceneNumber` is a position and positions move: reorder the storyboard and
+   * scene 3 is a different shot, while the asset is still the same asset. So a
+   * question as basic as "which shot is this clip from?" was unanswerable from
+   * the timeline, and anything that wanted to know had to infer it from an index
+   * that had already changed underneath.
+   *
+   * Stable for the life of the shot, so it is also what lets several takes of
+   * one shot be recognised as siblings rather than as unrelated files.
+   */
+  readonly shotId?: string;
   /** Sub-role within the scene: 'primary'|'first_frame'|'narration'|'music'|… */
   readonly role?: string;
   /**

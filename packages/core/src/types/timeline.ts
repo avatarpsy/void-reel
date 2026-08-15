@@ -67,6 +67,21 @@ export interface Clip {
   /** Zero-based index of the audio track within the source media file to use for this clip.
    * Undefined or 0 means the primary/first audio track. */
   readonly audioTrackIndex?: number;
+  /**
+   * WHERE THIS CLIP CAME FROM, on the storyboard.
+   *
+   * `shotId` is the board shot; `takeId` is which generation of it. A clip
+   * carried neither, so nothing on the timeline could say what it was OF — the
+   * agent had to guess from position, and position is exactly what an edit
+   * changes. With both, "recut scene 3 using more of take 2" is a lookup rather
+   * than an inference, and cutting several takes of one shot together stays
+   * legible after the pieces have been moved around.
+   *
+   * Optional and purely informational: nothing about playback or rendering reads
+   * them, and a clip the user dragged in from their own disk has neither.
+   */
+  readonly shotId?: string;
+  readonly takeId?: string;
 }
 
 export interface Effect {

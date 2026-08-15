@@ -317,3 +317,185 @@ describe('handleBlockDrop', () => {
     expect(readShot(board.std, shotId)!.media).toHaveLength(0);
   });
 });
+
+/**
+ * DRAGGING BACK OFF A SHOT — the exit that did not exist.
+ *
+ * Media could get into a shot two ways and out none: the only way off a card was
+ * the ✕ that deletes. So the canvas, which this design calls the scratch pad,
+ * could not be used as one.
+ *
+ * The rules here decide whether that gesture rearranges the user's work or
+ * quietly destroys some of it.
+ */
+describe('handleAssetDrop · dragging off a shot', () => {
+  function withOrigin(
+    e: AssetDragEntity,
+    origin: NonNullable<AssetDragEntity['origin']>,
+  ): AssetDragEntity {
+    return { ...e, origin };
+  }
+
+  it('MOVES a reference to the canvas — it does not leave a copy behind', async () => {
+    // A reference is an INPUT. Leaving a duplicate would mean the shot still
+    // generates from something the user just pulled off it.
+    const board = makeTestBoard();
+    const [shotId] = createShots(board.std, board.surfaceId, ['Kitchen']);
+    const mediaId = addMedia(board.std, shotId, {
+      kind: 'image', role: 'reference',
+      src: 's', url: 'u', name: 'still.png',
+    })!;
+    const placeOnCanvas = vi.fn().mockResolvedValue(undefined);
+
+    const at = screenAt(board, SHOT_W + SHOT_GAP / 2, 40);
+    const out = await handleAssetDrop(
+      board.std, withOrigin(entity(), { shotId, mediaId }), at, placeOnCanvas,
+    );
+
+    expect(out.target).toBe('canvas');
+    expect(placeOnCanvas).toHaveBeenCalledOnce();
+    expect(readShot(board.std, shotId)!.media).toHaveLength(0);
+  });
+
+  it('COPIES a take to the canvas — the shot keeps its record of what it made', async () => {
+    // A take is an OUTPUT, and the shot's own ledger of what it produced, what
+    // it cost and what seed made it. Auditioning one at size must never be a
+    // way of silently deleting it — discarding is the ✕, deliberately.
+    const board = makeTestBoard();
+    const [shotId] = createShots(board.std, board.surfaceId, ['Kitchen']);
+    const mediaId = addMedia(board.std, shotId, {
+      kind: 'image', role: 'reference',
+      src: 's', url: 'u', name: 'still.png',
+    })!;
+    const placeOnCanvas = vi.fn().mockResolvedValue(undefined);
+
+    const at = screenAt(board, SHOT_W + SHOT_GAP / 2, 40);
+    await handleAssetDrop(
+      board.std,
+      // A take drag carries `takeId`, never `mediaId`.
+      withOrigin(entity(), { shotId, takeId: 'take-1' }),
+      at,
+      placeOnCanvas,
+    );
+
+    expect(placeOnCanvas).toHaveBeenCalledOnce();
+    // The reference list is untouched — a take drag must not reach into it.
+    expect(readShot(board.std, shotId)!.media.map(m => m.id)).toEqual([mediaId]);
+  });
+
+  it('moves a reference from one shot to another, leaving none behind', async () => {
+    const board = makeTestBoard();
+    const [a, b] = createShots(board.std, board.surfaceId, ['One', 'Two']);
+    const mediaId = addMedia(board.std, a, {
+      kind: 'image', role: 'reference',
+      src: 's', url: 'u', name: 'still.png',
+    })!;
+    const placeOnCanvas = vi.fn().mockResolvedValue(undefined);
+
+    const at = screenAt(board, SHOT_W + SHOT_GAP + 40, 40);
+    const out = await handleAssetDrop(
+      board.std, withOrigin(entity(), { shotId: a, mediaId }), at, placeOnCanvas,
+    );
+
+    expect(out).toMatchObject({ target: 'shot', shotId: b });
+    expect(readShot(board.std, a)!.media).toHaveLength(0);
+    expect(readShot(board.std, b)!.media).toHaveLength(1);
+  });
+
+  it('does NOTHING when a reference is dropped back on its own shot', async () => {
+    // The most destructive possible reading of the least meaningful gesture: a
+    // remove-and-re-add loses the role, the tag, the trim and the note, and
+    // sends the tile to the end of its lane. Nudging a tile must be free.
+    const board = makeTestBoard();
+    const [shotId] = createShots(board.std, board.surfaceId, ['Kitchen']);
+    const mediaId = addMedia(board.std, shotId, {
+      kind: 'image', role: 'firstFrame',
+      src: 's', url: 'u', name: 'still.png', tag: 'sarah',
+    })!;
+    const placeOnCanvas = vi.fn().mockResolvedValue(undefined);
+
+    await handleAssetDrop(
+      board.std, withOrigin(entity(), { shotId, mediaId }), screenAt(board, 40, 40), placeOnCanvas,
+    );
+
+    const media = readShot(board.std, shotId)!.media;
+    expect(media).toHaveLength(1);
+    expect(media[0]!.id).toBe(mediaId);
+    expect(media[0]!.role).toBe('firstFrame');
+    expect(media[0]!.tag).toBe('sarah');
+  });
+
+  it('still COPIES from the panel, where there is no origin', async () => {
+    // The library drag is unchanged: no origin means nothing to move from.
+    const board = makeTestBoard();
+    const [shotId] = createShots(board.std, board.surfaceId, ['Kitchen']);
+    const placeOnCanvas = vi.fn().mockResolvedValue(undefined);
+
+    await handleAssetDrop(board.std, entity(), screenAt(board, 40, 40), placeOnCanvas);
+    expect(readShot(board.std, shotId)!.media).toHaveLength(1);
+  });
+});
+
+/**
+ * REORDERING WITHIN A LANE.
+ *
+ * Order is not cosmetic here: a model receives references positionally —
+ * `@Image1`, `@Image2` — and the prompt refers back to them by number, so moving
+ * a tile changes what gets generated. `moveMedia` has existed since the
+ * beginning and was reachable only by the agent.
+ *
+ * `insertionIndexAt` needs real laid-out DOM, which a headless test does not
+ * have, so what is asserted here is the part that decides correctness: dropping
+ * a tile back on its own shot must never destroy it.
+ */
+describe("handleAssetDrop · reordering in place", () => {
+  it("keeps everything about a reference dropped back on its own shot", async () => {
+    // No layout, so `insertionIndexAt` finds no strip and returns null — the
+    // order is left alone. The tile must still come through untouched: role,
+    // tag, trim and note are the things a remove-and-re-add would silently drop.
+    const board = makeTestBoard();
+    const [shotId] = createShots(board.std, board.surfaceId, ["Kitchen"]);
+    const mediaId = addMedia(board.std, shotId, {
+      kind: "image", role: "firstFrame",
+      src: "s", url: "u", name: "still.png", tag: "sarah", note: "hold on her eyes",
+    })!;
+    const placeOnCanvas = vi.fn().mockResolvedValue(undefined);
+
+    const out = await handleAssetDrop(
+      board.std,
+      { ...entity(), origin: { shotId, mediaId } },
+      screenAt(board, 40, 40),
+      placeOnCanvas,
+    );
+
+    expect(out).toMatchObject({ target: "shot", shotId });
+    const media = board.std && readShot(board.std, shotId)!.media;
+    expect(media).toHaveLength(1);
+    expect(media[0]).toMatchObject({
+      id: mediaId, role: "firstFrame", tag: "sarah", note: "hold on her eyes",
+    });
+    // Never placed on the canvas — it did not leave the shot.
+    expect(placeOnCanvas).not.toHaveBeenCalled();
+  });
+
+  it("leaves a take alone when it is dropped back on its own card", async () => {
+    // Takes are ordered by when they were made. There is nothing to rearrange,
+    // and the reference list must not be touched by a take gesture.
+    const board = makeTestBoard();
+    const [shotId] = createShots(board.std, board.surfaceId, ["Kitchen"]);
+    const mediaId = addMedia(board.std, shotId, {
+      kind: "image", role: "reference", src: "s", url: "u", name: "still.png",
+    })!;
+    const placeOnCanvas = vi.fn().mockResolvedValue(undefined);
+
+    await handleAssetDrop(
+      board.std,
+      { ...entity(), origin: { shotId, takeId: "take-1" } },
+      screenAt(board, 40, 40),
+      placeOnCanvas,
+    );
+
+    expect(readShot(board.std, shotId)!.media.map((m) => m.id)).toEqual([mediaId]);
+    expect(placeOnCanvas).not.toHaveBeenCalled();
+  });
+});

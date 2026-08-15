@@ -661,6 +661,16 @@ function App() {
     });
   }, [projectModifiedAt]);
 
+  /**
+   * The storyboard this project was compiled from, if any.
+   *
+   * A ref, not state: nothing on screen here depends on it. It exists so
+   * `get-state` can answer "where did this film come from?", which is what lets
+   * the host page offer a way back without searching every board for one that
+   * claims this project.
+   */
+  const sourceBoardIdRef = useRef<string>("");
+
   const [voidspaceLoading, setVoidspaceLoading] = useState(() => {
     const sp = new URLSearchParams(window.location.search);
     return sp.has("sceneListId") || sp.has("import");
@@ -1182,6 +1192,19 @@ function App() {
               // empty, and restoreSnapshot quietly no-ops).
               const persistedHistory = (project as any).__historyData as string | undefined;
               if ((project as any).__historyData) delete (project as any).__historyData;
+              /**
+               * WHICH STORYBOARD THIS FILM CAME FROM.
+               *
+               * Peeled off exactly like the history above, and for the same
+               * reason: `Project` is openreel's own type and Voidspace
+               * provenance does not belong in it. Kept in a module ref rather
+               * than state because nothing re-renders on it — it is answered
+               * on demand through `get-state`, so the host page can offer a way
+               * back to the board without having to look one up.
+               */
+              const boardId = (project as any).__sourceBoardId as string | undefined;
+              if ((project as any).__sourceBoardId) delete (project as any).__sourceBoardId;
+              if (boardId) sourceBoardIdRef.current = boardId;
               loadProject(project);
               if (persistedHistory) {
                 try {
@@ -1488,9 +1511,36 @@ function App() {
                 id: tr.id,
                 name: tr.name,
                 kind: trackInfer(tr),
+                /**
+                 * TRACK STATE, so the agent can see what the user sees.
+                 *
+                 * Alternate takes arrive on tracks that are hidden AND muted
+                 * (see `voidspace-loader`), which is most of what "there are
+                 * three other takes of this shot, off" means. Without these the
+                 * agent reads a timeline full of clips with no way to tell which
+                 * ones are actually playing — so it would describe a take stack
+                 * as duplicate footage, and "unhide Take 2" is not a request it
+                 * could even confirm it had carried out.
+                 */
+                hidden: tr.hidden === true,
+                muted: tr.muted === true,
+                locked: tr.locked === true,
                 clips: (tr.clips ?? []).map((c: any) => ({
                   id: c.id, mediaId: c.mediaId,
                   url: mediaIndex.get(c.mediaId) || '',
+                  /**
+                   * WHICH SHOT, AND WHICH TAKE OF IT.
+                   *
+                   * Stamped by the loader from the storyboard's own ids. This is
+                   * what turns "recut scene 3 using more of take 2" from a guess
+                   * about positions into a lookup — position is exactly what an
+                   * edit changes, so an agent inferring from it is wrong the
+                   * moment the user moves anything.
+                   *
+                   * Absent on clips the user dragged in themselves, which is
+                   * itself the answer to "where did this come from".
+                   */
+                  shotId: c.shotId, takeId: c.takeId,
                   // Human-readable identity so the agent can describe what's
                   // on the timeline ("your image d3b5f115….webp") and tell
                   // an IMAGE clip apart from a video on the same track.
@@ -1563,6 +1613,10 @@ function App() {
                 tracks: [...mediaTracks, ...captionTracks, ...graphicsTracks, ...subtitleTracks],
                 mediaCount: proj.mediaLibrary?.items?.length ?? 0,
                 textClipCount: captionClips.length,
+                // WHERE THIS FILM CAME FROM. Empty for a project that was not
+                // compiled from a storyboard, which is how the host page knows
+                // whether a way back exists at all.
+                sourceBoardId: sourceBoardIdRef.current || undefined,
               },
             });
             break;

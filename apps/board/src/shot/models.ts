@@ -171,9 +171,42 @@ export function plannedSeconds(shot: { kind?: string; model: string; durationSec
   if (shot.kind === 'hyperframes') return shot.durationSec > 0 ? shot.durationSec : 5;
   const caps = effectiveModel(shot.model);
   if (!caps) return shot.durationSec > 0 ? shot.durationSec : 0;
-  return shot.durationSec > 0
-    ? Math.max(caps.minDurationSec, Math.min(caps.maxDurationSec, shot.durationSec))
-    : caps.minDurationSec;
+  if (shot.durationSec <= 0) return snapDuration(caps, caps.minDurationSec);
+  return snapDuration(caps, shot.durationSec);
+}
+
+/**
+ * THE LENGTH THIS MODEL WILL ACTUALLY PRODUCE.
+ *
+ * Clamping to min/max was only half the rule, and the missing half was already
+ * described in `ModelCaps`: `allowedDurations` is "discrete lengths the model
+ * snaps to". Seedance does 4, 5, 8, 10, 12, 15 — it does not do 7. That list was
+ * being reported to the agent by `board_model_catalog` and used by nothing, so
+ * a shot planned at 7s was estimated at 7s, totalled at 7s, and sent as 7s, and
+ * whatever the provider then did with it — round, refuse, or pick for us — was
+ * a surprise arriving after the charge.
+ *
+ * NEAREST, WITH TIES GOING UP. A tie means the user's intent sits exactly
+ * between two lengths, and of the two only the longer one can still be trimmed
+ * on the timeline; the shorter one is gone. So the tie-break is the recoverable
+ * direction rather than the cheaper one.
+ *
+ * Applied inside `plannedSeconds` so the cost estimate, the board's runtime
+ * total, the card's warnings and the generation request all say the same number.
+ * They have disagreed before, and a summary that contradicts itself is worse
+ * than one that is merely approximate.
+ */
+export function snapDuration(caps: ModelCaps, wanted: number): number {
+  const inRange = Math.max(caps.minDurationSec, Math.min(caps.maxDurationSec, wanted));
+  if (!caps.allowedDurations.length) return inRange;
+
+  let best = caps.allowedDurations[0]!;
+  for (const d of caps.allowedDurations) {
+    const closer = Math.abs(d - inRange) < Math.abs(best - inRange);
+    const tie = Math.abs(d - inRange) === Math.abs(best - inRange);
+    if (closer || (tie && d > best)) best = d;
+  }
+  return best;
 }
 
 export function estimateShotCredits(

@@ -22,7 +22,9 @@ import type { BlockStdScope } from '@blocksuite/std';
 import { GfxControllerIdentifier } from '@blocksuite/std/gfx';
 
 import type { ShotBlockComponent } from './shot-block';
-import { addMedia, readShot, setMediaRole, setShotFields, shotAtPoint } from './shots';
+import {
+  addMedia, moveMedia, readShot, removeMedia, setMediaRole, setShotFields, shotAtPoint,
+} from './shots';
 import { rolesFor, type MediaRole, type ShotMedia } from './model';
 import { findBlock } from './blocks';
 
@@ -35,6 +37,38 @@ export interface AssetDragEntity {
    *  SAME drag is provably a duplicate rather than a new one. */
   dragId: string;
   media: Omit<ShotMedia, 'id' | 'role'>;
+  /**
+   * WHERE THIS CAME FROM, when it came off a shot card.
+   *
+   * Present means the drag is a MOVE: the asset is removed from the shot it
+   * started on. Absent means a copy from the panel, which is what a library
+   * drag has always been.
+   *
+   * The distinction is the same one `canvas-drop.ts` already makes, for the
+   * reason it states: leaving the original behind gives the user two of the same
+   * thing and no way to tell which one the video will use. A reference dragged
+   * from scene 3 to scene 4 has been MOVED, because that is what the gesture
+   * looks like and what it means everywhere else on a canvas.
+   *
+   * `takeId` rather than `mediaId` when the tile was a TAKE. Takes and
+   * references are different lists on the shot, so the remover has to know which
+   * one to look in — and a take dragged out is being auditioned on the canvas,
+   * never re-filed, which is why it is a copy (see `handleAssetDrop`).
+   *
+   * ⚠ `origin.mediaId` IS NOT `media.mediaId`. They sit in the same object and
+   * mean different things:
+   *
+   *   origin.mediaId  the entry's id WITHIN ITS SHOT — what `removeMedia` and
+   *                   `setMediaRole` address. Meaningless outside that shot.
+   *   media.mediaId   the VOIDSPACE LIBRARY id — the same file wherever it is
+   *                   used, on any shot, on any board.
+   *
+   * The names match what each side already calls its own field, so renaming
+   * either would break a convention somewhere else. Passing one where the other
+   * is expected fails silently: `removeMedia` simply finds nothing and returns
+   * false, so a "move" quietly becomes a copy.
+   */
+  origin?: { shotId: string; mediaId?: string; takeId?: string };
 }
 
 /**
@@ -110,6 +144,69 @@ export function dropZoneAt(
 }
 
 /**
+ * WHERE IN THE LANE A DROP LANDS — as an index into the shot's media list.
+ *
+ * Reads the tiles that are actually on screen and asks which one the pointer is
+ * past, by their midpoints: dropping on the left half of a tile means "before
+ * it", the right half means "after". That is the rule every list-reordering
+ * interface uses, and it is the one people already expect.
+ *
+ * Measured from the DOM rather than computed from the model, because the lane
+ * SCROLLS. A lane holding nine references shows four, and an index derived from
+ * the model would be right about a row the user cannot see.
+ *
+ * Returns null when there is nothing to work out — no tiles, or the pointer is
+ * not over a lane — and the caller then leaves the order alone.
+ */
+export function insertionIndexAt(
+  std: BlockStdScope,
+  shotId: string,
+  mediaId: string,
+  clientX: number,
+  clientY: number,
+): number | null {
+  const doc = shotComponentAt(std, shotId)?.ownerDocument;
+  const el = doc?.elementFromPoint(clientX, clientY) as HTMLElement | null;
+  const strip = el?.closest<HTMLElement>('[data-strip]');
+  if (!strip) return null;
+
+  const tiles = [...strip.querySelectorAll<HTMLElement>('[data-drag-media]')];
+  if (!tiles.length) return null;
+
+  // The ids IN THIS LANE, in the order they are drawn. The shot's list also
+  // holds the other lanes and the slotted media, so a lane index is not a list
+  // index — the id is what carries across.
+  const laneIds = tiles.map(t => t.dataset.dragMedia!).filter(Boolean);
+  let before = laneIds.length;
+  for (let i = 0; i < tiles.length; i++) {
+    const r = tiles[i]!.getBoundingClientRect();
+    if (clientX < r.left + r.width / 2) { before = i; break; }
+  }
+
+  const shot = readShot(std, shotId);
+  if (!shot) return null;
+  // Translate "before the Nth tile in this lane" into an index in the shot's
+  // own list — the only thing `moveMedia` can act on.
+  const targetId = laneIds[before];
+  const list = shot.media.map(m => m.id);
+  const from = list.indexOf(mediaId);
+  if (from < 0) return null;
+  const to = targetId ? list.indexOf(targetId) : list.length;
+  if (to < 0) return null;
+  // Removing the dragged item first shifts everything after it down one.
+  return to > from ? to - 1 : to;
+}
+
+/** `moveMedia` takes a DELTA; a drop knows an absolute position. */
+function moveMediaTo(std: BlockStdScope, shotId: string, mediaId: string, to: number): void {
+  const shot = readShot(std, shotId);
+  if (!shot) return;
+  const from = shot.media.findIndex(m => m.id === mediaId);
+  if (from < 0 || to === from) return;
+  moveMedia(std, shotId, mediaId, to - from);
+}
+
+/**
  * Handle one drop.
  *
  * `placeOnCanvas` is injected rather than imported so this module has no
@@ -124,14 +221,62 @@ export async function handleAssetDrop(
 ): Promise<DropOutcome> {
   const hit = dropZoneAt(std, at.clientX, at.clientY);
 
+  /**
+   * DROPPED BACK ON ITS OWN SHOT.
+   *
+   * Never a remove-and-re-add: that loses the role, the tag, the trim and the
+   * note, and sends the tile to the end of its lane. The gesture that looks most
+   * like "I did not mean anything by that" would be the most destructive one on
+   * the card.
+   *
+   * Landing on a LANE is a REORDER, and it is worth having. A model receives
+   * references positionally — `@Image1`, `@Image2` — and the prompt refers back
+   * to them by number, so order changes the output. `moveMedia` has existed
+   * since the beginning and was reachable only by the agent; this is the same
+   * operation with a pointer.
+   */
+  if (hit && entity.origin?.mediaId && hit.shotId === entity.origin.shotId) {
+    const to = insertionIndexAt(std, hit.shotId, entity.origin.mediaId, at.clientX, at.clientY);
+    if (to !== null) moveMediaTo(std, hit.shotId, entity.origin.mediaId, to);
+    return { target: 'shot', shotId: hit.shotId, mediaId: entity.origin.mediaId };
+  }
+  // A TAKE dropped back on its own card: nothing. Takes are ordered by when they
+  // were made, which is not a thing to rearrange.
+  if (hit && entity.origin && hit.shotId === entity.origin.shotId) {
+    return { target: 'shot', shotId: hit.shotId };
+  }
+
   if (!hit) {
     await placeOnCanvas(entity.media, [at.clientX, at.clientY]);
+    /**
+     * A REFERENCE MOVES OUT TO THE CANVAS; A TAKE IS COPIED THERE.
+     *
+     * They are different objects and the gesture means different things. A
+     * reference is an INPUT the user is taking off this shot — pulling it out
+     * to the canvas is where it now lives, and leaving a duplicate behind would
+     * mean the shot still generates from something the user just removed.
+     *
+     * A take is an OUTPUT and the shot's own record of what it produced. Pulling
+     * one onto the canvas is auditioning it at size — the reason the canvas is
+     * the scratch pad — and it must not silently delete the take, its cost, its
+     * seed or its place in the strip. Discarding a take is the ✕, deliberately.
+     */
+    if (entity.origin?.mediaId && !entity.origin.takeId) {
+      removeMedia(std, entity.origin.shotId, entity.origin.mediaId);
+    }
     return { target: 'canvas' };
   }
 
   const kind = entity.media.kind;
   const id = addMedia(std, hit.shotId, { ...entity.media, role: defaultRole(kind) });
   if (!id) return { target: 'canvas' };
+
+  // Landed on a DIFFERENT shot — the reference has moved, so it leaves the one
+  // it came from. Takes are copied for the reason above.
+  if (entity.origin?.mediaId && !entity.origin.takeId
+      && entity.origin.shotId !== hit.shotId) {
+    removeMedia(std, entity.origin.shotId, entity.origin.mediaId);
+  }
 
   /**
    * Dropped ON a well: that is an explicit statement of what the asset is for,

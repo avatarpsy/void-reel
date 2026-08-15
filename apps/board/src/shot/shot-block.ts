@@ -26,11 +26,12 @@ import { withToken } from '../board/parent-auth';
 import { focusField, takeCaret } from '../ui/field-caret';
 import {
   FIELD_SPECS, REF_KIND_LABEL, roleLabel, SHOT_KIND_HINT, SHOT_KIND_LABEL, SHOT_KINDS,
-  formatTime, isTimed, rolesFor, trimWindow,
+  chosenTake, formatTime, isTimed, rolesFor, trimWindow,
   type MediaRole, type ShotBlockModel, type ShotKind, type ShotMedia,
 } from './model';
 import { allBlocks, findBlock, onBlockCatalogue, searchBlocks, type BlockInfo } from './blocks';
-import { sceneNumberOf } from './shots';
+import { ASSET_DRAG_TYPE, type AssetDragEntity } from './drop';
+import { chooseTake, removeTake, sceneNumberOf } from './shots';
 import { resolveSlots, slotFills } from './slots';
 import { readParsed } from './screenplay-doc';
 import { lazyBlockPreview, openBlockLightbox, type LazyPreview } from '../ui/block-preview';
@@ -242,12 +243,42 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
       color: var(--vs-text-mute, rgba(26, 26, 46, 0.42));
     }
 
-    /* THE BODY CLAIMS ITS EVENTS — see the file header. */
-    .shot__body {
-      position: relative; /* the picker sheet's frame — see .shot__pick */
+    /* THE FRAME THE SHEETS ARE PINNED TO, and it does NOT scroll.
+
+       The pickers used to be positioned against .shot__body. That was fine
+       while the body was overflow:hidden, and became wrong the moment it
+       scrolled: an absolutely-positioned child of a scroll container is placed
+       against the CONTENT box, so a sheet anchored to the bottom would sit at
+       the bottom of the full scroll height — off the card, invisible — and a
+       sheet anchored to the top would slide away as the user scrolled.
+
+       This layer is exactly the body's VISIBLE box and never moves, so a sheet
+       stays where it was opened however far the content behind it scrolls. */
+    .shot__main {
+      position: relative;
       flex: 1;
       min-height: 0;
-      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* THE BODY CLAIMS ITS EVENTS — see the file header. */
+    .shot__body {
+      flex: 1;
+      min-height: 0;
+      /* SCROLLS RATHER THAN SWALLOWS.
+         This was overflow: hidden on a fixed-height canvas block, so any card
+         whose lanes and fields added up to more than its height silently ATE
+         the controls at the bottom — the model line and the duration box, which
+         is what "the bottom row is clipped" was. Hidden is right for the
+         horizontal axis (a lane does its own scrolling) and wrong for the
+         vertical one: a control the user cannot reach is worse than a
+         scrollbar. The footer has also moved out from under this rule
+         entirely — see .shot__foot. */
+      overflow-x: hidden;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      scrollbar-width: thin;
       display: flex;
       flex-direction: column;
       gap: 12px;
@@ -485,6 +516,108 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
     }
     .tile:hover .tile__role { opacity: 1; }
 
+    /* ── TAKES ────────────────────────────────────────────────────────────────
+       Outputs, not inputs, so the row reads differently from the reference
+       lanes above it: a rule, a warmer label, and the chosen one ringed. It is
+       the only row on the card that answers "is this shot done?". */
+    .takes { display: flex; flex-direction: column; gap: 5px; flex: none;
+             border-top: 1px solid var(--vs-border, rgba(15, 23, 42, 0.1));
+             padding-top: 8px; }
+    /* THE ROW SCROLLS SIDEWAYS AND NEVER GROWS DOWNWARD.
+       A shot with nine takes is a normal amount of trying, and nine tiles must
+       cost the card exactly what one does — a wrapping row would push the
+       written fields down by a hundred pixels per generation. Same rule the
+       reference lanes follow, and the wheel handler is the same one. */
+    .takes__strip {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      overflow-x: auto;
+      overflow-y: hidden;
+      overscroll-behavior: contain;
+      scrollbar-width: thin;
+      padding: 2px;
+      min-height: 62px;
+      max-height: 68px;
+    }
+    .take {
+      position: relative;
+      flex: none;
+      width: 104px;
+      aspect-ratio: 16 / 9;
+      border-radius: 7px;
+      overflow: hidden;
+      background: #12161f center/cover no-repeat;
+      cursor: pointer;
+      border: 0;
+      padding: 0;
+      /* The ring is drawn OUTSIDE via box-shadow rather than as a border: a
+         border would shrink the picture by two pixels, so ticking a take would
+         nudge every tile in the row. */
+      box-shadow: none;
+      transition: box-shadow 0.12s ease;
+    }
+    .take:hover { box-shadow: 0 0 0 2px var(--vs-border-strong, rgba(15, 23, 42, 0.3)); }
+    /* THE CHOSEN ONE. This is the whole point of the row, so it is the loudest
+       thing in it and it does not depend on hover to be visible. */
+    .take.is-on { box-shadow: 0 0 0 2px var(--vs-accent-a, #4a9bd9); }
+    .take__tick {
+      position: absolute;
+      top: 3px; left: 3px;
+      width: 15px; height: 15px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--vs-accent-a, #4a9bd9);
+      color: #fff;
+      font: 700 9px/1 var(--affine-font-family, sans-serif);
+    }
+    .take__n {
+      position: absolute;
+      inset: auto 0 0 0;
+      padding: 3px 5px;
+      font: 500 9px/1.2 var(--affine-font-family, sans-serif);
+      color: #fff;
+      background: linear-gradient(transparent, rgba(0, 0, 0, 0.78));
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      text-align: left;
+    }
+    /* Running and failed are STATES OF A TAKE, not toasts. A generation outlives
+       the tab it started in, so the card has to be able to say "still working"
+       after a reload — a shot that quietly lost what it was making is
+       indistinguishable from one that never started. */
+    .take__state {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      font: 500 9px/1.3 var(--affine-font-family, sans-serif);
+      color: #fff;
+      text-align: center;
+      padding: 4px;
+      background: rgba(9, 12, 18, 0.72);
+    }
+    .take--failed .take__state { background: rgba(120, 22, 22, 0.76); }
+    .take__x {
+      position: absolute;
+      top: 3px; right: 3px;
+      width: 16px; height: 16px;
+      display: grid;
+      place-items: center;
+      border: 0;
+      border-radius: 50%;
+      background: rgba(0, 0, 0, 0.62);
+      color: #fff;
+      font-size: 10px;
+      line-height: 1;
+      cursor: pointer;
+      opacity: 0;
+      transition: opacity 0.12s ease;
+    }
+    .take:hover .take__x { opacity: 1; }
+
     /* flex:none, NOT flex:1. The graphic card's single REFERENCES lane
        also grows, and with a few clips in it the lane won and squeezed ACTION
        and VOICEOVER down to a couple of pixels each — they looked like broken
@@ -554,6 +687,19 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
       content: attr(data-placeholder);
       color: var(--vs-text-mute, rgba(26, 26, 46, 0.38));
     }
+
+    /* THE TWO BOXES ARE NOT EQUALS, and the sizes should say so.
+       SHOT is the description of the panel and now carries the framing too, so
+       it is where most of the writing goes. VOICEOVER is one spoken line —
+       given the same height it reads as a box somebody forgot to fill in, and
+       it took room from the field that needed it. */
+    .field[data-field='action'] .field__text { min-height: 4.4em; }
+    .field[data-field='voiceover'] .field__text { min-height: 2.2em; max-height: 5em; }
+    .field[data-field='camera'] .field__text { min-height: 2.2em; max-height: 5em; }
+    /* The legacy CAMERA box is a leftover to empty out, not a control to fill
+       in. Dimmed so it reads that way without hiding what it holds. */
+    .field[data-field='camera'] { opacity: 0.72; }
+    .field[data-field='camera']:focus-within { opacity: 1; }
 
     /* The prompt's own name for a reference — @Image2. Small and unobtrusive:
        it matters when you are wiring a prompt and is noise the rest of the
@@ -642,36 +788,109 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
     }
     .shot__comp:hover { border-color: var(--vs-accent-a, #4a9bd9); }
 
+    /* A REAL FOOTER BAR, OUTSIDE THE SCROLLING BODY.
+
+       It used to be the last child of .shot__body. On a fixed-height canvas
+       block with overflow: hidden, that meant the moment the lanes and fields
+       above it added up to more than the card — which for a clip shot they did,
+       by roughly forty pixels — the model line and the duration box were cut
+       off the bottom. Adding padding makes that worse, not better.
+
+       As a SIBLING of the body it is structurally unclippable: the body is the
+       only thing that can give, and the controls are always reachable. */
     .shot__foot {
+      position: relative;
       display: flex;
       align-items: center;
       gap: 8px;
       flex: none;
-      padding-top: 2px;
+      padding: 7px 14px 9px;
+      border-top: 1px solid var(--vs-border, rgba(15, 23, 42, 0.08));
+      background: var(--vs-shot-bg, #ffffff);
       font: 500 9.5px/1 var(--affine-font-family, sans-serif);
       color: var(--vs-text-mute, rgba(26, 26, 46, 0.45));
     }
     /* Length, typed. A number field rather than a slider: people think in
        whole seconds here ("make it four"), and a slider on a canvas card is a
-       drag that fights the canvas for the same gesture. */
-    .shot__durwrap { flex: none; display: inline-flex; align-items: center; gap: 1px; }
+       drag that fights the canvas for the same gesture.
+
+       TWO THINGS MADE THIS FEEL BROKEN, and only one of them was visible.
+
+       The invisible one: the input carried no data-range-sync-exclude, so
+       BlockSuite's range binding treated it as stray content inside the editor
+       host and called host.focus() a frame after every caret move — the caret
+       left the field between keystrokes. The attribute is on the element now;
+       the full account is in ui/field-caret.ts, which found and fixed exactly
+       this for the contenteditables and never reached the inputs.
+
+       The visible one: 30px is not a target. It fits "5" and clips the caret
+       typing "10", it has no box to aim at, and it sat in a footer that was
+       being cut off (see .shot__foot). A field you have to hunt for reads as
+       one that refuses you. */
+    .shot__durwrap { flex: none; display: inline-flex; align-items: center; gap: 2px; }
     .shot__durin {
-      width: 30px;
+      width: 44px;
       appearance: none;
       -moz-appearance: textfield;
       border: 1px solid var(--vs-border, rgba(15, 23, 42, 0.14));
       border-radius: 5px;
-      padding: 2px 3px;
-      background: transparent;
+      padding: 3px 5px;
+      background: var(--vs-shot-field, rgba(127, 140, 170, 0.06));
       color: inherit;
       font: inherit;
       text-align: right;
       outline: none;
+      cursor: text;
     }
+    .shot__durin:hover { border-color: var(--vs-border-strong, rgba(15, 23, 42, 0.22)); }
     .shot__durin::-webkit-outer-spin-button,
     .shot__durin::-webkit-inner-spin-button { appearance: none; margin: 0; }
     .shot__durin:focus { border-color: var(--vs-accent-a, #4a9bd9); }
     .shot__cost { flex: none; cursor: help; }
+    /* WHO SPEAKS. Shown only on models that CAN speak — on the rest it would be
+       a switch with nothing behind it, and the card already warns when a
+       narration is written against a model that cannot voice it. */
+    .shot__voice {
+      flex: none;
+      appearance: none;
+      border: 1px solid var(--vs-border, rgba(15, 23, 42, 0.16));
+      border-radius: 999px;
+      padding: 3px 8px;
+      background: transparent;
+      color: var(--vs-text-mute, rgba(26, 26, 46, 0.5));
+      font: 500 9.5px/1 var(--affine-font-family, sans-serif);
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .shot__voice:hover { border-color: var(--vs-accent-a, #4a9bd9); }
+    .shot__voice.is-on {
+      border-color: var(--vs-accent-a, #4a9bd9);
+      color: var(--vs-accent-b, #2f6fa3);
+    }
+    /* THE VERB. The shot has carried every input to a generation since it was
+       built and had no way to run one — the only route to a clip was compiling
+       the whole board into a project. Small and quiet, because it sits on sixty
+       cards at once, but it is the most important control here. */
+    .shot__gen {
+      flex: none;
+      appearance: none;
+      border: 1px solid var(--vs-accent-a, #4a9bd9);
+      border-radius: 999px;
+      padding: 3px 10px;
+      background: transparent;
+      color: var(--vs-accent-b, #2f6fa3);
+      font: 600 9.5px/1 var(--affine-font-family, sans-serif);
+      letter-spacing: 0.02em;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .shot__gen:hover { background: var(--vs-accent-a, #4a9bd9); color: #fff; }
+    .shot__gen[disabled] {
+      opacity: 0.45;
+      cursor: default;
+      border-color: var(--vs-border, rgba(15, 23, 42, 0.18));
+      color: var(--vs-text-mute, rgba(26, 26, 46, 0.45));
+    }
     .shot__model {
       flex: 1;
       display: flex;
@@ -712,6 +931,7 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
          list that failed to load rather than a short list. */
       top: 6px; left: 8px; right: 8px; bottom: auto;
       max-height: calc(100% - 14px);
+      /* see .shot__pick--down */
       z-index: 3;
       display: flex;
       flex-direction: column;
@@ -719,6 +939,17 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
       border-radius: 10px;
       background: var(--vs-shot-bg, #ffffff);
       box-shadow: 0 8px 26px rgba(15, 23, 42, 0.18);
+    }
+    /* A SHEET OPENS FROM THE THING THAT OPENED IT.
+       The sheet is anchored to the top of the body, which is right for BLOCK
+       and FILL — their buttons are in the kind row, a few pixels above. It is
+       wrong for MODEL, whose button is in the FOOTER: the list flew to the
+       opposite end of the card from the control that was just pressed, which
+       reads as a different card's menu opening. Same sheet, anchored to the
+       near edge. */
+    .shot__pick--down {
+      top: auto;
+      bottom: 6px;
     }
     .shot__pickhead {
       flex: none;
@@ -1010,6 +1241,8 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
     this.disposeCatalogue = null;
     this.disposeBlocks = null;
     this.disposeDoc = null;
+    for (const off of this.dragCleanups) off();
+    this.dragCleanups = [];
     this.preview?.destroy();
     this.preview = null;
     this.previewHost = null;
@@ -1029,6 +1262,77 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
   /** The element the preview is bound to, so a re-render that replaces it is
    *  noticed rather than leaving the handle pointing at a detached node. */
   private previewHost: HTMLElement | null = null;
+
+  /**
+   * MAKE THE TILES DRAGGABLE — out to the canvas, or onto another shot.
+   *
+   * Until now media could get INTO a shot two ways and out none: the only exit
+   * was the ✕ that deletes. So the canvas, which the whole design calls the
+   * scratch pad, could not actually be used as one — you could not pull three
+   * takes out, lay them side by side, and throw two back.
+   *
+   * Registered here rather than in the template because `std.dnd.draggable`
+   * binds to a live element and hands back a disposer. Lit replaces those
+   * elements on re-render, so the bindings are torn down and rebuilt each pass —
+   * cheap (a handful of tiles) and correct, where a stale binding would point at
+   * a detached node and silently stop working.
+   */
+  private dragCleanups: Array<() => void> = [];
+
+  private syncTileDrags(): void {
+    for (const off of this.dragCleanups) off();
+    this.dragCleanups = [];
+
+    const dragId = () => `d${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+
+    for (const el of this.querySelectorAll<HTMLElement>('[data-drag-media]')) {
+      const mediaId = el.dataset.dragMedia!;
+      const item = (this.model.props.media ?? []).find(m => m.id === mediaId);
+      if (!item) continue;
+      this.dragCleanups.push(this.std.dnd.draggable<AssetDragEntity>({
+        element: el,
+        setDragData: () => ({
+          type: ASSET_DRAG_TYPE,
+          dragId: dragId(),
+          // The same description of the same asset the panel would send, so
+          // whatever receives it cannot tell where the drag started — except by
+          // `origin`, which is the one thing that must differ.
+          media: {
+            kind: item.kind, src: item.src, url: item.url, name: item.name,
+            ...(item.poster ? { poster: item.poster } : {}),
+            ...(item.mediaId ? { mediaId: item.mediaId } : {}),
+            ...(item.scope ? { scope: item.scope } : {}),
+          },
+          origin: { shotId: this.model.id, mediaId: item.id },
+        }),
+      }));
+    }
+
+    for (const el of this.querySelectorAll<HTMLElement>('[data-drag-take]')) {
+      const takeId = el.dataset.dragTake!;
+      const t = (this.model.props.takes ?? []).find(x => x.id === takeId);
+      // Only a finished take has anything to drag. A spinner is not a file.
+      if (!t || t.status !== 'ready' || !(t.url || t.src)) continue;
+      this.dragCleanups.push(this.std.dnd.draggable<AssetDragEntity>({
+        element: el,
+        setDragData: () => ({
+          type: ASSET_DRAG_TYPE,
+          dragId: dragId(),
+          media: {
+            kind: t.kind === 'image' ? 'image' : 'video',
+            src: t.src || t.url,
+            url: t.url || t.src,
+            name: t.label || 'Take',
+            ...(t.poster ? { poster: t.poster } : {}),
+            ...(t.mediaId ? { mediaId: t.mediaId } : {}),
+          },
+          // `takeId` marks it a COPY — see `handleAssetDrop`. Dragging a take
+          // out is auditioning it, never filing it away.
+          origin: { shotId: this.model.id, takeId: t.id },
+        }),
+      }));
+    }
+  }
 
   /** Keep the card's preview matching the shot. */
   private syncPreview(): void {
@@ -1126,6 +1430,7 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
   protected override updated(changed: Map<PropertyKey, unknown>): void {
     super.updated(changed);
     this.syncPreview();
+    this.syncTileDrags();
   }
 
   protected override shouldUpdate(changed: Map<PropertyKey, unknown>): boolean {
@@ -1199,6 +1504,24 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
    * pan. Same rule as the reference lanes, for the same reason.
    */
   private readonly onFieldWheel = (e: WheelEvent) => {
+    const el = e.currentTarget as HTMLElement;
+    if (el.scrollHeight <= el.clientHeight) return;
+    e.stopPropagation();
+  };
+
+  /**
+   * Wheel over the card BODY, now that the body scrolls.
+   *
+   * Same rule as the lanes and the written fields, for the same reason and by
+   * the same test: claimed only when there is somewhere to scroll. A card whose
+   * content fits still pans and zooms the board like the space around it, so
+   * this cannot create a dead zone — and a card that overflows scrolls to its
+   * own bottom instead of zooming the viewport out from under the reader.
+   *
+   * The lanes and fields see the event first and stop it when THEY can scroll,
+   * so the innermost thing that can move is the thing that moves.
+   */
+  private readonly onBodyWheel = (e: WheelEvent) => {
     const el = e.currentTarget as HTMLElement;
     if (el.scrollHeight <= el.clientHeight) return;
     e.stopPropagation();
@@ -1440,6 +1763,7 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
 
     return html`<div
       class="tile ${item.kind === 'audio' ? 'tile--audio' : ''}"
+      data-drag-media=${item.id}
       style=${poster ? `background-image:url("${withToken(poster)}")` : ''}
       title=${win?.trimmed
         ? `${title} — ${formatTime(win.start)}→${formatTime(win.end)}`
@@ -1563,10 +1887,12 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
 
       ${this._pickingSeq ? this.renderSeqMenu() : nothing}
 
+      <div class="shot__main">
       <div
         class="shot__body"
         @pointerdown=${(e: PointerEvent) => e.stopPropagation()}
         @dblclick=${(e: Event) => e.stopPropagation()}
+        @wheel=${this.onBodyWheel}
       >
         <!--
           WHAT THIS SHOT IS. A two-way switch rather than a setting buried
@@ -1693,16 +2019,26 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
           </div>`;
         })}
 
+        ${this.renderTakes()}
+
         <div class="fields">
           <!--
-            CAMERA IS HIDDEN ON A GRAPHIC. There is no camera: a composition is
-            rendered, not filmed, and the field feeds motion_prompt on the
-            scene — which a graphic never reads. It is hidden rather than
-            cleared, so switching back to a clip restores what was written.
+            CAMERA IS HIDDEN unless it already holds text — see FIELD_SPECS.
+            Framing now belongs in SHOT, in the sentence, which is how a shot
+            list is actually written. A board made before that change still has
+            direction in this field, so the box appears for those shots and for
+            nobody else. Nothing is cleared and nothing is rewritten.
+
+            It is hidden on a GRAPHIC either way: a composition is rendered, not
+            filmed, and the field feeds motion_prompt — which a graphic never
+            reads.
           -->
-          ${FIELD_SPECS.filter(spec => !(isGraphic && spec.key === 'camera'))
+          ${FIELD_SPECS
+            .filter(spec => spec.key !== 'camera'
+              || (!isGraphic && !!(this.model.props.camera ?? '').trim()))
             .map(spec => html`<div
               class="field"
+              data-field=${spec.key}
               @pointerdown=${this.focusFieldBox}
               @dblclick=${(e: Event) => e.stopPropagation()}
             >
@@ -1720,85 +2056,16 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
           </div>`)}
         </div>
 
+        <!-- THE FOOTER IS NOT IN HERE. It is a sibling of this body, rendered
+             by renderFoot below, so that content growing in here can never
+             push it off the card. -->
+      </div>
+
         <!--
-          WHAT THIS SHOT WILL BE MADE WITH, said on the card.
-
-          A model is not a setting buried in a menu here — it decides which
-          references are legal and how long the clip can be, so a person editing
-          the shot should be able to see it without going looking. Unset reads
-          "Model: ask me", which is an invitation rather than a silent default:
-          the agent's job is to ask, and a shot that never got asked about is
-          visible at a glance.
+        THE SHEETS ARE SIBLINGS OF THE BODY, NOT CHILDREN OF IT — they pin to
+        .shot__main, which is the body's visible box and does not scroll. Inside
+        the body they would scroll away from the control that opened them.
         -->
-        <div class="shot__foot">
-          <!--
-            A DEFAULT IS NOT A DECISION, and the card must not present it as one.
-            An unset shot still resolves to the project default — that IS what
-            would be generated — but saying just "Grok Imagine" would read as a
-            choice somebody made, and the whole point of per-shot models is that
-            the choice gets made deliberately. So the fallback is labelled.
-
-            A GRAPHIC HAS NO MODEL LINE at all: it is rendered, not generated,
-            and a model picker on it would be a control with nothing behind it.
-          -->
-          ${isGraphic
-            // Says WHY there is no model here, in the slot where a clip shows
-            // one. "Composition" named the thing without explaining it; this
-            // answers the question a user actually has when the model line they
-            // just used on scene 1 is missing from scene 2.
-            ? html`<span class="shot__model" title="A graphic is rendered from a block on your own computer — there is no model to choose and no generation cost.">Rendered, not generated</span>`
-            : html`<button
-                class="shot__model"
-                title=${this.model.props.model
-                  ? 'The video model this shot will be generated with — click to change'
-                  : 'No model chosen for this shot — click to pick one'}
-                @click=${(e: Event) => {
-                  e.stopPropagation();
-                  this._pickingBlock = false;
-                  this._pickingModel = !this._pickingModel;
-                }}
-              >
-                ${caps
-                  ? (this.model.props.model ? caps.label : `${caps.label} (default)`)
-                  : 'Model — not chosen'}
-                <span class="shot__caret">▾</span>
-              </button>`}
-
-          <!--
-            LENGTH, AND WHAT IT COSTS, side by side.
-            Duration is the single biggest lever on price — a 15s shot on the
-            top tier is several times a 5s one — and nobody discovers that until
-            after they have paid for twelve. Putting the estimate next to the
-            control turns "how long should this be" into a decision with a
-            visible consequence. The tilde is not decoration: the real charge
-            happens at generation against the registry, with resolution and
-            per-image surcharges this cannot know.
-          -->
-          <span class="shot__durwrap" title=${isGraphic
-            ? 'How long this graphic holds on screen. Blank renders 5 seconds.'
-            : 'Roughly how long this shot runs — the biggest lever on what it costs'}>
-            <input
-              class="shot__durin"
-              type="number" min="0" max="60" step="1"
-              .value=${String(this.model.props.durationSec || '')}
-              placeholder=${isGraphic ? '5' : '—'}
-              @pointerdown=${(e: Event) => e.stopPropagation()}
-              @keydown=${this.stopKeys}
-              @change=${(e: Event) => this.setDuration((e.target as HTMLInputElement).value)}
-            />s
-          </span>
-          ${credits !== null
-            ? html`<span class="shot__cost" title=${isGraphic
-                ? 'A composition is rendered, not generated — no model credits'
-                : 'Estimated generation cost. The exact charge is made when it runs.'}
-              >${formatCredits(credits)}</span>`
-            : nothing}
-          ${warnings.length
-            ? html`<span class="shot__warn" title=${warnings.map(w => w.message).join('\n\n')}>
-                ⚠ ${warnings.length}
-              </span>`
-            : nothing}
-        </div>
 
         <!--
         THE BLOCK LIBRARY, AS A SHEET OVER THE CARD.
@@ -1826,6 +2093,7 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
           <input
             class="shot__pickq"
             type="text"
+            data-range-sync-exclude="true"
             placeholder="stat, lower third, quote…"
             .value=${this._blockQuery}
             @keydown=${this.stopKeys}
@@ -1889,6 +2157,7 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
                 ? html`<input
                     class="shot__fillcolor"
                     type="color"
+                    data-range-sync-exclude="true"
                     .value=${r.value || r.slot.sample || '#000000'}
                     @keydown=${this.stopKeys}
                     @change=${(e: Event) => this.setSlotValue(r.slot.key, (e.target as HTMLInputElement).value)}
@@ -1896,6 +2165,7 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
                 : html`<input
                     class="shot__fillinput"
                     type="text"
+                    data-range-sync-exclude="true"
                     placeholder=${r.slot.sample ?? ''}
                     .value=${r.value ?? ''}
                     @keydown=${this.stopKeys}
@@ -1913,7 +2183,7 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
         what it costs, in the same words the warnings use.
         -->
         ${this._pickingModel ? html`<div
-        class="shot__pick"
+        class="shot__pick shot__pick--down"
         @pointerdown=${(e: PointerEvent) => e.stopPropagation()}
         @dblclick=${(e: Event) => e.stopPropagation()}
         >
@@ -1944,7 +2214,272 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
         </div>
         </div>` : nothing}
       </div>
+
+      ${this.renderFoot(isGraphic, caps, credits, warnings)}
     </div>`;
+  }
+
+  /**
+   * WHAT THIS SHOT WILL BE MADE WITH, AND WHAT IT WILL COST.
+   *
+   * A model is not a setting buried in a menu here — it decides which references
+   * are legal and how long the clip can be, so a person editing the shot should
+   * be able to see it without going looking. Unset reads "(default)", which is
+   * an invitation rather than a silent choice: the agent's job is to ask, and a
+   * shot that never got asked about is visible at a glance.
+   *
+   * RENDERED OUTSIDE `.shot__body`, and that is the fix for the clipped bottom
+   * row. Inside a fixed-height, overflow-hidden body, a footer is only visible
+   * while everything above it happens to fit — and on a clip card, with three
+   * slot wells, three lanes and the written fields, it did not. Out here the
+   * body is the only thing that can give.
+   *
+   * It therefore has to claim its own pointer events: the body's handlers no
+   * longer cover it, and without these a press on the model button starts a
+   * canvas drag and the card slides out from under the pointer.
+   */
+  private renderFoot(
+    isGraphic: boolean,
+    caps: ReturnType<typeof effectiveModel>,
+    credits: number | null,
+    warnings: ReturnType<typeof checkShot>,
+  ) {
+    return html`<div
+      class="shot__foot"
+      @pointerdown=${(e: PointerEvent) => e.stopPropagation()}
+      @dblclick=${(e: Event) => e.stopPropagation()}
+    >
+      <!--
+        A DEFAULT IS NOT A DECISION, and the card must not present it as one.
+        An unset shot still resolves to the project default — that IS what would
+        be generated — but saying just "Grok Imagine" would read as a choice
+        somebody made, and the whole point of per-shot models is that the choice
+        gets made deliberately. So the fallback is labelled.
+
+        A GRAPHIC HAS NO MODEL LINE at all: it is rendered, not generated, and a
+        model picker on it would be a control with nothing behind it.
+      -->
+      ${isGraphic
+        ? html`<span class="shot__model" title="A graphic is rendered from a block on your own computer — there is no model to choose and no generation cost.">Rendered, not generated</span>`
+        : html`<button
+            class="shot__model"
+            title=${this.model.props.model
+              ? 'The video model this shot will be generated with — click to change'
+              : 'No model chosen for this shot — click to pick one'}
+            @click=${(e: Event) => {
+              e.stopPropagation();
+              this._pickingBlock = false;
+              this._filling = false;
+              this._pickingModel = !this._pickingModel;
+            }}
+          >
+            ${caps
+              ? (this.model.props.model ? caps.label : `${caps.label} (default)`)
+              : 'Model — not chosen'}
+            <span class="shot__caret">▾</span>
+          </button>`}
+
+      <!--
+        LENGTH, AND WHAT IT COSTS, side by side.
+        Duration is the single biggest lever on price — a 15s shot on the top
+        tier is several times a 5s one — and nobody discovers that until after
+        they have paid for twelve. Putting the estimate next to the control turns
+        "how long should this be" into a decision with a visible consequence. The
+        tilde is not decoration: the real charge happens at generation against
+        the registry, with resolution and per-image surcharges this cannot know.
+      -->
+      <span class="shot__durwrap" title=${isGraphic
+        ? 'How long this graphic holds on screen. Blank renders 5 seconds.'
+        : 'Roughly how long this shot runs — the biggest lever on what it costs'}>
+        <!--
+          data-range-sync-exclude IS WHAT MAKES THIS TYPEABLE. See the note on
+          .shot__durin in the styles above, and the full account in
+          ui/field-caret.ts. Without it BlockSuite pulls focus back to the
+          editor host between keystrokes and the box reads as broken.
+        -->
+        <input
+          class="shot__durin"
+          type="number" min="0" max="60" step="1"
+          data-range-sync-exclude="true"
+          .value=${String(this.model.props.durationSec || '')}
+          placeholder=${isGraphic ? '5' : '—'}
+          @pointerdown=${(e: Event) => e.stopPropagation()}
+          @keydown=${this.stopKeys}
+          @change=${(e: Event) => this.setDuration((e.target as HTMLInputElement).value)}
+        />s
+      </span>
+      ${credits !== null
+        ? html`<span class="shot__cost" title=${isGraphic
+            ? 'A composition is rendered, not generated — no model credits'
+            : 'Estimated generation cost. The exact charge is made when it runs.'}
+          >${formatCredits(credits)}</span>`
+        : nothing}
+
+      <!--
+        DOES THE VIDEO SPEAK?
+
+        Only offered on a model that can. All four combinations of this and the
+        NARRATION field are legitimate films — see voiceMode in model.ts — so
+        it is a choice rather than something inferred from whether a line
+        happens to be written.
+      -->
+      ${!isGraphic && caps?.nativeDialogue ? html`<button
+        class="shot__voice ${this.model.props.voiceMode === 'dialogue' ? 'is-on' : ''}"
+        title=${this.model.props.voiceMode === 'dialogue'
+          ? `${caps.label} will speak the dialogue written in SHOT. Click for a silent clip.`
+          : `Silent clip — anything in NARRATION is voiced separately and laid over. `
+            + `Click to have ${caps.label} speak the dialogue in SHOT instead.`}
+        @click=${(e: Event) => { e.stopPropagation(); this.toggleVoice(); }}
+      >${this.model.props.voiceMode === 'dialogue' ? '🗣 Speaks' : '🔇 Silent'}</button>` : nothing}
+
+      <!--
+        RUN IT.
+
+        A graphic has no button: it renders from its block on the user's own
+        machine, exactly and for free, so a "generate" here would charge for a
+        worse version of something already available.
+
+        Disabled with a REASON in the tooltip rather than hidden. A control that
+        vanishes when the shot is empty teaches nobody what to do next; one that
+        says "write what happens first" does.
+      -->
+      ${isGraphic ? nothing : html`<button
+        class="shot__gen"
+        ?disabled=${!(this.model.props.action ?? '').trim()}
+        title=${(this.model.props.action ?? '').trim()
+          ? 'Generate a take of this shot — it is added beside the others, never over them'
+          : 'Write what happens in this shot first — a model has to be told what to film'}
+        @click=${(e: Event) => { e.stopPropagation(); this.requestGenerate(); }}
+      >▶ Generate</button>`}
+      ${warnings.length
+        ? html`<span class="shot__warn" title=${warnings.map(w => w.message).join('\n\n')}>
+            ⚠ ${warnings.length}
+          </span>`
+        : nothing}
+    </div>`;
+  }
+
+  /**
+   * WHAT THIS SHOT HAS ACTUALLY PRODUCED.
+   *
+   * Hidden entirely until there is something to show. An empty row labelled
+   * TAKES on every card of a fresh board would be sixty pixels of furniture
+   * answering a question nobody has asked yet — and the card has no sixty
+   * pixels to spare.
+   *
+   * Clicking a ready take makes it the shot. That is the only interaction, and
+   * it is deliberately the same gesture as picking anything else on the card:
+   * `chooseTake` refuses one that is still running, so a click on a spinner is
+   * a no-op rather than a broken promise.
+   */
+  private renderTakes() {
+    const takes = this.model.props.takes ?? [];
+    if (!takes.length) return nothing;
+
+    const chosen = chosenTake(takes, this.model.props.chosenTakeId ?? '');
+    const ready = takes.filter(t => t.status === 'ready').length;
+
+    return html`<div class="takes">
+      <div class="lane__head">
+        <span class="lane__label">TAKES</span>
+        <!--
+          SAYS WHAT WILL HAPPEN, because the tick is easy to misread.
+
+          EVERY ready take goes to the editor, stacked at the same moment on its
+          own track. The tick only says which one PLAYS; the rest sit above it,
+          muted, ready to cut to. Nothing is thrown away by not being ticked —
+          discarding is the ✕, and it is a separate, deliberate act.
+        -->
+        <span
+          class="lane__count"
+          title=${ready
+            ? `All ${ready} ready take${ready > 1 ? 's' : ''} go to the editor, lined up at `
+              + 'this moment. The ticked one plays; the others stack above it to cut to.'
+            : 'Nothing finished yet.'}
+        >${ready ? `${ready} ready` : `${takes.length}`}</span>
+      </div>
+      <div class="takes__strip" @wheel=${this.onLaneWheel}>
+        ${repeat(takes, t => t.id, (t, i) => {
+          const on = chosen?.id === t.id;
+          return html`<button
+            class="take ${on ? 'is-on' : ''} ${t.status === 'failed' ? 'take--failed' : ''}"
+            data-drag-take=${t.id}
+            style=${t.poster || t.src
+              ? `background-image:url("${withToken(t.poster || t.src)}")`
+              : ''}
+            title=${t.status === 'failed'
+              ? `Take ${i + 1} failed — ${t.error || 'no reason given'}`
+              : t.status === 'running'
+                ? `Take ${i + 1} is still generating`
+                : `${on
+                    ? 'Plays on the timeline. The other takes stack above it.'
+                    : 'Goes to the editor either way — click to make this the one that plays.'
+                  }${t.model ? ` · ${t.model}` : ''}`}
+            @pointerdown=${(e: Event) => e.stopPropagation()}
+            @click=${(e: Event) => { e.stopPropagation(); this.pickTake(t.id); }}
+          >
+            ${on ? html`<span class="take__tick">✓</span>` : nothing}
+            ${t.status === 'ready'
+              ? nothing
+              : html`<span class="take__state">${t.status === 'running'
+                  ? 'generating…'
+                  : (t.error || 'failed')}</span>`}
+            <span class="take__n">${t.label || `Take ${i + 1}`}${
+              t.durationSec ? ` · ${Math.round(t.durationSec)}s` : ''}</span>
+            <span
+              class="take__x"
+              role="button"
+              title="Discard this take — it stops going to the editor. The file stays in your Library."
+              @pointerdown=${(e: Event) => e.stopPropagation()}
+              @click=${(e: Event) => { e.stopPropagation(); this.dropTake(t.id); }}
+            >✕</span>
+          </button>`;
+        })}
+      </div>
+    </div>`;
+  }
+
+  /**
+   * Ask the HOST PAGE to generate this shot.
+   *
+   * The card raises intent; the page owns the network — the same split as
+   * `draft-save`, and for the same reason: an iframe has no credentials, no
+   * credit balance, and no `useStudioMediaGenerator`. The page reads the inputs
+   * back through `board-shot-gen-input` and records the result as a take
+   * through `board-add-take` / `board-update-take`.
+   *
+   * Nothing is written here, deliberately. A card that optimistically created
+   * its own placeholder take would leave one stranded whenever the page refused
+   * — no credits, no model, the tab closed mid-flight — and a take that never
+   * resolves is indistinguishable from a broken generator.
+   */
+  private requestGenerate(): void {
+    window.parent?.postMessage(
+      { type: 'voidspace:shot-generate', shotId: this.model.id },
+      '*',
+    );
+  }
+
+  /**
+   * Flip between a silent clip and one the model speaks.
+   *
+   * Writes an EXPLICIT `'silent'` rather than clearing back to `''`. Both
+   * resolve to a silent generation, but only one of them records that a person
+   * decided — which is the difference between a shot the agent should ask about
+   * and one it should leave alone.
+   */
+  private toggleVoice(): void {
+    const next = this.model.props.voiceMode === 'dialogue' ? 'silent' : 'dialogue';
+    this.store.captureSync();
+    this.store.updateBlock(this.model, { voiceMode: next });
+  }
+
+  private pickTake(takeId: string): void {
+    chooseTake(this.std, this.model.id, takeId);
+  }
+
+  private dropTake(takeId: string): void {
+    removeTake(this.std, this.model.id, takeId);
   }
 
   /** Pick a model for this shot, and close the list. */

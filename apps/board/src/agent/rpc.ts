@@ -40,9 +40,28 @@ import { pendingToast } from '../ui/toast';
 import { renderBoardThumbnail } from '../board/thumbnail';
 import { compileBoard, describeShot } from '../shot/screenplay';
 import {
-  MEDIA_ROLES, REF_KINDS, SHOT_H, SHOT_W, isTimed, normaliseShotKind, rolesFor, trimWindow,
-  type MediaRole, type RefKind,
+  MEDIA_ROLES, REF_KINDS, SHOT_H, SHOT_W, chosenTake, isTimed, normaliseShotKind, rolesFor,
+  trimWindow, type MediaRole, type RefKind, type ShotTake,
 } from '../shot/model';
+
+/** Accepted `source` values, so a typo becomes the safe default rather than a
+ *  value nothing downstream knows how to read. */
+const TAKE_SOURCES = new Set(['generated', 'recorded', 'uploaded', 'imported']);
+
+/**
+ * The order a model receives references in.
+ *
+ * Kept identical to compile's and the card's, because the positional tags
+ * (`@Image1`, `@Image2`) are numbered from it. Three copies of this list is two
+ * too many, but they are in three packages that do not import each other; the
+ * test that matters is that a shot's legend and its array agree, which is
+ * asserted where the legend is built.
+ */
+const GEN_ROLE_ORDER: MediaRole[] = [
+  'firstFrame', 'lastFrame', 'motionRef',
+  'background', 'figure', 'inset', 'logo', 'texture',
+  'reference', 'sfx', 'bgm',
+];
 import { allBlocks, findBlock, searchBlocks, setBlockCatalogue } from '../shot/blocks';
 import { canvasMediaFor } from '../shot/canvas-drop';
 import { readParsed, readScript, writeScript } from '../shot/screenplay-doc';
@@ -60,12 +79,13 @@ function bounds(m: { xywh?: string }): { x: number; y: number; w: number; h: num
   }
 }
 import {
-  allModels, checkShot, effectiveModel, estimateShotCredits, findModel, referenceTag,
-  setModelCatalogue, type ModelCaps,
+  allModels, checkShot, effectiveModel, estimateShotCredits, findModel, plannedSeconds,
+  referenceTag, setModelCatalogue, type ModelCaps,
 } from '../shot/models';
 import {
-  addMedia, createShots, deleteShot, moveMedia, readShot, readShots,
-  relayoutShots, removeMedia, setMediaRole, setShotFields, shotAtPoint, tagMedia, trimMedia,
+  addMedia, addTake, chooseTake, createShots, deleteShot, moveMedia, readShot, readShots,
+  relayoutShots, removeMedia, removeTake, setMediaRole, setShotFields, shotAtPoint, tagMedia,
+  trimMedia, updateTake,
 } from '../shot/shots';
 import { ensureVisible, fitBoard } from '../ui/viewport';
 
@@ -286,6 +306,47 @@ function digest(board: MountedBoard) {
             ...(win?.trimmed ? { inSec: win.start, outSec: win.end } : {}),
           };
         }),
+        /**
+         * WHAT THIS SHOT HAS ACTUALLY PRODUCED.
+         *
+         * Without it the agent cannot tell a shot that has been generated four
+         * times from one that has never been attempted, so it re-offers work
+         * that is already done and cannot answer "is this shot finished?".
+         *
+         * NO URLS — the same rule the reference list above follows, and for the
+         * same reasons: signed Library urls are long, burn context, and are not
+         * something a language model should be holding. `takeId` is what every
+         * take op takes, and it is enough to act on.
+         *
+         * `promptUsed` is truncated: it is what makes "that one, but warmer" an
+         * EDIT of a known thing rather than a fresh guess, but a shot with six
+         * takes must not carry six full prompts on every read.
+         */
+        takes: s.takes.map(t => ({
+          id: t.id,
+          status: t.status,
+          kind: t.kind,
+          durationSec: t.durationSec,
+          source: t.source,
+          createdAt: t.createdAt,
+          ...(t.label ? { label: t.label } : {}),
+          ...(t.model ? { model: t.model } : {}),
+          ...(t.runtime ? { runtime: t.runtime } : {}),
+          ...(t.seed !== undefined ? { seed: t.seed } : {}),
+          ...(t.costCredits !== undefined ? { costCredits: t.costCredits } : {}),
+          ...(t.error ? { error: t.error } : {}),
+          ...(t.promptUsed ? { promptUsed: t.promptUsed.slice(0, 160) } : {}),
+        })),
+        /**
+         * WHICH TAKE IS THE SHOT — resolved, not raw.
+         *
+         * The stored pointer is empty far more often than not, because a shot
+         * with one take never needed a decision. Reporting the raw field would
+         * have the agent believe nothing was chosen and offer to choose, on a
+         * shot that has exactly one candidate. `chosenTake` applies the same
+         * fallback the card draws and compile will use, so all three agree.
+         */
+        chosenTakeId: chosenTake(s.takes, s.chosenTakeId)?.id ?? '',
         // SAID OUT LOUD, every read. A warning the agent has to go and ask for
         // is a warning it will not ask for.
         warnings: warnings.map(w => w.message),
@@ -1128,6 +1189,236 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
       const id = String(args.mediaId ?? '');
       if (!setMediaRole(board.std, shotId, id, role)) {
         return fail('not_found', `Shot ${shotId} has no media with id ${id}.`);
+      }
+      return digest(board);
+    },
+
+    /**
+     * EVERYTHING NEEDED TO GENERATE ONE SHOT, gathered board-side.
+     *
+     * ── WHY THIS EXISTS AT ALL ───────────────────────────────────────────────
+     * The card raises intent; the page owns the network (same split as
+     * `draft-save`). But the page cannot compose the request itself: the shot's
+     * references live in the block, and the digest deliberately carries no urls
+     * — that rule exists so a language model never holds a signed Library url.
+     *
+     * So this is the PAGE-ONLY channel. It returns full-quality urls because the
+     * page is what calls the provider; nothing here is ever put in front of a
+     * model. `board_read` remains url-free, and the two must not be merged.
+     *
+     * ── THE PROMPT IS ASSEMBLED HERE, NOT ON THE PAGE ────────────────────────
+     * Because the pieces are here: the written fields, the reference ORDER a
+     * model receives them in, and the model's own tag spelling. Composing it on
+     * the page would mean a second implementation of the ordering rule, which is
+     * the thing that decides whether "@Image2 walks into frame" points at the
+     * right picture.
+     */
+    'voidspace:board-shot-gen-input': args => {
+      const g = guard(args); if (!g.ok) return g;
+      const shotId = String(args.shotId ?? '');
+      const shot = readShot(board.std, shotId);
+      if (!shot) return fail('not_found', `No shot ${shotId} on this board.`);
+
+      // A graphic is RENDERED from a block, not generated by a model. Offering
+      // it here would charge for something that has a free, exact path.
+      if (shot.kind === 'hyperframes') {
+        return fail(
+          'not_generatable',
+          'That shot is a graphic — it renders from its HyperFrames block rather than '
+          + 'being generated, so there is nothing to charge for.',
+        );
+      }
+
+      const caps = effectiveModel(shot.model);
+      const written = [shot.action, shot.camera].map(s => s.trim()).filter(Boolean).join(' ');
+      if (!written) {
+        return fail(
+          'empty',
+          'That shot has nothing written in it yet. A model needs to be told what happens '
+          + 'before it can film it.',
+        );
+      }
+
+      /**
+       * REFERENCES IN THE ORDER THE MODEL RECEIVES THEM.
+       *
+       * Identical to compile's ordering, because the positional tags are
+       * numbered from it — a legend that disagrees with the array is worse than
+       * no legend, since the prompt then names the wrong picture confidently.
+       */
+      const ordered = [...shot.media]
+        .filter(m => m.kind !== 'audio' && (m.url || m.src))
+        .sort((a, b) => GEN_ROLE_ORDER.indexOf(a.role) - GEN_ROLE_ORDER.indexOf(b.role));
+
+      // Only for models that read tags — for the rest it is noise that the model
+      // will try to render as words on screen.
+      const legend = caps?.usesReferenceTags
+        ? ordered
+            .map(m => {
+              const tag = referenceTag(caps, shot.media, m.id);
+              const what = [m.tag, m.refKind].filter(Boolean).join(', ');
+              return tag && what ? `${tag} is ${what}` : '';
+            })
+            .filter(Boolean)
+            .join('. ')
+        : '';
+
+      // The user's own direction for a reference, verbatim. It is the one part
+      // of a prompt nobody else can write, so it must not be paraphrased away.
+      const notes = ordered.map(m => m.note?.trim()).filter(Boolean).join(' ');
+
+      /**
+       * WHETHER THE MODEL SPEAKS, resolved here rather than on the page.
+       *
+       * Two gates, and both matter. The user's choice comes first — a silent
+       * shot stays silent even on a model that could talk. But `dialogue` is
+       * only ever sent to a model that HAS native dialogue: asking one that
+       * cannot for it either errors deep in a provider or, worse, is accepted
+       * and ignored, and the user is charged for a clip that was never going to
+       * speak. `checkShot` already warns on the card when a narration is written
+       * against a model that cannot voice it.
+       */
+      const wantsDialogue = shot.voiceMode === 'dialogue' && !!caps?.nativeDialogue;
+
+      return {
+        ok: true as const,
+        shotId,
+        title: shot.title,
+        prompt: [written, legend, notes].filter(Boolean).join(' '),
+        // FULL QUALITY. The card draws the display variant; a generation must
+        // be given the master or the output is built from a thumbnail.
+        referenceUrls: ordered.map(m => m.url || m.src),
+        model: shot.model,
+        effectiveModel: caps?.id ?? '',
+        /**
+         * THE LENGTH THIS MODEL WILL ACTUALLY PRODUCE — snapped, not requested.
+         *
+         * `plannedSeconds` clamps to the model's range AND snaps to its discrete
+         * `allowedDurations`, so the number sent to generate is the same one the
+         * card costed and totalled. Sending the raw request instead would have
+         * the provider round it silently, after the charge, to a length nothing
+         * on screen had ever mentioned.
+         */
+        durationSec: plannedSeconds({ kind: shot.kind, model: shot.model, durationSec: shot.durationSec }),
+        /** What the user asked for, so the page can say if it moved. */
+        requestedDurationSec: shot.durationSec,
+        voiceMode: wantsDialogue ? 'dialogue' : 'silent',
+        /** Set when a narration was written but this model cannot voice it —
+         *  the line still gets spoken, separately, as TTS over the clip. */
+        narrationIsSeparate: !!shot.voiceover.trim() && !wantsDialogue,
+        takeNumber: shot.takes.length + 1,
+      };
+    },
+
+    /**
+     * ── TAKES ────────────────────────────────────────────────────────────────
+     *
+     * Record an attempt at a shot. APPENDS, always — there is deliberately no
+     * op that replaces a take, because that invariant is what makes the board
+     * safe to hand to an agent: it cannot destroy footage the user paid for, no
+     * matter what it decides to do.
+     *
+     * The generation itself belongs to the PAGE (`useStudioMediaGenerator` owns
+     * model choice, idempotency, credits and the Library mirror). This only
+     * records the outcome, which is why it takes a url rather than a prompt.
+     */
+    'voidspace:board-add-take': args => {
+      const g = guard(args); if (!g.ok) return g;
+      const shotId = String(args.shotId ?? '');
+      const url = String(args.url ?? '');
+      if (!url) return fail('bad_request', 'A take needs a url.');
+      const id = addTake(board.std, shotId, {
+        url,
+        // The card draws `src`; only the render uses `url`. A caller that sends
+        // one url gets it in both rather than a blank tile — wrong-but-visible
+        // beats invisible, and it is the display variant that is optional.
+        src: String(args.src ?? url),
+        ...(args.poster ? { poster: String(args.poster) } : {}),
+        ...(args.mediaId ? { mediaId: String(args.mediaId) } : {}),
+        kind: args.kind === 'image' ? 'image' : 'video',
+        durationSec: Number(args.durationSec ?? 0) || 0,
+        status: args.status === 'running' || args.status === 'failed'
+          ? args.status : 'ready',
+        ...(args.error ? { error: String(args.error) } : {}),
+        ...(args.jobId ? { jobId: String(args.jobId) } : {}),
+        createdAt: new Date().toISOString(),
+        ...(args.label ? { label: String(args.label) } : {}),
+        source: TAKE_SOURCES.has(String(args.source))
+          ? String(args.source) as ShotTake['source'] : 'generated',
+        ...(args.model ? { model: String(args.model) } : {}),
+        ...(args.runtime === 'local' || args.runtime === 'cloud'
+          ? { runtime: args.runtime } : {}),
+        ...(Number.isFinite(Number(args.seed)) && args.seed !== undefined
+          ? { seed: Number(args.seed) } : {}),
+        ...(args.promptUsed ? { promptUsed: String(args.promptUsed) } : {}),
+        ...(Number.isFinite(Number(args.costCredits)) && args.costCredits !== undefined
+          ? { costCredits: Number(args.costCredits) } : {}),
+      });
+      if (!id) return fail('not_found', `No shot ${shotId} on this board.`);
+
+      // FIRST READY TAKE IS THE SHOT, without being asked. A shot with one take
+      // and no choice recorded has only one possible answer, and making the user
+      // confirm it would be ceremony. `chooseTake` refuses anything not ready,
+      // so a still-running first take correctly leaves the pointer empty.
+      const shot = readShot(board.std, shotId);
+      if (shot && !shot.chosenTakeId) chooseTake(board.std, shotId, id);
+      return { ...digest(board), takeId: id };
+    },
+
+    /** Update a take in flight — what a poller calls when a job finishes. */
+    'voidspace:board-update-take': args => {
+      const g = guard(args); if (!g.ok) return g;
+      const shotId = String(args.shotId ?? '');
+      const takeId = String(args.takeId ?? '');
+      const patch: Record<string, unknown> = {};
+      // `!= null` catches BOTH undefined and null, and the difference is not
+      // academic: `String(null)` is the four-character string "null", so a
+      // caller clearing a field by sending null would have written the WORD
+      // null into the url — a take pointing at a resource named "null", which
+      // fails as a 404 somewhere far away from here.
+      for (const k of ['url', 'src', 'poster', 'mediaId', 'error', 'jobId', 'label', 'promptUsed']) {
+        if (args[k] != null) patch[k] = String(args[k]);
+      }
+      for (const k of ['durationSec', 'costCredits', 'seed']) {
+        if (args[k] != null && Number.isFinite(Number(args[k]))) patch[k] = Number(args[k]);
+      }
+      if (args.status === 'running' || args.status === 'ready' || args.status === 'failed') {
+        patch.status = args.status;
+      }
+      if (!updateTake(board.std, shotId, takeId, patch)) {
+        return fail('not_found', `Shot ${shotId} has no take ${takeId}.`);
+      }
+      // A take that has just BECOME ready is the first candidate on a shot that
+      // was waiting for it — same rule as above, applied when the job lands
+      // rather than when it started.
+      const shot = readShot(board.std, shotId);
+      if (shot && !shot.chosenTakeId && patch.status === 'ready') {
+        chooseTake(board.std, shotId, takeId);
+      }
+      return digest(board);
+    },
+
+    /** Say which take IS the shot. */
+    'voidspace:board-choose-take': args => {
+      const g = guard(args); if (!g.ok) return g;
+      const shotId = String(args.shotId ?? '');
+      const takeId = String(args.takeId ?? '');
+      if (!chooseTake(board.std, shotId, takeId)) {
+        return fail(
+          'not_found',
+          `Could not choose take ${takeId} on shot ${shotId} — it does not exist, or it is not ready yet.`,
+        );
+      }
+      return digest(board);
+    },
+
+    /** Discard a take. The Library keeps the file; a cut already using it plays on. */
+    'voidspace:board-remove-take': args => {
+      const g = guard(args); if (!g.ok) return g;
+      const shotId = String(args.shotId ?? '');
+      const takeId = String(args.takeId ?? '');
+      if (!removeTake(board.std, shotId, takeId)) {
+        return fail('not_found', `Shot ${shotId} has no take ${takeId}.`);
       }
       return digest(board);
     },

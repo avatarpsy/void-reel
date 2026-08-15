@@ -98,7 +98,66 @@ const NOTE_BADGE = html`<svg viewBox="0 0 24 24" width="24" height="24" aria-hid
  * `stopPropagation` on pointerdown as well as click: without it the press starts
  * a canvas drag and the card moves out from under the finger before the click
  * lands.
+ *
+ * ── THE BUTTON IS THE BADGE, NOT THE CARD ────────────────────────────────────
+ * This was `inset: 0`, so the button covered the whole tile. Two consequences,
+ * and they were the same bug wearing two faces:
+ *
+ *   • EVERY click played. Clicking a clip to SELECT it — the most common thing
+ *     anyone does to a card on a canvas — started a stream instead.
+ *   • The card could not be selected or dragged by its picture AT ALL. The
+ *     pointerdown was swallowed here and never reached the gfx layer, so the
+ *     only draggable part of a clip card was the name strip along its bottom.
+ *
+ * The second one contradicts the rule the rest of the board is built on, stated
+ * in `ui/media-inspector.ts`: "on the canvas a single click selects, which is
+ * how every canvas works and what dragging depends on."
+ *
+ * So the hit area is the badge and nothing more. Everything outside it falls
+ * through to the canvas, which is what restores select, drag, and
+ * double-click-to-open on clips and tracks.
  */
+const PLAY_HIT = 44;
+
+/**
+ * THE BADGE FADES; IT DOES NOT SHOUT.
+ *
+ * A board of fifty clips was fifty play buttons at full strength — a wall of
+ * chrome over the pictures the user is actually trying to compare. Dimmed at
+ * rest and full on hover, the board reads as images again, and the control is
+ * exactly where it always was the moment a pointer goes near it.
+ *
+ * A REAL STYLESHEET, injected once, because these cards are rendered with
+ * `styleMap` — inline styles, which cannot express `:hover` at all. Injected
+ * once per document rather than a `<style>` inside the card template: the
+ * template renders per card and per update, and fifty identical style elements
+ * is fifty things for the browser to parse and reconcile.
+ */
+let playStylesInjected = false;
+function ensurePlayStyles(): void {
+  if (playStylesInjected || typeof document === 'undefined') return;
+  playStylesInjected = true;
+  const el = document.createElement('style');
+  /**
+   * OPACITY ONLY, and the two things it cannot do are worth stating.
+   *
+   * No `transform` on hover: the button's centring transform is an INLINE style
+   * (`styleMap`), and inline beats a stylesheet rule, so a scale here would
+   * silently never apply — or worse, land without the translate and throw the
+   * badge into the corner.
+   *
+   * No `[data-vs-media]:hover` either: the card is deliberately
+   * `pointer-events: none` so the canvas can drag the block it lives in, and an
+   * element that takes no pointer events never matches `:hover`. The rule would
+   * read as "brightens when you hover the card" and do nothing.
+   */
+  el.textContent = `
+    .vs-playbtn { opacity: 0.55; transition: opacity 0.12s ease; }
+    .vs-playbtn:hover { opacity: 1; }
+  `;
+  document.head.append(el);
+}
+
 function playButton(start: (host: HTMLElement) => void, badge: unknown) {
   const onPlay = (e: Event) => {
     e.stopPropagation();
@@ -106,12 +165,22 @@ function playButton(start: (host: HTMLElement) => void, badge: unknown) {
     const host = (e.currentTarget as HTMLElement).closest<HTMLElement>('[data-vs-media]');
     if (host) start(host);
   };
+  ensurePlayStyles();
   return html`<button
     type="button"
+    class="vs-playbtn"
     title="Play here — double-click the card to open it full size"
     style=${styleMap({
-      position: 'absolute', inset: '0', display: 'grid', placeItems: 'center',
+      position: 'absolute',
+      // Centred by transform rather than by a full-bleed grid: the button has to
+      // be exactly badge-sized, and a grid that centres its child still takes
+      // every pixel of the pointer surface for itself.
+      top: '50%', left: '50%',
+      transform: 'translate(-50%, -50%)',
+      width: `${PLAY_HIT}px`, height: `${PLAY_HIT}px`,
+      display: 'grid', placeItems: 'center',
       appearance: 'none', border: '0', background: 'transparent', padding: '0',
+      borderRadius: '50%',
       cursor: 'pointer', pointerEvents: 'auto', zIndex: '1',
     })}
     @pointerdown=${(e: Event) => e.stopPropagation()}

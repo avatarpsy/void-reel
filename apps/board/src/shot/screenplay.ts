@@ -58,7 +58,7 @@
 import type { BlockStdScope } from '@blocksuite/std';
 
 import {
-  roleLabel, formatTime, isTimed, trimWindow,
+  chosenTake, readyTakes, roleLabel, formatTime, isTimed, trimWindow,
   type MediaRole, type RefKind, type ShotMedia,
 } from './model';
 import { effectiveModel, referenceTag } from './models';
@@ -142,6 +142,46 @@ export interface CompiledShot {
   /** Slot-keyed values — media urls and typed words together. See below. */
   slots?: Array<{ key: string; kind: string; value: string }>;
   references: CompiledReference[];
+  /**
+   * WHAT THIS SHOT ALREADY IS, when it has been generated.
+   *
+   * ── EVERY KEPT TAKE TRAVELS, NOT JUST THE ONE THAT PLAYS ─────────────────
+   * The whole point of generating four times is being able to cut between them.
+   * So all of them reach the editor: the ticked one becomes the scene's clip on
+   * the main video track, and the rest are laid out at the SAME moment on their
+   * own muted tracks, ready to razor into. Sending only the chosen one would
+   * throw away three generations the user paid for and force a trip back to the
+   * board to change their mind.
+   *
+   * Ordered with the playing take FIRST, so a consumer that only understands one
+   * clip per scene still gets the right one.
+   *
+   * Omitted entirely on a shot with no ready take — which is the ordinary case
+   * for a storyboard that has not been generated yet, and the signal that the
+   * pipeline should generate the scene rather than assemble it.
+   */
+  takes?: CompiledTake[];
+}
+
+/** One generated attempt, as compile hands it over. */
+export interface CompiledTake {
+  /** Stable id from the board. Becomes `Clip.takeId` on the timeline, so a clip
+   *  can always say which take of which shot it is. */
+  id: string;
+  /** FULL QUALITY. What the render uses. */
+  url: string;
+  /** A still, so a timeline thumbnail costs one small image and never a stream. */
+  poster?: string;
+  /** Measured length of this take. Alternates genuinely differ in length, and
+   *  each keeps its own — the stack is honest about that rather than pretending
+   *  they match. */
+  durationSec: number;
+  /** True for the take that plays on the main video track. Exactly one. */
+  primary: boolean;
+  /** The user's name for it, or "Take 2". Names the track it lands on. */
+  label: string;
+  /** Voidspace Library id, so the editor can relink it later. */
+  mediaId?: string;
 }
 
 export interface CompiledBoard {
@@ -303,6 +343,32 @@ export function compileBoard(
     const placed = sceneIndex.get(shot.sceneKey);
     const seq = placed ? sequenceOf(parsed, placed) : null;
 
+    /**
+     * EVERY KEPT TAKE, PLAYING ONE FIRST.
+     *
+     * `chosenTake` applies the same fallback the card draws — an explicit tick
+     * if there is one, otherwise the newest ready take — so the clip the user
+     * has been looking at is the clip that lands on the main track. Three
+     * places resolve this now (card, digest, compile) and they must not
+     * disagree, which is why none of them re-implements the rule.
+     *
+     * Failed and still-running takes are excluded by `readyTakes`: a clip with
+     * no url would arrive on the timeline as a hole.
+     */
+    const playing = chosenTake(shot.takes, shot.chosenTakeId);
+    const compiledTakes: CompiledTake[] = playing
+      ? [playing, ...readyTakes(shot.takes).filter(t => t.id !== playing.id)]
+          .map((t, ti) => ({
+            id: t.id,
+            url: t.url || t.src,
+            ...(t.poster ? { poster: t.poster } : {}),
+            durationSec: t.durationSec,
+            primary: ti === 0,
+            label: t.label || `Take ${ti + 1}`,
+            ...(t.mediaId ? { mediaId: t.mediaId } : {}),
+          }))
+      : [];
+
     return {
       n: i + 1,
       id: shot.id,
@@ -340,6 +406,7 @@ export function compileBoard(
        */
       ...(isGraphic && graphicSlots.length ? { slots: graphicSlots } : {}),
       references: ordered.map(m => toReference(m, referenceTag(caps, ordered, m.id))),
+      ...(compiledTakes.length ? { takes: compiledTakes } : {}),
     };
   });
 

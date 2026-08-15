@@ -303,6 +303,47 @@ describe('plannedSeconds', () => {
     setModelCatalogue([], '');
     expect(plannedSeconds({ model: '', durationSec: 0 })).toBe(0);
   });
+
+  /**
+   * SNAPPING TO WHAT THE MODEL ACTUALLY PRODUCES.
+   *
+   * `allowedDurations` was reported to the agent and used by nothing, so a shot
+   * planned at 7s was estimated at 7s, totalled at 7s and SENT as 7s — and
+   * whatever Seedance then did with it (round, refuse, or choose for us) landed
+   * after the charge, at a length nothing on screen had ever mentioned.
+   */
+  it('snaps to a length the model can actually render', () => {
+    // Seedance does 4, 5, 8, 10, 12, 15. It does not do 6, 7 or 13.
+    expect(plannedSeconds({ model: SEEDANCE.id, durationSec: 7 })).toBe(8);   // nearer 8
+    expect(plannedSeconds({ model: SEEDANCE.id, durationSec: 6 })).toBe(5);   // nearer 5
+    expect(plannedSeconds({ model: SEEDANCE.id, durationSec: 13 })).toBe(12); // nearer 12
+    // 9 is equidistant from 8 and 10 — a tie, so it goes up. See the next test.
+    expect(plannedSeconds({ model: SEEDANCE.id, durationSec: 9 })).toBe(10);
+    // Exact hits are left alone.
+    expect(plannedSeconds({ model: SEEDANCE.id, durationSec: 10 })).toBe(10);
+  });
+
+  it('breaks a tie UPWARD, because only the longer one can still be trimmed', () => {
+    // 6.5 sits exactly between 5 and 8 for Seedance. Round down and the second
+    // and a half is gone for good; round up and the user can trim it on the
+    // timeline. The recoverable direction wins.
+    expect(plannedSeconds({ model: SEEDANCE.id, durationSec: 6.5 })).toBe(8);
+    // 7.5 between 5 and 10 on Kling.
+    expect(plannedSeconds({ model: KLING.id, durationSec: 7.5 })).toBe(10);
+  });
+
+  it('clamps BEFORE snapping, so an out-of-range ask lands on a real value', () => {
+    expect(plannedSeconds({ model: SEEDANCE.id, durationSec: 99 })).toBe(15);
+    expect(plannedSeconds({ model: SEEDANCE.id, durationSec: 1 })).toBe(4);
+  });
+
+  it('leaves a model with no discrete list free to use anything in range', () => {
+    // An empty `allowedDurations` means "anything in range" — snapping such a
+    // model to its minimum would quietly forbid every length it supports.
+    setModelCatalogue([LOCAL_H3], LOCAL_H3.id);
+    expect(plannedSeconds({ model: LOCAL_H3.id, durationSec: 7 })).toBe(7);
+    expect(plannedSeconds({ model: LOCAL_H3.id, durationSec: 13 })).toBe(13);
+  });
 });
 
 /**

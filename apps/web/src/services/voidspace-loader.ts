@@ -61,8 +61,176 @@ export interface VoidspaceSceneList {
   review_id?: string;
 }
 
+/**
+ * THE KEY EVERY MEDIA AND CLIP ID IS BUILT FROM.
+ *
+ * ── ONE FUNCTION, BECAUSE TWO PLACES DERIVE IT AND THEY MUST NOT DRIFT ──────
+ * The per-scene rebuild mints ids from it, and the STALE-BLOB PROBE reconstructs
+ * the same prefixes to ask "does the saved timeline already cover this scene?".
+ * When those two disagree the probe matches nothing, every scene looks missing,
+ * and the loader throws away the user's saved arrangement and rebuilds from
+ * board order — on every single load.
+ *
+ * That is not hypothetical: it is exactly what happened when the rebuild moved
+ * to `source_shot_id` and the probe was left on `_docId`. Nothing errored. The
+ * timeline simply reverted to storyboard order every time the project opened,
+ * and the only visible symptom was a user's edit quietly undoing itself.
+ *
+ * `source_shot_id` is stable for the life of a shot, so inserting a shot above
+ * another does not change its ids (see `compile.post.ts`). `_docId` — the scene
+ * NUMBER — is the fallback for projects that never came from a board, and it is
+ * what those projects have always used.
+ */
+export function sceneIdKey(scene: { _docId: string; source_shot_id?: string }): string {
+  return String(scene.source_shot_id || scene._docId);
+}
+
+/**
+ * KEEP THE USER'S CUT; ADD ONLY WHAT IS NEW.
+ *
+ * ── THE BEHAVIOUR THIS REPLACES ─────────────────────────────────────────────
+ * The saved `project_state` blob IS the user's arrangement — every trim, every
+ * reorder, every clip they moved. The loader prefers it, except when it looks
+ * STALE: Firestore has scene media the blob does not cover. Until now "stale"
+ * meant DISCARD, and the loader rebuilt every track from scene docs in
+ * storyboard order.
+ *
+ * So adding one shot to the board and recompiling threw away the entire edit.
+ * Not a crash, not a warning — the timeline simply reverted to board order, and
+ * the more work somebody had done the more they lost. It is the single reason
+ * "go back and add a shot" was unsafe once you had started editing.
+ *
+ * ── THE RULE ────────────────────────────────────────────────────────────────
+ * The saved arrangement wins for everything it already contains. Clips it has
+ * never seen — identified by id, which is stable per shot (`sceneIdKey`) — are
+ * APPENDED after the end of the saved timeline. Nothing is reordered, nothing
+ * is removed, nothing is retimed except the genuinely new material.
+ *
+ * ── ONE DELTA FOR EVERY TRACK, AND THAT IS THE SUBTLE PART ──────────────────
+ * A scene is not one clip: it is a video clip, a narration clip, possibly music
+ * and alternate takes, all at the SAME instant. Appending each track
+ * independently — "put the new clip after whatever this track ends with" —
+ * would slide them apart from each other, and a shot's voiceover would drift
+ * off its picture. So the shift is computed ONCE across all new clips and
+ * applied uniformly: their internal sync is preserved exactly.
+ *
+ * ── WHY APPEND RATHER THAN INSERT ───────────────────────────────────────────
+ * The board says where a shot sits on the BOARD. Once the user has rearranged
+ * the timeline, that no longer maps onto anything: inserting into the middle of
+ * their cut means guessing where they would have wanted it, and being wrong
+ * moves work they have already placed. Appending is predictable, never
+ * destructive, and one drag away from wherever they actually want it.
+ */
+export function mergeSavedArrangement(rebuilt: Project, saved: Project): Project {
+  const savedClipIds = new Set<string>();
+  for (const t of saved.timeline.tracks) for (const c of t.clips) savedClipIds.add(c.id);
+  for (const t of (saved.textClips ?? [])) savedClipIds.add(t.id);
+
+  const newByTrack = new Map<string, Clip[]>();
+  let newMin = Infinity;
+  for (const t of rebuilt.timeline.tracks) {
+    for (const c of t.clips) {
+      if (savedClipIds.has(c.id)) continue;
+      const list = newByTrack.get(t.id) ?? [];
+      list.push(c);
+      newByTrack.set(t.id, list);
+      newMin = Math.min(newMin, c.startTime);
+    }
+  }
+  const newTextClips = (rebuilt.textClips ?? []).filter((t) => !savedClipIds.has(t.id));
+  for (const t of newTextClips) newMin = Math.min(newMin, t.startTime);
+
+  // Nothing genuinely new: the blob was flagged stale by a probe that looks at
+  // scene COUNTS, which can disagree with what is actually on the timeline (a
+  // clip the user deleted, say). Returning the saved project untouched is
+  // exactly right — there is nothing to add, and rebuilding would only undo
+  // their work.
+  if (!newByTrack.size && !newTextClips.length) return saved;
+
+  const savedEnd = Math.max(
+    0,
+    ...saved.timeline.tracks.flatMap((t) => t.clips.map((c) => c.startTime + c.duration)),
+    ...(saved.textClips ?? []).map((t) => t.startTime + t.duration),
+  );
+  /**
+   * NOT CLAMPED TO ZERO, and that was a real flaw.
+   *
+   * The shift lands the first new clip exactly at the end of the saved cut. If
+   * the user has TRIMMED their edit down, the board's layout puts the new clip
+   * later than their timeline now ends — clamping at zero left it there, with a
+   * hole of dead air in between that nothing explains. A negative delta is the
+   * correct answer to "my cut is shorter than the board thinks": pull the new
+   * material back so it starts where the film currently stops.
+   */
+  const delta = Number.isFinite(newMin) ? savedEnd - newMin : 0;
+  const shift = <T extends { startTime: number }>(c: T): T =>
+    ({ ...c, startTime: c.startTime + delta });
+
+  const savedTrackIds = new Set(saved.timeline.tracks.map((t) => t.id));
+  const tracks: Track[] = saved.timeline.tracks.map((t) => {
+    const add = newByTrack.get(t.id);
+    return add ? { ...t, clips: [...t.clips, ...add.map(shift)] } : t;
+  });
+
+  /**
+   * A TRACK THE SAVED PROJECT HAS NEVER HAD — a "Take 2" that appeared because
+   * the user generated an alternate since they last saved.
+   *
+   * Inserted before the first VIDEO track rather than appended, because array
+   * order is z-order here and appending would put it at the BOTTOM of the
+   * stack, underneath the footage it is an alternate to. Same rule the rebuild
+   * follows; see the note there.
+   */
+  for (const t of rebuilt.timeline.tracks) {
+    if (savedTrackIds.has(t.id)) continue;
+    const add = newByTrack.get(t.id);
+    if (!add?.length) continue;
+    const fresh: Track = { ...t, clips: add.map(shift) };
+    const firstVideo = tracks.findIndex((x) => x.type === "video");
+    if (t.id.startsWith("track-take-") && firstVideo >= 0) tracks.splice(firstVideo, 0, fresh);
+    else tracks.push(fresh);
+  }
+
+  // Media the saved library has never seen. Union by id, saved first, so a
+  // healed url in the blob is not overwritten by a stale rebuild copy.
+  const savedMediaIds = new Set(saved.mediaLibrary.items.map((m) => m.id));
+  const items = [
+    ...saved.mediaLibrary.items,
+    ...rebuilt.mediaLibrary.items.filter((m) => !savedMediaIds.has(m.id)),
+  ];
+
+  const allEnds = tracks.flatMap((t) => t.clips.map((c) => c.startTime + c.duration));
+  const textClips = [...(saved.textClips ?? []), ...newTextClips.map(shift)];
+
+  return {
+    ...saved,
+    mediaLibrary: { items },
+    timeline: {
+      ...saved.timeline,
+      tracks,
+      duration: Math.max(
+        0,
+        ...allEnds,
+        ...textClips.map((t) => t.startTime + t.duration),
+      ),
+    },
+    textClips,
+    modifiedAt: Date.now(),
+  };
+}
+
 interface SceneData {
   scene_number: number;
+  /**
+   * The BOARD SHOT this scene was compiled from.
+   *
+   * Written by `/api/board/compile`, and as of the identity work it is what
+   * decides which scene a render belongs to when the storyboard is reordered —
+   * a scene number is a position and positions move. Carried onto every
+   * MediaItem and Clip built from this scene so the timeline can answer "which
+   * shot is this?" without inferring it from an index that has already changed.
+   */
+  source_shot_id?: string;
   scene_text?: string;
   narration_text?: string;
   visual_description?: string;
@@ -1214,7 +1382,7 @@ export async function loadSceneListAsProject(
         // `video_url` in Firestore against the set of scene docIds
         // represented in the blob's mediaLibrary. The per-scene
         // rebuild path mints media item ids as
-        // `media-video-${scene._docId}-${primaryVideo?.id ?? "fallback"}`
+        // `media-video-${idKey}-${primaryVideo?.id ?? "fallback"}`
         // (see further down), so the docId is the stable prefix.
         // When Firestore has scenes the blob hasn't seen, fall
         // through to per-scene rebuild; `applyAdditiveMerge` on the
@@ -1237,16 +1405,16 @@ export async function loadSceneListAsProject(
           for (const s of firestoreScenes) {
             const vu = (s as any).video_url;
             if (typeof vu === "string" && vu) {
-              firestoreVideoSceneIds.push(s._docId);
+              firestoreVideoSceneIds.push(sceneIdKey(s as any));
             }
             const nu = (s as any).narration_url;
             if (typeof nu === "string" && nu) {
-              firestoreNarrationSceneIds.push(s._docId);
+              firestoreNarrationSceneIds.push(sceneIdKey(s as any));
             }
           }
           firestoreVideoSceneCount = firestoreVideoSceneIds.length;
           // Match by prefix instead of regex. The per-scene rebuild
-          // mints media ids as `media-video-${scene._docId}-${primaryVideo.id ?? "fallback"}`,
+          // mints media ids as `media-video-${idKey}-${primaryVideo.id ?? "fallback"}`,
           // and primaryVideo.id is typically a UUID-with-dashes, so a
           // single regex like `^media-video-(.+?)-([^-]+|fallback)$`
           // splits the wrong way and pulls part of the UUID into the
@@ -1312,8 +1480,24 @@ export async function loadSceneListAsProject(
           // Fall through to per-scene rebuild.
         } else if (staleBlobMissing > 0) {
           console.warn(
-            `[voidspace-loader] project_state blob is STALE — Firestore has ${firestoreVideoSceneCount} scene video(s), blob covers ${blobVideoSceneCount}. Missing ${staleBlobMissing}. Falling back to per-scene rebuild so the new clip(s) reach the timeline.`,
+            `[voidspace-loader] project_state blob is STALE — Firestore has ${firestoreVideoSceneCount} scene video(s), blob covers ${blobVideoSceneCount}. Missing ${staleBlobMissing}. Rebuilding to pick the new clip(s) up, then MERGING the saved arrangement back over it.`,
           );
+          /**
+           * KEEP THE USER'S CUT ACROSS THE REBUILD.
+           *
+           * The rebuild is still how new clips are discovered — it is the only
+           * thing that reads scene docs. What changed is what happens to the
+           * blob afterwards: it used to be dropped, which reverted the timeline
+           * to storyboard order and threw away every trim and reorder the user
+           * had made. Now it is carried through and merged back on at the end
+           * (`mergeSavedArrangement`), so the rebuild contributes ONLY the
+           * material the saved project had never seen.
+           *
+           * Stashed on `slData` exactly like `__pendingHistoryData` and
+           * `__pendingDeletedTracks` — the established way this function passes
+           * something from the blob branch into the rebuild.
+           */
+          (slData as any).__pendingSavedProject = parsed;
           if (typeof projectStateRaw.history === "string") {
             (slData as any).__pendingHistoryData = projectStateRaw.history;
           }
@@ -1542,6 +1726,15 @@ export async function loadSceneListAsProject(
   // 4) Build media library + timeline
   const mediaItems: MediaItem[] = [];
   const videoTrackClips: Clip[] = [];
+  /**
+   * Alternate takes, keyed by their POSITION in the stack (2, 3, 4…).
+   *
+   * Keyed by position rather than by shot so that every shot's second take
+   * shares one "Take 2" track. Unhiding it then shows the alternate for exactly
+   * the shots that have one, and leaves every other shot showing what it showed
+   * — which is what makes comparing across a whole cut possible in one gesture.
+   */
+  const alternateTakeClips = new Map<number, Clip[]>();
   // Stills for scenes that have no moving picture at all. An ordinary clip on
   // an ordinary track — the point is the user SEES it in the timeline and can
   // move, trim or delete it, rather than it being missing entirely.
@@ -1666,6 +1859,32 @@ export async function loadSceneListAsProject(
   );
 
   for (const { scene, videos, images, narrations, sfxs } of sceneMedia) {
+    /**
+     * THE KEY THAT MEDIA AND CLIP IDS ARE BUILT FROM — and it must survive a
+     * reorder, which `_docId` does not.
+     *
+     * `_docId` is the scene NUMBER. Insert one shot in the middle of a
+     * storyboard and every scene below renumbers, so every id derived from it
+     * changes: `clip-video-3` becomes `clip-video-4`, and so on down the film.
+     * The comment on `mediaId` below explains why that matters — the editor's
+     * live subscription merges ADDITIVELY, and it identifies what it already has
+     * by id. Renamed ids read as brand-new clips, so a recompile with the editor
+     * open would leave the old ones in place and add a full second copy of every
+     * scene below the insertion point.
+     *
+     * `source_shot_id` is stable for the life of the shot: inserting something
+     * above it does not change it. That is exactly what it was made
+     * load-bearing for (see `compile.post.ts`), and this is the second place it
+     * pays for itself.
+     *
+     * FALLS BACK to `_docId` when absent, so a project that did not come from a
+     * board — where there are no shot ids — keeps precisely the ids it has
+     * today. Projects that DID come from a board see their ids change once, and
+     * a reload settles it; the alternative is duplication every time somebody
+     * inserts a shot.
+     */
+    const idKey = sceneIdKey(scene as any);
+
     const sceneFallbackVideoUrl = await resolveMediaUrl(
       scene.video_url ?? scene.url ?? null,
     );
@@ -1827,7 +2046,7 @@ export async function loadSceneListAsProject(
 
         musicTrackSpecs.push({
           mediaId: sceneMusicMediaId,
-          sceneDocId: scene._docId,
+          sceneDocId: idKey,
           startTime: currentTime,
           duration,
           inPoint,
@@ -1848,7 +2067,7 @@ export async function loadSceneListAsProject(
     // even when every scene had a first frame on disk.
     if (imageUrl) {
       const frameBlob = await fetchMediaBlob(imageUrl);
-      const frameMediaId = `media-frame-${scene._docId}-${primaryImage?.id ?? stableHash(imageUrl)}`;
+      const frameMediaId = `media-frame-${idKey}-${primaryImage?.id ?? stableHash(imageUrl)}`;
       mediaItems.push({
         id: frameMediaId,
         name: `Scene ${scene.scene_number} · Frame`,
@@ -1861,6 +2080,7 @@ export async function loadSceneListAsProject(
         originalUrl: imageUrl,
         category: "Frames",
         sceneNumber: scene.scene_number,
+        shotId: scene.source_shot_id,
         role: "first_frame",
         sourceFile: deriveMirrorSourceFile("image", scene.scene_number, "first_frame", imageUrl, frameBlob),
       });
@@ -1888,7 +2108,7 @@ export async function loadSceneListAsProject(
       // applyAdditiveMerge saw no change and a regenerated take stayed
       // INVISIBLE on the timeline (the "replace on timeline not working"
       // bug). A URL-derived suffix changes whenever the take changes.
-      const mediaId = `media-video-${scene._docId}-${primaryVideo?.id ?? stableHash(videoUrl)}`;
+      const mediaId = `media-video-${idKey}-${primaryVideo?.id ?? stableHash(videoUrl)}`;
       mediaItems.push({
         id: mediaId,
         name: `Scene ${scene.scene_number} · Video`,
@@ -1904,6 +2124,7 @@ export async function loadSceneListAsProject(
         originalUrl: videoUrl,
         category: "Scene Videos",
         sceneNumber: scene.scene_number,
+        shotId: scene.source_shot_id,
         role: "primary",
         sourceFile: deriveMirrorSourceFile("video", scene.scene_number, "primary", videoUrl, videoBlob),
       });
@@ -1917,7 +2138,9 @@ export async function loadSceneListAsProject(
         ? videoEndMsRaw! / 1000
         : sceneDuration;
       videoTrackClips.push({
-        id: `clip-video-${scene._docId}`,
+        id: `clip-video-${idKey}`,
+        // Provenance: which board shot this came from. See Clip.shotId.
+        shotId: scene.source_shot_id,
         mediaId,
         trackId: "track-video",
         startTime: currentTime,
@@ -1932,6 +2155,93 @@ export async function loadSceneListAsProject(
       });
     }
 
+    /**
+     * ── THE OTHER TAKES OF THIS SHOT ─────────────────────────────────────────
+     *
+     * Generated on the storyboard and carried here by compile as `take_list`.
+     * Each one starts at the SAME instant as the clip above — they are
+     * alternates, not a sequence — on its own muted, hidden track (built after
+     * the loop). The user flips a track on to compare, drags one down to swap,
+     * or razors across the stack to cut between them.
+     *
+     * The PRIMARY is skipped: it is already the video clip above. Skipping by
+     * flag rather than by position, because `take_list` order is compile's and
+     * nothing here should re-derive which one plays.
+     *
+     * EACH KEEPS ITS OWN LENGTH. A five-second take and an eight-second one are
+     * genuinely different material; forcing both into the scene's slot would
+     * hide that exactly when the user is deciding between them.
+     */
+    const takeList = Array.isArray((scene as any).take_list)
+      ? ((scene as any).take_list as any[])
+      : [];
+    let takeSlot = 1;
+    for (const t of takeList) {
+      const takeUrl = String(t?.url ?? "");
+      if (!takeUrl || t?.primary === true) continue;
+      takeSlot += 1;
+
+      const takeId = String(t?.id ?? "");
+      const takeMediaId = `media-take-${idKey}-${takeId || takeSlot}`;
+      const resolved = await resolveMediaUrl(takeUrl);
+      if (!resolved) continue;
+
+      const takeDuration = Number(t?.duration_sec) > 0
+        ? Number(t.duration_sec)
+        : sceneDuration;
+
+      mediaItems.push({
+        id: takeMediaId,
+        name: `Scene ${scene.scene_number} · ${String(t?.label ?? `Take ${takeSlot}`)}`,
+        type: "video",
+        fileHandle: null,
+        /**
+         * NO BLOB, deliberately.
+         *
+         * The scene's own video is fetched so the renderer has bytes for it.
+         * Alternates are hidden and muted by default — most of them are never
+         * looked at — so pre-fetching every take of every shot would multiply
+         * the cost of opening a storyboard-built project by the number of times
+         * the user pressed Generate. The url is durable; the editor fetches on
+         * demand when a track is unhidden.
+         */
+        blob: null,
+        metadata: mediaMeta({ duration: takeDuration, fileSize: 0 }),
+        thumbnailUrl: (t?.poster ? await resolveMediaUrl(String(t.poster)) : null) ?? null,
+        waveformData: null,
+        originalUrl: resolved,
+        // Its own bucket in the Assets panel: these are alternates, not the
+        // scene's footage, and mixing them into "Scene Videos" would make a
+        // four-take shot look like four scenes.
+        category: "Takes",
+        sceneNumber: scene.scene_number,
+        shotId: scene.source_shot_id,
+        role: "take",
+      });
+
+      const list = alternateTakeClips.get(takeSlot) ?? [];
+      list.push({
+        id: `clip-take-${idKey}-${takeId || takeSlot}`,
+        // Which take of which shot — the whole point of Phase 1's identity work.
+        shotId: scene.source_shot_id,
+        takeId: takeId || undefined,
+        mediaId: takeMediaId,
+        trackId: `track-take-${takeSlot}`,
+        // THE SAME INSTANT as the playing take. Alternates, never a sequence.
+        startTime: currentTime,
+        duration: takeDuration,
+        inPoint: 0,
+        outPoint: takeDuration,
+        effects: [],
+        audioEffects: [],
+        transform: makeDefaultTransform(),
+        // Audible once the user unhides and unmutes the track to audition it.
+        volume: 1,
+        keyframes: [],
+      });
+      alternateTakeClips.set(takeSlot, list);
+    }
+
     // ── Still clip (scenes with no moving picture) ──
     // An image-only scene used to contribute NOTHING to the timeline: the still
     // appeared in the Assets panel and the video track simply had a hole where
@@ -1940,9 +2250,11 @@ export async function loadSceneListAsProject(
     // the video. Only when there is no video — a first frame that merely backs
     // an existing clip is already represented by that clip.
     if (!videoUrl && imageUrl) {
-      const stillMediaId = `media-frame-${scene._docId}-${primaryImage?.id ?? stableHash(imageUrl)}`;
+      const stillMediaId = `media-frame-${idKey}-${primaryImage?.id ?? stableHash(imageUrl)}`;
       imageTrackClips.push({
-        id: `clip-image-${scene._docId}`,
+        id: `clip-image-${idKey}`,
+        // Provenance: which board shot this came from. See Clip.shotId.
+        shotId: scene.source_shot_id,
         mediaId: stillMediaId,
         trackId: "track-image",
         startTime: currentTime,
@@ -1962,7 +2274,7 @@ export async function loadSceneListAsProject(
     if (narrationUrl) {
       // Same per-take rule as the video media id above: URL-hash fallback,
       // never a shared literal (regens must mint a NEW media id).
-      const narMediaId = `media-narration-${scene._docId}-${narration?.id ?? stableHash(narrationUrl)}`;
+      const narMediaId = `media-narration-${idKey}-${narration?.id ?? stableHash(narrationUrl)}`;
       const narDurMs = typeof narration?.duration_ms === "number" ? narration.duration_ms : null;
       let narDuration = narDurMs != null ? narDurMs / 1000 : sceneDuration;
 
@@ -1994,6 +2306,7 @@ export async function loadSceneListAsProject(
         originalUrl: narrationUrl,
         category: "Narrations",
         sceneNumber: scene.scene_number,
+        shotId: scene.source_shot_id,
         role: "narration",
         // Narration is mirrored WITHOUT a role tag (server caller passes
         // none) → `scene-<n>.mp3`; pass role undefined to match that.
@@ -2025,7 +2338,9 @@ export async function loadSceneListAsProject(
         : (rawEndMs != null ? Math.max(inPoint, rawEndMs / 1000) : inPoint + narDuration);
 
       narrationTrackClips.push({
-        id: `clip-narration-${scene._docId}`,
+        id: `clip-narration-${idKey}`,
+        // Provenance: which board shot this came from. See Clip.shotId.
+        shotId: scene.source_shot_id,
         mediaId: narMediaId,
         trackId: "track-narration",
         startTime: currentTime,
@@ -2080,7 +2395,7 @@ export async function loadSceneListAsProject(
       // production. Prefixing with the scene doc id makes every clip
       // distinct without changing the underlying media reuse.
       sfxTrackClips.push({
-        id: `clip-sfx-${scene._docId}-${sfx.id}`,
+        id: `clip-sfx-${idKey}-${sfx.id}`,
         mediaId: sfxMediaId,
         trackId: "track-sfx",
         startTime,
@@ -2169,7 +2484,7 @@ export async function loadSceneListAsProject(
           start: Math.max(0, w.startTime - startSec),
           end: Math.max(0, w.endTime - startSec),
         }));
-        pushCaption(text, startSec, endSec, scene._docId, chunkIdx++, clipWords);
+        pushCaption(text, startSec, endSec, idKey, chunkIdx++, clipWords);
       }
     } else {
       // Lyrics segments need rebasing relative to music_start_ms (Flutter parity).
@@ -2206,7 +2521,7 @@ export async function loadSceneListAsProject(
             segment.text.toUpperCase(),
             currentTime + rebasedStart,
             currentTime + clampedEnd,
-            scene._docId,
+            idKey,
             chunkIdx++,
           );
         }
@@ -2269,7 +2584,7 @@ export async function loadSceneListAsProject(
               display,
               currentTime + rebasedStart,
               currentTime + clampedEnd,
-              scene._docId,
+              idKey,
               chunkIdx++,
               capWords,
             );
@@ -2292,7 +2607,7 @@ export async function loadSceneListAsProject(
               segment.text.toUpperCase(),
               currentTime + rebasedStart,
               currentTime + clampedEnd,
-              scene._docId,
+              idKey,
               chunkIdx++,
             );
           }
@@ -2445,6 +2760,52 @@ export async function loadSceneListAsProject(
   // overlap. Overlays are not derived here at all — an overlay is just an alpha
   // video the user or agent drops on its own video track, which stacks above
   // automatically (see the track/add stacking rule).
+  /**
+   * ── ALTERNATE TAKES, STACKED AT THE SAME MOMENT ──────────────────────────
+   *
+   * A shot generated four times on the storyboard arrives with four takes. They
+   * are NOT laid end to end — that would make the film four times too long and
+   * turn editing into deletion. They are time-aligned: the playing take is on
+   * `track-video` below, and take 2 sits directly above it at the same instant,
+   * take 3 above that. Flip a track's eye to compare, drag one down to swap, or
+   * razor across the stack to cut between them.
+   *
+   * PUSHED BEFORE `track-video`, and that is the z-order, not a coincidence. The
+   * shared painter sorts pixel tracks by DESCENDING array index, so a LOWER
+   * index paints LAST and therefore sits ON TOP (see the note above, and
+   * `stores/track-stacking.test.ts`). The timeline UI renders the array
+   * top-to-bottom, so these also appear as the rows above Video — what the user
+   * sees above IS above.
+   *
+   * `hidden` AND `muted`, and both are required. `hidden` alone is not enough:
+   * the word `hidden` appears nowhere in `packages/core/src/audio` — audibility
+   * is `!track.muted && (!hasSoloTracks || track.solo)` and
+   * `getAudioTracksAtTime` explicitly includes video tracks. Ship these
+   * hidden-only and the user sees one take while HEARING all four at once, with
+   * nothing on screen to explain it.
+   *
+   * One track per take POSITION, not per shot: every shot's second take shares
+   * "Take 2", so unhiding it shows the alternate for exactly the shots that have
+   * one and leaves every other shot showing what it showed.
+   */
+  const takeTrackIds = [...alternateTakeClips.keys()].sort((a, b) => a - b);
+  for (const slot of takeTrackIds.slice().reverse()) {
+    const clips = alternateTakeClips.get(slot) ?? [];
+    if (!clips.length) continue;
+    tracks.push({
+      id: `track-take-${slot}`,
+      type: "video",
+      name: `Take ${slot}`,
+      clips,
+      transitions: [],
+      locked: false,
+      // See above — both, or the user hears every take at once.
+      hidden: true,
+      muted: true,
+      solo: false,
+    });
+  }
+
   tracks.push({
     id: "track-video",
     type: "video",
@@ -2577,6 +2938,50 @@ export async function loadSceneListAsProject(
   if (typeof pendingHistory === "string") {
     (project as any).__historyData = pendingHistory;
     console.log(`[voidspace-loader] Preserved history (${pendingHistory.length}b) across empty-blob fallback rebuild`);
+  }
+
+  /**
+   * THE SAVED ARRANGEMENT GOES BACK ON TOP.
+   *
+   * Set only by the STALE branch — never by the poisoned-blob branch (that data
+   * belongs to a different project) and never by the empty-blob branch (there is
+   * nothing in it to preserve). So this runs exactly when there is a real edit
+   * to protect and real new material to add.
+   *
+   * `__historyData` is re-attached afterwards because the merge returns a new
+   * object built from the SAVED project, and the history rides on the rebuilt
+   * one.
+   */
+  /**
+   * WHICH STORYBOARD THIS CAME FROM — the way back.
+   *
+   * `source_board_id` has been written on every compiled project since compile
+   * existed and read by nothing, so the round trip was one-way in practice: you
+   * could send a board to the editor and then had to go and find it again by
+   * hand. Carried on the project the same way `__historyData` is — a field
+   * App.tsx peels off after `loadProject` — because `Project` is openreel's own
+   * type and Voidspace provenance does not belong in it.
+   */
+  const sourceBoardId = String((slData as Record<string, unknown>).source_board_id ?? '');
+  if (sourceBoardId) (project as any).__sourceBoardId = sourceBoardId;
+
+  const pendingSaved = (slData as any).__pendingSavedProject as Project | undefined;
+  if (pendingSaved?.timeline?.tracks?.length) {
+    const merged = mergeSavedArrangement(project, pendingSaved);
+    const before = project.timeline.tracks.reduce((n, t) => n + t.clips.length, 0);
+    const after = merged.timeline.tracks.reduce((n, t) => n + t.clips.length, 0);
+    console.log(
+      `[voidspace-loader] Merged the saved arrangement back over the rebuild — `
+      + `kept the user's cut, added ${Math.max(0, after - (pendingSaved.timeline.tracks
+          .reduce((n, t) => n + t.clips.length, 0)))} new clip(s). `
+      + `(rebuild had ${before})`,
+    );
+    if (typeof pendingHistory === "string") (merged as any).__historyData = pendingHistory;
+    if (deletedTracks.length > 0) (merged as any).deletedTracks = deletedTracks;
+    // The merge builds from the SAVED project, so anything stamped on the
+    // rebuilt one has to be carried across explicitly.
+    if (sourceBoardId) (merged as any).__sourceBoardId = sourceBoardId;
+    return merged;
   }
 
   return project;

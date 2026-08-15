@@ -25,6 +25,7 @@ import { perRev } from '../board/doc-cache';
 import {
   SHOT_GAP, SHOT_H, SHOT_W, normaliseTag,
   type MediaRole, type RefKind, type ShotBlockModel, type ShotKind, type ShotMedia,
+  type ShotTake,
 } from './model';
 
 export interface ShotView {
@@ -34,6 +35,12 @@ export interface ShotView {
   voiceover: string;
   camera: string;
   media: ShotMedia[];
+  /** Every attempt this shot has produced, oldest first. */
+  takes: ShotTake[];
+  /** Which take IS the shot; '' when not decided (see `chosenTake`). */
+  chosenTakeId: string;
+  /** Does the video model make its own sound? '' = not decided (silent). */
+  voiceMode: '' | 'silent' | 'dialogue';
   /** Video model id, or '' for the project default. */
   model: string;
   /** Planned seconds, or 0 for "not decided". */
@@ -118,6 +125,26 @@ function viewOf(std: BlockStdScope, id: string, x: number): ShotView | null {
     voiceover: p.voiceover ?? '',
     camera: p.camera ?? '',
     media: p.media ?? [],
+    /**
+     * PLAIN DATA, copied — for the same reason `compositionVars` below is.
+     *
+     * These props are Yjs-backed, so the store hands back a REACTIVE PROXY, and
+     * `structuredClone` refuses one. A proxy reaching `postMessage` does not
+     * fail politely on the offending field: it kills the whole message, which is
+     * how one stat card's variables once made `board_read` return an error for
+     * the entire board.
+     *
+     * `media` gets away with passing the proxy through only because the RPC
+     * digest happens to rebuild every entry by hand. Relying on a consumer to
+     * remember that is exactly the kind of thing that is fine until the day
+     * somebody adds a second consumer, so takes are flattened at the source.
+     *
+     * `?? []` is the other half: boards made before takes existed have no such
+     * key (see the note on `ShotProps.takes`).
+     */
+    takes: (p.takes ?? []).map(t => ({ ...t })),
+    chosenTakeId: p.chosenTakeId ?? '',
+    voiceMode: (p.voiceMode as ShotView['voiceMode']) ?? '',
     model: p.model ?? '',
     durationSec: p.durationSec ?? 0,
     // Boards written before graphic shots existed have neither prop. A shot
@@ -253,6 +280,7 @@ export function setShotFields(
   id: string,
   patch: Partial<Pick<ShotView,
     'title' | 'action' | 'voiceover' | 'camera' | 'model' | 'durationSec' | 'kind'
+    | 'voiceMode'
     | 'composition' | 'compositionVars' | 'sceneKey'
   >>,
 ): boolean {
@@ -299,6 +327,132 @@ function editMedia<T>(
   std.store.captureSync();
   std.store.updateBlock(block.model, () => { result = edit(list) ?? null; });
   return result;
+}
+
+/**
+ * THE TAKES LIST, edited in place — and BACKFILLED IF IT IS MISSING.
+ *
+ * Same in-place discipline as `editMedia` above, for the same Yjs reasons. The
+ * extra job here is the one that would otherwise bite silently:
+ *
+ * `takes` did not exist when most boards were made. A BlockSuite schema's
+ * `props()` supplies defaults when a block is CREATED; it does not reach back
+ * into documents already on disk. So on any older board `props.takes` is
+ * `undefined`, and an `editMedia`-shaped helper — which bails on a missing list
+ * — would return null forever. Pressing Generate would do nothing at all, with
+ * no error, on exactly the boards a real user already has work in.
+ *
+ * So a missing list is CREATED rather than refused. One write, once per shot,
+ * and every board is on the same footing afterwards.
+ */
+function editTakes<T>(
+  std: BlockStdScope,
+  shotId: string,
+  edit: (list: ShotTake[]) => T | null,
+): T | null {
+  const block = std.store.getBlock(shotId);
+  if (!block) return null;
+  const props = block.model.props as { takes?: ShotTake[] };
+  std.store.captureSync();
+  if (!props.takes) {
+    // Seed the key, then re-read: the reactive proxy hands back the live
+    // Y-backed array only after the prop exists.
+    std.store.updateBlock(block.model, { takes: [] });
+  }
+  const list = (block.model.props as { takes?: ShotTake[] }).takes;
+  if (!list) return null;
+  let result: T | null = null;
+  std.store.updateBlock(block.model, () => { result = edit(list) ?? null; });
+  return result;
+}
+
+/**
+ * Record an attempt at this shot.
+ *
+ * APPENDS. There is deliberately no "replace the take" — that is the invariant
+ * that makes trying again free and makes the board safe to point an agent at.
+ * Returns the new take's id so a caller can update its status when the job
+ * finishes, or choose it immediately.
+ */
+export function addTake(
+  std: BlockStdScope,
+  shotId: string,
+  take: Omit<ShotTake, 'id'>,
+): string | null {
+  const entry: ShotTake = { ...take, id: mediaId() };
+  return editTakes(std, shotId, list => {
+    list.splice(list.length, 0, entry);
+    return entry.id;
+  });
+}
+
+/**
+ * Update a take in flight — status, the url it resolved to, what it cost.
+ *
+ * Field-by-field rather than by replacement, so Yjs writes only what changed
+ * and a concurrent edit to a different field of the same take survives.
+ */
+export function updateTake(
+  std: BlockStdScope,
+  shotId: string,
+  takeId: string,
+  patch: Partial<Omit<ShotTake, 'id'>>,
+): boolean {
+  return editTakes(std, shotId, list => {
+    const target = list.find(t => t.id === takeId);
+    if (!target) return null;
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === undefined) continue;
+      (target as unknown as Record<string, unknown>)[k] = v;
+    }
+    return true;
+  }) ?? false;
+}
+
+/**
+ * Say which take IS the shot.
+ *
+ * Writes a POINTER on the shot rather than a flag on the take, so there is
+ * exactly one place that knows and nothing to keep in step. Refuses a take that
+ * is not ready: choosing something still generating would put a url that does
+ * not exist yet onto the timeline.
+ */
+export function chooseTake(std: BlockStdScope, shotId: string, takeId: string): boolean {
+  const block = std.store.getBlock(shotId);
+  if (!block) return false;
+  const props = block.model.props as { takes?: ShotTake[]; chosenTakeId?: string };
+  const target = (props.takes ?? []).find(t => t.id === takeId);
+  if (!target || target.status !== 'ready') return false;
+  if (props.chosenTakeId === takeId) return true;
+  std.store.captureSync();
+  std.store.updateBlock(block.model, { chosenTakeId: takeId });
+  return true;
+}
+
+/**
+ * Discard a take.
+ *
+ * Removing the CHOSEN one clears the pointer rather than silently promoting a
+ * neighbour: `chosenTake()` then falls back to the newest ready take, which is
+ * a rule the user can predict, where "the one next to it" is not.
+ *
+ * The Library item is untouched. A take already cut into a film must keep
+ * playing, and this is only saying it is no longer a candidate here.
+ */
+export function removeTake(std: BlockStdScope, shotId: string, takeId: string): boolean {
+  const done = editTakes(std, shotId, list => {
+    const at = list.findIndex(t => t.id === takeId);
+    if (at < 0) return null;
+    list.splice(at, 1);
+    return true;
+  }) ?? false;
+  if (!done) return false;
+  const block = std.store.getBlock(shotId);
+  const props = block?.model.props as { chosenTakeId?: string } | undefined;
+  if (block && props?.chosenTakeId === takeId) {
+    std.store.updateBlock(block.model, { chosenTakeId: '' });
+  }
+  return true;
 }
 
 /**
