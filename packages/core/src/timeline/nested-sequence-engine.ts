@@ -1,9 +1,36 @@
 import type { Clip, Track, Transform } from "../types/timeline";
+import type { TextClip } from "../text/types";
+import type { ShapeClip, SVGClip, StickerClip } from "../graphics/types";
 
+/**
+ * WHAT IS INSIDE A NESTED SEQUENCE — a timeline, containerized.
+ *
+ * ── WHY THE OVERLAY LISTS ARE HERE ──────────────────────────────────────────
+ * A compound is not "some clips": it is a project timeline in a box, and it has
+ * to be able to hold everything a timeline holds. Video, audio and image clips
+ * ride on `tracks` and always did. Text, shapes, SVG and stickers DO NOT — in
+ * this codebase a text track's `clips` array is empty and the content lives on
+ * `Project.textClips`, keyed by track. So a compound had nowhere to put them,
+ * and the renderer had no choice but to blank them: **a sequence containing a
+ * title card rendered without the title.**
+ *
+ * These four mirror `Project`'s own fields, one for one, which is the point —
+ * the inside of a sequence and the top-level timeline are then the same kind of
+ * object, and anything that can be built on one can be built in the other.
+ *
+ * ADDITIVE AND OPTIONAL, so upstream's `{clips, tracks, duration}` is still a
+ * valid value of this type and the eventual merge does not conflict.
+ */
 export interface CompoundClipContent {
   clips: Clip[];
   tracks: Track[];
   duration: number;
+  /** Titles and captions living inside this sequence. */
+  textClips?: TextClip[];
+  /** Shapes, and the SVG and sticker overlays that sit alongside them. */
+  shapeClips?: ShapeClip[];
+  svgClips?: SVGClip[];
+  stickerClips?: StickerClip[];
 }
 
 export interface CompoundClip {
@@ -53,16 +80,72 @@ function generateId(): string {
   return `compound_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
 }
 
+/**
+ * The overlays that belong inside a sequence, moved to its own clock.
+ *
+ * Shared by `createCompoundClip` and the board's sequence mapping so the two
+ * cannot disagree about what "inside" means — a title that travels one way and
+ * not the other is the kind of difference nobody finds until a render is wrong.
+ *
+ * Overlays are timed like clips but live on the project rather than on a track,
+ * so track membership is the only thing that says whether one is in or out.
+ */
+export function pickOverlays(
+  overlays: {
+    textClips?: TextClip[];
+    shapeClips?: ShapeClip[];
+    svgClips?: SVGClip[];
+    stickerClips?: StickerClip[];
+  },
+  trackIds: ReadonlySet<string>,
+  offset: number,
+): Pick<CompoundClipContent, "textClips" | "shapeClips" | "svgClips" | "stickerClips"> {
+  const take = <T extends { trackId?: string; startTime: number }>(
+    list: T[] | undefined,
+  ): T[] | undefined => {
+    if (!list?.length) return undefined;
+    const mine = list
+      .filter((o) => !!o.trackId && trackIds.has(o.trackId))
+      .map((o) => ({ ...o, startTime: o.startTime - offset }));
+    return mine.length ? mine : undefined;
+  };
+
+  return {
+    textClips: take(overlays.textClips),
+    shapeClips: take(overlays.shapeClips),
+    svgClips: take(overlays.svgClips),
+    stickerClips: take(overlays.stickerClips),
+  };
+}
+
 export class NestedSequenceEngine {
   private compoundClips: Map<string, CompoundClip> = new Map();
   private instances: Map<string, CompoundClipInstance> = new Map();
   private instancesByCompound: Map<string, Set<string>> = new Map();
   private colorIndex = 0;
 
+  /**
+   * `overlays` is ours, added to upstream's signature.
+   *
+   * Text, shapes, SVG and stickers do not live on tracks — they live on the
+   * project — so a selection that includes a title has no way to carry it into
+   * the sequence unless the caller passes the project's overlay lists in.
+   * Without this, making a sequence out of a titled shot silently drops the
+   * title: the picture goes in, the words do not.
+   *
+   * Optional, and every existing caller omits it, so upstream's two-argument
+   * call is unchanged.
+   */
   createCompoundClip(
     clips: Clip[],
     tracks: Track[],
     options: CreateCompoundClipOptions = {},
+    overlays: {
+      textClips?: TextClip[];
+      shapeClips?: ShapeClip[];
+      svgClips?: SVGClip[];
+      stickerClips?: StickerClip[];
+    } = {},
   ): CompoundClip {
     if (clips.length === 0) {
       throw new Error("Cannot create compound clip from empty selection");
@@ -100,6 +183,16 @@ export class NestedSequenceEngine {
         clips: normalizedClips,
         tracks: relevantTracks,
         duration,
+        /**
+         * OVERLAYS ON THE SELECTED TRACKS, SHIFTED WITH EVERYTHING ELSE.
+         *
+         * Filtered by track — an overlay on a track that did not go into the
+         * sequence belongs to the outer film — and normalised by the same
+         * `minStartTime`, so a title two seconds into the selection is two
+         * seconds into the sequence rather than wherever it sat on the parent
+         * timeline.
+         */
+        ...pickOverlays(overlays, relevantTrackIds, minStartTime),
       },
       createdAt: Date.now(),
       modifiedAt: Date.now(),

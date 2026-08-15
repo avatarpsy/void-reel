@@ -191,12 +191,27 @@ export class VideoEngine {
         tracks: compound.content.tracks,
         duration: compound.content.duration,
       },
-      // Overlays belong to the OUTER timeline. A caption sitting over the film
-      // must not be redrawn inside every nested sequence underneath it.
-      textClips: [],
-      shapeClips: [],
-      svgClips: [],
-      stickerClips: [],
+      /**
+       * THE SEQUENCE'S OWN OVERLAYS, AND ONLY THOSE.
+       *
+       * Upstream blanks all four, which is right for the OUTER film's overlays
+       * — a caption sitting over the whole film must not be redrawn inside
+       * every nested sequence underneath it, once per sequence, stacking up.
+       *
+       * But it also meant a sequence could not CONTAIN a title: a compound is a
+       * timeline in a box and has to hold what a timeline holds. Now the
+       * compound's own overlays are passed in and the outer ones are still
+       * dropped, so both hold — a title inside the sequence renders inside it,
+       * and the film's captions stay outside it.
+       *
+       * Empty arrays when the compound carries none, which is upstream's exact
+       * behaviour and therefore the behaviour of every compound built before
+       * this field existed.
+       */
+      textClips: compound.content.textClips ?? [],
+      shapeClips: compound.content.shapeClips ?? [],
+      svgClips: compound.content.svgClips ?? [],
+      stickerClips: compound.content.stickerClips ?? [],
       compoundClips: project.compoundClips?.filter(
         (item) => item.id !== compoundId,
       ),

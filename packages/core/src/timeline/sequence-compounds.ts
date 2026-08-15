@@ -1,5 +1,6 @@
 import type { Clip, Track } from "../types/timeline";
 import type { CompoundClip } from "./nested-sequence-engine";
+import { pickOverlays } from "./nested-sequence-engine";
 
 /** A stretch of the film that belongs to one screenplay sequence. */
 export interface SequenceSpan {
@@ -58,6 +59,19 @@ export function buildSequenceCompounds(
      *  rebuilds on every Firestore tick must not mint a new id each time, or
      *  every rebuild looks like a different sequence to the additive merge. */
     readonly idFor?: (span: SequenceSpan, index: number) => string;
+    /**
+     * The project's overlays, so a title inside a sequence goes in with it.
+     *
+     * Text, shapes, SVG and stickers live on the project rather than on tracks,
+     * so they cannot be found from `tracks` alone — without these, wrapping a
+     * titled shot in a sequence keeps the picture and drops the words.
+     */
+    readonly overlays?: {
+      readonly textClips?: any[];
+      readonly shapeClips?: any[];
+      readonly svgClips?: any[];
+      readonly stickerClips?: any[];
+    };
   } = {},
 ): SequenceCompoundResult {
   const include = options.includeTrackId
@@ -111,10 +125,24 @@ export function buildSequenceCompounds(
 
     const id = idFor(span, index);
     const duration = span.endTime - span.startTime;
+    /**
+     * Overlays on the tracks that went inside, on the sequence's own clock.
+     *
+     * Same helper the engine uses when a sequence is made from a selection, so
+     * "what counts as inside" has one definition. Note the board mapping keeps
+     * MUSIC and CAPTION tracks out (see `include` above), so a film-wide
+     * caption is untouched — it is a title belonging to a shot that travels.
+     */
+    const innerTrackIds = new Set(innerTracks.map((t) => t.id));
     compounds.push({
       id,
       name: span.name || `Sequence ${index + 1}`,
-      content: { clips: inner, tracks: innerTracks, duration },
+      content: {
+        clips: inner,
+        tracks: innerTracks,
+        duration,
+        ...pickOverlays(options.overlays ?? {}, innerTrackIds, span.startTime),
+      },
       createdAt: 0,
       modifiedAt: 0,
       color: "#8b5cf6",

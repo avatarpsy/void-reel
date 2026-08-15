@@ -165,3 +165,89 @@ describe("NestedSequenceEngine", () => {
     expect(e.getCompoundClip(c.id)!.content.duration).toBe(5);
   });
 });
+
+/**
+ * A SEQUENCE IS A TIMELINE IN A BOX — it must hold what a timeline holds.
+ *
+ * Video, audio and image clips ride on `tracks` and always did. Text, shapes,
+ * SVG and stickers DO NOT: in this codebase a text track's `clips` array is
+ * empty and the content lives on `Project.textClips`, keyed by track. So a
+ * compound had nowhere to put them and the renderer had to blank them — a
+ * sequence containing a title card rendered without the title.
+ *
+ * `CompoundClipContent` now mirrors `Project`'s overlay fields one for one,
+ * which is the point: the inside of a sequence and the top-level timeline are
+ * the same kind of object.
+ */
+describe("NestedSequenceEngine · a sequence holds a whole timeline", () => {
+  const overlay = (id: string, trackId: string, startTime: number) =>
+    ({ id, trackId, startTime, duration: 3, text: id }) as any;
+
+  it("carries text, shapes, SVG and stickers into the sequence", () => {
+    const e = new NestedSequenceEngine();
+    const a = clip("a", 0), b = clip("b", 5);
+    const c = e.createCompoundClip(
+      [a, b],
+      [track("t1", [a, b])],
+      {},
+      {
+        textClips: [overlay("title", "t1", 0)],
+        shapeClips: [overlay("box", "t1", 1)],
+        svgClips: [overlay("logo", "t1", 2)],
+        stickerClips: [overlay("star", "t1", 3)],
+      },
+    );
+    expect(c.content.textClips?.map((t: any) => t.id)).toEqual(["title"]);
+    expect(c.content.shapeClips?.map((t: any) => t.id)).toEqual(["box"]);
+    expect(c.content.svgClips?.map((t: any) => t.id)).toEqual(["logo"]);
+    expect(c.content.stickerClips?.map((t: any) => t.id)).toEqual(["star"]);
+  });
+
+  it("puts overlays on the sequence's OWN clock", () => {
+    // A title two seconds into the selection is two seconds into the sequence,
+    // not wherever it sat on the parent timeline. Otherwise opening a sequence
+    // shows its titles somewhere else entirely.
+    const e = new NestedSequenceEngine();
+    const a = clip("a", 30), b = clip("b", 35);
+    const c = e.createCompoundClip(
+      [a, b], [track("t1", [a, b])], {},
+      { textClips: [overlay("title", "t1", 32)] },
+    );
+    expect(c.content.textClips![0]!.startTime).toBe(2);
+  });
+
+  it("leaves an overlay on a track that stayed outside", () => {
+    // Track membership is the only thing that says in or out, because an
+    // overlay is timed like a clip but stored on the project.
+    const e = new NestedSequenceEngine();
+    const a = clip("a", 0), b = clip("b", 5);
+    const c = e.createCompoundClip(
+      [a, b], [track("t1", [a, b])], {},
+      { textClips: [overlay("caption", "track-captions", 0)] },
+    );
+    expect(c.content.textClips).toBeUndefined();
+  });
+
+  it("omits the overlay fields entirely when there are none", () => {
+    // Upstream's `{clips, tracks, duration}` stays a valid value of this type,
+    // so a compound built before these fields existed behaves identically and
+    // the eventual merge does not conflict.
+    const e = new NestedSequenceEngine();
+    const a = clip("a", 0), b = clip("b", 5);
+    const c = e.createCompoundClip([a, b], [track("t1", [a, b])]);
+    expect(c.content.textClips).toBeUndefined();
+    expect(c.content.shapeClips).toBeUndefined();
+  });
+
+  it("keeps audio and image tracks, not just video", () => {
+    // "Anything inside" means anything: a sequence is not a video-only bundle.
+    const e = new NestedSequenceEngine();
+    const v = clip("v", 0), n = { ...clip("n", 0), trackId: "audio1" };
+    const c = e.createCompoundClip(
+      [v, n],
+      [track("t1", [v]), { ...track("audio1", [n]), type: "audio" as const }],
+    );
+    const types = c.content.tracks.map((t) => t.type).sort();
+    expect(types).toEqual(["audio", "video"]);
+  });
+});
