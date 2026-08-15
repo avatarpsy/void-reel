@@ -58,6 +58,29 @@ export interface ClipMetadata {
   readonly [key: string]: unknown;
 }
 
+/**
+ * Is this clip an instance of a nested sequence, and which one?
+ *
+ * ── ONE ANSWER, SHARED ──────────────────────────────────────────────────────
+ * Three places need it — the export renderer, the preview's frame provider and
+ * the timeline UI — and if they ever disagree, a sequence renders in one and
+ * not the others. That is the exact failure mode this codebase has already been
+ * bitten by with captions.
+ *
+ * TWO SPELLINGS, both upstream's, both supported: `metadata.compoundClipId` is
+ * what the editor writes, and a `compound:`-prefixed `mediaId` is what carries
+ * the identity through code that only ever looks at `mediaId` — which is most
+ * of the older timeline surface.
+ */
+export function compoundIdOfClip(
+  clip: { mediaId?: string; metadata?: { compoundClipId?: unknown } },
+): string | null {
+  const fromMeta = clip.metadata?.compoundClipId;
+  if (typeof fromMeta === "string" && fromMeta) return fromMeta;
+  const mediaId = clip.mediaId ?? "";
+  return mediaId.startsWith("compound:") ? mediaId.slice("compound:".length) : null;
+}
+
 export interface Clip {
   readonly id: string;
   readonly mediaId: string;

@@ -41,6 +41,10 @@ import {
   type Track,
   rewriteToProxy,
   PreviewFrameCache,
+  // Nested sequences: the shared "is this a compound, and which" answer. It
+  // must be the same one the export path uses, or the two disagree about what
+  // is even a sequence.
+  compoundIdOfClip,
 } from "@openreel/core";
 import { useEngineStore } from "../../stores/engine-store";
 import { useSettingsStore } from "../../stores/settings-store";
@@ -1450,6 +1454,45 @@ export const Preview: React.FC = () => {
 
       const mainCtx = canvas.getContext("2d");
       if (!mainCtx) return false;
+
+      /**
+       * ── A NESTED SEQUENCE IS RENDERED BY THE CANONICAL COMPOSITOR ────────
+       *
+       * A compound clip is a whole timeline, not a media blob, so the preview's
+       * own painter has nothing to draw for it: `compositeTracksToCtx` is pure
+       * painting over frames the caller already resolved, and there is no file
+       * to decode. Left alone it draws a hole.
+       *
+       * Upstream's answer, taken as-is, and it is better than resolving the
+       * compound per-clip and feeding it into the frame map: when a sequence is
+       * on screen, render the WHOLE frame through the same engine the export
+       * uses and blit it. The preview is then identical to the exported file by
+       * construction — nesting, timing, effects, transforms and all — instead
+       * of identical only in the parts both paths happen to implement the same
+       * way. That divergence is what once made captions visible on screen and
+       * absent from the render, and a nested sequence has far more surface for
+       * it than a caption does.
+       *
+       * Only while a compound is actually active, so an ordinary project keeps
+       * the fast path and pays nothing.
+       */
+      const hasActiveCompound = timelineTracks.some((track) =>
+        !track.hidden &&
+        track.clips.some(
+          (clip) =>
+            !!compoundIdOfClip(clip) &&
+            time >= clip.startTime &&
+            time < clip.startTime + clip.duration,
+        ),
+      );
+      if (hasActiveCompound) {
+        const frame = await getRenderBridge().renderFrame(time);
+        if (frame) {
+          mainCtx.clearRect(0, 0, canvas.width, canvas.height);
+          mainCtx.drawImage(frame.image, 0, 0, canvas.width, canvas.height);
+          return true;
+        }
+      }
 
       if (
         !offscreenCanvasRef.current ||

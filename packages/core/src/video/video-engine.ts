@@ -5,6 +5,7 @@ import type {
   Effect,
   Transform,
 } from "../types/timeline";
+import { compoundIdOfClip } from "../types/timeline";
 import type { MediaItem, Project } from "../types/project";
 import type { TextClip } from "../text/types";
 import type { ShapeClip, EmphasisAnimation } from "../graphics/types";
@@ -140,6 +141,29 @@ export class VideoEngine {
    * marked in-flight for the duration of the call, and the compound is
    * stripped from its own nested project so it cannot re-enter itself.
    */
+  /**
+   * The same thing, for a caller that owns its own compositor.
+   *
+   * The editor's PREVIEW paints through `compositeTracksToCtx`, which is pure
+   * — it is handed already-resolved frames rather than resolving them. So the
+   * preview needs to ask for a compound's picture the way it asks for a decoded
+   * video frame, and this is that door.
+   *
+   * Public wrapper rather than making the method itself public: the recursion
+   * guard and the nested-project construction stay private, so there is exactly
+   * one implementation of "how a compound is rendered" and no way to call half
+   * of it.
+   */
+  async renderCompoundPreviewFrame(
+    project: Project,
+    compoundId: string,
+    localTime: number,
+    width: number,
+    height: number,
+  ): Promise<ImageBitmap | null> {
+    return this.renderCompoundFrame(project, compoundId, localTime, width, height);
+  }
+
   private async renderCompoundFrame(
     project: Project,
     compoundId: string,
@@ -192,20 +216,10 @@ export class VideoEngine {
     }
   }
 
-  /**
-   * The compound this clip is an instance of, if it is one.
-   *
-   * Two spellings, both upstream's: `metadata.compoundClipId` is what the
-   * editor writes, and a `compound:`-prefixed `mediaId` is what lets a clip
-   * carry its identity through code that only ever looks at `mediaId`.
-   */
+  /** See `compoundIdOfClip` — shared with the preview so the two cannot
+   *  disagree about what is a nested sequence. */
   private compoundIdOf(clip: Clip): string | null {
-    if (typeof clip.metadata?.compoundClipId === "string") {
-      return clip.metadata.compoundClipId;
-    }
-    return clip.mediaId.startsWith("compound:")
-      ? clip.mediaId.slice("compound:".length)
-      : null;
+    return compoundIdOfClip(clip);
   }
 
   /**

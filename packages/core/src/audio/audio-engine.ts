@@ -1,5 +1,6 @@
 import type { Timeline, Track, Clip, Effect } from "../types/timeline";
 import type { MediaItem, Project } from "../types/project";
+import { flattenCompoundAudio } from "../timeline/flatten-compounds";
 import type {
   AudioEngineConfig,
   AudioTrackRenderInfo,
@@ -190,7 +191,10 @@ export class AudioEngine {
   ): Promise<RenderedAudio> {
     this.ensureInitialized();
 
-    const { timeline, mediaLibrary, settings } = project;
+    // `timeline` is deliberately not destructured here: the mixer must read the
+    // FLATTENED one (see below), and pulling the raw one into scope is how a
+    // later edit reaches for the wrong variable and silently loses nested audio.
+    const { mediaLibrary, settings } = project;
     const sampleRate = settings.sampleRate || this.config.sampleRate;
     const channels = settings.channels || this.config.channels;
     const safeDuration = Math.max(duration, 0.001);
@@ -200,8 +204,25 @@ export class AudioEngine {
       frameCount,
       sampleRate,
     );
+    /**
+     * NESTED SEQUENCES ARE FLATTENED BEFORE THE MIXER SEES THEM.
+     *
+     * A compound instance is one clip whose `mediaId` names a sequence, not a
+     * file — so the mixer below finds no media for it and contributes silence.
+     * A nested sequence would play with a picture and no sound.
+     *
+     * The picture solves this by recursion (the compound's tracks go through a
+     * whole `renderFrame`); audio has no equivalent, and teaching the mixer
+     * about sequences would put timeline structure inside a thing whose job is
+     * to sum samples. `flattenCompoundAudio` hands it a timeline with no
+     * sequences in it instead — the inner clips, offset, trimmed and
+     * gain-scaled to the instance — so the mixer stays a mixer.
+     *
+     * Returns the timeline untouched when nothing is nested, so an ordinary
+     * project pays nothing.
+     */
     const audioTracks = this.getAudioTracksAtTime(
-      timeline,
+      flattenCompoundAudio(project),
       startTime,
       duration,
     );
