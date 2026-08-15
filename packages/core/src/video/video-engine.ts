@@ -604,128 +604,115 @@ export class VideoEngine {
           const clipInfo = this.createClipRenderInfo(clip, time);
 
           /**
-           * A NESTED SEQUENCE DRAWS ITSELF, and it has to be caught HERE.
+           * ── WHERE THE PICTURE COMES FROM: A FILE, OR A SEQUENCE ───────────
            *
            * A compound instance has no media file — its `mediaId` names a
-           * sequence, not an asset — so the lookup below finds nothing and the
-           * `continue` silently drops it. That is what a nested sequence looked
-           * like before this: a clip on the timeline that renders as a hole.
+           * sequence — so the lookup below finds nothing and the `continue`
+           * silently drops it. That is what a nested sequence looked like
+           * before this: a clip on the timeline that renders as a hole.
            *
-           * It is composited through the same transform path as any other clip
-           * (see `drawFrame` below), so an instance can be scaled, positioned,
-           * faded and keyframed exactly like footage.
+           * ── AND IT RESOLVES TO A BITMAP LIKE ANY OTHER CLIP ───────────────
+           * An earlier version drew the compound here and skipped the rest of
+           * the loop, which meant an instance rendered with only its base
+           * transform: no keyframes, no emphasis animation, no clip effects,
+           * no transitions. A sequence you had animated sat perfectly still.
+           *
+           * Resolving it INTO `bitmap` instead means everything below runs
+           * unchanged — because it is the same code that handles footage. A
+           * sequence can be keyframed, scaled, faded, colour-graded and
+           * transitioned exactly like a clip, and nothing here has to know
+           * that it is a whole timeline underneath.
            */
+          let bitmap: ImageBitmap | null = null;
+          // A compound frame is OURS and must be closed after drawing; a cached
+          // media bitmap belongs to the cache and must not be.
+          let bitmapFromCache = false;
+
           const compoundId = this.compoundIdOf(clip);
           if (compoundId) {
-            const compoundFrame = await this.renderCompoundFrame(
+            bitmap = await this.renderCompoundFrame(
               project,
               compoundId,
               clipInfo.sourceTime,
               width,
               height,
             );
-            if (compoundFrame) {
-              /**
-               * Composited through the SAME path as footage, so an instance can
-               * be positioned, scaled and faded like any other clip.
-               *
-               * `clipInfo.transform` is the base transform, scaled into canvas
-               * space the way every other clip is (see `scaledTransform`
-               * below). Keyframes and emphasis animation are deliberately not
-               * applied here yet — they are resolved further down for media
-               * clips, and wiring a nested sequence into that chain is a
-               * separate change with its own failure modes. A sequence dropped
-               * on the timeline renders correctly; an ANIMATED one is the next
-               * step, and it will fail visibly rather than silently.
-               */
-              const t = clipInfo.transform;
-              this.drawFrameToContext(
-                ctx,
-                compoundFrame,
-                {
-                  ...t,
-                  position: { x: t.position.x * scaleX, y: t.position.y * scaleY },
-                  scale: { x: t.scale.x * scaleX, y: t.scale.y * scaleY },
-                },
-                t.opacity,
-                width,
-                height,
-              );
-              compoundFrame.close();
+            // A sequence that cannot be resolved (deleted, or a cycle) draws
+            // nothing, exactly as its audio contributes nothing.
+            if (!bitmap) continue;
+          } else {
+            const mediaItem = mediaLibrary.items.find(
+              (m) => m.id === clipInfo.mediaId,
+            );
+            if (!mediaItem) continue;
+            if (!mediaItem.blob) {
+              const hydrated = await this.hydrateMediaBlob(mediaItem);
+              if (!hydrated) continue;
             }
-            continue;
-          }
+            const mediaBlob = mediaItem.blob;
+            if (!mediaBlob) continue;
 
-          const mediaItem = mediaLibrary.items.find(
-            (m) => m.id === clipInfo.mediaId,
-          );
-          if (!mediaItem) continue;
-          if (!mediaItem.blob) {
-            const hydrated = await this.hydrateMediaBlob(mediaItem);
-            if (!hydrated) continue;
-          }
-          const mediaBlob = mediaItem.blob;
-          if (!mediaBlob) continue;
+            // `bitmap` and `bitmapFromCache` are declared above, outside this
+            // branch, because a compound resolves into the same pair.
 
-          let bitmap: ImageBitmap | null = null;
-          let bitmapFromCache = false;
-
-          if (mediaItem.type === "image") {
-            try {
-              if (isAnimatedGif(mediaBlob)) {
-                let gifCache = this.gifFrameCache.get(mediaItem.id);
-                if (!gifCache) {
-                  const newCache = await createGifFrameCache(mediaBlob);
-                  if (newCache) {
-                    this.gifFrameCache.set(mediaItem.id, newCache);
-                    gifCache = newCache;
+            if (mediaItem.type === "image") {
+              try {
+                if (isAnimatedGif(mediaBlob)) {
+                  let gifCache = this.gifFrameCache.get(mediaItem.id);
+                  if (!gifCache) {
+                    const newCache = await createGifFrameCache(mediaBlob);
+                    if (newCache) {
+                      this.gifFrameCache.set(mediaItem.id, newCache);
+                      gifCache = newCache;
+                    }
+                  }
+                  if (gifCache && gifCache.frames.length > 0) {
+                    const clipLocalTime = time - clip.startTime;
+                    const frameIndex = getGifFrameAtTime(
+                      gifCache,
+                      clipLocalTime * 1000,
+                    );
+                    bitmap = gifCache.frames[frameIndex];
+                    bitmapFromCache = true;
+                  } else {
+                    bitmap = await createImageBitmap(mediaBlob);
+                  }
+                } else {
+                  const cached = this.staticImageCache.get(mediaItem.id);
+                  if (cached) {
+                    bitmap = cached;
+                    bitmapFromCache = true;
+                  } else {
+                    bitmap = await createImageBitmap(mediaBlob);
+                    this.staticImageCache.set(mediaItem.id, bitmap);
+                    bitmapFromCache = true;
                   }
                 }
-                if (gifCache && gifCache.frames.length > 0) {
-                  const clipLocalTime = time - clip.startTime;
-                  const frameIndex = getGifFrameAtTime(
-                    gifCache,
-                    clipLocalTime * 1000,
-                  );
-                  bitmap = gifCache.frames[frameIndex];
-                  bitmapFromCache = true;
-                } else {
-                  bitmap = await createImageBitmap(mediaBlob);
-                }
-              } else {
-                const cached = this.staticImageCache.get(mediaItem.id);
-                if (cached) {
-                  bitmap = cached;
-                  bitmapFromCache = true;
-                } else {
-                  bitmap = await createImageBitmap(mediaBlob);
-                  this.staticImageCache.set(mediaItem.id, bitmap);
-                  bitmapFromCache = true;
-                }
+              } catch (error) {
+                console.warn(
+                  `Failed to create ImageBitmap for image ${mediaItem.id}:`,
+                  error,
+                );
               }
-            } catch (error) {
-              console.warn(
-                `Failed to create ImageBitmap for image ${mediaItem.id}:`,
-                error,
-              );
-            }
-          } else {
-            bitmap = await this.decodeFrameWithMediaBunny(
-              mediaBlob,
-              clipInfo.sourceTime,
-              settings.width,
-              settings.height,
-              clipInfo.mediaId,
-            );
-            if (!bitmap) {
-              bitmap = await this.decodeFrameWithVideoElement(
-                mediaItem.id,
+            } else {
+              bitmap = await this.decodeFrameWithMediaBunny(
                 mediaBlob,
                 clipInfo.sourceTime,
                 settings.width,
                 settings.height,
+                clipInfo.mediaId,
               );
+              if (!bitmap) {
+                bitmap = await this.decodeFrameWithVideoElement(
+                  mediaItem.id,
+                  mediaBlob,
+                  clipInfo.sourceTime,
+                  settings.width,
+                  settings.height,
+                );
+              }
             }
+
           }
 
           if (bitmap) {
