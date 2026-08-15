@@ -1,6 +1,10 @@
 import type { Timeline } from "./timeline";
 import type { TextClip } from "../text/types";
 import type { ShapeClip, SVGClip, StickerClip } from "../graphics/types";
+import type {
+  CompoundClip,
+  CompoundClipInstance,
+} from "../timeline/nested-sequence-engine";
 
 export interface ProjectSettings {
   readonly width: number;
@@ -37,6 +41,36 @@ export interface Project {
     clipIds: readonly string[];
     at: number;
   }>;
+  /**
+   * NESTED SEQUENCES — the content, stored ONCE.
+   *
+   * A compound clip is a timeline in its own right: its own tracks, its own
+   * clips, its own duration. It lives here, on the project, and the timeline
+   * holds INSTANCES of it — ordinary clips carrying
+   * `metadata.compoundClipId`.
+   *
+   * ── THAT SPLIT IS WHY AN EDIT PROPAGATES ────────────────────────────────
+   * The content exists in exactly one place, so opening a sequence, trimming a
+   * clip inside it and closing again changes every instance of it on every
+   * timeline — because they were never copies, only references. Storing the
+   * content on each instance would make "edit the sequence" mean "edit this
+   * one copy of it", which is not what a sequence is.
+   *
+   * Nesting needs no extra machinery: a compound's own tracks may contain a
+   * clip that is itself an instance of another compound. The renderer recurses
+   * and guards against a cycle.
+   *
+   * Name and shape are upstream's, so the eventual merge converges rather than
+   * conflicts.
+   */
+  readonly compoundClips?: CompoundClip[];
+  /**
+   * Instances, for anything that needs them without walking every track.
+   *
+   * The timeline is still the source of truth for WHERE an instance sits — it
+   * is a clip like any other. This is the index, and it is optional.
+   */
+  readonly nestedInstances?: CompoundClipInstance[];
 }
 
 export interface MediaLibrary {

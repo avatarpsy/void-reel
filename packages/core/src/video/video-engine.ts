@@ -103,8 +103,109 @@ export class VideoEngine {
    *
    * @param config - Optional frame cache configuration
    */
+  /**
+   * ── NESTED SEQUENCES ──────────────────────────────────────────────────────
+   *
+   * One engine per compound, kept alive between frames because building one
+   * costs a decode pipeline and a compound is drawn on every frame it covers.
+   *
+   * `renderingCompounds` is the cycle guard. A compound whose content contains
+   * an instance of ITSELF — reachable by dragging a sequence into itself, or by
+   * two sequences referencing each other — would otherwise recurse until the
+   * stack gives out. Nesting is legal and unbounded in depth; a CYCLE is not,
+   * and the difference is whether the same id is already on the stack.
+   */
+  private compoundEngines = new Map<string, VideoEngine>();
+  private renderingCompounds = new Set<string>();
+
   constructor(config: Partial<FrameCacheConfig> = {}) {
     this.cacheConfig = { ...DEFAULT_CACHE_CONFIG, ...config };
+  }
+
+  /**
+   * Draw a nested sequence as if it were a piece of footage.
+   *
+   * The compound's own tracks become a project in their own right and go
+   * through a full `renderFrame` — which is what makes a nested sequence
+   * behave like one: everything the timeline can do (layers, transforms,
+   * transitions, further nesting) works inside it, because it is the same
+   * renderer, not a reduced copy of it.
+   *
+   * `localTime` is time WITHIN the sequence, clamped to its duration. The
+   * caller converts from timeline time, so trimming an instance shows a
+   * different part of the sequence exactly as trimming a clip shows a
+   * different part of a file.
+   *
+   * Ported from upstream, including the two guards that matter: the id is
+   * marked in-flight for the duration of the call, and the compound is
+   * stripped from its own nested project so it cannot re-enter itself.
+   */
+  private async renderCompoundFrame(
+    project: Project,
+    compoundId: string,
+    localTime: number,
+    width: number,
+    height: number,
+  ): Promise<ImageBitmap | null> {
+    const compound = project.compoundClips?.find((item) => item.id === compoundId);
+    if (!compound || this.renderingCompounds.has(compoundId)) return null;
+
+    let engine = this.compoundEngines.get(compoundId);
+    if (!engine) {
+      // Upstream also copies an `exportMode` flag here; this fork has no such
+      // field (it uses `resetExportState()` instead), so there is nothing to
+      // carry. Left as a note so the eventual merge does not silently drop it.
+      engine = new VideoEngine(this.cacheConfig);
+      await engine.initialize();
+      this.compoundEngines.set(compoundId, engine);
+    }
+
+    const nestedProject: Project = {
+      ...project,
+      timeline: {
+        ...project.timeline,
+        tracks: compound.content.tracks,
+        duration: compound.content.duration,
+      },
+      // Overlays belong to the OUTER timeline. A caption sitting over the film
+      // must not be redrawn inside every nested sequence underneath it.
+      textClips: [],
+      shapeClips: [],
+      svgClips: [],
+      stickerClips: [],
+      compoundClips: project.compoundClips?.filter(
+        (item) => item.id !== compoundId,
+      ),
+    };
+
+    this.renderingCompounds.add(compoundId);
+    try {
+      const frame = await engine.renderFrame(
+        nestedProject,
+        Math.max(0, Math.min(localTime, compound.content.duration)),
+        width,
+        height,
+      );
+      return frame.image;
+    } finally {
+      this.renderingCompounds.delete(compoundId);
+    }
+  }
+
+  /**
+   * The compound this clip is an instance of, if it is one.
+   *
+   * Two spellings, both upstream's: `metadata.compoundClipId` is what the
+   * editor writes, and a `compound:`-prefixed `mediaId` is what lets a clip
+   * carry its identity through code that only ever looks at `mediaId`.
+   */
+  private compoundIdOf(clip: Clip): string | null {
+    if (typeof clip.metadata?.compoundClipId === "string") {
+      return clip.metadata.compoundClipId;
+    }
+    return clip.mediaId.startsWith("compound:")
+      ? clip.mediaId.slice("compound:".length)
+      : null;
   }
 
   /**
@@ -472,6 +573,60 @@ export class VideoEngine {
         const clips = this.getClipsAtTime(track, time);
         for (const clip of clips) {
           const clipInfo = this.createClipRenderInfo(clip, time);
+
+          /**
+           * A NESTED SEQUENCE DRAWS ITSELF, and it has to be caught HERE.
+           *
+           * A compound instance has no media file — its `mediaId` names a
+           * sequence, not an asset — so the lookup below finds nothing and the
+           * `continue` silently drops it. That is what a nested sequence looked
+           * like before this: a clip on the timeline that renders as a hole.
+           *
+           * It is composited through the same transform path as any other clip
+           * (see `drawFrame` below), so an instance can be scaled, positioned,
+           * faded and keyframed exactly like footage.
+           */
+          const compoundId = this.compoundIdOf(clip);
+          if (compoundId) {
+            const compoundFrame = await this.renderCompoundFrame(
+              project,
+              compoundId,
+              clipInfo.sourceTime,
+              width,
+              height,
+            );
+            if (compoundFrame) {
+              /**
+               * Composited through the SAME path as footage, so an instance can
+               * be positioned, scaled and faded like any other clip.
+               *
+               * `clipInfo.transform` is the base transform, scaled into canvas
+               * space the way every other clip is (see `scaledTransform`
+               * below). Keyframes and emphasis animation are deliberately not
+               * applied here yet — they are resolved further down for media
+               * clips, and wiring a nested sequence into that chain is a
+               * separate change with its own failure modes. A sequence dropped
+               * on the timeline renders correctly; an ANIMATED one is the next
+               * step, and it will fail visibly rather than silently.
+               */
+              const t = clipInfo.transform;
+              this.drawFrameToContext(
+                ctx,
+                compoundFrame,
+                {
+                  ...t,
+                  position: { x: t.position.x * scaleX, y: t.position.y * scaleY },
+                  scale: { x: t.scale.x * scaleX, y: t.scale.y * scaleY },
+                },
+                t.opacity,
+                width,
+                height,
+              );
+              compoundFrame.close();
+            }
+            continue;
+          }
+
           const mediaItem = mediaLibrary.items.find(
             (m) => m.id === clipInfo.mediaId,
           );

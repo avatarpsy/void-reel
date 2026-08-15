@@ -36,6 +36,28 @@ export interface Track {
   readonly solo: boolean;
 }
 
+/**
+ * Free-form data riding on a clip.
+ *
+ * ── SHAPED TO MATCH UPSTREAM, DELIBERATELY ──────────────────────────────────
+ * Upstream carries editing-template fields here too (`templateSource`,
+ * `appliedTemplates`, …). We do not have that feature, so they are absent — but
+ * the INDEX SIGNATURE is upstream's, which means their fields type-check
+ * against this the day the branches merge. Diverging on the shape of the one
+ * field a nested sequence is identified by would turn a clean merge into a
+ * conflict in the renderer.
+ */
+export interface ClipMetadata {
+  /**
+   * THE CLIP IS AN INSTANCE OF A COMPOUND (a nested sequence).
+   *
+   * Its picture is not a media file — it is the compound's own timeline,
+   * rendered. See `Project.compoundClips`.
+   */
+  readonly compoundClipId?: string;
+  readonly [key: string]: unknown;
+}
+
 export interface Clip {
   readonly id: string;
   readonly mediaId: string;
@@ -82,6 +104,15 @@ export interface Clip {
    */
   readonly shotId?: string;
   readonly takeId?: string;
+  /**
+   * Extra data, including whether this clip IS a nested sequence.
+   *
+   * A compound instance is an ORDINARY CLIP with `metadata.compoundClipId` set
+   * — not a separate kind of object. That is the decision the whole feature
+   * rests on: it moves, trims, splits and selects with every tool the timeline
+   * already has, and nesting is then just the same thing one level down.
+   */
+  readonly metadata?: ClipMetadata;
 }
 
 export interface Effect {
