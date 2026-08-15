@@ -28,7 +28,12 @@ import type {
   Clip,
   Subtitle,
   TextClip,
+  CompoundClip,
 } from "@openreel/core";
+// Screenplay sequences → nested sequences on the timeline. See NEST_SEQUENCES
+// below; the mapping is built and tested, and gated until the editor can open
+// one.
+import { buildSequenceCompounds } from "@openreel/core";
 
 // ────────────────────────────────────────────
 // Types matching Firestore document shapes
@@ -276,6 +281,14 @@ interface SceneData {
    * shot is this?" without inferring it from an index that has already changed.
    */
   source_shot_id?: string;
+  /**
+   * The screenplay SEQUENCE this shot sits in — "The chase".
+   *
+   * Written by compile since the structure work and read by nothing until now.
+   * Consecutive scenes sharing one is what becomes a nested sequence on the
+   * timeline; empty means the shot is not in one, which is every short film.
+   */
+  board_sequence?: string;
   scene_text?: string;
   narration_text?: string;
   visual_description?: string;
@@ -1780,6 +1793,14 @@ export async function loadSceneListAsProject(
    * — which is what makes comparing across a whole cut possible in one gesture.
    */
   const alternateTakeClips = new Map<number, Clip[]>();
+  /**
+   * Screenplay sequences, as stretches of the finished timeline.
+   *
+   * Filled as the scene loop walks the film, because that loop is the only
+   * place that knows where each shot ends up in time. Turned into nested
+   * sequences after the tracks are assembled — see `buildSequenceCompounds`.
+   */
+  const sequenceSpans: Array<{ name: string; startTime: number; endTime: number }> = [];
   // Stills for scenes that have no moving picture at all. An ordinary clip on
   // an ordinary track — the point is the user SEES it in the timeline and can
   // move, trim or delete it, rather than it being missing entirely.
@@ -2660,6 +2681,27 @@ export async function loadSceneListAsProject(
       }
     }
 
+    /**
+     * WHERE THIS SHOT'S SEQUENCE RUNS TO.
+     *
+     * Consecutive scenes sharing a `board_sequence` are one stretch of the
+     * film, and that stretch becomes a nested sequence. Extending the current
+     * run rather than starting a new one is what makes it consecutive — two
+     * separated runs of the same name stay two places in the film, because
+     * something was put between them.
+     */
+    const seqName = String((scene as any).board_sequence ?? "").trim();
+    const last = sequenceSpans[sequenceSpans.length - 1];
+    if (seqName && last && last.name === seqName && Math.abs(last.endTime - currentTime) < 0.001) {
+      last.endTime = currentTime + sceneDuration;
+    } else if (seqName) {
+      sequenceSpans.push({
+        name: seqName,
+        startTime: currentTime,
+        endTime: currentTime + sceneDuration,
+      });
+    }
+
     currentTime += sceneDuration;
     totalMusicDuration = currentTime;
   }
@@ -2940,6 +2982,43 @@ export async function loadSceneListAsProject(
       .filter((t) => !tombTrackIds.has(t.id) || t.clips.length > 0);
   }
 
+  /**
+   * ── SCREENPLAY SEQUENCES → NESTED SEQUENCES ────────────────────────────────
+   *
+   * OFF BY DEFAULT, AND THAT IS THE POINT OF THE FLAG.
+   *
+   * The container works: it renders, it exports, it carries its own audio, and
+   * it nests. What does not exist yet is the way IN — double-click to open a
+   * sequence, edit inside, come back out. Until that lands, turning this on
+   * would take a film that was five editable shots and hand the user two blocks
+   * they cannot open. That is strictly worse than flat, so it ships dark.
+   *
+   * Everything behind the flag is built and tested, so enabling it is this one
+   * line once the timeline UI can open a sequence — which comes with the
+   * upstream merge, since their `ClipComponent` and `NestedSequenceSection`
+   * need their design system.
+   *
+   * Ids are derived from the span's own position, not minted, because the
+   * loader rebuilds on every Firestore tick and the editor merges additively
+   * BY ID — a fresh id per rebuild would add a second copy of every sequence,
+   * forever.
+   */
+  const NEST_SEQUENCES = false;
+  let compoundClips: CompoundClip[] = [];
+  if (NEST_SEQUENCES && sequenceSpans.length) {
+    const built = buildSequenceCompounds(timeline.tracks, sequenceSpans, {
+      idFor: (span) => `seq-${sceneListId}-${Math.round(span.startTime * 100)}`,
+    });
+    if (built.compounds.length) {
+      compoundClips = built.compounds;
+      (timeline as { tracks: Track[] }).tracks = built.tracks;
+      console.log(
+        `[voidspace-loader] Nested ${built.compounds.length} screenplay sequence(s) `
+        + `into compound clips: ${built.compounds.map((c) => c.name).join(", ")}`,
+      );
+    }
+  }
+
   const project: Project = {
     id: buildVoidspaceProjectId(userId, sceneListId, slData.avatar_id as string | undefined),
     name: slData.name || slData.avatar_name || "Voidspace Project",
@@ -2956,6 +3035,8 @@ export async function loadSceneListAsProject(
     // Keep the tombstones on the rebuilt project so they persist through the
     // next autosave (otherwise one rebuild would erase the deletion record).
     ...(deletedTracks.length > 0 ? { deletedTracks } : {}),
+    // Empty unless NEST_SEQUENCES is on — see above.
+    ...(compoundClips.length ? { compoundClips } : {}),
   };
 
   // If the empty-blob safety net flagged a stale history we should
