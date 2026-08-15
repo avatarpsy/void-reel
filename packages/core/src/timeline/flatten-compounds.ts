@@ -30,6 +30,18 @@ import { compoundIdOfClip } from "../types/timeline";
  *    a group fader does. Muting an instance silences the sequence.
  *  • DEPTH — a sequence inside a sequence flattens all the way down.
  *
+ * ── WHY 8, AND WHAT HAPPENS PAST IT ────────────────────────────────────────
+ * The picture has no matching number: `renderCompoundFrame` bounds itself
+ * STRUCTURALLY, by dropping the current compound from the project it hands
+ * down, so it can recurse at most once per compound that exists. This is a flat
+ * cap instead, and past it a sequence renders its picture with no sound — the
+ * same divergence this file exists to close.
+ *
+ * That needs a burlesque of nesting to reach: eight sequences inside one
+ * another, which no cut of a film has. It is a backstop against a malformed
+ * document, not a limit anyone edits into. If it is ever raised, raise it
+ * knowing the two paths disagree above it.
+ *
  * Returns the timeline UNCHANGED when there is nothing nested, so the ordinary
  * project pays nothing for this.
  */
