@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  buildTakeTracks,
   sceneIdKey,
   mergeSavedArrangement,
   isEphemeralMediaHost,
@@ -303,5 +304,80 @@ describe("mergeSavedArrangement", () => {
     const rebuilt = proj([track("track-video", [clip("c1", 0, 5), clip("c2", 5, 7)])]);
 
     expect(mergeSavedArrangement(rebuilt, saved).timeline.duration).toBe(12);
+  });
+});
+
+/**
+ * THE ALTERNATE-TAKE TRACKS.
+ *
+ * Four takes of one shot arrive time-aligned and stacked, not one after
+ * another — serial layout would make the film four times too long and turn
+ * editing into deletion. These are the rules that make the stack behave, and
+ * every one of them is invisible in the running product until it is wrong,
+ * at which point it reads as the editor being broken rather than a track flag.
+ */
+describe("buildTakeTracks", () => {
+  const clip = (id: string, trackId: string) => ({
+    id, mediaId: `m-${id}`, trackId, startTime: 0, duration: 5,
+    inPoint: 0, outPoint: 5, effects: [], audioEffects: [],
+    transform: {} as any, volume: 1, keyframes: [],
+  }) as any;
+
+  it("is empty when nothing was generated twice", () => {
+    // The overwhelmingly common shot has one take. No stack, no empty rows.
+    expect(buildTakeTracks(new Map())).toEqual([]);
+  });
+
+  it("orders HIGHEST take first, so Take 3 sits above Take 2 above Video", () => {
+    // Array order is z-order and a LOWER index paints on top. Getting this
+    // backwards puts the alternates underneath the footage they stand in for,
+    // where unhiding one appears to do nothing at all.
+    const tracks = buildTakeTracks(new Map([
+      [2, [clip("a", "track-take-2")]],
+      [3, [clip("b", "track-take-3")]],
+      [4, [clip("c", "track-take-4")]],
+    ]));
+    expect(tracks.map((t) => t.id)).toEqual([
+      "track-take-4", "track-take-3", "track-take-2",
+    ]);
+  });
+
+  it("is hidden AND muted — hidden alone means hearing every take at once", () => {
+    // `hidden` appears nowhere in packages/core/src/audio: audibility is
+    // mute/solo only, and getAudioTracksAtTime includes VIDEO tracks. So a
+    // hidden-only take track is silent to the eye and fully audible.
+    const [t] = buildTakeTracks(new Map([[2, [clip("a", "track-take-2")]]]));
+    expect(t.hidden).toBe(true);
+    expect(t.muted).toBe(true);
+  });
+
+  it("names tracks the way the user reads them", () => {
+    const [t] = buildTakeTracks(new Map([[2, [clip("a", "track-take-2")]]]));
+    expect(t.name).toBe("Take 2");
+    expect(t.id).toBe("track-take-2");
+    expect(t.type).toBe("video");
+  });
+
+  it("skips a slot with no clips rather than adding an empty row", () => {
+    const tracks = buildTakeTracks(new Map([
+      [2, [clip("a", "track-take-2")]],
+      [3, []],
+    ]));
+    expect(tracks.map((t) => t.id)).toEqual(["track-take-2"]);
+  });
+
+  it("leaves the clips exactly as given — alignment is decided upstream", () => {
+    // Each alternate starts at the same instant as the take that plays. This
+    // function must not retime anything; doing so would slide a take off the
+    // shot it belongs to.
+    const clips = [clip("a", "track-take-2"), clip("b", "track-take-2")];
+    const [t] = buildTakeTracks(new Map([[2, clips]]));
+    expect(t.clips).toBe(clips);
+  });
+
+  it("is not locked and not soloed — the user can work with it immediately", () => {
+    const [t] = buildTakeTracks(new Map([[2, [clip("a", "track-take-2")]]]));
+    expect(t.locked).toBe(false);
+    expect(t.solo).toBe(false);
   });
 });

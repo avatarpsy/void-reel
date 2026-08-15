@@ -219,6 +219,51 @@ export function mergeSavedArrangement(rebuilt: Project, saved: Project): Project
   };
 }
 
+/**
+ * The alternate-take tracks, in the order they must sit in the array.
+ *
+ * ── PUSHED BEFORE `track-video`, AND THAT IS THE Z-ORDER ────────────────────
+ * The shared painter sorts pixel tracks by DESCENDING array index, so a LOWER
+ * index paints LAST and therefore sits ON TOP (`video-engine`, and pinned by
+ * `stores/track-stacking.test.ts`). The timeline UI renders the array
+ * top-to-bottom, so these also appear as the rows above Video — what the user
+ * sees above IS above.
+ *
+ * Highest take number first, so Take 3 ends up above Take 2 above Video.
+ *
+ * ── `hidden` AND `muted`, AND BOTH ARE REQUIRED ─────────────────────────────
+ * `hidden` alone is not enough: the word does not appear anywhere in
+ * `packages/core/src/audio` — audibility is `!muted && (!solo || isSolo)` and
+ * `getAudioTracksAtTime` explicitly includes video tracks. Ship these
+ * hidden-only and the user sees one take while HEARING all four at once, with
+ * nothing on screen to explain it.
+ *
+ * Extracted so the rules above are testable. They are invisible in the running
+ * product until they are wrong, and then they are wrong in a way that reads as
+ * the editor being broken rather than as a track flag.
+ */
+export function buildTakeTracks(clipsBySlot: Map<number, Clip[]>): Track[] {
+  const out: Track[] = [];
+  const slots = [...clipsBySlot.keys()].sort((a, b) => b - a);   // highest first
+  for (const slot of slots) {
+    const clips = clipsBySlot.get(slot) ?? [];
+    // A slot with no clips would be an empty row the user has to wonder about.
+    if (!clips.length) continue;
+    out.push({
+      id: `track-take-${slot}`,
+      type: "video",
+      name: `Take ${slot}`,
+      clips,
+      transitions: [],
+      locked: false,
+      hidden: true,
+      muted: true,
+      solo: false,
+    });
+  }
+  return out;
+}
+
 interface SceneData {
   scene_number: number;
   /**
@@ -2788,23 +2833,7 @@ export async function loadSceneListAsProject(
    * "Take 2", so unhiding it shows the alternate for exactly the shots that have
    * one and leaves every other shot showing what it showed.
    */
-  const takeTrackIds = [...alternateTakeClips.keys()].sort((a, b) => a - b);
-  for (const slot of takeTrackIds.slice().reverse()) {
-    const clips = alternateTakeClips.get(slot) ?? [];
-    if (!clips.length) continue;
-    tracks.push({
-      id: `track-take-${slot}`,
-      type: "video",
-      name: `Take ${slot}`,
-      clips,
-      transitions: [],
-      locked: false,
-      // See above — both, or the user hears every take at once.
-      hidden: true,
-      muted: true,
-      solo: false,
-    });
-  }
+  for (const t of buildTakeTracks(alternateTakeClips)) tracks.push(t);
 
   tracks.push({
     id: "track-video",
