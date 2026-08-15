@@ -139,7 +139,13 @@ export function installScreenplayFocus(
     // the editor that is on its way out. `data-focus-mode` is already set by
     // `open()` and is what gates the print stylesheet — so there is no separate
     // printing flag to keep in step.
-    requestAnimationFrame(() => requestAnimationFrame(() => window.print()));
+    // Guarded because this fires from a rAF callback, where a throw is an
+    // UNCAUGHT exception with no stack pointing back here. Every browser has
+    // `print`; test DOMs do not, and the resulting uncaught error is the kind
+    // of noise that hides a real one.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (typeof window.print === 'function') window.print();
+    }));
   }
 
   /**

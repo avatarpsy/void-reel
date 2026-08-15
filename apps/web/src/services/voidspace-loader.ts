@@ -3006,6 +3006,17 @@ export async function loadSceneListAsProject(
   const NEST_SEQUENCES = false;
   let compoundClips: CompoundClip[] = [];
   if (NEST_SEQUENCES && sequenceSpans.length) {
+    /**
+     * No `overlays` here, and that is currently correct rather than an
+     * oversight: every text clip this loader builds sits on `track-captions`
+     * (see `captionTextClips`), which the default `includeTrackId` keeps OUT
+     * of a sequence because a caption spans them.
+     *
+     * BEFORE FLIPPING THE FLAG, re-check that. The moment a title lands on a
+     * shot's own video track, it must be passed here or it is silently dropped
+     * when that shot is wrapped — picture in, words gone. `buildSequenceCompounds`
+     * takes `overlays` for exactly this.
+     */
     const built = buildSequenceCompounds(timeline.tracks, sequenceSpans, {
       idFor: (span) => `seq-${sceneListId}-${Math.round(span.startTime * 100)}`,
     });
