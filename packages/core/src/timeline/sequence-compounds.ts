@@ -40,8 +40,13 @@ export interface SequenceCompoundResult {
  *  • CONSECUTIVE runs only. Two separated stretches of the same sequence name
  *    are two places in the film, not one sequence used twice — the user (or
  *    the editor) put something between them, and merging them would move it.
- *  • A run of ONE shot is left flat. Wrapping a single clip in a container adds
- *    a layer to open with nothing inside it worth opening.
+ *  • A span whose contents all START TOGETHER is left flat. In practice that is
+ *    the run of ONE shot — its picture and its narration begin at the same
+ *    instant — and wrapping it would add a layer to open with nothing inside it
+ *    worth opening. The test is on start times rather than a shot count because
+ *    tracks are all this function is given; a lone shot whose narration is
+ *    deliberately offset therefore DOES get wrapped, which is the right answer
+ *    for a different reason: there is internal timing to see.
  *  • Clips are normalised to start at zero inside the compound, so the sequence
  *    is N seconds long rather than N seconds preceded by an hour of nothing.
  *  • Anything not covered by a span is untouched.
