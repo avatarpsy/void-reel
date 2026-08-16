@@ -2200,9 +2200,11 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
                 title=${m.locked
                   ? `${m.label} — needs a Plus plan`
                   : m.local
-                    ? `${m.label} runs on ${m.local.nodeName}. The board’s Generate button `
-                      + 'cannot reach local generation yet — pick a cloud model here, or run '
-                      + 'this shot from the studio chat.'
+                    // The LABEL already ends in the machine name ("MiniMax H3 ·
+                    // Workhorse GPU"), so repeating it here read as "… · This
+                    // computer runs on This computer". Only add what the label
+                    // does not already say.
+                    ? `${m.label}${m.local.ready ? '' : ' — not set up on that machine yet'}`
                     : m.label}
                 @click=${(e: Event) => { e.stopPropagation(); this.chooseModel(m.id); }}
               >

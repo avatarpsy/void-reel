@@ -318,24 +318,6 @@ export function checkShot(
       message: `${caps.label} is not ready on ${caps.local.nodeName}. `
         + (caps.local.missing || 'It needs setting up before this shot can be generated.'),
     });
-  } else if (caps.local) {
-    /**
-     * READY, AND STILL NOT RUNNABLE FROM HERE — say so on the card.
-     *
-     * The board's Generate button goes through the page's cloud generator,
-     * which has no local route yet. So a local model that IS ready looked
-     * completely fine: listed, selectable, costed at zero credits — and then
-     * refused at the moment of pressing the button. Zero credits made it the
-     * most attractive row in the picker.
-     *
-     * Same argument as the not-ready warning directly above: the card is where
-     * a model problem should surface, while changing your mind is still free.
-     */
-    out.push({
-      message: `${caps.label} runs on ${caps.local.nodeName}, and the board's Generate `
-        + 'button cannot reach it yet. Pick a cloud model to generate from here, or run '
-        + 'this shot from the studio chat.',
-    });
   }
 
   for (const m of shot.media) {
