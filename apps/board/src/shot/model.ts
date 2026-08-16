@@ -423,8 +423,26 @@ export interface ShotTake {
   status: 'running' | 'ready' | 'failed';
   /** Why it failed, in words a person can read. */
   error?: string;
-  /** The provider/job handle to resume polling after a reload. */
+  /**
+   * The provider/job handle to resume polling after a reload.
+   *
+   * THE REAL HANDLE, not a local correlation id. This field existed from the
+   * start and was being filled with the board's own progress-toast id
+   * (`shot_<timestamp>`), which no machine has ever heard of — so the resume it
+   * was added for could not be written, and a take whose tab closed mid-render
+   * stayed `running` forever. Nothing read it, so nothing complained.
+   */
   jobId?: string;
+  /**
+   * WHICH MACHINE owns `jobId`, for a local render.
+   *
+   * A job id only means something on the node that ran it: asking loopback about
+   * a job on the workstation reports "no such job" and would abandon a render
+   * that is going perfectly well. Absent for cloud takes, which are addressed by
+   * provider task id alone.
+   */
+  nodeVia?: 'loopback' | 'mesh';
+  nodeName?: string;
 
   /** ISO 8601. Orders the strip, and answers "is there a newer take than the
    *  one on the timeline?". */

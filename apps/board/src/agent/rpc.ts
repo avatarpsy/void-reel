@@ -64,6 +64,7 @@ const GEN_ROLE_ORDER: MediaRole[] = [
 ];
 import { allBlocks, findBlock, searchBlocks, setBlockCatalogue } from '../shot/blocks';
 import { canvasMediaFor } from '../shot/canvas-drop';
+import { clearTakeProgress, setTakeProgress } from '../shot/take-progress';
 import { readParsed, readScript, writeScript } from '../shot/screenplay-doc';
 import { coverage, nextScene, renderScene, renderScriptContext } from '../shot/resolution';
 import { sequenceOf } from '../shot/fountain';
@@ -1339,7 +1340,22 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
       const g = guard(args); if (!g.ok) return g;
       const shotId = String(args.shotId ?? '');
       const url = String(args.url ?? '');
-      if (!url) return fail('bad_request', 'A take needs a url.');
+      const status = args.status === 'running' || args.status === 'failed'
+        ? args.status : 'ready';
+      /**
+       * A RUNNING TAKE HAS NO URL YET — that is what running means.
+       *
+       * This required one unconditionally, so the placeholder row the page
+       * writes when a render STARTS was refused. The damage was not the missing
+       * spinner: `generateShot` keeps the returned `takeId` and gates the
+       * completion update on it, so the refusal at the start silently discarded
+       * the FINISHED clip too. The board generated, the file landed in the
+       * Library, and the shot came back looking untouched.
+       *
+       * A failed take has no url either, for the same reason. Ready still needs
+       * one — a finished take with nothing to play is the case worth refusing.
+       */
+      if (!url && status === 'ready') return fail('bad_request', 'A finished take needs a url.');
       const id = addTake(board.std, shotId, {
         url,
         // The card draws `src`; only the render uses `url`. A caller that sends
@@ -1350,10 +1366,12 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
         ...(args.mediaId ? { mediaId: String(args.mediaId) } : {}),
         kind: args.kind === 'image' ? 'image' : 'video',
         durationSec: Number(args.durationSec ?? 0) || 0,
-        status: args.status === 'running' || args.status === 'failed'
-          ? args.status : 'ready',
+        status,
         ...(args.error ? { error: String(args.error) } : {}),
         ...(args.jobId ? { jobId: String(args.jobId) } : {}),
+        ...(args.nodeVia === 'loopback' || args.nodeVia === 'mesh'
+          ? { nodeVia: args.nodeVia } : {}),
+        ...(args.nodeName ? { nodeName: String(args.nodeName) } : {}),
         createdAt: new Date().toISOString(),
         ...(args.label ? { label: String(args.label) } : {}),
         source: TAKE_SOURCES.has(String(args.source))
@@ -1389,18 +1407,27 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
       // caller clearing a field by sending null would have written the WORD
       // null into the url — a take pointing at a resource named "null", which
       // fails as a 404 somewhere far away from here.
-      for (const k of ['url', 'src', 'poster', 'mediaId', 'error', 'jobId', 'label', 'promptUsed']) {
+      for (const k of ['url', 'src', 'poster', 'mediaId', 'error', 'jobId', 'label', 'promptUsed', 'nodeName']) {
         if (args[k] != null) patch[k] = String(args[k]);
       }
       for (const k of ['durationSec', 'costCredits', 'seed']) {
         if (args[k] != null && Number.isFinite(Number(args[k]))) patch[k] = Number(args[k]);
       }
+      // Constrained rather than stringified: these two decide WHICH MACHINE a
+      // resume or a cancel is addressed to, and a junk value would send it to
+      // the wrong one — or to none, silently.
+      if (args.nodeVia === 'loopback' || args.nodeVia === 'mesh') patch.nodeVia = args.nodeVia;
+      if (args.runtime === 'local' || args.runtime === 'cloud') patch.runtime = args.runtime;
       if (args.status === 'running' || args.status === 'ready' || args.status === 'failed') {
         patch.status = args.status;
       }
       if (!updateTake(board.std, shotId, takeId, patch)) {
         return fail('not_found', `Shot ${shotId} has no take ${takeId}.`);
       }
+      // A take that has stopped running has no live progress, and no stoppable
+      // job. Dropped here rather than on a timer so a job that stalls keeps
+      // showing its last known phase instead of blanking on its own.
+      if (patch.status === 'ready' || patch.status === 'failed') clearTakeProgress(takeId);
       // A take that has just BECOME ready is the first candidate on a shot that
       // was waiting for it — same rule as above, applied when the job lands
       // rather than when it started.
@@ -1433,6 +1460,11 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
       if (!removeTake(board.std, shotId, takeId)) {
         return fail('not_found', `Shot ${shotId} has no take ${takeId}.`);
       }
+      // The row is gone; its progress must go with it. Take ids are unique per
+      // shot, so a stale entry would never be READ again — but it would sit in
+      // the map for the life of the page, and a long board session that
+      // generated and discarded a lot would accumulate them.
+      clearTakeProgress(takeId);
       return digest(board);
     },
 
@@ -1667,6 +1699,68 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
         progress.get(id)?.();
         progress.set(id, pendingToast(String(args.message ?? 'Working…'), 0));
       }
+      return { ok: true as const, rev };
+    },
+
+    /**
+     * Every take still marked `running`, with the handle needed to chase it.
+     *
+     * ── WHY THIS EXISTS ─────────────────────────────────────────────────────
+     * `running` is persisted precisely so a render survives the tab that started
+     * it. But surviving is only half of it: nothing was ever picking those takes
+     * back up, so closing or reloading the tab left a take spinning FOREVER —
+     * the file lands in the Library and the card never stops saying "generating".
+     * An endless spinner is indistinguishable from a broken generator, and it is
+     * the one failure a user cannot act on.
+     *
+     * ── PAGE-ONLY CHANNEL. NEVER PUT THIS IN FRONT OF A MODEL ────────────────
+     * Same rule as `board-shot-gen-input`. The agent's `takes` digest is
+     * deliberately handle-free and url-free; job ids are infrastructure the page
+     * needs and a language model has no use for.
+     */
+    'voidspace:board-running-takes': () => {
+      const out: Array<Record<string, unknown>> = [];
+      for (const s of readShots(board.std)) {
+        for (const t of s.takes ?? []) {
+          if (t.status !== 'running') continue;
+          out.push({
+            shotId: s.id,
+            takeId: t.id,
+            label: t.label ?? '',
+            // Absent for a take written before this field carried the real
+            // handle, and for anything the page could not identify. The caller
+            // must treat "no handle" as unresumable rather than guessing.
+            jobId: t.jobId ?? '',
+            runtime: t.runtime ?? '',
+            nodeVia: t.nodeVia ?? '',
+            nodeName: t.nodeName ?? '',
+            createdAt: t.createdAt,
+          });
+        }
+      }
+      return { ok: true as const, rev, takes: out };
+    },
+
+    /**
+     * How a RUNNING take is doing, for its own card to draw.
+     *
+     * Separate from `board-update-take` on purpose — see `take-progress.ts` for
+     * why this must not touch the document. The short version: it arrives every
+     * three seconds and stops being true the moment the job ends, so persisting
+     * it would fill the undo stack and then lie about it after a reload.
+     *
+     * Not guarded like the write ops: it changes nothing that can be saved,
+     * lost or undone. The worst a bad call can do is put a wrong word under a
+     * spinner until the next poll corrects it.
+     */
+    'voidspace:board-take-progress': args => {
+      const takeId = String(args.takeId ?? '');
+      if (!takeId) return fail('empty', 'Take progress needs a takeId.');
+      setTakeProgress(takeId, {
+        ...(args.label != null ? { label: String(args.label) } : {}),
+        ...(args.pct != null && Number.isFinite(Number(args.pct)) ? { pct: Number(args.pct) } : {}),
+        ...(args.cancellable != null ? { cancellable: args.cancellable === true } : {}),
+      });
       return { ok: true as const, rev };
     },
 

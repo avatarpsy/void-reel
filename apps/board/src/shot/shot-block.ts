@@ -32,6 +32,7 @@ import {
 import { allBlocks, findBlock, onBlockCatalogue, searchBlocks, type BlockInfo } from './blocks';
 import { ASSET_DRAG_TYPE, type AssetDragEntity } from './drop';
 import { chooseTake, removeTake, sceneNumberOf } from './shots';
+import { onTakeProgress, setTakeProgress, takeProgress } from './take-progress';
 import { resolveSlots, slotFills } from './slots';
 import { readParsed } from './screenplay-doc';
 import { lazyBlockPreview, openBlockLightbox, type LazyPreview } from '../ui/block-preview';
@@ -617,6 +618,26 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
       transition: opacity 0.12s ease;
     }
     .take:hover .take__x { opacity: 1; }
+    /* ALWAYS VISIBLE, unlike the ✕ beside it. Discarding is a tidy-up you go
+       looking for; stopping is what you want the instant you realise a render
+       is going wrong, and a control you must hover to discover is one you do
+       not find while watching a machine struggle. Sits left of the ✕ so the
+       two never overlap on a card narrow enough to show both. */
+    .take__stop {
+      position: absolute;
+      top: 3px; right: 22px;
+      width: 16px; height: 16px;
+      display: grid;
+      place-items: center;
+      border: 0;
+      border-radius: 50%;
+      background: rgba(0, 0, 0, 0.72);
+      color: #fff;
+      font-size: 8px;
+      line-height: 1;
+      cursor: pointer;
+    }
+    .take__stop:hover { background: rgba(150, 30, 30, 0.9); }
 
     /* flex:none, NOT flex:1. The graphic card's single REFERENCES lane
        also grows, and with a few clips in it the lane won and squeezed ACTION
@@ -1188,6 +1209,9 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
 
   private disposeBlocks: (() => void) | null = null;
 
+  /** Take progress is not a block prop either — same reason as the catalogues. */
+  private disposeTakeProgress: (() => void) | null = null;
+
   /**
    * The sequence pill reads the SCREENPLAY block, not this one.
    *
@@ -1206,6 +1230,7 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
     // dirty when they land.
     this.disposeCatalogue = onModelCatalogue(() => this.requestUpdate());
     this.disposeBlocks = onBlockCatalogue(() => this.requestUpdate());
+    this.disposeTakeProgress = onTakeProgress(() => this.requestUpdate());
     /**
      * COALESCED TO ONE FRAME, and that matters more than it looks.
      *
@@ -1238,9 +1263,11 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
     this.disposeCatalogue?.();
     this.disposeBlocks?.();
     this.disposeDoc?.();
+    this.disposeTakeProgress?.();
     this.disposeCatalogue = null;
     this.disposeBlocks = null;
     this.disposeDoc = null;
+    this.disposeTakeProgress = null;
     for (const off of this.dragCleanups) off();
     this.dragCleanups = [];
     this.preview?.destroy();
@@ -2428,7 +2455,21 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
             title=${t.status === 'failed'
               ? `Take ${i + 1} failed — ${t.error || 'no reason given'}`
               : t.status === 'running'
-                ? `Take ${i + 1} is still generating`
+                /**
+                 * SAY WHY THERE IS NO STOP BUTTON.
+                 *
+                 * Only a render on your own machine can be stopped: a cloud
+                 * generation is already paid for and the provider has no
+                 * cancel. A card that simply omits the control on some takes
+                 * and not others reads as a bug, so the tooltip names the
+                 * reason — and distinguishes "cannot" from "cannot any more",
+                 * which is what a reloaded tab is really saying.
+                 */
+                ? takeProgress(t.id)?.cancellable
+                  ? `Take ${i + 1} is generating on your machine — ■ stops it`
+                  : t.runtime === 'local'
+                    ? `Take ${i + 1} was rendering on your machine and this board no longer has a handle for it, so it cannot be stopped or finished. Discard it with ✕ and generate again; if it completed, the clip is in your Library.`
+                    : `Take ${i + 1} is generating in the cloud. Cloud renders cannot be stopped — it will finish on its own and land in your Library.`
                 : `${on
                     ? 'Plays on the timeline. The other takes stack above it.'
                     : 'Goes to the editor either way — click to make this the one that plays.'
@@ -2440,8 +2481,32 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
             ${t.status === 'ready'
               ? nothing
               : html`<span class="take__state">${t.status === 'running'
-                  ? 'generating…'
+                  ? (takeProgress(t.id)?.label || 'generating…')
                   : (t.error || 'failed')}</span>`}
+            ${
+              /**
+               * STOP, WHERE THE TAKE WAS STARTED.
+               *
+               * Only for a take the page can actually stop — see
+               * `take-progress.ts`. A reloaded tab has lost the job handle, so
+               * the control correctly disappears rather than becoming a button
+               * that reports failure every time it is pressed.
+               *
+               * `pointerdown` is stopped as well as `click`, like the ✕ beside
+               * it: without that the press starts a take DRAG and the click
+               * never lands, so the button looks dead while the card follows
+               * the cursor.
+               */
+              t.status === 'running' && takeProgress(t.id)?.cancellable
+                ? html`<span
+                    class="take__stop"
+                    role="button"
+                    title="Stop this render. It frees the GPU straight away; nothing else queued is affected."
+                    @pointerdown=${(e: Event) => e.stopPropagation()}
+                    @click=${(e: Event) => { e.stopPropagation(); this.stopTake(t.id); }}
+                  >■</span>`
+                : nothing
+            }
             <span class="take__n">${t.label || `Take ${i + 1}`}${
               t.durationSec ? ` · ${Math.round(t.durationSec)}s` : ''}</span>
             <span
@@ -2474,6 +2539,25 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
   private requestGenerate(): void {
     window.parent?.postMessage(
       { type: 'voidspace:shot-generate', shotId: this.model.id },
+      '*',
+    );
+  }
+
+  /**
+   * Ask the host page to stop a running take.
+   *
+   * Same split as `requestGenerate`, and it has to be: the job lives on the
+   * user's node, reached through a session this iframe does not have. Nothing is
+   * written here either — the page's poll loop sees the node report `cancelled`
+   * and marks the take through the ordinary `board-update-take` path, so there
+   * stays exactly ONE writer for a take's status.
+   *
+   * The optimistic part is only the label, and only until the next poll.
+   */
+  private stopTake(takeId: string): void {
+    setTakeProgress(takeId, { label: 'stopping…' });
+    window.parent?.postMessage(
+      { type: 'voidspace:take-cancel', shotId: this.model.id, takeId },
       '*',
     );
   }

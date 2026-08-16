@@ -844,3 +844,166 @@ describe('the revision guard applies where it means something', () => {
     expect(r.reason).toBe('board_changed');
   });
 });
+
+/**
+ * A take's LIFE, from the placeholder the page writes when a render starts to
+ * the row it fills in when the clip lands.
+ *
+ * The start of that life was broken and silently so: `board-add-take` demanded
+ * a url unconditionally, so the running placeholder was refused, `generateShot`
+ * got no takeId back, and the completion update — which is gated on that id —
+ * never ran. The board generated a clip, paid for it, and showed nothing.
+ * Nothing above or below this boundary can see that; only these can.
+ */
+describe('board_add_take', () => {
+  it('accepts a RUNNING take with no url — that is what running means', async () => {
+    const shots = await call('voidspace:board-add-shots', { titles: ['A'] });
+    const res = await call('voidspace:board-add-take', {
+      shotId: shots.shots[0].id,
+      status: 'running',
+      url: '',
+      src: '',
+      kind: 'video',
+      label: 'Take 1',
+    });
+    expect(res.ok).not.toBe(false);
+    expect(res.takeId).toBeTruthy();
+  });
+
+  it('accepts a FAILED take with no url, so the failure is visible on the card', async () => {
+    const shots = await call('voidspace:board-add-shots', { titles: ['A'] });
+    const res = await call('voidspace:board-add-take', {
+      shotId: shots.shots[0].id, status: 'failed', url: '', error: 'no credits',
+    });
+    expect(res.takeId).toBeTruthy();
+  });
+
+  it('still refuses a READY take with nothing to play', async () => {
+    const shots = await call('voidspace:board-add-shots', { titles: ['A'] });
+    const res = await call('voidspace:board-add-take', {
+      shotId: shots.shots[0].id, status: 'ready', url: '',
+    });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe('bad_request');
+  });
+
+  /** The whole round trip, which is the thing that was actually broken. */
+  it('carries a placeholder through to a finished take', async () => {
+    const shots = await call('voidspace:board-add-shots', { titles: ['A'] });
+    const shotId = shots.shots[0].id;
+    const started = await call('voidspace:board-add-take', {
+      shotId, status: 'running', url: '', kind: 'video', label: 'Take 1',
+    });
+    const done = await call('voidspace:board-update-take', {
+      shotId, takeId: started.takeId,
+      status: 'ready', url: 'https://x/clip.mp4', src: 'https://x/clip.mp4', durationSec: 5,
+    });
+    expect(done.ok).not.toBe(false);
+    const read = await call('voidspace:board-read');
+    const shot = read.shots.find((s: any) => s.id === shotId);
+    // A running take cannot be the chosen one; becoming ready is what makes it
+    // the shot, and that is the rule this round trip has to preserve.
+    expect(shot.chosenTakeId).toBe(started.takeId);
+  });
+});
+
+describe('board_take_progress', () => {
+  it('needs a takeId', async () => {
+    const res = await call('voidspace:board-take-progress', { label: 'x' });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe('empty');
+  });
+
+  /** It must NOT write the document — that is its entire reason for existing.
+   *  A rev bump would mean an undo step and a save per poll. */
+  it('does not change the board', async () => {
+    const shots = await call('voidspace:board-add-shots', { titles: ['A'] });
+    const started = await call('voidspace:board-add-take', {
+      shotId: shots.shots[0].id, status: 'running', url: '',
+    });
+    const before = (await call('voidspace:board-read')).rev;
+    await call('voidspace:board-take-progress', {
+      shotId: shots.shots[0].id, takeId: started.takeId, label: 'sampling 4/8', cancellable: true,
+    });
+    expect((await call('voidspace:board-read')).rev).toBe(before);
+  });
+});
+
+/**
+ * Recovering renders that outlived the tab that started them.
+ *
+ * `running` was persisted from the start "so a reload can resume polling", and
+ * nothing ever did — the take's `jobId` was being filled with the board's own
+ * progress-toast id, which no machine has heard of. So the spinner ran forever
+ * on a shot whose clip was already sitting in the Library.
+ */
+describe('board_running_takes', () => {
+  it('reports nothing when nothing is running', async () => {
+    await call('voidspace:board-add-shots', { titles: ['A'] });
+    const r = await call('voidspace:board-running-takes');
+    expect(r.ok).toBe(true);
+    expect(r.takes).toEqual([]);
+  });
+
+  it('carries the handle and the machine, so a resume can address it', async () => {
+    const shots = await call('voidspace:board-add-shots', { titles: ['A'] });
+    const shotId = shots.shots[0].id;
+    const started = await call('voidspace:board-add-take', {
+      shotId, status: 'running', url: '', kind: 'video',
+    });
+    await call('voidspace:board-update-take', {
+      shotId, takeId: started.takeId,
+      jobId: 'bb2ce43b', runtime: 'local', nodeVia: 'loopback', nodeName: 'WORKHORSE-GPU',
+    });
+
+    const r = await call('voidspace:board-running-takes');
+    expect(r.takes).toHaveLength(1);
+    expect(r.takes[0]).toMatchObject({
+      shotId, takeId: started.takeId,
+      jobId: 'bb2ce43b', runtime: 'local', nodeVia: 'loopback', nodeName: 'WORKHORSE-GPU',
+    });
+  });
+
+  /** A job id means nothing without the machine that owns it, so a junk `via`
+   *  must not be stored — it would address a resume at the wrong computer. */
+  it('refuses a nodeVia that is not a real route', async () => {
+    const shots = await call('voidspace:board-add-shots', { titles: ['A'] });
+    const shotId = shots.shots[0].id;
+    const started = await call('voidspace:board-add-take', {
+      shotId, status: 'running', url: '',
+    });
+    await call('voidspace:board-update-take', {
+      shotId, takeId: started.takeId, jobId: 'x1', nodeVia: 'carrier-pigeon', runtime: 'banana',
+    });
+    const r = await call('voidspace:board-running-takes');
+    expect(r.takes[0].nodeVia).toBe('');
+    expect(r.takes[0].runtime).toBe('');
+  });
+
+  it('drops a take from the list once it finishes', async () => {
+    const shots = await call('voidspace:board-add-shots', { titles: ['A'] });
+    const shotId = shots.shots[0].id;
+    const started = await call('voidspace:board-add-take', {
+      shotId, status: 'running', url: '', kind: 'video',
+    });
+    expect((await call('voidspace:board-running-takes')).takes).toHaveLength(1);
+    await call('voidspace:board-update-take', {
+      shotId, takeId: started.takeId, status: 'ready', url: 'https://x/c.mp4',
+    });
+    expect((await call('voidspace:board-running-takes')).takes).toEqual([]);
+  });
+
+  /** A CLOUD take has no handle and no cancel. It must still be reported, so the
+   *  page can say so rather than leaving it spinning in silence. */
+  it('reports a cloud take with no handle rather than hiding it', async () => {
+    const shots = await call('voidspace:board-add-shots', { titles: ['A'] });
+    const shotId = shots.shots[0].id;
+    await call('voidspace:board-add-take', {
+      shotId, status: 'running', url: '', runtime: 'cloud',
+    });
+    const r = await call('voidspace:board-running-takes');
+    expect(r.takes).toHaveLength(1);
+    expect(r.takes[0].jobId).toBe('');
+    expect(r.takes[0].runtime).toBe('cloud');
+  });
+});
