@@ -3,6 +3,12 @@ import react from "@vitejs/plugin-react";
 import path from "path";
 
 export default defineConfig({
+  // Served from /image/, so every emitted URL has to say so. Without this Vite
+  // defaults to "/" and the built index.html asks for /assets/index-*.js, which
+  // is not where the assets are — the website answers that with a redirect, the
+  // browser never gets JavaScript, and the editor is a blank page. The board has
+  // carried `base: '/board/'` since it was written; this app never had the line.
+  base: "/image/",
   plugins: [react()],
   assetsInclude: ["**/*.wasm"],
   resolve: {
