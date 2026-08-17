@@ -493,6 +493,19 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
     const hint = isBlock
       ? 'click to see it render, drag onto a shot'
       : 'click to preview, drag onto the board';
+    /**
+     * NO "+" ON THE TILE.
+     *
+     * It called `addAsset`, which places at the CENTRE OF THE VIEWPORT when
+     * nothing is selected — so from a panel the user was scrolling, it dropped
+     * a card wherever the canvas happened to be looking, which read as a grey
+     * box appearing from nowhere. Drag is the gesture that says where, it was
+     * always available on the same tile, and it cannot land somewhere the user
+     * was not pointing.
+     *
+     * `addAsset` itself stays: the preview overlay's own Add button uses it,
+     * and there the user has committed to one asset and is looking at it.
+     */
     return `<div class="vs-assets__item${isBlock ? ' vs-assets__item--block' : ''}"
       data-a="item" data-id="${a.id}"
       title="${esc(a.label || a.kind)}${a.detail ? ` — ${esc(a.detail)}` : ''} — ${hint}">
@@ -505,8 +518,6 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
               data-a="star" data-id="${a.id}"
               title="${favourites.has(a.id) ? 'Remove from Favourites' : 'Add to Favourites'}"
               aria-pressed="${favourites.has(a.id)}">${favourites.has(a.id) ? '★' : '☆'}</button>` : ''}
-      <button type="button" class="vs-assets__place" data-a="add" data-id="${a.id}"
-              title="${isBlock ? 'Use on the selected shot' : 'Add to the board'}">+</button>
     </div>`;
   }
 

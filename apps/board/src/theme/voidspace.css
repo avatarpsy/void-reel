@@ -669,15 +669,12 @@ editor-host {
   color: rgba(255, 255, 255, 0.6);
 }
 
-/* Tile: click previews, the + adds. */
+/* Tile: click previews, DRAG places. There was a hover "+" here that added the
+   asset at the centre of the viewport — so from a panel the user was scrolling
+   it dropped a card wherever the canvas happened to be looking, which read as a
+   grey box appearing from nowhere. Drag is the gesture that says where, and it
+   was always on the same tile. */
 .vs-assets__item { position: relative; }
-.vs-assets__place {
-  position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
-  width: 20px; height: 20px; border: 0; border-radius: 5px; cursor: pointer;
-  background: var(--vs-accent-b); color: #fff; font: 600 13px/1 var(--affine-font-family);
-  opacity: 0; transition: opacity 0.12s ease;
-}
-.vs-assets__item:hover .vs-assets__place { opacity: 1; }
 
 /* Preview overlay — the board's equivalent of MediaPreviewOverlay. */
 .vs-preview {
@@ -806,8 +803,6 @@ editor-host {
 }
 .vs-assets__list--grid .vs-assets__name,
 .vs-assets__list--compact .vs-assets__name { padding: 0 2px 4px; }
-.vs-assets__list--grid .vs-assets__place,
-.vs-assets__list--compact .vs-assets__place { top: 6px; right: 6px; transform: none; }
 
 /* Section headers span every column rather than becoming a grid cell. */
 .vs-assets__list--grid .vs-assets__section,
