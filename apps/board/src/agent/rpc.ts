@@ -1694,6 +1694,23 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
      * With no `ids` it answers for the selection, which is the case that matters
      * — "use these four" is the sentence this exists for.
      */
+    /**
+     * THE LIBRARY CHANGED — RE-READ IT.
+     *
+     * The parent generates media; the asset panel in here is a view of the same
+     * Library it landed in. Without this the user watched their own generation
+     * appear on the canvas and NOT in the panel beside it, and the only fix was
+     * the refresh button — which reads as the panel being stale rather than as
+     * a message never sent.
+     *
+     * A window event rather than a direct call, so the panel keeps its internals
+     * to itself and anything else that lists assets can listen too.
+     */
+    'voidspace:board-library-changed': () => {
+      window.dispatchEvent(new CustomEvent('voidspace:library-changed'));
+      return { ok: true as const, rev };
+    },
+
     'voidspace:board-selection': args => {
       const ids = Array.isArray(args.ids) ? args.ids.map(String) : null;
       if (!ids) return { ok: true as const, rev, ...readSelection(board.std) };

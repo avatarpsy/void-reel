@@ -31,6 +31,7 @@ import { installScreenplayFocus } from './ui/screenplay-focus';
 import { installBoardUi } from './ui/board-ui';
 import { installAssetPanel } from './ui/asset-panel';
 import { installMediaInspector } from './ui/media-inspector';
+import { installCanvasMenu } from './ui/canvas-menu';
 import { installSpacePan } from './ui/space-pan';
 import { installSpine } from './ui/spine';
 import { installToasts, toast } from './ui/toast';
@@ -242,6 +243,9 @@ async function boot(): Promise<void> {
   // Hold space and drag to pan — a gesture every other canvas tool has and
   // BlockSuite does not implement at all. See space-pan.ts.
   installSpacePan(board, chromeHost);
+  // Select references, right-click, make something from them. The generation
+  // itself is the parent's — this only turns the gesture into a request.
+  installCanvasMenu(board, chromeHost);
   // Hold the board still when the WINDOW around it changes size — which on this
   // surface means the studio shell collapsing the agent chat and handing this
   // iframe the extra width. See `installViewportAnchor` for the why and the

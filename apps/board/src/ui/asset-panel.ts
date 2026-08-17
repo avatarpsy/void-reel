@@ -1290,6 +1290,21 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
    * would be told, wrongly, that they have none. Reload when it lands, and only
    * when it is what is on screen.
    */
+  /**
+   * Something the user made just landed in the Library — show it.
+   *
+   * Fired by the parent through `voidspace:board-library-changed` after a
+   * generation. The cache is dropped first for the same reason the block
+   * catalogue drops it: re-listing without invalidating would re-render the
+   * page from before the change and make the user's own generation look like it
+   * did not happen.
+   */
+  const onLibraryChanged = () => {
+    invalidateAssetCache();
+    if (!collapsed) void load();
+  };
+  window.addEventListener('voidspace:library-changed', onLibraryChanged);
+
   const disposeBlocks = onBlockCatalogue(() => {
     /**
      * THE CATALOGUE CHANGING IS A LIBRARY MUTATION, so the cache must forget it.
@@ -1310,6 +1325,7 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
     sub.unsubscribe?.();
     disposeBlocks();
     window.removeEventListener('keydown', onKeyDown, true);
+    window.removeEventListener('voidspace:library-changed', onLibraryChanged);
     // A panel torn down while still waiting for a token must not reload into a
     // detached DOM when one finally arrives.
     stopAuthWait?.();
