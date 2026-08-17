@@ -150,14 +150,30 @@ export const Preview: React.FC = () => {
    * holding position costs nothing at all.
    */
   const stageAreaRef = useRef<HTMLDivElement>(null);
+  const stageWrapRef = useRef<HTMLDivElement>(null);
+  const stageOffsetRef = useRef(0);
   const [stageOffset, setStageOffset] = useState(0);
   useCenterShift(stageAreaRef, (dx) => {
-    setStageOffset((current) => {
-      const area = stageAreaRef.current?.clientWidth ?? 0;
-      const stage = overlayRef.current?.getBoundingClientRect().width ?? 0;
-      const limit = Math.max(0, (area - stage) / 2);
-      return Math.max(-limit, Math.min(limit, current - dx));
-    });
+    const area = stageAreaRef.current?.clientWidth ?? 0;
+    const stage = overlayRef.current?.getBoundingClientRect().width ?? 0;
+    const limit = Math.max(0, (area - stage) / 2);
+    const next = Math.max(-limit, Math.min(limit, stageOffsetRef.current - dx));
+    stageOffsetRef.current = next;
+    /**
+     * WRITTEN TO THE ELEMENT, NOT JUST TO STATE.
+     *
+     * A ResizeObserver callback runs after layout and BEFORE the browser
+     * paints, so a style written here lands in the same frame as the resize
+     * that caused it. Going only through `setState` put the correction one
+     * frame late, which is exactly long enough to see: the picture jumped
+     * ~140px and snapped back. The state below still holds the value so every
+     * later render re-applies it — this line is only about which frame it
+     * first appears in.
+     */
+    if (stageWrapRef.current) {
+      stageWrapRef.current.style.transform = `translateX(${next}px)`;
+    }
+    setStageOffset(next);
   });
   const animationRef = useRef<number | null>(null);
   const renderBridgeInitialized = useRef<boolean>(false);
@@ -4785,7 +4801,11 @@ export const Preview: React.FC = () => {
             it. This wrapper cancels that, clamped so the stage can never be
             pushed out of the area. No transition: the whole point is that
             nothing animates, because nothing should appear to move. */}
-        <div className="shrink-0" style={{ transform: `translateX(${stageOffset}px)` }}>
+        <div
+          ref={stageWrapRef}
+          className="shrink-0"
+          style={{ transform: `translateX(${stageOffset}px)` }}
+        >
         <div
           ref={overlayRef}
           className={`relative bg-black overflow-hidden transition-all duration-300 ${

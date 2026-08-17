@@ -576,6 +576,21 @@ export function Canvas() {
     const ctx = canvas?.getContext('2d');
     if (!canvas || !ctx || !artboard || !project) return;
 
+    /**
+     * Pan is read LIVE, not from this callback's closure.
+     *
+     * The resize anchor below corrects the pan and then draws SYNCHRONOUSLY,
+     * inside the ResizeObserver, so the corrected picture is in the frame the
+     * browser is about to paint. React has not re-rendered at that point, so a
+     * closure read would draw with the PRE-correction pan — which is exactly
+     * the two-frame flash ("it moves, then comes back") this removes.
+     *
+     * `panX`/`panY` stay in the dependency list: they still have to invalidate
+     * this callback for every other caller, and they are what the render hash
+     * below compares.
+     */
+    const { panX: livePanX, panY: livePanY } = useUIStore.getState();
+
     // Size the bitmap from the canvas's OWN CSS box, so the two can never
     // disagree and the browser never rescales what we drew. Assigning width or
     // height clears the bitmap and resets the 2D context, so only do it when the
@@ -590,7 +605,7 @@ export function Canvas() {
     const marqueeHash = marqueeRect ? `${marqueeRect.x}-${marqueeRect.y}-${marqueeRect.width}-${marqueeRect.height}` : 'none';
     const gradientHash = gradientDrag ? `${gradientDrag.startX}-${gradientDrag.startY}-${gradientDrag.endX}-${gradientDrag.endY}` : 'none';
     const selHash = `${activeSelection?.id ?? 'none'}-${marchingOffsetRef.current}-${lassoDraftRef.current?.length ?? 0}`;
-    const renderHash = `${zoom}-${panX}-${panY}-${selectedLayerIds.join(',')}-${project.updatedAt}-${showGrid}-${drawing.isDrawing}-${drawing.currentPath?.length ?? 0}-${isMarqueeSelecting}-${marqueeHash}-${gradientHash}-${selHash}`;
+    const renderHash = `${zoom}-${livePanX}-${livePanY}-${selectedLayerIds.join(',')}-${project.updatedAt}-${showGrid}-${drawing.isDrawing}-${drawing.currentPath?.length ?? 0}-${isMarqueeSelecting}-${marqueeHash}-${gradientHash}-${selHash}`;
     // While a paint/retouch stroke is active, the buffer changes every move but
     // none of the hash inputs do — so bypass the dedupe to draw the live stroke.
     const livePainting = !!(paintCanvasRef.current && paintLayerIdRef.current) || !!lassoDraftRef.current;
@@ -609,8 +624,8 @@ export function Canvas() {
     ctx.fillStyle = document.documentElement.classList.contains('dark') ? '#18181b' : '#e8e9ed';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    const centerX = canvas.width / 2 + panX;
-    const centerY = canvas.height / 2 + panY;
+    const centerX = canvas.width / 2 + livePanX;
+    const centerY = canvas.height / 2 + livePanY;
     const artboardX = centerX - (artboard.size.width * zoom) / 2;
     const artboardY = centerY - (artboard.size.height * zoom) / 2;
 
@@ -658,8 +673,8 @@ export function Canvas() {
       artboard.size.width,
       artboard.size.height,
       zoom,
-      panX,
-      panY
+      livePanX,
+      livePanY
     );
 
     // Keep the active stroke's buffer current so renderLayer draws it live. A
@@ -1170,10 +1185,19 @@ export function Canvas() {
    * Read through `getState()` rather than closing over `panX`/`panY`: the
    * observer must not be re-attached on every pan, or it would re-baseline
    * mid-drag and lose the shift it exists to catch.
+   *
+   * AND DRAW IMMEDIATELY. Correcting the pan and leaving the redraw to the
+   * usual path — React re-render, then a `requestAnimationFrame` — put the
+   * corrected picture two frames late, so the artwork visibly jumped 250px and
+   * came back. A ResizeObserver callback runs after layout and BEFORE the
+   * frame is painted, so drawing here means the only picture ever shown is the
+   * right one. `render` reads the pan live (see its head) precisely so this
+   * call sees the value set on the line above.
    */
   useCenterShift(canvasRef, (dx, dy) => {
     const s = useUIStore.getState();
     s.setPan(s.panX - dx, s.panY - dy);
+    render();
   });
 
   useEffect(() => {
