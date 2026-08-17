@@ -63,10 +63,30 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
 
   let refIds: string[] = [];
 
+  /**
+   * WHAT WAS SELECTED BEFORE THE RIGHT-CLICK TOUCHED IT.
+   *
+   * The bug this exists for: marquee four images, right-click one of them, and
+   * the menu offered to generate from ONE. BlockSuite treats the press that
+   * opens a context menu as a normal selecting press, so by the time
+   * `contextmenu` fires the selection has already collapsed to the card under
+   * the cursor — and reading it there reads the aftermath of the gesture, not
+   * the intent behind it.
+   *
+   * So the selection is snapshotted on the pointer-down that PRECEDES it, in
+   * the capture phase, before BlockSuite's own handlers run.
+   */
+  let preClick: string[] = [];
+
   const close = () => {
     if (menu.hidden) return;
     menu.hidden = true;
     refIds = [];
+  };
+
+  const onPointerDown = (e: PointerEvent) => {
+    if (e.button !== 2) return;
+    preClick = selectedMedia(board).map(m => m.id);
   };
 
   /**
@@ -105,8 +125,24 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
     if (target?.isContentEditable || target?.closest('input, textarea, [contenteditable="true"]')) return;
 
     e.preventDefault();
-    const media = selectedMedia(board);
-    refIds = media.map(m => m.id);
+
+    /**
+     * WHICH SET THE USER MEANT — the same rule a file manager uses.
+     *
+     * Right-click something that is part of the current selection and the whole
+     * selection is what you acted on; right-click outside it and the selection
+     * becomes that one thing. Anything else surprises: the first case is how
+     * "these four" is expressed, and the second is how you change your mind.
+     *
+     * `preClick` is the selection as it was a moment ago (see above). The block
+     * under the cursor decides which of the two readings applies — and a
+     * right-click on empty canvas keeps the selection too, because a marquee
+     * followed by a right-click in the gap between the images is still "these".
+     */
+    const clickedId = target?.closest<HTMLElement>('[data-block-id]')?.dataset.blockId ?? '';
+    const useSnapshot = preClick.length > 1
+      && (!clickedId || preClick.includes(clickedId));
+    refIds = useSnapshot ? [...preClick] : selectedMedia(board).map(m => m.id);
     menu.innerHTML = render(refIds.length);
 
     // Positioned against the viewport and nudged back inside it, so a
@@ -145,6 +181,10 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
   };
   const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close(); };
 
+  // CAPTURE phase, and before the contextmenu listener below: this has to see
+  // the selection while it is still the user's, not after BlockSuite has
+  // collapsed it to whatever is under the cursor.
+  container.addEventListener('pointerdown', onPointerDown, true);
   container.addEventListener('contextmenu', onContextMenu);
   menu.addEventListener('click', onMenuClick);
   document.addEventListener('pointerdown', onDocDown, true);
@@ -155,9 +195,16 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
   // A selection that changes under an open menu makes its "from 3 references"
   // a lie, so the menu goes rather than the count.
   const gfx = board.std.get(GfxControllerIdentifier);
-  const sub = gfx.selection.slots.updated.subscribe(() => close());
+  const sub = gfx.selection.slots.updated.subscribe(() => {
+    // Only while the menu is CLOSED does a selection change matter. The
+    // right-click itself changes the selection (BlockSuite selects what is
+    // under the cursor), so closing on that would shut the menu in the same
+    // frame it opened — which is what "the menu does nothing" looked like.
+    if (menu.hidden) preClick = selectedMedia(board).map(m => m.id);
+  });
 
   return () => {
+    container.removeEventListener('pointerdown', onPointerDown, true);
     container.removeEventListener('contextmenu', onContextMenu);
     menu.removeEventListener('click', onMenuClick);
     document.removeEventListener('pointerdown', onDocDown, true);

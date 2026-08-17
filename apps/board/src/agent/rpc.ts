@@ -1554,7 +1554,36 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
       const COLS = 4;
       const CELL_W = 340;
       const CELL_H = 250;
-      const origin = { x: 0, y: SHOT_H + 240 };
+
+      /**
+       * PUT IT WHERE THE USER IS LOOKING.
+       *
+       * A generation made FROM references belongs beside them. Landing it in a
+       * fixed spot below the filmstrip meant the user asked for a variant of
+       * four images they were staring at, watched a toast, and then had to go
+       * and find the result — on an infinite canvas, at whatever zoom they were
+       * at, which is a search rather than a glance.
+       *
+       * The references are the anchor because the board is the only side that
+       * knows where they are: the parent sends `referenceIds` for provenance
+       * anyway, so this costs nothing and needs no new argument. Placed just
+       * BELOW their bounding box rather than to the right, since a row of
+       * references read left-to-right and the answer reads as the next line.
+       *
+       * No references (a plain "add media", or a track) falls back to the old
+       * clear space under the strip — there is nothing to be near.
+       */
+      const anchorIds = rows.flatMap(r => (Array.isArray(r.referenceIds) ? r.referenceIds.map(String) : []));
+      const anchors = anchorIds.length
+        ? readCanvas(board.std).filter(i => anchorIds.includes(i.id))
+        : [];
+      const boxed = anchors.filter(a => typeof a.x === 'number' && typeof a.y === 'number');
+      const origin = boxed.length
+        ? {
+            x: Math.min(...boxed.map(a => a.x as number)),
+            y: Math.max(...boxed.map(a => (a.y as number) + (typeof a.h === 'number' ? a.h : 240))) + 64,
+          }
+        : { x: 0, y: SHOT_H + 240 };
 
       const placedIds: string[] = [];
       const problems: string[] = [];
@@ -1567,7 +1596,15 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
         if (!row.displayUrl) missingDisplay++;
 
         const kind = row.kind === 'video' || row.kind === 'audio' ? row.kind : 'image';
-        const at = rows.length > 1
+        /**
+         * A LONE ITEM IS PLACED TOO, when there is something to place it near.
+         *
+         * This used to pass `null` for a single row and let `placeAsset` pick,
+         * which is right for "add this from the library" and wrong for the case
+         * that matters most — one generated image, made from references the
+         * user is looking at, appearing somewhere else entirely.
+         */
+        const at = rows.length > 1 || boxed.length
           ? {
               x: origin.x + (i % COLS) * CELL_W,
               y: origin.y + Math.floor(i / COLS) * CELL_H,
