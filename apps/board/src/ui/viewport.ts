@@ -23,7 +23,29 @@ interface BoardViewport {
   centerX: number;
   centerY: number;
   zoom: number;
-  setCenter(centerX: number, centerY: number): void;
+  width: number;
+  setCenter(centerX: number, centerY: number, forceUpdate?: boolean): void;
+  onResize(): void;
+  /**
+   * BlockSuite CACHES the container's box, and clears the cache in exactly one
+   * place: the first line of its own ResizeObserver callback
+   * (`Viewport.setShellElement`). Ours can be delivered first — it is, on this
+   * board, because the editor's shell is registered during an async lit render
+   * that happens after `installViewportAnchor` runs — and then every size the
+   * viewport reports is one resize out of date.
+   *
+   * That is the whole of the 200ms glitch: the correction below was computed
+   * and applied against a stale width, so the board was drawn 210px off until
+   * BlockSuite's debounce caught up and redrew it. Clearing the cache first is
+   * not a workaround for the cache; it is doing the same thing BlockSuite does,
+   * in the callback that got there first.
+   *
+   * Declared optional so a BlockSuite upgrade that renames or removes these
+   * cannot break the build — `refreshBox` below falls back to the old
+   * (correct-but-late) behaviour if the reset does not take.
+   */
+  _cachedBoundingClientRect?: DOMRect | null;
+  _cachedOffsetWidth?: number | null;
 }
 
 /** The editor root, or null before it mounts. */
@@ -51,7 +73,26 @@ function edgelessRoot():
  * space on the side it appeared, and nothing the user was looking at moves.
  *
  * Same rule, same derivation as `useCenterShift` in `@openreel/ui`, which the
- * video and image editors use for their own surfaces. Returns a disposer.
+ * video and image editors use for their own surfaces.
+ *
+ * AND IT HAS TO LAND ON THE SAME FRAME, which is the harder half.
+ *
+ * Correcting the centre alone left the board visibly jumping ~210px and
+ * snapping back a fifth of a second later — worse than the drift it fixed,
+ * because a glitch reads as broken where a slow drift only reads as odd.
+ * Frame-by-frame, the CENTRE was already right on frame 0 and the picture only
+ * moved on frame 13: BlockSuite debounces its resize pipeline by 200ms
+ * (`Viewport._setupResizeObserver`), and the renderer repositions on
+ * `sizeUpdated`, which only `_completeResize` emits at the END of that debounce.
+ * So for thirteen frames the board was drawn with a corrected centre and a
+ * stale width.
+ *
+ * `setRect` is the public way to say "this is the size now" and emits
+ * `sizeUpdated` itself, so the renderer acts while we are still inside the
+ * ResizeObserver callback — before the browser paints. The 200ms debounce then
+ * completes against a viewport that is already correct and changes nothing.
+ *
+ * Returns a disposer.
  */
 export function installViewportAnchor(el: HTMLElement): () => void {
   let prev: { cx: number; cy: number } | null = null;
@@ -73,7 +114,25 @@ export function installViewportAnchor(el: HTMLElement): () => void {
     if (dx === 0 && dy === 0) return;
     const vp = edgelessRoot()?.gfx?.viewport;
     if (!vp || !vp.zoom) return;
-    vp.setCenter(vp.centerX + dx / vp.zoom, vp.centerY + dy / vp.zoom);
+    // Read the pre-correction centre BEFORE anything below mutates it.
+    const cx0 = vp.centerX;
+    const cy0 = vp.centerY;
+    const zoom = vp.zoom;
+
+    // 1. Make the viewport's idea of its own size current — see the interface.
+    vp._cachedBoundingClientRect = null;
+    vp._cachedOffsetWidth = null;
+    // 2. Open a resize and close it in the same breath. `onResize` is what
+    //    BlockSuite's own observer calls; `forceUpdate` on `setCenter` then
+    //    completes it immediately rather than 200ms later. Completion is the
+    //    step that writes the new size into the viewport and repositions every
+    //    block, so doing both here is what makes the correction land on this
+    //    frame — and it is idempotent, so BlockSuite's own handler arriving
+    //    afterwards finds nothing left to change.
+    vp.onResize();
+    // 3. Anchor: cancel the container centre's movement, so the point the user
+    //    was looking at is under the same pixel it was a frame ago.
+    vp.setCenter(cx0 + dx / zoom, cy0 + dy / zoom, true);
   };
 
   measure();

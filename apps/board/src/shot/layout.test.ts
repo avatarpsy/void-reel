@@ -10,7 +10,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { parseFountain } from './fountain';
-import { EMPTY_ROW_H, GUTTER, planBoard } from './layout';
+import { EMPTY_ROW_H, GUTTER, nearestSlotOrder, planBoard } from './layout';
 import { SHOT_GAP, SHOT_W } from './model';
 
 const SCRIPT = `# ACT ONE
@@ -149,5 +149,42 @@ describe('planBoard', () => {
     const plan = planBoard(split, []);
     expect(plan.sequences.map(s => [s.title, s.from, s.to]))
       .toEqual([['A', 0, 0], ['B', 1, 1], ['A', 2, 2]]);
+  });
+});
+
+/**
+ * DRAGGING A CARD TO A NEW PLACE IN THE ROW.
+ *
+ * Slots on a 696px pitch: 360, 1056, 1752 (left edges), so centres at 680,
+ * 1376, 2072. The threshold is half of that, 348, which is the point at which
+ * the dragged card visibly overlaps its neighbour more than its own slot.
+ */
+describe('nearestSlotOrder', () => {
+  const ROW = ['a', 'b', 'c'];
+  const centreOf = (slot: number) => GUTTER + SHOT_W / 2 + slot * (SHOT_W + SHOT_GAP);
+
+  it('takes the slot it is nearest, at just over half a pitch', () => {
+    // 'c' sits in slot 2. Dragged 0.6 of a pitch left it is nearest slot 1.
+    const c = centreOf(2) - (SHOT_W + SHOT_GAP) * 0.6;
+    expect(nearestSlotOrder(ROW, 'c', c)).toEqual(['a', 'c', 'b']);
+  });
+
+  it('stays put for a nudge under half a pitch — that is not a re-cut', () => {
+    const c = centreOf(2) - (SHOT_W + SHOT_GAP) * 0.4;
+    expect(nearestSlotOrder(ROW, 'c', c)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('crosses two slots when it is dragged two slots', () => {
+    expect(nearestSlotOrder(ROW, 'c', centreOf(0))).toEqual(['c', 'a', 'b']);
+  });
+
+  it('clamps a card dragged off the end of the row to the end of it', () => {
+    expect(nearestSlotOrder(ROW, 'a', centreOf(9))).toEqual(['b', 'c', 'a']);
+    expect(nearestSlotOrder(ROW, 'c', centreOf(-4))).toEqual(['c', 'a', 'b']);
+  });
+
+  it('leaves a row of one alone, and a card that is not in the row', () => {
+    expect(nearestSlotOrder(['a'], 'a', 99999)).toEqual(['a']);
+    expect(nearestSlotOrder(ROW, 'zz', centreOf(0))).toEqual(ROW);
   });
 });

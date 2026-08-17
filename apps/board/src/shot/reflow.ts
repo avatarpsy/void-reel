@@ -31,7 +31,8 @@ import {
 } from '@blocksuite/std/gfx';
 
 import { relayOffHostRelease } from './drag-release';
-import { SHOT_H } from './model';
+import { nearestSlotOrder } from './layout';
+import { SHOT_H, SHOT_W } from './model';
 import { boardPlan, readShots, relayoutShots } from './shots';
 
 export class ShotReflowExtension extends InteractivityExtension {
@@ -120,18 +121,46 @@ export class ShotReflowExtension extends InteractivityExtension {
     for (const id of ids) this.refile(id);
 
     /**
-     * THEN SNAP.
+     * THEN SNAP — TO THE NEAREST SLOT, NOT TO WHERE THE LEFT EDGE LANDED.
      *
-     * `readShots` sorts by row and then by x — which, now that this runs after
-     * the drop has been committed, is exactly where the user just put the card.
-     * This only puts the cards back on the pitch.
+     * ── WHY THE FIRST VERSION FELT LIKE A REFUSAL ────────────────────────────
+     * It re-read the board and sorted by x, so a card only changed places once
+     * its LEFT EDGE crossed its neighbour's — a full card-and-gap, 696px. Drag a
+     * card halfway onto the one beside it, which is what everybody does and what
+     * every other grid in the world accepts, and the sort still put it back
+     * where it started. It looked exactly like the board refusing the gesture,
+     * and the report was "I move them and they snap back".
      *
-     * `relayoutShots` writes nothing when a card is already where it belongs, so
-     * dragging a shot a few pixels and letting go costs one write for that card
-     * and none for the rest.
+     * Nearest-slot is the rule people already know: when the card's MIDDLE is
+     * closer to the next slot than to its own, it takes that slot. That halves
+     * the distance and, more importantly, makes the threshold the thing the eye
+     * is already judging — overlap — instead of an invisible edge comparison.
+     *
+     * Only the card that was actually dragged is repositioned this way. Every
+     * other card keeps the order the board already had, so a drop cannot
+     * quietly reshuffle anything the user did not touch.
      */
-    const order = readShots(this.std).map(s => s.id);
+    const dragged = new Set(ids);
+    const plan = boardPlan(this.std);
+    const order: string[] = [];
+    for (const row of plan.rows) {
+      order.push(...this.reorderRow(row.shotIds, dragged));
+    }
     if (order.length) relayoutShots(this.std, order);
+  }
+
+  /** One row, with the dragged card moved to the slot it is nearest. */
+  private reorderRow(rowIds: readonly string[], dragged: Set<string>): string[] {
+    const moved = rowIds.find(id => dragged.has(id));
+    if (!moved) return [...rowIds];
+
+    const block = this.std.store.getBlock(moved);
+    if (!block) return [...rowIds];
+    let box: number[];
+    try { box = JSON.parse((block.model.props as { xywh: string }).xywh) as number[]; }
+    catch { return [...rowIds]; }
+
+    return nearestSlotOrder(rowIds, moved, box[0] + (box[2] || SHOT_W) / 2);
   }
 
   /**

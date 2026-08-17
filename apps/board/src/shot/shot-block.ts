@@ -623,10 +623,24 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
        card the body scrolls, and a take strip that shrank to nothing there
        would be the old complaint in a new place.
        (No backticks in here: this is inside a css template literal.) */
-    .takes { display: flex; flex-direction: column; gap: 5px; flex: 1 0 auto;
-             min-height: 0;
-             border-top: 1px solid var(--vs-border, rgba(15, 23, 42, 0.1));
-             padding-top: 8px; }
+    .takes {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      /* NO GROW, SOME SHRINK, AND A FLOOR.
+         No grow, so the free space on a nearly empty card goes to the body and
+         the take row stays pinned to the bottom edge rather than floating in
+         the middle with a gap under it.
+         Some shrink, so a card whose fields have filled it gives the row back
+         its height instead of pushing it off the card — the body scrolls, which
+         is what a body is for.
+         The floor is a thumbnail you can still tell two performances apart in.
+         Below that the row is not worth the space it costs. */
+      flex: 0 1 auto;
+      min-height: 104px;
+      border-top: 1px solid var(--vs-border, rgba(15, 23, 42, 0.1));
+      padding: 8px 14px 12px;
+    }
     /* THE ROW SCROLLS SIDEWAYS AND NEVER GROWS DOWNWARD.
        A shot with nine takes is a normal amount of trying, and nine tiles must
        cost the card exactly what one does — a wrapping row would push the
@@ -644,11 +658,15 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
       overscroll-behavior: contain;
       scrollbar-width: thin;
       padding: 2px;
-      flex: 1;
-      /* Enough to recognise a face at the floor, and capped so a card with one
-         reference does not turn into a contact sheet with a caption. */
+      /* A REAL BASIS, NOT max-height. flex: 1 against an auto basis made the
+         row's height depend on the tiles, and the tiles stretch to the row —
+         each waiting on the other, which is how the previews ended up at their
+         minimum inside a strip that had grown around them. A stated height is
+         the size the row wants; shrink takes it back down when the card is full.
+         Capped at what it is, so one take does not become a contact sheet. */
+      flex: 1 1 auto;
+      height: 168px;
       min-height: 76px;
-      max-height: 168px;
     }
     /* THE TAKE'S OWN SHAPE, NOT A SLOT'S.
        (No backticks anywhere in here: this is inside a css template literal.)
@@ -674,7 +692,12 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
          space on both sides. It is a floor for the moment before the picture
          loads and for a take whose poster has gone, not a shape. */
       min-width: 34px;
-      max-width: 260px;
+      /* 16:9 AT THE ROW'S FULL HEIGHT, which is what this number is: 168 tall
+         wants 299 wide. It was 260, so every landscape take was pillarboxed by
+         forty pixels — the one shape that should have fit exactly. Wider than
+         this is a 2.39 anamorphic frame, and letterboxing that is the honest
+         thing to do rather than letting one take eat the row. */
+      max-width: 300px;
       border-radius: 7px;
       overflow: hidden;
       background: #12161f;
@@ -695,7 +718,7 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
       display: block;
       height: 100%;
       width: auto;
-      max-width: 260px;
+      max-width: 300px;
       object-fit: contain;
       background: #12161f;
       /* A shot with nine takes is nine pictures the browser must not fetch
@@ -2506,10 +2529,24 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
         -->
         ${this.renderFoot(isGraphic, caps, credits, warnings)}
 
-        <!-- AND WHAT CAME BACK. Bottom of the card, under the button that
-             produced it: a take is the answer to everything above it. -->
-        ${this.renderTakes()}
       </div>
+
+        <!--
+          AND WHAT CAME BACK — a SIBLING of the body, not its last child.
+
+          It was the last thing inside the scrolling body, and the body is the
+          one part of the card that can overflow. So on any shot with real
+          content — a written prompt, narration, a few references — the fields
+          above added up to more than the card and pushed the take row past the
+          bottom edge. Half a thumbnail showing, and the rest reachable only by
+          scrolling a box nobody expects to scroll. That is the "previews are
+          getting clipped" report, and no amount of sizing inside the body could
+          have fixed it: the row was outside the visible box.
+
+          Out here it is structurally unclippable, exactly like the sheets below,
+          and the body scrolls under it instead.
+        -->
+        ${this.renderTakes()}
 
         <!--
         THE SHEETS ARE SIBLINGS OF THE BODY, NOT CHILDREN OF IT — they pin to

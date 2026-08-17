@@ -262,18 +262,80 @@ function holdFocus(std: BlockStdScope, el: HTMLElement): void {
    * in it at all: inside this field it is the same interaction continuing (and
    * `takeCaret` re-arms the guard anyway); outside it, the user has moved on.
    */
-  const stop = (e: Event) => {
-    if (el.contains(e.target as Node | null)) return;
+  const host = (std.host ?? null) as HTMLElement | null;
+
+  const release = () => {
     done = true;
     window.removeEventListener('pointerdown', stop, { capture: true });
+    doc.removeEventListener('focusin', onFocusIn, true);
+    el.removeEventListener('keydown', onEscape);
+  };
+
+  const stop = (e: Event) => {
+    if (el.contains(e.target as Node | null)) return;
+    release();
   };
   window.addEventListener('pointerdown', stop, { capture: true });
 
-  const tick = () => {
-    if (done || !el.isConnected || performance.now() - started > GUARD_MS) {
-      window.removeEventListener('pointerdown', stop, { capture: true });
+  /**
+   * ── THE STEAL DOES NOT STOP AFTER A QUARTER OF A SECOND ──────────────────
+   *
+   * Everything below the rAF tick is a 400ms budget, and that was enough for
+   * the burst of selection churn a click provokes. It is not enough for a
+   * PERSON. Click the length box, take your hand off the mouse to reach the
+   * keyboard, and the pointer drifts across the canvas: the edgeless layer
+   * updates `std.selection`, `RangeBinding._onStdSelectionChanged` runs, and
+   * line 293 of range-binding calls `host.focus({ preventScroll: true })` — a
+   * second steal, on a path `data-range-sync-exclude` does not guard, because
+   * that attribute is only consulted for NATIVE selection changes.
+   *
+   * Measured, with the box focused and the pointer merely moved over empty
+   * canvas: `document.activeElement` went from `INPUT.shot__durin` to
+   * `EDITOR-HOST`, and every keystroke after it went to the canvas. That is the
+   * whole of "I have to keep my cursor on the box, otherwise it goes out of
+   * focus" — the field was fine as long as the mouse never moved.
+   *
+   * ── WHY ONLY THE HOST, AND WHY THAT IS SAFE ──────────────────────────────
+   * Focus is taken back ONLY when it lands on the editor host itself. Nobody
+   * focuses the host by hand: a real click on the canvas fires `pointerdown`
+   * first, and `stop` above has already ended the guard by the time focus
+   * moves. So host-as-destination means the steal and nothing else. Focus that
+   * goes anywhere else — another field, a button, the browser chrome — is the
+   * user leaving, and is let go.
+   *
+   * This lives until the user does something that means they are done with the
+   * field, not until a timer expires.
+   */
+  function onFocusIn(e: FocusEvent): void {
+    if (done) return;
+    if (!el.isConnected) { release(); return; }
+
+    const to = e.target as Node | null;
+    if (to && el.contains(to)) {
+      lastGood = caret.read() ?? lastGood;
       return;
     }
+    // No host to compare against — we cannot tell the steal from a departure,
+    // so we claim neither and let the rAF tick below do its bounded job.
+    if (!host) return;
+    if (to !== host) { release(); return; }
+
+    el.focus({ preventScroll: true });
+    caret.restore(lastGood);
+  }
+  doc.addEventListener('focusin', onFocusIn, true);
+
+  // Escape is the deliberate way out (see stopFieldKeys) — it blurs, and the
+  // guard must not undo that.
+  const onEscape = (e: KeyboardEvent) => { if (e.key === 'Escape') release(); };
+  el.addEventListener('keydown', onEscape);
+
+  const tick = () => {
+    // ONLY THE TICK ENDS HERE. The focusin guard above outlives this budget on
+    // purpose — see its comment — so the 400ms expiry stops polling without
+    // tearing the rest down. A disconnected element is a real end for both.
+    if (done || !el.isConnected) { release(); return; }
+    if (performance.now() - started > GUARD_MS) return;
 
     // The provocation, removed. Cheap, and it is the actual fix — the steal only
     // fires while a non-text selection exists.

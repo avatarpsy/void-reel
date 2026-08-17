@@ -38,9 +38,23 @@ import { focusField, stopFieldKeys, takeCaret } from './field-caret';
  * So this stub does the same thing the real one does: it clears only the types
  * it is asked for, and clearing `text` removes the DOM ranges.
  */
-function fakeStd(selections: Array<{ type: string }> = []) {
+/**
+ * The host is part of the fixture now, because the guard distinguishes THE
+ * STEAL from the user leaving by where focus lands: `range-binding` focuses the
+ * editor host and nothing else does. A fake with no host cannot tell them apart
+ * and falls back to the bounded rAF tick.
+ */
+function fakeHost(): HTMLElement {
+  const host = document.createElement('editor-host');
+  host.tabIndex = 0;
+  document.body.append(host);
+  return host;
+}
+
+function fakeStd(selections: Array<{ type: string }> = [], host?: HTMLElement) {
   let value = [...selections];
   return {
+    host,
     selection: {
       get value() { return value; },
       clear: vi.fn((types?: string[]) => {
@@ -168,18 +182,66 @@ describe('takeCaret — mid-gesture', () => {
    */
   it('takes focus back when the editor steals it', async () => {
     const el = field();
-    const thief = document.createElement('div');
-    thief.tabIndex = 0;
-    document.body.append(thief);
+    const host = fakeHost();
 
-    takeCaret(fakeStd(), el, 10, 10);
+    takeCaret(fakeStd([], host), el, 10, 10);
     expect(document.activeElement).toBe(el);
 
-    thief.focus();
-    expect(document.activeElement).toBe(thief);
+    host.focus();
+    await frames(1);
+    expect(document.activeElement).toBe(el);
+  });
+
+  /**
+   * AND KEEPS TAKING IT BACK, long after the rAF tick's 400ms budget.
+   *
+   * This is the bug the budget could not reach: click the length box, pause to
+   * reach the keyboard, and any pointer drift over the canvas changes
+   * `std.selection`, which makes `range-binding` focus the host again. The old
+   * guard had long since expired, so the keystrokes went to the canvas.
+   */
+  it('still takes it back after the tick budget has expired', async () => {
+    const el = field();
+    const host = fakeHost();
+
+    takeCaret(fakeStd([], host), el, 10, 10);
+    await new Promise(r => setTimeout(r, 500));
+
+    host.focus();
+    await frames(1);
+    expect(document.activeElement).toBe(el);
+  });
+
+  /**
+   * AND LETS GO WHEN THE USER MEANS TO LEAVE. Focus landing anywhere that is
+   * not the host is a person moving on, and fighting that would be a field you
+   * cannot get out of — worse than the bug.
+   */
+  it('lets go when focus moves somewhere that is not the host', async () => {
+    const el = field();
+    const host = fakeHost();
+    const elsewhere = document.createElement('input');
+    document.body.append(elsewhere);
+
+    takeCaret(fakeStd([], host), el, 10, 10);
+    elsewhere.focus();
 
     await frames(3);
-    expect(document.activeElement).toBe(el);
+    expect(document.activeElement).toBe(elsewhere);
+  });
+
+  /** Escape is the deliberate way out, and the guard must not undo it. */
+  it('lets go on Escape', async () => {
+    const el = field();
+    const host = fakeHost();
+
+    takeCaret(fakeStd([], host), el, 10, 10);
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    el.blur();
+    host.focus();
+
+    await frames(3);
+    expect(document.activeElement).not.toBe(el);
   });
 
   /**

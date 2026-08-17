@@ -259,3 +259,40 @@ function bands(script: ParsedScript, rows: BoardRow[]): {
     acts: run(r => r.actIndex, i => script.acts[i]?.title ?? ''),
   };
 }
+
+/**
+ * ONE ROW, REORDERED AROUND THE CARD THAT WAS DRAGGED.
+ *
+ * The rule is nearest-slot: the moved card takes whichever slot its CENTRE is
+ * closest to. `Math.round` is the whole of it — half a pitch either way rounds
+ * to the next slot — and that half-pitch is the threshold the eye is already
+ * judging, because half a pitch is when the cards visibly overlap.
+ *
+ * ── WHAT THIS REPLACED, AND WHY IT READ AS A BUG ─────────────────────────────
+ * The strip order used to be re-derived by sorting every card by its left edge.
+ * Since all the cards are the same width, that means a card only changes places
+ * once its edge passes its neighbour's — a full card AND the gap, 696px. Drag
+ * one halfway onto the card beside it, which is what everybody does, and the
+ * sort put it straight back. Indistinguishable from the board refusing the
+ * gesture, and reported as "I move them and they snap back".
+ *
+ * Only the moved card is repositioned. The rest keep the order they had, so a
+ * drop can never quietly reshuffle cards the user did not touch.
+ */
+export function nearestSlotOrder(
+  rowIds: readonly string[],
+  movedId: string,
+  centre: number,
+): string[] {
+  const ids = [...rowIds];
+  if (ids.length < 2 || !ids.includes(movedId)) return ids;
+
+  const slot = Math.round((centre - (GUTTER + SHOT_W / 2)) / (SHOT_W + SHOT_GAP));
+  // Clamped: a card dragged past the end of a row belongs at the end of it,
+  // not nowhere.
+  const target = Math.max(0, Math.min(ids.length - 1, slot));
+
+  const rest = ids.filter(id => id !== movedId);
+  rest.splice(target, 0, movedId);
+  return rest;
+}
