@@ -628,22 +628,19 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
        card the body scrolls, and a take strip that shrank to nothing there
        would be the old complaint in a new place.
        (No backticks in here: this is inside a css template literal.) */
+    /* THE SHRINKING HALF of the box above — the controls never give, this does.
+       A hairline rather than a full border: it is a division inside one box,
+       not the edge between two. */
     .takes {
       display: flex;
       flex-direction: column;
       gap: 5px;
-      /* NO GROW, SOME SHRINK, AND A FLOOR.
-         No grow, so the free space on a nearly empty card goes to the body and
-         the take row stays pinned to the bottom edge rather than floating in
-         the middle with a gap under it.
-         Some shrink, so a card whose fields have filled it gives the row back
-         its height instead of pushing it off the card — the body scrolls, which
-         is what a body is for.
-         The floor is a thumbnail you can still tell two performances apart in.
-         Below that the row is not worth the space it costs. */
       flex: 0 1 auto;
+      /* The floor is a thumbnail you can still tell two performances apart in.
+         Below that the row is not worth the space it costs, and the card is
+         better off giving the height to the body. */
       min-height: 104px;
-      border-top: 1px solid var(--vs-border, rgba(15, 23, 42, 0.1));
+      border-top: 1px solid var(--vs-border, rgba(15, 23, 42, 0.06));
       padding: 8px 14px 12px;
     }
     /* THE ROW SCROLLS SIDEWAYS AND NEVER GROWS DOWNWARD.
@@ -1040,12 +1037,31 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
 
        As a SIBLING of the body it is structurally unclippable: the body is the
        only thing that can give, and the controls are always reachable. */
-    /* A ROW IN THE CARD, not a bar bolted to its bottom edge.
-       It used to be pinned outside the scrolling body, so it carried a
-       full-bleed background and a top border to separate itself from whatever
-       it was floating over. In the flow it needs neither: it is a step between
-       the references above it and the takes below, and it is bracketed the same
-       way every other lane on the card is. */
+    /* THE BOTTOM OF THE CARD, AS ONE BOX.
+       (No backticks in here: this is inside a css template literal.)
+
+       The model line, the length, GENERATE and the takes, held together below
+       the scrolling body. See the markup for why neither half can live inside
+       the body.
+
+       0 1 auto: no grow, so the free space on a nearly empty card goes to the
+       body and this stays against the bottom edge rather than floating in the
+       middle. Shrink, so a card the user has made short gives space back from
+       the take row — but only down to the floor below, which is the height of
+       the controls plus a thumbnail you can still judge. Past that the card is
+       simply too short and the body, which is the part that scrolls, keeps
+       giving instead. */
+    .shot__base {
+      display: flex;
+      flex-direction: column;
+      flex: 0 1 auto;
+      min-height: 0;
+      border-top: 1px solid var(--vs-border, rgba(15, 23, 42, 0.1));
+      background: var(--vs-shot-bg, #fff);
+    }
+    /* The controls are the one thing on this card that never gives up a pixel:
+       flex none, so however short the card gets, the model line and the button
+       are still there. */
     .shot__foot {
       position: relative;
       display: flex;
@@ -1053,8 +1069,7 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
       flex-wrap: wrap;
       gap: 8px;
       flex: none;
-      padding-top: 10px;
-      border-top: 1px solid var(--vs-border, rgba(15, 23, 42, 0.08));
+      padding: 9px 14px;
       font: 500 9.5px/1 var(--affine-font-family, sans-serif);
       color: var(--vs-text-mute, rgba(26, 26, 46, 0.45));
     }
@@ -2597,31 +2612,34 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
           </div>`;
         })}
 
-        <!--
-          WHAT IT WILL BE MADE WITH, AND THE BUTTON THAT MAKES IT — the last
-          thing before the results, because it is the last decision. See
-          renderFoot below for why it stopped being a pinned footer.
-        -->
-        ${this.renderFoot(isGraphic, caps, credits, warnings)}
-
       </div>
 
         <!--
-          AND WHAT CAME BACK — a SIBLING of the body, not its last child.
+          THE BOTTOM OF THE CARD, AS ONE BOX, OUTSIDE THE SCROLLING BODY.
 
-          It was the last thing inside the scrolling body, and the body is the
-          one part of the card that can overflow. So on any shot with real
-          content — a written prompt, narration, a few references — the fields
-          above added up to more than the card and pushed the take row past the
-          bottom edge. Half a thumbnail showing, and the rest reachable only by
-          scrolling a box nobody expects to scroll. That is the "previews are
-          getting clipped" report, and no amount of sizing inside the body could
-          have fixed it: the row was outside the visible box.
+          Both halves used to be somewhere else and both were wrong for the same
+          reason: the body is the one part of the card that can overflow, so
+          anything left inside it can be pushed off the bottom edge.
 
-          Out here it is structurally unclippable, exactly like the sheets below,
-          and the body scrolls under it instead.
+            • The take row went first. On a shot with a written prompt and a few
+              references, the fields above it added up to more than the card and
+              the previews were cut in half — reachable only by scrolling a box
+              nobody expects to scroll.
+            • The model line and the GENERATE button went next, and that one is
+              worse: shorten the card and the button a person is looking for
+              simply is not there, with a strip of takes sitting where it should
+              be. A control you cannot reach is not a layout problem, it is a
+              card that cannot be used.
+
+          Out here neither can be clipped. They are one box because they are one
+          thought — what this shot will be made with, the button that makes it,
+          and what came back — and one box means one border, one background and
+          one thing that holds the bottom of the card no matter how short it is.
         -->
-        ${this.renderTakes()}
+        <div class="shot__base">
+          ${this.renderFoot(isGraphic, caps, credits, warnings)}
+          ${this.renderTakes()}
+        </div>
 
         <!--
         THE SHEETS ARE SIBLINGS OF THE BODY, NOT CHILDREN OF IT — they pin to
