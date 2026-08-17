@@ -29,6 +29,7 @@ import { state } from 'lit/decorators.js';
 import { blockSrcdoc } from '../ui/block-render';
 import { ensureBlockRuntime } from '../ui/block-runtime';
 import { claimFieldClipboard } from '../ui/field-caret';
+import { blockScrollWheel } from '../ui/wheel';
 import { draftMeta, type DraftBlockModel } from './draft-block';
 
 /** Slot kinds, in the order a person reads a design: what it says, then shows. */
@@ -390,7 +391,7 @@ export class DraftBlockComponent extends GfxBlockComponent<DraftBlockModel> {
       <div
         class="d__body"
         @pointerdown=${(e: Event) => e.stopPropagation()}
-        @wheel=${(e: WheelEvent) => e.stopPropagation()}
+        @wheel=${blockScrollWheel}
       >
         <span class="d__label">
           ${entries.length ? `${entries.length} fillable slot${entries.length === 1 ? '' : 's'}` : 'Slots'}

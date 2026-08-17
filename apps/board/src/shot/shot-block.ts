@@ -29,6 +29,7 @@ import {
   focusField,
   takeCaret,
 } from '../ui/field-caret';
+import { blockScrollWheel, claimScrollWheel } from '../ui/wheel';
 import {
   FIELD_SPECS, REF_KIND_LABEL, roleLabel, SHOT_KIND_HINT, SHOT_KIND_LABEL, SHOT_KINDS,
   chosenTake, formatTime, isTimed, rolesFor, takeAsMedia, takeThumb, trimWindow,
@@ -1943,11 +1944,12 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
    * innermost thing that can move is the thing that moves. The written fields
    * no longer take part: they grow to their text rather than scrolling inside
    * themselves, so the body is where their overflow goes.
+   *
+   * And a ctrl+wheel is never claimed at all — that is the zoom gesture, and it
+   * belongs to the canvas wherever the pointer is. See `ui/wheel.ts`.
    */
   private readonly onBodyWheel = (e: WheelEvent) => {
-    const el = e.currentTarget as HTMLElement;
-    if (el.scrollHeight <= el.clientHeight) return;
-    e.stopPropagation();
+    claimScrollWheel(e, e.currentTarget as HTMLElement, 'y');
   };
 
   /** See `ui/field-caret.ts` — the reasoning lives with the code. */
@@ -2023,7 +2025,7 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
       class="seqmenu"
       @pointerdown=${(e: Event) => e.stopPropagation()}
       @click=${(e: Event) => e.stopPropagation()}
-      @wheel=${(e: WheelEvent) => e.stopPropagation()}
+      @wheel=${blockScrollWheel}
     >
       ${script.scenes.length
         ? html`
@@ -3244,12 +3246,12 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
    * gesture over a reference row would zoom the whole board — the single most
    * jarring thing a canvas can do while you are reading a list. Only claimed
    * when the lane actually has somewhere to scroll, so an empty row still pans
-   * the board like the space around it.
+   * the board like the space around it — and never for a ctrl+wheel, which is
+   * the zoom gesture and belongs to the canvas. See `ui/wheel.ts`.
    */
   private readonly onLaneWheel = (e: WheelEvent) => {
     const strip = e.currentTarget as HTMLElement;
-    if (strip.scrollWidth <= strip.clientWidth) return;
-    e.stopPropagation();
+    if (!claimScrollWheel(e, strip, 'x')) return;
     e.preventDefault();
     strip.scrollBy({ left: e.deltaY + e.deltaX, behavior: 'auto' });
   };

@@ -33,6 +33,7 @@ import { repeat } from 'lit/directives/repeat.js';
 import { offsetOfLine } from './fountain';
 import { type ScreenplayBlockModel } from './screenplay-doc';
 import { rowClass, screenplayView, type ScreenplayRow } from './screenplay-view';
+import { blockScrollWheel } from '../ui/wheel';
 
 /** Shown on a board whose screenplay has not been started. */
 const PLACEHOLDER = `Title: Untitled
@@ -422,7 +423,7 @@ export class ScreenplayBlockComponent extends GfxBlockComponent<ScreenplayBlockM
             .value=${text}
             @pointerdown=${(e: Event) => e.stopPropagation()}
             @dblclick=${(e: Event) => e.stopPropagation()}
-            @wheel=${(e: WheelEvent) => e.stopPropagation()}
+            @wheel=${blockScrollWheel}
             @keydown=${(e: KeyboardEvent) => {
               // The canvas listens for keys on the host — Backspace deletes the
               // selected block, space pans. Without this, writing a script would
@@ -435,7 +436,7 @@ export class ScreenplayBlockComponent extends GfxBlockComponent<ScreenplayBlockM
         : html`<div
             class="sp__scroll"
             @pointerdown=${(e: Event) => e.stopPropagation()}
-            @wheel=${(e: WheelEvent) => e.stopPropagation()}
+            @wheel=${blockScrollWheel}
             @dblclick=${(e: MouseEvent) => {
               e.stopPropagation();
               // The line under the pointer, so editing opens where the user was
