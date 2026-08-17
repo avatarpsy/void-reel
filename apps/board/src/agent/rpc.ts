@@ -368,6 +368,17 @@ function digest(board: MountedBoard) {
  * returning stale data.
  */
 export interface BoardRpcOptions {
+  /**
+   * The pending-media layer, for `board-pending-media`.
+   *
+   * A getter for the same reason `screenplay` is one: the RPC is installed
+   * before the chrome, and the readiness handshake must not wait on panels.
+   */
+  pending?: () => {
+    show(id: string, kind: 'image' | 'video' | 'audio', referenceIds: string[]): void;
+    hide(id: string): void;
+    fail(id: string, message: string): void;
+  } | null;
   /** Force a cloud snapshot. Compile calls it so the stored document can never
    *  be older than the project built from it. */
   flushCloud?: () => Promise<void>;
@@ -1743,6 +1754,33 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
      * A window event rather than a direct call, so the panel keeps its internals
      * to itself and anything else that lists assets can listen too.
      */
+    /**
+     * A CARD WHERE THE RESULT WILL BE, WHILE IT IS BEING MADE.
+     *
+     * The parent owns generation — the session, the credits, the model — so it
+     * is the only side that knows when one starts and how it ended. This is the
+     * only thing it needs from the canvas: raise a placeholder at the anchor the
+     * finished media will use, then clear it.
+     *
+     * `done` clears. `error` leaves it on screen saying why, because a failure
+     * that simply removes the card looks like nothing ever happened.
+     */
+    'voidspace:board-pending-media': args => {
+      const layer = opts.pending?.();
+      if (!layer) return { ok: true as const, rev };
+      const id = String(args.id ?? '');
+      if (!id) return fail('empty', 'A placeholder needs an id.');
+      const error = String(args.error ?? '');
+      if (error) layer.fail(id, error);
+      else if (args.done) layer.hide(id);
+      else {
+        const kind = args.kind === 'video' || args.kind === 'audio' ? args.kind : 'image';
+        const ids = Array.isArray(args.referenceIds) ? args.referenceIds.map(String) : [];
+        layer.show(id, kind, ids);
+      }
+      return { ok: true as const, rev };
+    },
+
     'voidspace:board-library-changed': () => {
       window.dispatchEvent(new CustomEvent('voidspace:library-changed'));
       return { ok: true as const, rev };

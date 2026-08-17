@@ -1749,3 +1749,53 @@ editor-host {
   color: var(--vs-text-mute);
   font: 400 10.5px/1.4 var(--affine-font-family);
 }
+
+
+/* ══ Pending media ═════════════════════════════════════════════════════════
+   A card in the spot a generation will land, for the minute or two it takes.
+   Chrome over the canvas, never a block — see ui/pending-media.ts for why. */
+.vs-pending-layer {
+  position: absolute; inset: 0;
+  pointer-events: none;
+  z-index: 6;                 /* under the asset panel (7), over the canvas */
+  overflow: hidden;
+}
+.vs-pending {
+  position: absolute; top: 0; left: 0;
+  transform-origin: top left;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 10px;
+  box-sizing: border-box; padding: 12px;
+  border: 1px dashed var(--vs-border);
+  border-radius: 10px;
+  background: var(--vs-panel);
+  pointer-events: none;
+  text-align: center;
+}
+.vs-pending__spinner {
+  width: 26px; height: 26px; flex: none;
+  border: 2px solid var(--vs-border);
+  border-top-color: var(--vs-accent-a);
+  border-radius: 50%;
+  animation: vs-pending-spin 0.85s linear infinite;
+}
+@keyframes vs-pending-spin { to { transform: rotate(360deg); } }
+/* A spinner is the one thing here that must not animate for someone who asked
+   for no motion; the card itself still says what is happening. */
+@media (prefers-reduced-motion: reduce) {
+  .vs-pending__spinner { animation: none; border-top-color: var(--vs-accent-a); }
+}
+.vs-pending__label {
+  color: var(--vs-text-dim);
+  font: 500 12px/1.4 var(--affine-font-family);
+}
+.vs-pending.is-failed {
+  border-style: solid;
+  border-color: rgba(255, 99, 99, 0.45);
+  cursor: pointer;
+}
+.vs-pending.is-failed .vs-pending__label { color: #ff8a8a; }
+.vs-pending__dismiss {
+  color: var(--vs-text-mute);
+  font: 400 10.5px/1.3 var(--affine-font-family);
+}

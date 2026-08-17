@@ -317,6 +317,27 @@ export interface CanvasSelection {
   mediaUrls: string[];
 }
 
+/**
+ * WHERE A RESULT MADE FROM THESE BELONGS.
+ *
+ * Just below their bounding box: a row of references reads left-to-right, so
+ * the thing made from them reads as the next line. Used by BOTH the pending
+ * placeholder and the real placement, so the spinner is replaced in the spot it
+ * occupied rather than the picture appearing somewhere else a minute later.
+ *
+ * Null when none of the ids resolve to something with a box — the caller then
+ * falls back to its own clear space, because there is nothing to be near.
+ */
+export function anchorFor(std: BlockStdScope, referenceIds: string[]): { x: number; y: number } | null {
+  if (!referenceIds.length) return null;
+  const boxed = readCanvas(std).filter(i => referenceIds.includes(i.id));
+  if (!boxed.length) return null;
+  return {
+    x: Math.min(...boxed.map(a => a.x)),
+    y: Math.max(...boxed.map(a => a.y + a.h)) + 64,
+  };
+}
+
 export function readSelection(std: BlockStdScope): CanvasSelection {
   const items = readCanvas(std, true);
   return {

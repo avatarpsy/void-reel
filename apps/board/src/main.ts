@@ -32,6 +32,7 @@ import { installBoardUi } from './ui/board-ui';
 import { installAssetPanel } from './ui/asset-panel';
 import { installMediaInspector } from './ui/media-inspector';
 import { installCanvasMenu } from './ui/canvas-menu';
+import { installPendingMedia } from './ui/pending-media';
 import { installSpacePan } from './ui/space-pan';
 import { installSpine } from './ui/spine';
 import { installToasts, toast } from './ui/toast';
@@ -181,6 +182,7 @@ async function boot(): Promise<void> {
   installBoardRpc(board, {
     flushCloud: () => cloud.flush(),
     screenplay: () => screenplay,
+    pending: () => pending,
   });
 
   /**
@@ -246,6 +248,10 @@ async function boot(): Promise<void> {
   // Select references, right-click, make something from them. The generation
   // itself is the parent's — this only turns the gesture into a request.
   installCanvasMenu(board, chromeHost);
+  // A card in the spot a generation will land, for as long as it takes. Handed
+  // to the RPC so the parent — which owns the generation — can raise and clear
+  // it without knowing anything about the canvas.
+  const pending = installPendingMedia(board, chromeHost);
   // Hold the board still when the WINDOW around it changes size — which on this
   // surface means the studio shell collapsing the agent chat and handing this
   // iframe the extra width. See `installViewportAnchor` for the why and the
