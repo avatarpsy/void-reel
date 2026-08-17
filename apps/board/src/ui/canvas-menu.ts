@@ -24,8 +24,6 @@
  * Same reason as `board-ui.ts`: chrome that sits over the editor, owns no
  * document state, and must not join BlockSuite's render cycle.
  */
-import { GfxControllerIdentifier } from '@blocksuite/std/gfx';
-
 import { readCanvas } from '../board/canvas';
 import type { MountedBoard } from '../blocksuite/editor';
 
@@ -53,6 +51,30 @@ function selectedMedia(board: MountedBoard): Array<{ id: string; kind: string }>
   return readCanvas(board.std, true)
     .filter(i => i.kind === 'image' || i.kind === 'media')
     .map(i => ({ id: i.id, kind: i.kind }));
+}
+
+/**
+ * WHICH SET THE USER MEANT — the same rule a file manager uses.
+ *
+ * Right-click something inside the current selection and the whole selection is
+ * what you acted on; right-click outside it and the selection becomes that one
+ * thing. Anything else surprises: the first is how "these four" is expressed,
+ * the second is how you change your mind.
+ *
+ * @param before  the selection as it was on the pointer-down, BEFORE BlockSuite
+ *                collapsed it to whatever the cursor was over
+ * @param clicked the block under the cursor, or '' for empty canvas
+ * @param now     the selection after that collapse
+ *
+ * Exported and pure because this rule has now been got wrong twice — once by
+ * reading the selection too late, once by a stray subscription overwriting the
+ * snapshot — and both times it failed silently as "only one reference".
+ */
+export function chooseReferences(before: string[], clicked: string, now: string[]): string[] {
+  // A single-item snapshot carries no more information than `now` does, and
+  // preferring it would keep a stale selection alive after the user moved on.
+  if (before.length > 1 && (!clicked || before.includes(clicked))) return [...before];
+  return [...now];
 }
 
 export function installCanvasMenu(board: MountedBoard, container: HTMLElement): () => void {
@@ -140,9 +162,7 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
      * followed by a right-click in the gap between the images is still "these".
      */
     const clickedId = target?.closest<HTMLElement>('[data-block-id]')?.dataset.blockId ?? '';
-    const useSnapshot = preClick.length > 1
-      && (!clickedId || preClick.includes(clickedId));
-    refIds = useSnapshot ? [...preClick] : selectedMedia(board).map(m => m.id);
+    refIds = chooseReferences(preClick, clickedId, selectedMedia(board).map(m => m.id));
     menu.innerHTML = render(refIds.length);
 
     // Positioned against the viewport and nudged back inside it, so a
@@ -192,16 +212,21 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
   window.addEventListener('blur', close);
   container.addEventListener('wheel', close, { passive: true });
 
-  // A selection that changes under an open menu makes its "from 3 references"
-  // a lie, so the menu goes rather than the count.
-  const gfx = board.std.get(GfxControllerIdentifier);
-  const sub = gfx.selection.slots.updated.subscribe(() => {
-    // Only while the menu is CLOSED does a selection change matter. The
-    // right-click itself changes the selection (BlockSuite selects what is
-    // under the cursor), so closing on that would shut the menu in the same
-    // frame it opened — which is what "the menu does nothing" looked like.
-    if (menu.hidden) preClick = selectedMedia(board).map(m => m.id);
-  });
+  /**
+   * NOTHING ELSE MAY TOUCH `preClick`.
+   *
+   * There was a `selection.slots.updated` subscription here that refreshed the
+   * snapshot whenever the menu was closed, on the theory that it kept it warm.
+   * It did the opposite, and it is why the fix above did not work: the
+   * right-click's own pointer-down collapses the selection, that fires
+   * `updated`, and the subscription overwrote the snapshot with the collapsed
+   * value — all before `contextmenu` ran. The pointer-down handler set the
+   * right answer and this erased it a microtask later.
+   *
+   * The pointer-down IS the refresh, and it happens at the only moment that
+   * matters. Anything that keeps a second copy of this in step is a second
+   * chance to get it wrong.
+   */
 
   return () => {
     container.removeEventListener('pointerdown', onPointerDown, true);
@@ -211,7 +236,6 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
     document.removeEventListener('keydown', onKey);
     window.removeEventListener('blur', close);
     container.removeEventListener('wheel', close);
-    sub.unsubscribe?.();
     menu.remove();
   };
 }
