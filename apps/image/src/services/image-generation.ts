@@ -216,7 +216,11 @@ export async function fetchAvatarContext(): Promise<AvatarContext[]> {
     const res = await fetch('/api/studio/avatar-context', { headers: { Authorization: `Bearer ${token}` } });
     if (!res.ok) return [];
     const j = await res.json();
-    return Array.isArray(j.avatars) ? j.avatars : [];
+    if (!Array.isArray(j.avatars)) return [];
+    // The route also lists avatars that have only a voice sample, because the
+    // web Add-media picker offers voice as well. This is an IMAGE reference
+    // picker: such an avatar would draw its name over an empty grid.
+    return (j.avatars as AvatarContext[]).filter((a) => Array.isArray(a.images) && a.images.length > 0);
   } catch {
     return [];
   }
