@@ -68,6 +68,8 @@ import {
   SelectItem,
   SelectGroup,
   SelectLabel,
+  PanelHeader,
+  PanelRail,
 } from "@openreel/ui";
 
 // Initialize engines as singletons
@@ -198,6 +200,14 @@ export const InspectorPanel: React.FC = () => {
   // User-resizable panel width (persisted via panels.inspector.width; the
   // drag handle lives in EditorInterface as a flex sibling).
   const inspectorWidth = useUIStore((state) => state.panels.inspector.width ?? 320);
+  // Collapse — the mirror of the Assets column, same control, same rail. See
+  // @openreel/asset-browser/panel-chrome for why it lives on the panel.
+  const inspectorCollapsed = useUIStore((state) => state.panels?.inspector?.collapsed ?? false);
+  const togglePanelCollapsed = useUIStore((state) => state.togglePanelCollapsed);
+  const toggleInspector = useCallback(
+    () => togglePanelCollapsed("inspector"),
+    [togglePanelCollapsed],
+  );
   const { getSelectedClipIds } = useUIStore();
   const selectedItems = useUIStore((state) => state.selectedItems);
   const selectedClipIds = getSelectedClipIds();
@@ -707,16 +717,33 @@ export const InspectorPanel: React.FC = () => {
     clipType === "svg" ||
     clipType === "sticker";
 
+  // Collapsed: a rail on the right edge, mirroring the Assets rail on the left.
+  // After every hook, so toggling never remounts the panel and never loses the
+  // transcription / caption state held above.
+  if (inspectorCollapsed) {
+    return <PanelRail side="right" label="Inspector" onExpand={toggleInspector} />;
+  }
+
   return (
     <div
       data-tour="inspector"
       style={{ width: inspectorWidth }}
       className="bg-background-secondary border-l border-border flex flex-col overflow-y-auto h-full custom-scrollbar shrink-0"
     >
-      <div className="p-5">
-        <h3 className="text-sm font-bold text-text-primary mb-5 tracking-tight">
-          Inspector
-        </h3>
+      {/* Panel header — the shared component, mirrored to the right edge. The
+          title used to sit inside the scrolling body, so it slid away as soon
+          as you scrolled the properties list and there was nowhere fixed to put
+          the collapse control. Sticky keeps both where the other panels put
+          them. */}
+      <PanelHeader
+        title="Inspector"
+        side="right"
+        collapsed={false}
+        onToggle={toggleInspector}
+        className="sticky top-0 z-10 bg-background-secondary px-5"
+      />
+
+      <div className="px-5 pb-5">
 
         {selectedClipIds.length > 1 && selectedCaptionIds.length >= 1 ? (
           /* Multiple boxes selected (marquee / shift-select) with at least one

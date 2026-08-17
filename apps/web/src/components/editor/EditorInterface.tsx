@@ -177,6 +177,11 @@ export const EditorInterface: React.FC = () => {
     previewCollapsed,
     centerView,
   } = useUIStore();
+  // Whether each docked column is showing its full body or its rail. Read here
+  // as well as in the panels themselves because the DRAG HANDLES between them
+  // are siblings in this row, and a handle for a collapsed panel is dead.
+  const assetsCollapsed = useUIStore((s) => s.panels?.mediaLibrary?.collapsed ?? false);
+  const inspectorCollapsed = useUIStore((s) => s.panels?.inspector?.collapsed ?? false);
   // The center workspace column shows EITHER the video preview or the audio
   // mixer, chosen by `centerView` (toolbar button swaps it; music projects
   // default to "mixer", video to "preview"). When the mixer is shown the
@@ -337,8 +342,11 @@ export const EditorInterface: React.FC = () => {
           <AssetsPanel />
         </PanelErrorBoundary>
 
-        {/* Drag handle: resize the Assets panel */}
-        <PanelResizer panelId="mediaLibrary" side="right" />
+        {/* Drag handle: resize the Assets panel. Gone while the panel is a
+            rail — a resize grip on something with no width to give is a
+            control that does nothing, and it sat right where the reopen
+            button is. */}
+        {!assetsCollapsed && <PanelResizer panelId="mediaLibrary" side="right" />}
 
         {showMixerCenter ? (
           <>
@@ -361,8 +369,8 @@ export const EditorInterface: React.FC = () => {
           </PanelErrorBoundary>
         )}
 
-        {/* Drag handle: resize the Inspector panel */}
-        <PanelResizer panelId="inspector" side="left" />
+        {/* Drag handle: resize the Inspector panel — see above. */}
+        {!inspectorCollapsed && <PanelResizer panelId="inspector" side="left" />}
 
         <PanelErrorBoundary name="Inspector">
           <InspectorPanel />

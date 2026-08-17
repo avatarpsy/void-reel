@@ -12,8 +12,6 @@ import {
   Redo2,
   Download,
   Save,
-  PanelLeftClose,
-  PanelRightClose,
   ChevronDown,
   SquareDashed,
   Circle,
@@ -38,6 +36,7 @@ import {
   SquareStack,
   Send,
 } from 'lucide-react';
+import { AllPanelsButton } from '@openreel/ui';
 import { useUIStore, Tool } from '../../../stores/ui-store';
 import { useProjectStore } from '../../../stores/project-store';
 import { onTopLinkClick } from '../../../services/navigate-top';
@@ -242,12 +241,14 @@ export function Toolbar() {
   const {
     activeTool,
     setActiveTool,
-    togglePanelCollapsed,
-    toggleInspectorCollapsed,
+    toggleAllPanels,
     openExportDialog,
     toggleShortcutsPanel,
     setPublishCarouselOpen,
   } = useUIStore();
+  // "Any open" rather than "all open" — the button clears the screen while
+  // anything is still on it, and only then restores. Matches the video editor.
+  const anyPanelOpen = useUIStore((s) => !s.isPanelCollapsed || !s.isInspectorCollapsed);
 
   const { project, setProjectName, undo, redo, canUndo, canRedo } = useProjectStore();
 
@@ -306,13 +307,14 @@ export function Toolbar() {
 
       <div className="w-px h-6 bg-border mx-1" />
 
-      <button
-        onClick={togglePanelCollapsed}
-        className="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-        title="Toggle left panel"
-      >
-        <PanelLeftClose size={18} />
-      </button>
+      {/* ONE panel control in the toolbar, acting on the whole set.
+          There used to be two here — a left-panel button beside "Back to
+          Projects" and a right-panel button past Export, half a screen apart —
+          and neither panel carried a control of its own, so the gesture lived
+          nowhere near the thing it closed. Per-panel collapse now sits on each
+          panel's header (LeftPanel / EditorInterface), which is where the video
+          editor and the board put it. */}
+      <AllPanelsButton anyOpen={anyPanelOpen} onToggle={toggleAllPanels} />
 
       <div className="w-px h-6 bg-border mx-1" />
 
@@ -397,14 +399,6 @@ export function Toolbar() {
       >
         <Download size={16} />
         Export
-      </button>
-
-      <button
-        onClick={toggleInspectorCollapsed}
-        className="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-        title="Toggle right panel"
-      >
-        <PanelRightClose size={18} />
       </button>
     </div>
   );

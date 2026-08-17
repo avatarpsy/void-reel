@@ -48,6 +48,8 @@ import {
   ContextMenuItem,
   ContextMenuSeparator,
   ContextMenuTrigger,
+  PanelHeader,
+  PanelRail,
 } from "@openreel/ui";
 import { useKieAIStore } from "../../stores/kieai-store";
 import { mediaName, mediaId } from "../../utils/media-name";
@@ -787,9 +789,16 @@ export const AssetsPanel: React.FC = () => {
   // `panels` is persisted wholesale, so preferences saved before this panel id
   // existed rehydrate without it — read defensively rather than crash.
   const assetsWidth = useUIStore((s) => s.panels?.mediaLibrary?.width ?? 320);
-  // Header expand button: toggle the Assets panel between its normal width
-  // and a wide preset so the user can see more columns of media at once
-  // (complements the drag handle). 320 is the default; 560 is "expanded".
+  // Collapse state — same model as every other editor: the panel does not
+  // unmount, it becomes a rail carrying the mirrored button (see
+  // @openreel/asset-browser/panel-chrome). Read defensively for the same
+  // reason `width` is: `panels` persists wholesale.
+  const assetsCollapsed = useUIStore((s) => s.panels?.mediaLibrary?.collapsed ?? false);
+  const togglePanelCollapsed = useUIStore((s) => s.togglePanelCollapsed);
+  const toggleAssets = useCallback(
+    () => togglePanelCollapsed("mediaLibrary"),
+    [togglePanelCollapsed],
+  );
   const runAdobeImport = useCallback(async () => {
     const path = adobePath.trim();
     if (!path || adobeBusy) return;
@@ -1256,6 +1265,14 @@ export const AssetsPanel: React.FC = () => {
     retryTask(item.kieaiTaskId);
   }, [retryTask, setKieAIItemState]);
 
+  // Collapsed: a rail, not an absence. Placed AFTER every hook in this
+  // component so the hook order is identical in both states — an early return
+  // above them would remount the whole panel on each toggle and drop the
+  // library's loaded state with it.
+  if (assetsCollapsed) {
+    return <PanelRail side="left" label="Assets" onExpand={toggleAssets} />;
+  }
+
   return (
     <div
       data-tour="assets"
@@ -1266,11 +1283,19 @@ export const AssetsPanel: React.FC = () => {
       {isImporting && (
         <LoadingIndicator message={importProgress || "Importing media..."} />
       )}
-      {/* Panel Header */}
-      <div className="px-5 py-4 flex items-center justify-between">
-        <span className="font-bold text-lg text-text-primary tracking-tight">
-          Assets
-        </span>
+      {/* Panel header — the SHARED one, so this column's title weight, row
+          height and trailing collapse button are literally the same component
+          the Inspector and the image editor's panels use. It was an 18px title
+          in a 56px row here and a 14px title everywhere else; a panel heading
+          that changes size as you move between editors is the kind of drift
+          nobody reports and everybody feels. */}
+      <PanelHeader
+        title="Assets"
+        side="left"
+        collapsed={false}
+        onToggle={toggleAssets}
+        className="px-5"
+      >
         <div className="flex gap-1">
           {/* `[&_*]:pointer-events-none` is load-bearing on every label
               in this panel — without it a real mouse click lands on
@@ -1286,21 +1311,21 @@ export const AssetsPanel: React.FC = () => {
             onClick={() => void showVoidspaceFolder()}
             disabled={folderBusy}
             title={folderError || "Open your Voidspace folder — recordings, generated media and renders"}
-            className={`inline-flex items-center justify-center h-6 w-6 rounded-md transition-colors cursor-pointer disabled:opacity-40 ${
+            className={`inline-flex items-center justify-center h-7 w-7 rounded-md transition-colors cursor-pointer disabled:opacity-40 ${
               folderError
                 ? "text-red-400 hover:bg-background-elevated"
-                : "text-text-secondary hover:text-text-primary hover:bg-background-elevated"
+                : "text-text-muted hover:text-text-primary hover:bg-background-elevated"
             }`}
           >
-            <Home size={14} />
+            <Home size={16} />
           </button>
           {isEmbedded ? (
             <button
               onClick={() => openMediaPicker()}
               title="Add media — upload, search the web, or generate with AI"
-              className="inline-flex items-center justify-center h-6 w-6 rounded-md text-text-secondary hover:text-text-primary hover:bg-background-elevated cursor-pointer transition-colors"
+              className="inline-flex items-center justify-center h-7 w-7 rounded-md text-text-muted hover:text-text-primary hover:bg-background-elevated cursor-pointer transition-colors"
             >
-              <Plus size={14} />
+              <Plus size={16} />
             </button>
           ) : (
             <label
@@ -1308,15 +1333,13 @@ export const AssetsPanel: React.FC = () => {
               title="Import media"
               role="button"
               tabIndex={0}
-              className="inline-flex items-center justify-center h-6 w-6 rounded-md text-text-secondary hover:text-text-primary hover:bg-background-elevated cursor-pointer transition-colors [&_*]:pointer-events-none"
+              className="inline-flex items-center justify-center h-7 w-7 rounded-md text-text-muted hover:text-text-primary hover:bg-background-elevated cursor-pointer transition-colors [&_*]:pointer-events-none"
             >
-              <Plus size={14} />
+              <Plus size={16} />
             </label>
           )}
-          {/* Expand / close removed — the panel is a fixed part of the editor
-              layout and both buttons only ever got in the way. */}
         </div>
-      </div>
+      </PanelHeader>
 
       {adobeOpen && (
         <div className="mx-5 mb-4 p-3 rounded-lg border border-border bg-background-secondary space-y-2">

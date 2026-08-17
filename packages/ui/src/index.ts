@@ -1,4 +1,5 @@
 export { cn } from "./lib/utils"
+export { useCenterShift } from "./hooks/use-center-shift"
 export { readSiteTheme, resolveBootTheme, watchSiteTheme, type SiteTheme } from "./lib/site-theme"
 
 export { Alert, AlertTitle, AlertDescription } from "./components/alert"
@@ -54,6 +55,18 @@ export {
   DropdownMenuRadioGroup,
 } from "./components/dropdown-menu"
 export { Input } from "./components/input"
+export {
+  PanelCollapseButton,
+  AllPanelsButton,
+  PanelHeader,
+  PanelRail,
+  PANEL_RAIL_PX,
+  type PanelSide,
+  type PanelCollapseButtonProps,
+  type AllPanelsButtonProps,
+  type PanelHeaderProps,
+  type PanelRailProps,
+} from "./components/panel-chrome"
 export { Label } from "./components/label"
 export { Popover, PopoverTrigger, PopoverContent } from "./components/popover"
 export { Progress } from "./components/progress"

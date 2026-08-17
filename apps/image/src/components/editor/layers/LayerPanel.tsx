@@ -294,15 +294,22 @@ export function LayerPanel() {
 
   return (
     <div className="h-full flex flex-col">
+      {/* The "Layers" heading that used to open this row is gone: the column's
+          shared PanelHeader (LeftPanel) now names the panel, and two titles one
+          above the other is what "two panels bolted together" looks like. The
+          row keeps what is actually LayerPanel's — generate, and the count. */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-border">
         <div className="flex items-center gap-1.5">
-          <h3 className="text-xs font-medium text-foreground">Layers</h3>
+          {/* `bg-white/10 text-white` — white on white in the light theme, so
+              this was an invisible button. Themed tokens, and the label spelled
+              out now that the row is no longer led by a redundant "Layers". */}
           <button
             onClick={() => setGenerateImageOpen(true)}
-            className="w-5 h-5 flex items-center justify-center rounded-md bg-white/10 hover:bg-white/20 text-white transition-colors"
+            className="inline-flex h-6 items-center gap-1 rounded-md bg-primary/10 px-2 text-[11px] font-medium text-primary transition-colors hover:bg-primary/20"
             title="Generate an image with AI"
           >
-            <Plus size={16} strokeWidth={2.5} />
+            <Plus size={13} strokeWidth={2.5} />
+            Generate
           </button>
         </div>
         <span className="text-[10px] text-muted-foreground">

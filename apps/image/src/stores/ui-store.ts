@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { subscribeWithSelector } from 'zustand/middleware';
+import { loadPanelCollapsed, savePanelCollapsed } from '@openreel/asset-browser';
 import type { EditSource } from '../services/image-handoff';
 
 export type AppView = 'welcome' | 'editor';
@@ -253,6 +254,9 @@ interface UIActions {
   setActivePanel: (panel: Panel) => void;
   togglePanelCollapsed: () => void;
   toggleInspectorCollapsed: () => void;
+  /** Close both side columns, or reopen them if either is already shut.
+   *  The Tab key and the toolbar's Panels button both land here. */
+  toggleAllPanels: () => void;
   setMaskEditLayerId: (layerId: string | null) => void;
   setGenerativeFillOpen: (open: boolean) => void;
   setGenerateImageOpen: (open: boolean, asPage?: boolean) => void;
@@ -317,8 +321,8 @@ export const useUIStore = create<UIState & UIActions>()(
     flattenedProjectId: null,
     activeTool: 'select',
     activePanel: 'layers',
-    isPanelCollapsed: false,
-    isInspectorCollapsed: false,
+    isPanelCollapsed: loadPanelCollapsed('image-left'),
+    isInspectorCollapsed: loadPanelCollapsed('image-right'),
     maskEditLayerId: null,
     generativeFillOpen: false,
     generateImageOpen: false,
@@ -479,8 +483,37 @@ export const useUIStore = create<UIState & UIActions>()(
       set(updates);
     },
     setActivePanel: (panel) => set({ activePanel: panel }),
-    togglePanelCollapsed: () => set((s) => ({ isPanelCollapsed: !s.isPanelCollapsed })),
-    toggleInspectorCollapsed: () => set((s) => ({ isInspectorCollapsed: !s.isInspectorCollapsed })),
+    /**
+     * Collapse state is REMEMBERED, through the same helper the board uses.
+     *
+     * This store is not persisted (it holds live tool state — brush size,
+     * drawing buffers, crop rect — none of which should survive a reload), so
+     * these three write the one flag they own straight to the shared
+     * `voidspace.panels.*` namespace. Without it the image editor was the only
+     * surface that forgot the choice the moment you refreshed.
+     */
+    togglePanelCollapsed: () => set((s) => {
+      const isPanelCollapsed = !s.isPanelCollapsed;
+      savePanelCollapsed('image-left', isPanelCollapsed);
+      return { isPanelCollapsed };
+    }),
+    toggleInspectorCollapsed: () => set((s) => {
+      const isInspectorCollapsed = !s.isInspectorCollapsed;
+      savePanelCollapsed('image-right', isInspectorCollapsed);
+      return { isInspectorCollapsed };
+    }),
+    /**
+     * Asymmetric on purpose — see the video editor's `toggleAllPanels`. While
+     * ANYTHING is open this clears the screen; only from a clear screen does it
+     * bring everything back. Toggling each independently would leave the user
+     * bouncing between two half-open layouts and never reaching the clean one.
+     */
+    toggleAllPanels: () => set((s) => {
+      const collapsed = !s.isPanelCollapsed || !s.isInspectorCollapsed;
+      savePanelCollapsed('image-left', collapsed);
+      savePanelCollapsed('image-right', collapsed);
+      return { isPanelCollapsed: collapsed, isInspectorCollapsed: collapsed };
+    }),
     setMaskEditLayerId: (layerId) => set({ maskEditLayerId: layerId }),
     setGenerativeFillOpen: (open: boolean) => set({ generativeFillOpen: open }),
     setGenerateImageOpen: (open: boolean, asPage = false) => set({ generateImageOpen: open, generateImageAsPage: open ? asPage : false }),

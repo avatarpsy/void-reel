@@ -370,6 +370,21 @@ const DEFAULT_SHORTCUTS: ShortcutDefinition[] = [
     enabled: true,
   },
   {
+    // Tab — the Photoshop/Figma gesture for "clear the chrome off my screen",
+    // which this editor had no way to do at all. Registered here rather than as
+    // its own window listener so it shows up in the shortcuts overlay, can be
+    // remapped, and inherits `shouldIgnoreTarget` — Tab must still leave a
+    // field, indent a caption and traverse focus wherever a caret is.
+    id: "view.togglePanels",
+    name: "Hide / Show Panels",
+    description: "Collapse both side panels, or bring them back",
+    category: "view",
+    defaultKey: "tab",
+    currentKey: "tab",
+    action: "view.togglePanels",
+    enabled: true,
+  },
+  {
     id: "file.save",
     name: "Save",
     description: "Save project",

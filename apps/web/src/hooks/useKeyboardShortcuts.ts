@@ -268,6 +268,12 @@ export function useKeyboardShortcuts() {
     setShowShortcutsOverlay(true);
   }, []);
 
+  /** Tab — collapse both docked columns, or bring them back. See
+   *  `view.togglePanels` in keyboard-shortcuts.ts for why it lives there. */
+  const handleTogglePanels = useCallback(() => {
+    useUIStore.getState().toggleAllPanels();
+  }, []);
+
   const handleSave = useCallback(() => {}, []);
 
   const handleExport = useCallback(() => {}, []);
@@ -318,6 +324,7 @@ export function useKeyboardShortcuts() {
       ["timeline.zoomOut", handleZoomOut],
       ["timeline.fitTimeline", handleFitTimeline],
       ["view.showShortcuts", handleShowShortcuts],
+      ["view.togglePanels", handleTogglePanels],
       ["file.save", handleSave],
       ["file.export", handleExport],
       ["tools.addText", handleAddText],
@@ -361,6 +368,7 @@ export function useKeyboardShortcuts() {
     handleZoomOut,
     handleFitTimeline,
     handleShowShortcuts,
+    handleTogglePanels,
     handleSave,
     handleExport,
     handleAddText,

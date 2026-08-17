@@ -1,4 +1,5 @@
 import { useEffect, useRef, useCallback, useState, useMemo } from 'react';
+import { useCenterShift } from '@openreel/ui';
 import { useProjectStore } from '../../../stores/project-store';
 import { fileToImageAsset } from '../../../services/image-import';
 import { useUIStore } from '../../../stores/ui-store';
@@ -1145,6 +1146,35 @@ export function Canvas() {
       try { document.fonts?.removeEventListener?.('loadingdone', onFontsLoaded); } catch { /* noop */ }
     };
   }, [forceRender]);
+
+  /**
+   * THE ARTWORK DOES NOT MOVE WHEN THE CHROME DOES.
+   *
+   * The artboard is drawn at `canvas.width / 2 + panX`, i.e. anchored to the
+   * CENTRE of this canvas element. Centring is right until the element changes
+   * size: collapse the left column and the canvas gains ~244px on its left, so
+   * its centre — and the artwork with it — slides ~122px across the screen. The
+   * user put a panel away and their picture jumped. The same happened on every
+   * panel drag, and again when the agent chat outside the iframe was collapsed
+   * and gave this whole editor more room.
+   *
+   * So: cancel the centre's movement in the pan. The canvas really does get
+   * bigger, the artwork stays under exactly the pixel it was under, and the
+   * space that appeared shows more of the workspace — which is what the user
+   * asked for by closing the panel.
+   *
+   * This is the rule BlockSuite already applies on the board (its viewport pins
+   * the top-left model coordinate across a resize), so all three editors now
+   * behave the same way.
+   *
+   * Read through `getState()` rather than closing over `panX`/`panY`: the
+   * observer must not be re-attached on every pan, or it would re-baseline
+   * mid-drag and lose the shift it exists to catch.
+   */
+  useCenterShift(canvasRef, (dx, dy) => {
+    const s = useUIStore.getState();
+    s.setPan(s.panX - dx, s.panY - dy);
+  });
 
   useEffect(() => {
     if (!project) return;

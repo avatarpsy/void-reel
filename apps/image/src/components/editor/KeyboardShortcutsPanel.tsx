@@ -82,6 +82,7 @@ const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: ['⌘', '0'], description: 'Zoom to fit' },
       { keys: ["⌘", "'"], description: 'Toggle grid' },
       { keys: ['⌘', ';'], description: 'Toggle guides' },
+      { keys: ['Tab'], description: 'Hide / show all side panels' },
     ],
   },
   {

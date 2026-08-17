@@ -15,6 +15,7 @@ import {
   ZoomIn,
   Gauge,
 } from "lucide-react";
+import { useCenterShift } from "@openreel/ui";
 import type { PreviewQuality } from "../../stores/timeline-store";
 import { useProjectStore } from "../../stores/project-store";
 import { InlineRecordingPreview } from "./InlineRecordingPreview";
@@ -129,6 +130,35 @@ export const Preview: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
+  /**
+   * The area the stage is centred in, and the offset that keeps the stage still
+   * when that area changes width.
+   *
+   * See the wrapper in the JSX for the why. `useCenterShift` reports how far
+   * this area's centre moved on screen — collapsing the Assets column moves it
+   * ~138px — and we subtract exactly that, clamped so the stage can never be
+   * pushed past the edge of the area it lives in. Clamping matters on a narrow
+   * window, where holding position uncompensated would push the picture out of
+   * sight; there the offset simply gives back what it cannot afford.
+   *
+   * HORIZONTAL ONLY, deliberately. The vertical dimension changes for a reason
+   * the user is looking at: dragging the timeline up, or minimising the video.
+   * Those SHOULD re-centre — pinning the picture while the space under it
+   * shrinks would slide it behind the timeline. Width changes are the opposite:
+   * they come from chrome the user just put away, and the stage never uses the
+   * extra width anyway (it is a fixed 450px tall, capped at 800 wide), so
+   * holding position costs nothing at all.
+   */
+  const stageAreaRef = useRef<HTMLDivElement>(null);
+  const [stageOffset, setStageOffset] = useState(0);
+  useCenterShift(stageAreaRef, (dx) => {
+    setStageOffset((current) => {
+      const area = stageAreaRef.current?.clientWidth ?? 0;
+      const stage = overlayRef.current?.getBoundingClientRect().width ?? 0;
+      const limit = Math.max(0, (area - stage) / 2);
+      return Math.max(-limit, Math.min(limit, current - dx));
+    });
+  });
   const animationRef = useRef<number | null>(null);
   const renderBridgeInitialized = useRef<boolean>(false);
   const lastGoodFrameRef = useRef<ImageBitmap | null>(null);
@@ -4739,12 +4769,23 @@ export const Preview: React.FC = () => {
           produced exactly the overlap it looked like. The stage is centred, so
           it keeps its breathing room from the free space rather than padding. */}
       <div
+        ref={stageAreaRef}
         className={`flex-1 min-h-0 overflow-hidden relative flex items-center justify-center bg-background-secondary/30 transition-all duration-300 ${
           isFullscreen ? "px-0" : "px-4"
         } ${zoomLevel > 1 ? "overflow-auto" : ""}`}
         onMouseMove={interactionMode !== "none" ? handleMouseMove : undefined}
         onMouseUp={handleMouseUp}
       >
+        {/* THE PICTURE HOLDS STILL WHEN THE CHROME MOVES.
+            The stage below is a FIXED size (450px tall × the project aspect,
+            capped at 800px) centred in whatever room is left. So collapsing the
+            Assets column — which gives this area ~276px more on its left —
+            moved the centre, and the video jumped ~138px sideways for no
+            reason: the stage never uses the extra width, it only re-centres in
+            it. This wrapper cancels that, clamped so the stage can never be
+            pushed out of the area. No transition: the whole point is that
+            nothing animates, because nothing should appear to move. */}
+        <div className="shrink-0" style={{ transform: `translateX(${stageOffset}px)` }}>
         <div
           ref={overlayRef}
           className={`relative bg-black overflow-hidden transition-all duration-300 ${
@@ -5145,6 +5186,7 @@ export const Preview: React.FC = () => {
                 </div>
               );
             })}
+        </div>
         </div>
       </div>
 

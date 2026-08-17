@@ -56,6 +56,7 @@ import {
   Tooltip,
   TooltipTrigger,
   TooltipContent,
+  AllPanelsButton,
 } from "@openreel/ui";
 
 type ExportType =
@@ -92,7 +93,13 @@ export const Toolbar: React.FC = () => {
     togglePreviewCollapsed,
     centerView,
     toggleCenterView,
+    toggleAllPanels,
   } = useUIStore();
+  // "Any open" rather than "all open": the button's job is to clear the screen
+  // while anything is still on it, and only then to bring everything back.
+  const anyPanelOpen = useUIStore(
+    (s) => !s.panels?.mediaLibrary?.collapsed || !s.panels?.inspector?.collapsed,
+  );
   // The center column shows either the video player or the audio mixer.
   // When the mixer occupies the center there is no video surface to
   // minimise and the dock-mixer toggle would be redundant, so those two
@@ -1090,6 +1097,22 @@ export const Toolbar: React.FC = () => {
       <div className="flex-1" />
 
       <div className="flex items-center gap-4">
+        {/* The ONE panel control that belongs in a toolbar: it acts on the
+            whole set, so it belongs to no single panel. Per-panel collapse
+            lives on each panel's own header — same button, same place, in
+            every editor. */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <AllPanelsButton
+              anyOpen={anyPanelOpen}
+              onToggle={toggleAllPanels}
+            />
+          </TooltipTrigger>
+          <TooltipContent>
+            <p>{anyPanelOpen ? "Hide all panels" : "Show all panels"} · Tab</p>
+          </TooltipContent>
+        </Tooltip>
+
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button

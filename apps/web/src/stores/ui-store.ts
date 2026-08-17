@@ -124,6 +124,10 @@ export interface UIState {
   setPanelVisible: (panelId: PanelId, visible: boolean) => void;
   setPanelWidth: (panelId: PanelId, width: number) => void;
   setPanelCollapsed: (panelId: PanelId, collapsed: boolean) => void;
+  togglePanelCollapsed: (panelId: PanelId) => void;
+  /** Close every side panel, or reopen them all if any is already shut.
+   *  The Tab gesture and the toolbar's Panels button both land here. */
+  toggleAllPanels: () => void;
   setShortcut: (action: keyof KeyboardShortcuts, shortcut: string) => void;
   resetShortcuts: () => void;
   setTheme: (theme: "light" | "dark" | "system") => void;
@@ -202,8 +206,11 @@ const DEFAULT_SNAP_SETTINGS: SnapSettings = {
 const DEFAULT_PANELS: Record<PanelId, PanelState> = {
   // 320 == the old fixed `w-80`. Now user-resizable via PanelResizer
   // (persisted; clamped 200–800 by setPanelWidth).
-  mediaLibrary: { visible: true, width: 320 },
-  inspector: { visible: true, width: 320 },
+  // `collapsed` is spelled out rather than left undefined: these two are the
+  // docked columns Tab and the panel headers act on, and a panel whose state is
+  // `undefined` rehydrates from an older build as neither open nor shut.
+  mediaLibrary: { visible: true, width: 320, collapsed: false },
+  inspector: { visible: true, width: 320, collapsed: false },
   effects: { visible: false, width: 300 },
   audioMixer: { visible: false, width: 300 },
   colorGrading: { visible: false, width: 400 },
@@ -445,6 +452,44 @@ export const useUIStore = create<UIState>()(
               },
             },
           }));
+        },
+
+        togglePanelCollapsed: (panelId: PanelId) => {
+          set((state) => ({
+            panels: {
+              ...state.panels,
+              [panelId]: {
+                ...state.panels[panelId],
+                collapsed: !state.panels[panelId]?.collapsed,
+              },
+            },
+          }));
+        },
+
+        /**
+         * ONE gesture for the whole set — the editor's "get out of my way".
+         *
+         * Asymmetric on purpose: if ANYTHING is still open the button closes
+         * everything, and only once the screen is clear does it bring it all
+         * back. A per-panel XOR would leave the user toggling between two
+         * half-open layouts and never reaching the clean one, which is the
+         * layout they pressed the key for.
+         *
+         * Only the two docked columns take part. `effects`, `audioMixer` and
+         * friends are opened deliberately from the toolbar and are closer to
+         * windows than to chrome — sweeping them away with Tab would lose work
+         * in progress.
+         */
+        toggleAllPanels: () => {
+          set((state) => {
+            const docked: PanelId[] = ["mediaLibrary", "inspector"];
+            const collapsed = docked.some((id) => !state.panels[id]?.collapsed);
+            const panels = { ...state.panels };
+            for (const id of docked) {
+              panels[id] = { ...panels[id], collapsed };
+            }
+            return { panels };
+          });
         },
 
         setShortcut: (action: keyof KeyboardShortcuts, shortcut: string) => {

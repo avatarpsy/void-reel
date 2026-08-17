@@ -47,6 +47,7 @@ import {
   Coffee,
   Loader2,
 } from 'lucide-react';
+import { PanelHeader } from '@openreel/ui';
 import { useUIStore, Panel } from '../../../stores/ui-store';
 import { useProjectStore } from '../../../stores/project-store';
 import { LayerPanel } from '../layers/LayerPanel';
@@ -69,7 +70,8 @@ const panels: { id: Panel; icon: React.ElementType; label: string }[] = [
 ];
 
 export const LeftPanel = memo(function LeftPanel() {
-  const { activePanel, setActivePanel } = useUIStore();
+  const { activePanel, setActivePanel, togglePanelCollapsed } = useUIStore();
+  const activeLabel = panels.find((p) => p.id === activePanel)?.label ?? 'Panel';
 
   return (
     <div className="h-full flex">
@@ -94,13 +96,27 @@ export const LeftPanel = memo(function LeftPanel() {
         })}
       </div>
 
-      <div className="flex-1 overflow-hidden">
-        {activePanel === 'layers' && <LayerPanel />}
-        {activePanel === 'elements' && <ElementsPanel />}
-        {activePanel === 'assets' && <AssetsPanel />}
-        {activePanel === 'text' && <TextPanel />}
-        {activePanel === 'shapes' && <ShapesPanel />}
-        {activePanel === 'uploads' && <UploadsPanel />}
+      <div className="flex-1 flex flex-col overflow-hidden">
+        {/* HEADER. This column had none: the tool rail said which panel was
+            selected and the body launched straight into a segmented control,
+            so the column was the only one in any editor with no name on it and
+            nowhere to hang the collapse control. Same 48px row, same title
+            weight, same trailing collapse button as the video editor's Assets
+            and Inspector headers. */}
+        <PanelHeader
+          title={activeLabel}
+          side="left"
+          collapsed={false}
+          onToggle={togglePanelCollapsed}
+        />
+        <div className="flex-1 overflow-hidden">
+          {activePanel === 'layers' && <LayerPanel />}
+          {activePanel === 'elements' && <ElementsPanel />}
+          {activePanel === 'assets' && <AssetsPanel />}
+          {activePanel === 'text' && <TextPanel />}
+          {activePanel === 'shapes' && <ShapesPanel />}
+          {activePanel === 'uploads' && <UploadsPanel />}
+        </div>
       </div>
     </div>
   );
@@ -394,7 +410,8 @@ function TextPanel() {
 
   return (
     <div className="p-3">
-      <h3 className="text-sm font-medium text-foreground mb-3">Add Text</h3>
+      {/* No local heading: the column's shared PanelHeader names the panel.
+          Two titles stacked is what "two panels bolted together" looks like. */}
       <div className="space-y-2">
         {textStyles.map((style) => (
           <button
@@ -429,7 +446,8 @@ function ShapesPanel() {
 
   return (
     <div className="p-3">
-      <h3 className="text-sm font-medium text-foreground mb-3">Shapes</h3>
+      {/* No local heading: the column's shared PanelHeader names the panel.
+          Two titles stacked is what "two panels bolted together" looks like. */}
       <div className="grid grid-cols-3 gap-2">
         {shapes.map((shape) => (
           <button
@@ -650,7 +668,8 @@ function UploadsPanel() {
 
   return (
     <div className="p-3 h-full overflow-y-auto">
-      <h3 className="text-sm font-medium text-foreground mb-3">Upload Files</h3>
+      {/* No local heading: the column's shared PanelHeader names the panel.
+          Two titles stacked is what "two panels bolted together" looks like. */}
 
       <div
         onDragOver={(e) => {

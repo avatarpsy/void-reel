@@ -47,7 +47,7 @@ export function useKeyboardShortcuts() {
   const {
     setActiveTool, activeTool, zoomIn, zoomOut, zoomToFit, setZoom,
     toggleGrid, toggleGuides, toggleShortcutsPanel, openSettingsDialog,
-    brushSettings, setBrushSettings, togglePanelCollapsed, toggleInspectorCollapsed,
+    brushSettings, setBrushSettings, toggleAllPanels,
   } = useUIStore();
   const {
     selectedLayerIds, removeLayer, copyLayers, cutLayers, pasteLayers,
@@ -97,10 +97,14 @@ export function useKeyboardShortcuts() {
       }
 
       // Tab toggles the side panels (Photoshop hides all panels with Tab).
-      if (e.key === 'Tab' && !isMod) {
+      // It used to flip each column INDEPENDENTLY, so once you had closed one
+      // panel by hand every Tab just swapped which one was showing and the
+      // clean full-screen canvas became unreachable. `toggleAllPanels` closes
+      // everything while anything is open and only then restores — the same
+      // rule the video editor's Tab and both toolbar buttons follow.
+      if (e.key === 'Tab' && !isMod && !e.altKey && !e.shiftKey) {
         e.preventDefault();
-        togglePanelCollapsed();
-        toggleInspectorCollapsed();
+        toggleAllPanels();
         return;
       }
 
@@ -258,6 +262,6 @@ export function useKeyboardShortcuts() {
     moveLayerDown, moveLayerToTop, moveLayerToBottom, groupLayers, ungroupLayers, mergeDown, updateLayer,
     zoomIn, zoomOut, zoomToFit, setZoom, toggleGrid, toggleGuides, toggleShortcutsPanel,
     openSettingsDialog, undo, redo, canUndo, canRedo, project, brushSettings, setBrushSettings,
-    togglePanelCollapsed, toggleInspectorCollapsed,
+    toggleAllPanels,
   ]);
 }
