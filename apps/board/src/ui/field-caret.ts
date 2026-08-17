@@ -465,3 +465,66 @@ export function stopFieldKeys(e: KeyboardEvent): void {
   e.stopPropagation();
   if (e.key === 'Escape') (e.target as HTMLElement).blur();
 }
+
+/**
+ * LETTING A FIELD HAVE ITS OWN CLIPBOARD.
+ *
+ * ── THE BUG: PASTE DID NOTHING, ANYWHERE ON A SHOT CARD ─────────────────────
+ * Copy worked. Paste silently did nothing — no text, no error, no hint. Found
+ * by holding the event object and reading it AFTER dispatch had finished, which
+ * is the only way to see it:
+ *
+ *     at EdgelessClipboardController._onPaste (blocksuite …)
+ *     at UIEventDispatcher._paste (blocksuite …)
+ *
+ * The edgeless clipboard controller calls `preventDefault()` on EVERY paste
+ * that reaches the editor host, because on a canvas a paste means "put the
+ * copied image or shape down here" and the browser's own handling would be
+ * wrong. It is right about the canvas and has no idea our cards have text
+ * fields in them.
+ *
+ * It runs from BlockSuite's own event dispatcher, bound above the card — so a
+ * listener ON the field reading `defaultPrevented` sees `false`, and everything
+ * looks correct right up until nothing happens.
+ *
+ * ── THE FIX: KEEP IT OFF THE CANVAS, AND OTHERWISE DO NOTHING ───────────────
+ * A clipboard event that starts inside an editable field is not a canvas
+ * gesture, so it is stopped before it can become one. The BROWSER then does the
+ * paste itself, which is worth insisting on rather than inserting the text by
+ * hand: it coerces to plain text in a `plaintext-only` field, places the caret
+ * after the inserted run, and puts ONE undo entry on the stack — so Ctrl+Z
+ * takes back the paste instead of the paragraph around it.
+ *
+ * Copy and cut are stopped for the same reason. They happen to work today
+ * because the controller returns early when it holds no canvas selection, but
+ * that is a detail of its internals rather than a promise, and a field whose
+ * copy depends on the canvas being deselected is a bug waiting for a user.
+ *
+ * CAPTURE, at the card, so it beats a dispatcher bound anywhere above it.
+ */
+export function claimFieldClipboard(root: HTMLElement): () => void {
+  const onClip = (e: Event) => {
+    const target = e.target as HTMLElement | null;
+    if (!target) return;
+    const editable = target.isContentEditable
+      || /^(INPUT|TEXTAREA)$/.test(target.tagName);
+    if (!editable) return;
+    /**
+     * `stopPropagation` and NOTHING ELSE.
+     *
+     * Not `preventDefault` — the browser's own handling is precisely what we
+     * are trying to reach. Not `stopImmediatePropagation` — another listener on
+     * this same element (a paste that strips formatting, say) is ours and must
+     * still run.
+     */
+    e.stopPropagation();
+  };
+  for (const type of ['copy', 'cut', 'paste']) {
+    root.addEventListener(type, onClip, true);
+  }
+  return () => {
+    for (const type of ['copy', 'cut', 'paste']) {
+      root.removeEventListener(type, onClip, true);
+    }
+  };
+}

@@ -28,6 +28,7 @@ import { state } from 'lit/decorators.js';
 
 import { blockSrcdoc } from '../ui/block-render';
 import { ensureBlockRuntime } from '../ui/block-runtime';
+import { claimFieldClipboard } from '../ui/field-caret';
 import { draftMeta, type DraftBlockModel } from './draft-block';
 
 /** Slot kinds, in the order a person reads a design: what it says, then shows. */
@@ -243,9 +244,14 @@ export class DraftBlockComponent extends GfxBlockComponent<DraftBlockModel> {
   @state() private accessor _runtimeReady = false;
 
   private ro: ResizeObserver | null = null;
+  private disposeClipboard: (() => void) | null = null;
 
   override connectedCallback(): void {
     super.connectedCallback();
+    // Same reason as the shot card: the edgeless clipboard controller cancels
+    // every paste that reaches the host, so this name could be copied but never
+    // pasted into. See claimFieldClipboard.
+    this.disposeClipboard = claimFieldClipboard(this);
     void ensureBlockRuntime().then(() => { this._runtimeReady = true; });
     this.ro = new ResizeObserver(() => this.refit());
     requestAnimationFrame(() => {
@@ -258,11 +264,33 @@ export class DraftBlockComponent extends GfxBlockComponent<DraftBlockModel> {
   override disconnectedCallback(): void {
     this.ro?.disconnect();
     this.ro = null;
+    this.disposeClipboard?.();
+    this.disposeClipboard = null;
     super.disconnectedCallback();
   }
 
   override updated(): void {
+    this.syncName();
     this.refit();
+  }
+
+  /**
+   * The name is written by hand rather than interpolated as a child.
+   *
+   * Lit marks a child binding with comment nodes it keeps references to, and a
+   * contenteditable is a box whose children the browser rewrites — a paste or a
+   * select-all-and-type takes the markers with it and the next render throws
+   * "Cannot read properties of null (reading 'insertBefore')". The same fault
+   * was caught on the shot card; the account is in its `syncFieldText`.
+   *
+   * Skipped while focused, because assigning textContent dumps the caret to the
+   * start of the box.
+   */
+  private syncName(): void {
+    const el = this.querySelector<HTMLElement>('[data-name-field]');
+    if (!el || el === this.ownerDocument.activeElement) return;
+    const want = String(this.model.props.name ?? '');
+    if (el.textContent !== want) el.textContent = want;
   }
 
   private refit(): void {
@@ -351,7 +379,8 @@ export class DraftBlockComponent extends GfxBlockComponent<DraftBlockModel> {
               this.store.updateBlock(this.model, { name: v });
             }
           }}
-        >${p.name}</div>
+          data-name-field
+        ></div>
       </div>
 
       <div class="d__stage" @pointerdown=${(e: Event) => e.stopPropagation()}>

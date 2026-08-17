@@ -23,7 +23,12 @@ import { state } from 'lit/decorators.js';
 import { repeat } from 'lit/directives/repeat.js';
 
 import { withToken } from '../board/parent-auth';
-import { claimFormField, focusField, takeCaret } from '../ui/field-caret';
+import {
+  claimFieldClipboard,
+  claimFormField,
+  focusField,
+  takeCaret,
+} from '../ui/field-caret';
 import {
   FIELD_SPECS, REF_KIND_LABEL, roleLabel, SHOT_KIND_HINT, SHOT_KIND_LABEL, SHOT_KINDS,
   chosenTake, formatTime, isTimed, rolesFor, takeAsMedia, takeThumb, trimWindow,
@@ -841,8 +846,17 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
       border-radius: 9px;
       padding: 7px 10px;
       background: var(--vs-shot-field, rgba(127, 140, 170, 0.06));
-      flex: 1;
-      min-height: 0;
+      /* 1 0 auto, AND THE THIRD VALUE IS THE WHOLE POINT.
+         (No backticks in here: this is inside a css template literal.)
+         Plain flex: 1 is shorthand for 1 1 0% — a base size of ZERO, so the box
+         sized itself purely from the leftover space and ignored the text in it
+         completely. Measured: 842 characters in a box 114px tall holding 165px
+         of text, with 51px of it simply not shown. A basis of auto sizes the box
+         from its content, which is what a paragraph needs; the grow keeps the
+         old behaviour of taking up slack when the card has some. No shrink, so a
+         long prompt pushes the card body into scrolling rather than being
+         squeezed until it clips again. */
+      flex: 1 0 auto;
       cursor: text;
       transition: border-color 0.12s ease, box-shadow 0.12s ease, background 0.12s ease;
     }
@@ -866,19 +880,33 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
       user-select: none;
     }
     .field:focus-within .field__label { color: var(--vs-accent-b, #2f6fa3); }
-    /* ROOM TO WRITE. A flex:1 child inside a flex:none column resolves to the
-       content height, so an empty ACTION was a one-line sliver you had to hit
-       within about eleven pixels. Three lines minimum gives a real target and a
-       place to see what you wrote; past eight it scrolls rather than pushing the
-       footer off a fixed-height card. */
+    /* ROOM TO WRITE, AND THEN AS MUCH ROOM AS THE WRITING NEEDS.
+
+       A flex:1 child inside a flex:none column resolves to the content height,
+       so an empty SHOT was a one-line sliver you had to hit within about eleven
+       pixels. Three lines minimum gives a real target and a place to see what
+       you wrote.
+
+       NO CEILING, AND NO SCROLLBAR OF ITS OWN. It used to stop at 8.5em and
+       scroll inside itself, which put a THIRD scrollable box on the card — the
+       canvas, the card body, and now the paragraph — nested inside each other.
+       Text past the eighth line was invisible unless you found the right one to
+       scroll, and a wheel over a shot could mean any of three things depending
+       on the pixel it was over. A prompt is the thing the whole card is about;
+       hiding two thirds of it to save eighty pixels is the wrong trade.
+
+       The card body scrolls instead, which it already did and which is one
+       obvious place for the overflow to go. */
     .field__text {
       font: 400 11.5px/1.45 var(--affine-font-family, sans-serif);
       outline: none;
-      overflow-y: auto;
-      overscroll-behavior: contain;
-      flex: 1;
+      /* Content-based, for the same reason as .field above. */
+      flex: 1 0 auto;
       min-height: 3.1em;
-      max-height: 8.5em;
+      /* Long words and pasted URLs must wrap rather than widen the box and put
+         a horizontal scrollbar under the paragraph. */
+      overflow-wrap: anywhere;
+      white-space: pre-wrap;
       /* Selection has to be VISIBLE to be trusted. The canvas suppresses text
          selection broadly to keep drags clean; a field is the one place that
          must opt back in. */
@@ -897,8 +925,8 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
        given the same height it reads as a box somebody forgot to fill in, and
        it took room from the field that needed it. */
     .field[data-field='action'] .field__text { min-height: 4.4em; }
-    .field[data-field='voiceover'] .field__text { min-height: 2.2em; max-height: 5em; }
-    .field[data-field='camera'] .field__text { min-height: 2.2em; max-height: 5em; }
+    .field[data-field='voiceover'] .field__text { min-height: 2.2em; }
+    .field[data-field='camera'] .field__text { min-height: 2.2em; }
     /* The legacy CAMERA box is a leftover to empty out, not a control to fill
        in. Dimmed so it reads that way without hiding what it holds. */
     .field[data-field='camera'] { opacity: 0.72; }
@@ -1414,6 +1442,7 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
 
   /** Take progress is not a block prop either — same reason as the catalogues. */
   private disposeTakeProgress: (() => void) | null = null;
+  private disposeClipboard: (() => void) | null = null;
 
   /**
    * The sequence pill reads the SCREENPLAY block, not this one.
@@ -1431,6 +1460,17 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
     // model line and its warnings from one, the block name and its slot count
     // from the other. Neither is a block prop, so nothing else marks the card
     // dirty when they land.
+    /**
+     * COPY, CUT AND PASTE BELONG TO WHICHEVER FIELD IS FOCUSED.
+     *
+     * The edgeless clipboard controller cancels every paste that reaches the
+     * host, so without this a shot card's fields could be copied FROM and never
+     * pasted INTO — silently, with no error to go looking for. Bound on the
+     * card, in capture, so it is ahead of BlockSuite's dispatcher; see
+     * `claimFieldClipboard`.
+     */
+    this.disposeClipboard = claimFieldClipboard(this);
+
     this.disposeCatalogue = onModelCatalogue(() => this.requestUpdate());
     this.disposeBlocks = onBlockCatalogue(() => this.requestUpdate());
     this.disposeTakeProgress = onTakeProgress(() => this.requestUpdate());
@@ -1494,10 +1534,12 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
     this.disposeBlocks?.();
     this.disposeDoc?.();
     this.disposeTakeProgress?.();
+    this.disposeClipboard?.();
     this.disposeCatalogue = null;
     this.disposeBlocks = null;
     this.disposeDoc = null;
     this.disposeTakeProgress = null;
+    this.disposeClipboard = null;
     for (const off of this.dragCleanups) off();
     this.dragCleanups = [];
     this.preview?.destroy();
@@ -1751,8 +1793,52 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
    */
   protected override updated(changed: Map<PropertyKey, unknown>): void {
     super.updated(changed);
+    this.syncFieldText();
     this.syncPreview();
     this.syncTileDrags();
+  }
+
+  /**
+   * THE EDITABLE TEXT IS WRITTEN BY HAND, NOT BY LIT — and it has to be.
+   *
+   * ── WHAT IT COST TO LET LIT OWN IT ──────────────────────────────────────────
+   * The fields used to interpolate the model value as the element's CHILD. Lit
+   * implements a child binding by planting two marker comment nodes and keeping
+   * references to them, and a contenteditable is a box whose children the
+   * BROWSER rewrites:
+   * select-all-and-type replaces them, a paste replaces them, and a delete that
+   * empties the box takes the markers with it. Lit's references then point at
+   * nodes with no parent, and the next render throws:
+   *
+   *     Cannot read properties of null (reading 'insertBefore')   [lit ChildPart]
+   *
+   * Caught by the E2E suite's console check, three times in one step, right
+   * after a paste — and a card whose render throws stops updating entirely,
+   * which is what "I click and type and it loses focus" looks like from the
+   * outside. No amount of guarding WHEN we render could fix it; the markers had
+   * no business being inside an editable box in the first place.
+   *
+   * ── AND NEVER UNDER THE CARET ───────────────────────────────────────────────
+   * A focused field is skipped outright. Writing `textContent` collapses the
+   * selection and dumps the caret to the start, so the box the user is typing in
+   * is the one box that must be left alone. `commit` on blur is what puts the
+   * model and the DOM back in agreement, and `flushDeferred` renders once the
+   * caret has gone.
+   *
+   * Compared before writing, because assigning `textContent` destroys and
+   * rebuilds the text node even when the string has not changed — which would
+   * throw away the browser's own undo stack on every unrelated render.
+   */
+  private syncFieldText(): void {
+    const active = this.ownerDocument.activeElement;
+    const props = this.model.props as unknown as Record<string, unknown>;
+    for (const el of this.querySelectorAll<HTMLElement>('[data-textbind]')) {
+      if (el === active) continue;
+      const key = el.dataset.textbind;
+      if (!key) continue;
+      const want = String(props[key] ?? '');
+      if (el.textContent !== want) el.textContent = want;
+    }
   }
 
   /**
@@ -1830,20 +1916,6 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
   };
 
   /**
-   * Wheel inside a written field.
-   *
-   * Claimed only when the field has somewhere to scroll — a three-line ACTION in
-   * an eight-line box has nothing to scroll, and swallowing the gesture there
-   * would make a dead zone in the middle of the card where the board refuses to
-   * pan. Same rule as the reference lanes, for the same reason.
-   */
-  private readonly onFieldWheel = (e: WheelEvent) => {
-    const el = e.currentTarget as HTMLElement;
-    if (el.scrollHeight <= el.clientHeight) return;
-    e.stopPropagation();
-  };
-
-  /**
    * Wheel over the card BODY, now that the body scrolls.
    *
    * Same rule as the lanes and the written fields, for the same reason and by
@@ -1852,8 +1924,10 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
    * this cannot create a dead zone — and a card that overflows scrolls to its
    * own bottom instead of zooming the viewport out from under the reader.
    *
-   * The lanes and fields see the event first and stop it when THEY can scroll,
-   * so the innermost thing that can move is the thing that moves.
+   * The lanes see the event first and stop it when THEY can scroll, so the
+   * innermost thing that can move is the thing that moves. The written fields
+   * no longer take part: they grow to their text rather than scrolling inside
+   * themselves, so the body is where their overflow goes.
    */
   private readonly onBodyWheel = (e: WheelEvent) => {
     const el = e.currentTarget as HTMLElement;
@@ -2304,7 +2378,8 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
           @dblclick=${this.editTitle}
           @keydown=${this.stopKeys}
           @blur=${(e: FocusEvent) => this.commit('title', e.target as HTMLElement)}
-        >${this.model.props.title}</div>
+          data-textbind="title"
+        ></div>
       </div>
 
       ${this._pickingSeq ? this.renderSeqMenu() : nothing}
@@ -2404,9 +2479,9 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
               data-placeholder=${spec.placeholder}
               @pointerdown=${this.claimCaret}
               @keydown=${this.stopKeys}
-              @wheel=${this.onFieldWheel}
               @blur=${(e: FocusEvent) => this.commit(spec.key, e.target as HTMLElement)}
-            >${this.model.props[spec.key]}</div>
+              data-textbind=${spec.key}
+            ></div>
           </div>`)}
         </div>
 
