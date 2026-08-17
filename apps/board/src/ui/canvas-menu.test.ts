@@ -7,15 +7,17 @@
  * already collapsed it to the card under the cursor, then because a stray
  * `selection.updated` subscription overwrote the snapshot that fixed it.
  *
- * Neither bug was in the RULE — the rule is four lines — so a test of the DOM
- * would have caught neither. What both needed was a place where the rule is
- * stated once, in terms of the three facts it depends on, so the next change to
- * the event plumbing has something to be checked against.
+ * The third attempt stopped racing the collapse altogether: a multi-selection
+ * is REMEMBERED when the user builds it — shift-clicking, or finishing a
+ * marquee — and only a left-click forgets it. None of those bugs were in the
+ * RULE, which is four lines; they were all in when it was asked. So this pins
+ * the rule, and the comments above `remembered` pin the timing.
  */
 import { describe, expect, it } from 'vitest';
 
 import { chooseReferences } from './canvas-menu';
 
+/** What a user has shift-clicked together. */
 const FOUR = ['a', 'b', 'c', 'd'];
 
 describe('right-clicking inside a multi-selection', () => {
@@ -43,11 +45,19 @@ describe('right-clicking outside it', () => {
   });
 });
 
-describe('a snapshot of one carries no extra information', () => {
+describe('nothing remembered', () => {
   it('defers to the live selection', () => {
-    // Preferring it would keep one stale id alive across an unrelated click.
+    // Only selections of two or more are ever remembered, so one id here would
+    // mean a bug upstream; either way the live answer is the honest one.
     expect(chooseReferences(['a'], 'b', ['b'])).toEqual(['b']);
     expect(chooseReferences([], 'b', ['b'])).toEqual(['b']);
+  });
+
+  it('is what a left-click leaves behind', () => {
+    // Clicking elsewhere clears the memory (see `onPointerDown`), so a later
+    // right-click acts on what is actually selected — four references from five
+    // minutes ago must not reattach themselves to an unrelated image.
+    expect(chooseReferences([], 'z', ['z'])).toEqual(['z']);
   });
 });
 

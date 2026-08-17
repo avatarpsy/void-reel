@@ -24,6 +24,8 @@
  * Same reason as `board-ui.ts`: chrome that sits over the editor, owns no
  * document state, and must not join BlockSuite's render cycle.
  */
+import { GfxControllerIdentifier } from '@blocksuite/std/gfx';
+
 import { readCanvas } from '../board/canvas';
 import type { MountedBoard } from '../blocksuite/editor';
 
@@ -47,34 +49,42 @@ const ICONS: Record<string, string> = {
  * image model, and counting them would tell the user "4 references" and then
  * generate from two.
  */
-function selectedMedia(board: MountedBoard): Array<{ id: string; kind: string }> {
+function selectedImages(board: MountedBoard): string[] {
   return readCanvas(board.std, true)
-    .filter(i => i.kind === 'image' || i.kind === 'media')
-    .map(i => ({ id: i.id, kind: i.kind }));
+    // IMAGES ONLY. `media` is an attachment — a clip or a track — and every
+    // generator that takes references takes pictures. Counting a video would
+    // promise three references and send two.
+    .filter(i => i.kind === 'image')
+    .map(i => i.id);
 }
 
 /**
- * WHICH SET THE USER MEANT — the same rule a file manager uses.
+ * WHICH SET THE USER MEANT.
  *
- * Right-click something inside the current selection and the whole selection is
- * what you acted on; right-click outside it and the selection becomes that one
- * thing. Anything else surprises: the first is how "these four" is expressed,
- * the second is how you change your mind.
+ * ── WHY THIS DOES NOT READ THE LIVE SELECTION ────────────────────────────────
+ * BlockSuite treats the press that opens a context menu as an ordinary
+ * selecting press, so by the time anything can respond the selection has
+ * collapsed to the single card under the cursor. Two previous attempts tried to
+ * win that race — read it earlier, snapshot it on pointer-down — and both lost,
+ * silently, in the same way: "Generate from 1 reference" over a selection of
+ * four.
  *
- * @param before  the selection as it was on the pointer-down, BEFORE BlockSuite
- *                collapsed it to whatever the cursor was over
- * @param clicked the block under the cursor, or '' for empty canvas
- * @param now     the selection after that collapse
+ * So this does not race it. A multi-selection is REMEMBERED at the moment the
+ * user builds it — shift-clicking, or finishing a marquee — which is long
+ * before any right-click, and nothing that happens afterwards can un-remember
+ * it except the user deliberately selecting something else.
  *
- * Exported and pure because this rule has now been got wrong twice — once by
- * reading the selection too late, once by a stray subscription overwriting the
- * snapshot — and both times it failed silently as "only one reference".
+ * @param remembered the last selection of two or more, or []
+ * @param clicked    the block under the cursor, or '' for empty canvas
+ * @param live       the selection right now, after any collapse
  */
-export function chooseReferences(before: string[], clicked: string, now: string[]): string[] {
-  // A single-item snapshot carries no more information than `now` does, and
-  // preferring it would keep a stale selection alive after the user moved on.
-  if (before.length > 1 && (!clicked || before.includes(clicked))) return [...before];
-  return [...now];
+export function chooseReferences(remembered: string[], clicked: string, live: string[]): string[] {
+  // Right-clicking inside what you selected acts on all of it; right-clicking
+  // outside it acts on the one thing — the rule every file manager uses. Empty
+  // canvas keeps it too: a marquee then a click in the gap between the images
+  // is still "these".
+  if (remembered.length > 1 && (!clicked || remembered.includes(clicked))) return [...remembered];
+  return [...live];
 }
 
 export function installCanvasMenu(board: MountedBoard, container: HTMLElement): () => void {
@@ -86,19 +96,15 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
   let refIds: string[] = [];
 
   /**
-   * WHAT WAS SELECTED BEFORE THE RIGHT-CLICK TOUCHED IT.
+   * THE LAST SELECTION OF TWO OR MORE, remembered when the user built it.
    *
-   * The bug this exists for: marquee four images, right-click one of them, and
-   * the menu offered to generate from ONE. BlockSuite treats the press that
-   * opens a context menu as a normal selecting press, so by the time
-   * `contextmenu` fires the selection has already collapsed to the card under
-   * the cursor — and reading it there reads the aftermath of the gesture, not
-   * the intent behind it.
-   *
-   * So the selection is snapshotted on the pointer-down that PRECEDES it, in
-   * the capture phase, before BlockSuite's own handlers run.
+   * Not read at right-click time and not snapshotted on the press — see
+   * `chooseReferences` for why both of those lose. It is recorded by the
+   * subscription below the moment a multi-selection exists, which is while the
+   * user is shift-clicking or finishing a marquee, and it survives the collapse
+   * that the right-click causes because that collapse never writes to it.
    */
-  let preClick: string[] = [];
+  let remembered: string[] = [];
 
   const close = () => {
     if (menu.hidden) return;
@@ -106,9 +112,17 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
     refIds = [];
   };
 
+  /**
+   * A LEFT press is how you change your mind; a RIGHT press never is.
+   *
+   * This is the only thing that forgets a remembered selection, and it has to
+   * exist: without it, multi-selecting once would keep those four references
+   * alive under every later right-click, including on something else entirely.
+   * Clearing here rather than on any selection change is what keeps the
+   * right-click's own collapse from erasing the answer.
+   */
   const onPointerDown = (e: PointerEvent) => {
-    if (e.button !== 2) return;
-    preClick = selectedMedia(board).map(m => m.id);
+    if (e.button === 0) remembered = [];
   };
 
   /**
@@ -121,7 +135,7 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
    */
   function render(count: number): string {
     const head = count
-      ? `<div class="vs-canvas-menu__head">Generate from ${count} reference${count === 1 ? '' : 's'}</div>`
+      ? `<div class="vs-canvas-menu__head">Generate from ${count} image${count === 1 ? '' : 's'}</div>`
       : '<div class="vs-canvas-menu__head">Add media to the board</div>';
     const rows = KINDS.map(k => `
       <button type="button" class="vs-canvas-menu__item" data-kind="${k.kind}">
@@ -132,7 +146,7 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
     // Audio takes no visual reference, and saying so beats letting someone
     // select four stills and wonder why the track ignored them.
     const note = count
-      ? '<div class="vs-canvas-menu__note">Music and voice ignore image references.</div>'
+      ? '<div class="vs-canvas-menu__note">Images only — music and voice ignore them.</div>'
       : '<div class="vs-canvas-menu__note">Opens your library, web search and upload too.</div>';
     return head + rows + note;
   }
@@ -162,7 +176,7 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
      * followed by a right-click in the gap between the images is still "these".
      */
     const clickedId = target?.closest<HTMLElement>('[data-block-id]')?.dataset.blockId ?? '';
-    refIds = chooseReferences(preClick, clickedId, selectedMedia(board).map(m => m.id));
+    refIds = chooseReferences(remembered, clickedId, selectedImages(board));
     menu.innerHTML = render(refIds.length);
 
     // Positioned against the viewport and nudged back inside it, so a
@@ -213,20 +227,18 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
   container.addEventListener('wheel', close, { passive: true });
 
   /**
-   * NOTHING ELSE MAY TOUCH `preClick`.
+   * Remember a multi-selection, never a smaller one.
    *
-   * There was a `selection.slots.updated` subscription here that refreshed the
-   * snapshot whenever the menu was closed, on the theory that it kept it warm.
-   * It did the opposite, and it is why the fix above did not work: the
-   * right-click's own pointer-down collapses the selection, that fires
-   * `updated`, and the subscription overwrote the snapshot with the collapsed
-   * value — all before `contextmenu` ran. The pointer-down handler set the
-   * right answer and this erased it a microtask later.
-   *
-   * The pointer-down IS the refresh, and it happens at the only moment that
-   * matters. Anything that keeps a second copy of this in step is a second
-   * chance to get it wrong.
+   * The `> 1` guard is the whole fix. An earlier version of this subscription
+   * wrote the selection unconditionally, so the right-click's own collapse to a
+   * single card overwrote the very answer it was meant to preserve — the
+   * snapshot taken a moment earlier was correct and this erased it.
    */
+  const gfx = board.std.get(GfxControllerIdentifier);
+  const sub = gfx.selection.slots.updated.subscribe(() => {
+    const ids = selectedImages(board);
+    if (ids.length > 1) remembered = ids;
+  });
 
   return () => {
     container.removeEventListener('pointerdown', onPointerDown, true);
@@ -236,6 +248,7 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
     document.removeEventListener('keydown', onKey);
     window.removeEventListener('blur', close);
     container.removeEventListener('wheel', close);
+    sub.unsubscribe?.();
     menu.remove();
   };
 }
