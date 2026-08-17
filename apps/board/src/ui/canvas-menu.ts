@@ -105,6 +105,7 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
    * that the right-click causes because that collapse never writes to it.
    */
   let remembered: string[] = [];
+  const gfx = board.std.get(GfxControllerIdentifier);
 
   const close = () => {
     if (menu.hidden) return;
@@ -122,7 +123,65 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
    * right-click's own collapse from erasing the answer.
    */
   const onPointerDown = (e: PointerEvent) => {
-    if (e.button === 0) remembered = [];
+    if (e.button !== 0) return;
+
+    /**
+     * SHIFT-CLICK ADDS TO THE SELECTION.
+     *
+     * It did not, and that — not any of the timing this file had been chasing —
+     * is why "generate from these four" only ever saw one. Measured on a real
+     * board: click A selects A, shift-click B selects B and DROPS A. BlockSuite's
+     * edgeless surface builds multi-selections by marquee and by nothing else,
+     * so the gesture every canvas tool teaches was simply absent, and every fix
+     * upstream of it was reading a multi-selection that never existed.
+     *
+     * TOGGLES, because that is what shift-click means everywhere else: a second
+     * shift-click on the same card takes it back out, which is how you correct a
+     * mis-click without starting the selection again.
+     *
+     * `stopPropagation` is required, not defensive. Without it BlockSuite's own
+     * handler runs next and replaces the selection with the one card under the
+     * cursor — undoing this on the same press.
+     */
+    const hit = (e.target as HTMLElement | null)?.closest<HTMLElement>('[data-block-id]');
+    const id = hit?.dataset.blockId ?? '';
+    if (e.shiftKey && id) {
+      /**
+       * ONLY IDS THE GFX LAYER OWNS.
+       *
+       * `data-block-id` is on more than the canvas elements — a note's inner
+       * paragraph carries one too — and handing the selection manager an id it
+       * cannot resolve throws `isLocked is not a function` from inside
+       * BlockSuite, on every shift-click, where the user sees only that the
+       * selection stopped working. Resolving against `gfxElements` first keeps
+       * this to things that can actually be selected on a canvas.
+       */
+      const canvasIds = new Set(
+        [...gfx.gfxElements].map(m => (m as unknown as { id: string }).id),
+      );
+      if (!canvasIds.has(id)) return;
+      const current = [...gfx.selection.selectedIds].filter(x => canvasIds.has(x));
+      const next = current.includes(id)
+        ? current.filter(x => x !== id)
+        : [...current, id];
+      // Never leave nothing selected from an ADD gesture — shift-clicking the
+      // only selected card would otherwise clear the canvas selection entirely,
+      // which reads as the click having gone wrong.
+      const elements = next.length ? next : [id];
+      gfx.selection.set({ elements, editing: false });
+      // Remember it HERE as well as in the subscription. Setting the selection
+      // programmatically does not reliably emit `slots.updated`, so relying on
+      // that alone left the memory permanently empty — which only showed up as
+      // a right-click on the GAP between two selected images offering to add
+      // media instead of generating from them.
+      if (elements.length > 1) remembered = elements;
+      e.stopPropagation();
+      e.preventDefault();
+      return;
+    }
+
+    // A plain left press is how you change your mind — see `remembered`.
+    remembered = [];
   };
 
   /**
@@ -175,7 +234,20 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
      * right-click on empty canvas keeps the selection too, because a marquee
      * followed by a right-click in the gap between the images is still "these".
      */
-    const clickedId = target?.closest<HTMLElement>('[data-block-id]')?.dataset.blockId ?? '';
+    /**
+     * WHAT WAS ACTUALLY CLICKED — and '' genuinely means empty canvas.
+     *
+     * `data-block-id` is on the surface and the page block too, so a press on
+     * bare canvas still resolves to an id. Taking that at face value made
+     * "clicked something outside the selection" true everywhere, and
+     * right-clicking the gap between two selected images offered to add media
+     * instead of generating from them. Only ids the gfx layer owns count.
+     */
+    const hitId = target?.closest<HTMLElement>('[data-block-id]')?.dataset.blockId ?? '';
+    const onCanvas = new Set(
+      [...gfx.gfxElements].map(m => (m as unknown as { id: string }).id),
+    );
+    const clickedId = onCanvas.has(hitId) ? hitId : '';
     refIds = chooseReferences(remembered, clickedId, selectedImages(board));
     menu.innerHTML = render(refIds.length);
 
@@ -234,7 +306,6 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
    * single card overwrote the very answer it was meant to preserve — the
    * snapshot taken a moment earlier was correct and this erased it.
    */
-  const gfx = board.std.get(GfxControllerIdentifier);
   const sub = gfx.selection.slots.updated.subscribe(() => {
     const ids = selectedImages(board);
     if (ids.length > 1) remembered = ids;
