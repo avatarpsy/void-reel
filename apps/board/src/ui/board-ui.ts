@@ -178,9 +178,22 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
   }
 
   function addShot() {
-    // Titled by position so a new card is never a nameless box the user has to
-    // guess at; they rename it in place, or ask the agent to.
-    createShots(board.std, board.surfaceId, [`SCENE ${shotCount() + 1} — untitled`]);
+    /**
+     * NAMED FOR WHAT IT IS — a shot, not a scene.
+     *
+     * It read `SCENE 4 — untitled`, which was wrong twice. A scene belongs to
+     * the SCREENPLAY and several shots share one, so minting a scene per card
+     * asserted a structure nobody had written; and the card's own badge said
+     * "SCENE 4" beside a pill saying which scene it actually covered, giving two
+     * different numbers the same name.
+     *
+     * `— untitled` is gone with it. It was there to signal "rename me" and does
+     * the opposite: it fills the field, so the placeholder ("Name this shot…")
+     * never shows and the words have to be deleted before they can be replaced.
+     * The number alone is a name a person is happy to keep or happy to type
+     * over.
+     */
+    createShots(board.std, board.surfaceId, [`Shot ${shotCount() + 1}`]);
     requestAnimationFrame(() => fitBoard());
   }
 

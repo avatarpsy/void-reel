@@ -30,7 +30,9 @@ import {
   type ExtensionDragEndContext,
 } from '@blocksuite/std/gfx';
 
-import { readShots, relayoutShots } from './shots';
+import { relayOffHostRelease } from './drag-release';
+import { SHOT_H } from './model';
+import { boardPlan, readShots, relayoutShots } from './shots';
 
 export class ShotReflowExtension extends InteractivityExtension {
   static override key = 'voidspace-shot-reflow';
@@ -53,23 +55,127 @@ export class ShotReflowExtension extends InteractivityExtension {
       const shotIds = new Set(readShots(this.std).map(s => s.id));
       if (!ids.every(id => shotIds.has(id))) return {};
 
+      /**
+       * A RELEASE OVER OUR OWN CHROME STILL HAS TO END THE DRAG. The manager
+       * binds `pointerup` to the editor host, and the asset panel and toolbars
+       * are siblings of it — see `drag-release.ts`. Without this, dragging a
+       * card leftwards (which is how you move it earlier in the film) ends over
+       * the panel and the move is never committed at all.
+       */
+      const endRelease = relayOffHostRelease(this.std);
+
       return {
+        clear: endRelease,
+        /**
+         * ── AFTER THE DROP HAS ACTUALLY LANDED, NOT DURING IT ────────────────
+         *
+         * This ran synchronously and produced overlapping cards. BlockSuite
+         * moves a dragged block by STASHING `xywh` — the writes are local while
+         * the pointer is down — and commits them to the document in
+         * `GfxBlockComponent.onDragEnd` with `model.pop('xywh')`. Our handler ran
+         * first, so:
+         *
+         *   • the shot order was still the one cached from BEFORE the drag (a
+         *     stashed write never reaches `blockUpdated`, so the per-revision
+         *     memo was never invalidated), and
+         *   • whatever box we assigned to the dragged card was then overwritten
+         *     by the pop.
+         *
+         * Measured on three cards: dragging C to the far left left C at x=247
+         * and A at x=360 — two cards overlapping, C off the grid. A 40px nudge
+         * of B put B and C at the same x. From the user's side that is "I move
+         * them and they snap back", and sometimes worse than snap-back.
+         *
+         * One frame later the pop has been committed, `blockUpdated` has moved
+         * the revision, and the order read here is the order the user just made.
+         * A frame is also invisible: the card is already sitting where it was
+         * dropped, and it slides onto the grid from there.
+         */
         onDragEnd: (_ctx: ExtensionDragEndContext) => {
-          /**
-           * READ THE ORDER, THEN SNAP TO IT.
-           *
-           * `readShots` sorts by x — which is exactly where the user just put
-           * the card — so the order is already what they intended. This only
-           * puts the cards back on the pitch.
-           *
-           * `relayoutShots` writes nothing when a card is already where it
-           * belongs, so dragging a shot a few pixels and letting go costs one
-           * write for that card and none for the rest.
-           */
-          const order = readShots(this.std).map(s => s.id);
-          if (order.length > 1) relayoutShots(this.std, order);
+          requestAnimationFrame(() => this.settle(ids));
         },
       };
     });
+  }
+
+  /** Re-file whatever moved, then put the strip back on its pitch. */
+  private settle(ids: string[]): void {
+    // The gesture may have ended by deleting the card, or the board may have
+    // been closed between the drop and this frame.
+    if (!ids.some(id => this.std.store.getBlock(id))) return;
+
+    /**
+     * WHICH ROW IT LANDED IN IS A STATEMENT ABOUT THE FILM.
+     *
+     * The board is a grid: a scene is a row (`shot/layout.ts`). So a card
+     * dropped inside another scene's row has been moved to that scene, and
+     * saying so is the whole reason the rows are there — the alternative is a
+     * card that visibly sits under "sc 4" while still claiming to cover sc 2,
+     * and a layout that snaps it back on the next open.
+     *
+     * SIDEWAYS IS STILL A RE-CUT. Landing in the row it started in changes no
+     * scene and only its place in that row, which is the reorder this extension
+     * has always done.
+     */
+    for (const id of ids) this.refile(id);
+
+    /**
+     * THEN SNAP.
+     *
+     * `readShots` sorts by row and then by x — which, now that this runs after
+     * the drop has been committed, is exactly where the user just put the card.
+     * This only puts the cards back on the pitch.
+     *
+     * `relayoutShots` writes nothing when a card is already where it belongs, so
+     * dragging a shot a few pixels and letting go costs one write for that card
+     * and none for the rest.
+     */
+    const order = readShots(this.std).map(s => s.id);
+    if (order.length) relayoutShots(this.std, order);
+  }
+
+  /**
+   * Put a shot on whatever scene its new row belongs to.
+   *
+   * BY VERTICAL OVERLAP, not by the card's top edge: a card dropped straddling
+   * two rows belongs to the one it is mostly in, which is what it looks like it
+   * is in. Comparing a single edge makes a card that is 90% inside a row read as
+   * being in the row above.
+   *
+   * The rows come from the plan the layout just drew, so the answer is against
+   * the geometry the user was actually looking at.
+   *
+   * Writes nothing when the scene has not changed, and nothing at all on a flat
+   * board — a piece with no screenplay has one row, and re-filing within it
+   * would be asserting a scene nobody wrote.
+   */
+  private refile(id: string): void {
+    const plan = boardPlan(this.std);
+    if (plan.flat) return;
+
+    const block = this.std.store.getBlock(id);
+    if (!block) return;
+    let box: number[];
+    try { box = JSON.parse((block.model.props as { xywh: string }).xywh) as number[]; }
+    catch { return; }
+    const [, top, , height] = box;
+    const bottom = top + (height || SHOT_H);
+
+    let best: { key: string; overlap: number } | null = null;
+    for (const row of plan.rows) {
+      const overlap = Math.min(bottom, row.y + row.height) - Math.max(top, row.y);
+      if (overlap > 0 && (!best || overlap > best.overlap)) {
+        best = { key: row.sceneKey, overlap };
+      }
+    }
+    // Off every row — dropped in the margin below the film. Left alone rather
+    // than filed under the nearest thing, which would be a guess about the one
+    // decision this gesture is supposed to make explicit.
+    if (!best) return;
+
+    const props = block.model.props as { sceneKey?: string };
+    if ((props.sceneKey ?? '') === best.key) return;
+    this.std.store.captureSync();
+    this.std.store.updateBlock(block.model, { sceneKey: best.key });
   }
 }

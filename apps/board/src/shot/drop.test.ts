@@ -20,7 +20,6 @@ import {
   ASSET_DRAG_TYPE, BLOCK_DRAG_TYPE, handleAssetDrop, handleBlockDrop,
   type AssetDragEntity, type BlockDragEntity,
 } from './drop';
-import { SHOT_GAP, SHOT_W } from './model';
 import { addMedia, createShots, readShot, readShots, setShotFields } from './shots';
 import { setBlockCatalogue } from './blocks';
 
@@ -44,6 +43,27 @@ function screenAt(board: TestBoard, x: number, y: number) {
   return { clientX, clientY };
 }
 
+/**
+ * Screen coordinates INSIDE a given shot's own box.
+ *
+ * These tests used to aim at fixed model points — (40, 40) was inside the first
+ * card because the board was one strip starting at the origin. The board is a
+ * grid now (`shot/layout.ts`) and rows start past a gutter wide enough for the
+ * act and sequence brackets, so a fixed point aims at empty canvas. Asking the
+ * card where it is expresses what the test always meant, and survives any
+ * future change to the layout.
+ */
+function inShot(board: TestBoard, shotId: string) {
+  const props = board.store.getBlock(shotId)!.model.props as { xywh: string };
+  const [x, y, w, h] = JSON.parse(props.xywh) as number[];
+  return screenAt(board, x + w / 2, y + h / 2);
+}
+
+/** Somewhere no shot is, whatever the layout does. */
+function offBoard(board: TestBoard) {
+  return screenAt(board, -8000, -8000);
+}
+
 describe('handleAssetDrop', () => {
   it('appends to the shot under the pointer and creates nothing on the canvas', async () => {
     const board = makeTestBoard();
@@ -51,7 +71,7 @@ describe('handleAssetDrop', () => {
     const before = board.store.getBlock(board.surfaceId)!.model.children.length;
     const placeOnCanvas = vi.fn().mockResolvedValue(undefined);
 
-    const out = await handleAssetDrop(board.std, entity(), screenAt(board, 40, 40), placeOnCanvas);
+    const out = await handleAssetDrop(board.std, entity(), inShot(board, shotId), placeOnCanvas);
 
     expect(out).toMatchObject({ target: 'shot', shotId });
     expect(readShot(board.std, shotId)!.media).toHaveLength(1);
@@ -66,7 +86,7 @@ describe('handleAssetDrop', () => {
     createShots(board.std, board.surfaceId, ['Kitchen']);
     const placeOnCanvas = vi.fn().mockResolvedValue(undefined);
 
-    const at = screenAt(board, SHOT_W + SHOT_GAP / 2, 40);
+    const at = offBoard(board);
     const out = await handleAssetDrop(board.std, entity(), at, placeOnCanvas);
 
     expect(out.target).toBe('canvas');
@@ -77,7 +97,7 @@ describe('handleAssetDrop', () => {
   it('routes to the shot the pointer is over, not the nearest one', async () => {
     const board = makeTestBoard();
     const [, second] = createShots(board.std, board.surfaceId, ['A', 'B']);
-    const at = screenAt(board, SHOT_W + SHOT_GAP + 20, 40);
+    const at = inShot(board, second);
 
     const out = await handleAssetDrop(board.std, entity(), at, vi.fn());
     expect(out.shotId).toBe(second);
@@ -87,7 +107,7 @@ describe('handleAssetDrop', () => {
   it('defaults a role by kind', async () => {
     const board = makeTestBoard();
     const [shotId] = createShots(board.std, board.surfaceId, ['Kitchen']);
-    const at = screenAt(board, 40, 40);
+    const at = inShot(board, shotId);
 
     await handleAssetDrop(board.std, entity({ kind: 'audio', name: 'hit.wav' }, 'd1'), at, vi.fn());
     await handleAssetDrop(board.std, entity({ kind: 'video', name: 'clip.mp4' }, 'd2'), at, vi.fn());
@@ -108,7 +128,7 @@ describe('handleAssetDrop', () => {
   it('treats a second deliberate drop as a second reference', async () => {
     const board = makeTestBoard();
     const [shotId] = createShots(board.std, board.surfaceId, ['Kitchen']);
-    const at = screenAt(board, 40, 40);
+    const at = inShot(board, shotId);
 
     await handleAssetDrop(board.std, entity({}, 'd1'), at, vi.fn());
     await handleAssetDrop(board.std, entity({}, 'd2'), at, vi.fn());
@@ -151,7 +171,7 @@ describe('dropping onto a slot', () => {
     const [shotId] = createShots(board.std, board.surfaceId, ['Kitchen']);
     stubZone(board, shotId, 'firstFrame');
 
-    await handleAssetDrop(board.std, entity(), screenAt(board, 40, 40), vi.fn());
+    await handleAssetDrop(board.std, entity(), inShot(board, shotId), vi.fn());
     expect(readShot(board.std, shotId)!.media[0].role).toBe('firstFrame');
   });
 
@@ -161,7 +181,7 @@ describe('dropping onto a slot', () => {
     setShotFields(board.std, shotId, { kind: 'hyperframes' });
     stubZone(board, shotId, 'background');
 
-    await handleAssetDrop(board.std, entity(), screenAt(board, 40, 40), vi.fn());
+    await handleAssetDrop(board.std, entity(), inShot(board, shotId), vi.fn());
     expect(readShot(board.std, shotId)!.media[0].role).toBe('background');
   });
 
@@ -182,7 +202,7 @@ describe('dropping onto a slot', () => {
     setShotFields(board.std, shotId, { kind: 'hyperframes', composition: 'browser-mockup' });
     stubZone(board, shotId, 'screenshot');
 
-    await handleAssetDrop(board.std, entity(), screenAt(board, 40, 40), vi.fn());
+    await handleAssetDrop(board.std, entity(), inShot(board, shotId), vi.fn());
     expect(readShot(board.std, shotId)!.media[0].role).toBe('screenshot');
   });
 
@@ -197,7 +217,7 @@ describe('dropping onto a slot', () => {
     setShotFields(board.std, shotId, { kind: 'hyperframes', composition: 'browser-mockup' });
     stubZone(board, shotId, 'portrait');
 
-    await handleAssetDrop(board.std, entity(), screenAt(board, 40, 40), vi.fn());
+    await handleAssetDrop(board.std, entity(), inShot(board, shotId), vi.fn());
     expect(readShot(board.std, shotId)!.media[0].role).toBe('reference');
   });
 
@@ -208,7 +228,7 @@ describe('dropping onto a slot', () => {
     stubZone(board, shotId, 'firstFrame');
 
     await handleAssetDrop(
-      board.std, entity({ kind: 'audio', name: 'hit.wav' }), screenAt(board, 40, 40), vi.fn(),
+      board.std, entity({ kind: 'audio', name: 'hit.wav' }), inShot(board, shotId), vi.fn(),
     );
     expect(readShot(board.std, shotId)!.media[0].role).toBe('sfx');
   });
@@ -219,7 +239,7 @@ describe('dropping onto a slot', () => {
     const [shotId] = createShots(board.std, board.surfaceId, ['Kitchen']);
     stubZone(board, shotId, null);
 
-    await handleAssetDrop(board.std, entity(), screenAt(board, 40, 40), vi.fn());
+    await handleAssetDrop(board.std, entity(), inShot(board, shotId), vi.fn());
     expect(readShot(board.std, shotId)!.media[0].role).toBe('reference');
   });
 });
@@ -239,7 +259,7 @@ describe('handleBlockDrop', () => {
     const board = makeTestBoard();
     const [shotId] = createShots(board.std, board.surfaceId, ['The stat']);
 
-    const out = handleBlockDrop(board.std, block('stat-card'), screenAt(board, 40, 40));
+    const out = handleBlockDrop(board.std, block('stat-card'), inShot(board, shotId));
 
     expect(out).toMatchObject({ target: 'shot', shotId, title: 'The stat' });
     const shot = readShot(board.std, shotId)!;
@@ -260,7 +280,7 @@ describe('handleBlockDrop', () => {
     });
     addMedia(board.std, shotId, { ...entity().media, role: 'reference' as const });
 
-    handleBlockDrop(board.std, block('stat-card'), screenAt(board, 40, 40));
+    handleBlockDrop(board.std, block('stat-card'), inShot(board, shotId));
 
     const shot = readShot(board.std, shotId)!;
     expect(shot.voiceover).toBe('Ninety-two percent.');
@@ -282,10 +302,10 @@ describe('handleBlockDrop', () => {
     });
 
     // Re-dropping the SAME block is a no-op on the values someone typed.
-    handleBlockDrop(board.std, block('stat-card'), screenAt(board, 40, 40));
+    handleBlockDrop(board.std, block('stat-card'), inShot(board, shotId));
     expect(readShot(board.std, shotId)!.compositionVars).toEqual({ stat: '92%' });
 
-    handleBlockDrop(board.std, block('quote-card', 'b2'), screenAt(board, 40, 40));
+    handleBlockDrop(board.std, block('quote-card', 'b2'), inShot(board, shotId));
     const shot = readShot(board.std, shotId)!;
     expect(shot.composition).toBe('quote-card');
     expect(shot.compositionVars).toEqual({});
@@ -300,7 +320,7 @@ describe('handleBlockDrop', () => {
     createShots(board.std, board.surfaceId, ['A']);
 
     const out = handleBlockDrop(
-      board.std, block('stat-card'), screenAt(board, 4000, 4000),
+      board.std, block('stat-card'), offBoard(board),
     );
     expect(out.target).toBe('refused');
     expect((out as { reason: string }).reason).toMatch(/onto a shot/i);
@@ -311,7 +331,7 @@ describe('handleBlockDrop', () => {
     const [shotId] = createShots(board.std, board.surfaceId, ['A']);
     const before = board.store.getBlock(board.surfaceId)!.model.children.length;
 
-    handleBlockDrop(board.std, block('stat-card'), screenAt(board, 40, 40));
+    handleBlockDrop(board.std, block('stat-card'), inShot(board, shotId));
 
     expect(board.store.getBlock(board.surfaceId)!.model.children).toHaveLength(before);
     expect(readShot(board.std, shotId)!.media).toHaveLength(0);
@@ -347,7 +367,7 @@ describe('handleAssetDrop · dragging off a shot', () => {
     })!;
     const placeOnCanvas = vi.fn().mockResolvedValue(undefined);
 
-    const at = screenAt(board, SHOT_W + SHOT_GAP / 2, 40);
+    const at = offBoard(board);
     const out = await handleAssetDrop(
       board.std, withOrigin(entity(), { shotId, mediaId }), at, placeOnCanvas,
     );
@@ -369,7 +389,7 @@ describe('handleAssetDrop · dragging off a shot', () => {
     })!;
     const placeOnCanvas = vi.fn().mockResolvedValue(undefined);
 
-    const at = screenAt(board, SHOT_W + SHOT_GAP / 2, 40);
+    const at = offBoard(board);
     await handleAssetDrop(
       board.std,
       // A take drag carries `takeId`, never `mediaId`.
@@ -392,7 +412,7 @@ describe('handleAssetDrop · dragging off a shot', () => {
     })!;
     const placeOnCanvas = vi.fn().mockResolvedValue(undefined);
 
-    const at = screenAt(board, SHOT_W + SHOT_GAP + 40, 40);
+    const at = inShot(board, b);
     const out = await handleAssetDrop(
       board.std, withOrigin(entity(), { shotId: a, mediaId }), at, placeOnCanvas,
     );
@@ -415,7 +435,7 @@ describe('handleAssetDrop · dragging off a shot', () => {
     const placeOnCanvas = vi.fn().mockResolvedValue(undefined);
 
     await handleAssetDrop(
-      board.std, withOrigin(entity(), { shotId, mediaId }), screenAt(board, 40, 40), placeOnCanvas,
+      board.std, withOrigin(entity(), { shotId, mediaId }), inShot(board, shotId), placeOnCanvas,
     );
 
     const media = readShot(board.std, shotId)!.media;
@@ -431,7 +451,7 @@ describe('handleAssetDrop · dragging off a shot', () => {
     const [shotId] = createShots(board.std, board.surfaceId, ['Kitchen']);
     const placeOnCanvas = vi.fn().mockResolvedValue(undefined);
 
-    await handleAssetDrop(board.std, entity(), screenAt(board, 40, 40), placeOnCanvas);
+    await handleAssetDrop(board.std, entity(), inShot(board, shotId), placeOnCanvas);
     expect(readShot(board.std, shotId)!.media).toHaveLength(1);
   });
 });
@@ -464,7 +484,7 @@ describe("handleAssetDrop · reordering in place", () => {
     const out = await handleAssetDrop(
       board.std,
       { ...entity(), origin: { shotId, mediaId } },
-      screenAt(board, 40, 40),
+      inShot(board, shotId),
       placeOnCanvas,
     );
 
@@ -491,7 +511,7 @@ describe("handleAssetDrop · reordering in place", () => {
     await handleAssetDrop(
       board.std,
       { ...entity(), origin: { shotId, takeId: "take-1" } },
-      screenAt(board, 40, 40),
+      inShot(board, shotId),
       placeOnCanvas,
     );
 

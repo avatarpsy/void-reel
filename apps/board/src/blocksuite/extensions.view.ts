@@ -26,6 +26,8 @@ import { FrameViewExtension } from '@blocksuite/affine/blocks/frame/view';
 import { AttachmentViewExtension } from '@blocksuite/affine/blocks/attachment/view';
 
 import { VoidspaceMediaViewExtension } from '../board/media-embed';
+// Tells every widget that this is a canvas. Not optional — see doc-mode.ts.
+import { BoardDocModeExtension } from './doc-mode';
 // OURS. The storyboard panel — a real block that owns its media, which is what
 // removed the frame-membership reconciler that used to live here. AFFiNE adds an
 // element to the frame it is dropped on but never removes it from the one it came
@@ -159,8 +161,20 @@ const VIEW_PROVIDERS = [
    * button: the player existed the whole time and we were not asking for it.
    */
   AttachmentViewExtension,
-  // MUST come after it: overrides the video/audio embed configs that extension
-  // registers, so the player letterboxes instead of cropping. See media-embed.ts.
+  /**
+   * MUST come after it, and overrides three of its registrations:
+   *
+   *   • the VIDEO and AUDIO embed configs, so a clip is a poster tile that
+   *     streams only once somebody presses play (see media-embed.ts);
+   *   • the edgeless BLOCK VIEW, so the card fills the block's box instead of
+   *     being drawn at a fixed 752×544 and squeezed onto it with two
+   *     independent scale factors (see media-block.ts — that squeeze is what
+   *     made every clip on the canvas look stretched, and its play button a
+   *     ten-pixel ellipse).
+   *
+   * All three are `di.override`, so the order is not a preference: registering
+   * before AFFiNE's own would throw on the duplicate identifier.
+   */
   VoidspaceMediaViewExtension,
   ShotViewExtension,
   EmbedViewExtension,
@@ -204,6 +218,20 @@ export function boardViewExtensions(): ExtensionType[] {
   return [
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ...new ViewExtensionManager(VIEW_PROVIDERS as any).get('edgeless'),
+    /**
+     * AND SAY SO TO THE WIDGETS. Asking for the `edgeless` scope above decides
+     * which extensions load; it does not tell a loaded extension which mode it
+     * is running in. That is `DocModeProvider`, and the stock one answers
+     * `null` — a third answer no `mode === 'edgeless'` guard tests for, so every
+     * one of them took the page branch.
+     *
+     * The visible cost was that clip and track cards could not be dragged on the
+     * canvas at all: the drag-handle widget made them HTML5 drag sources (a
+     * page-mode feature) and swallowed the pointerdown the gfx layer needed.
+     * See `doc-mode.ts` for the full chain. Must come AFTER the providers, since
+     * it overrides what FoundationViewExtension registered.
+     */
+    BoardDocModeExtension,
     // OURS, appended: a plain extension rather than a provider, same as the
     // shot block's schema half.
     CanvasMediaToShotExtension,

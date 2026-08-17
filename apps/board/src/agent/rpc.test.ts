@@ -1007,3 +1007,67 @@ describe('board_running_takes', () => {
     expect(r.takes[0].runtime).toBe('cloud');
   });
 });
+
+describe('board_shot_gen_input · whether the clip speaks', () => {
+  /**
+   * WHAT THIS REPLACED. The card carried a Speaks / Silent toggle writing
+   * `voiceMode`, and this payload read it. That asked the user to decide
+   * something the writing had already decided twice — SHOT describes the video
+   * including any dialogue in it, NARRATION is a separate track over the top —
+   * and it defaulted to SILENT, so a shot whose prompt contained a line
+   * generated a silent clip with nothing on the card to explain it.
+   *
+   * `dialogue` permits speech, it does not command it: a model with native
+   * dialogue speaks the lines it finds and stays quiet when there are none. So
+   * the prompt decides, which is what everyone believed was happening.
+   */
+  it('lets a model that can speak do so, without being asked', async () => {
+    const created = await call('voidspace:board-add-shots', { titles: ['A'] });
+    const shotId = created.shots[0].id;
+    await call('voidspace:board-update-shot', {
+      shotId, action: 'She turns and says "welcome my viewers".',
+    });
+
+    const out = await call('voidspace:board-shot-gen-input', { shotId });
+    expect(out.voiceMode).toBe('dialogue');
+  });
+
+  it('never asks a model that cannot speak for dialogue', async () => {
+    // Asking one that cannot either errors deep in a provider or is accepted
+    // and ignored — and the user is charged for a clip that was never going to
+    // speak.
+    setModelCatalogue([{ ...SEEDANCE, nativeDialogue: false }], SEEDANCE.id);
+    const created = await call('voidspace:board-add-shots', { titles: ['A'] });
+    const shotId = created.shots[0].id;
+    // A shot with nothing written in it is refused before any of this.
+    await call('voidspace:board-update-shot', { shotId, action: 'She turns.' });
+    const out = await call('voidspace:board-shot-gen-input', { shotId });
+    expect(out.voiceMode).toBe('silent');
+  });
+
+  it('keeps a narration separate on every model, because that is what it means', async () => {
+    /**
+     * This read `voiceover && !wantsDialogue`, which said the OPPOSITE on a
+     * model that speaks: a narrator's line was handed to the video model to
+     * perform on camera. A narrator is not a character in the scene, and this
+     * flag is what decides which one the line becomes.
+     */
+    const created = await call('voidspace:board-add-shots', { titles: ['A'] });
+    const shotId = created.shots[0].id;
+    await call('voidspace:board-update-shot', {
+      shotId, action: 'She turns to the window.', voiceover: 'It had rained all week.',
+    });
+
+    const out = await call('voidspace:board-shot-gen-input', { shotId });
+    expect(out.voiceMode).toBe('dialogue');       // the model may still speak on camera
+    expect(out.narrationIsSeparate).toBe(true);   // but the narrator is laid over
+  });
+
+  it('says a shot with no narration has none to lay over', async () => {
+    const created = await call('voidspace:board-add-shots', { titles: ['A'] });
+    const shotId = created.shots[0].id;
+    await call('voidspace:board-update-shot', { shotId, action: 'She turns.' });
+    const out = await call('voidspace:board-shot-gen-input', { shotId });
+    expect(out.narrationIsSeparate).toBe(false);
+  });
+});

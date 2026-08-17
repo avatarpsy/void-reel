@@ -22,11 +22,13 @@ import { GfxControllerIdentifier } from '@blocksuite/std/gfx';
 import { generateKeyBetween } from 'fractional-indexing';
 
 import { perRev } from '../board/doc-cache';
+import { planBoard, type BoardPlan } from './layout';
 import {
   SHOT_GAP, SHOT_H, SHOT_W, normaliseTag,
   type MediaRole, type RefKind, type ShotBlockModel, type ShotKind, type ShotMedia,
   type ShotTake,
 } from './model';
+import { readParsed } from './screenplay-doc';
 
 export interface ShotView {
   id: string;
@@ -99,12 +101,62 @@ function shotOrder(std: BlockStdScope): ShotOrder {
     const rows = std.store
       .getBlocksByFlavour('voidspace:shot')
       .map(block => {
-        const p = block.model.props as ShotBlockModel['props'];
+        /**
+         * `peek()`, AND IT IS THE DIFFERENCE BETWEEN O(n) AND O(n²).
+         *
+         * BlockSuite props are signals and its components render inside a
+         * tracking scope, so reading `props.xywh` SUBSCRIBES the caller to that
+         * block's position. Every shot card reads this list — it is where its
+         * SHOT number comes from — so reading the positions normally subscribed
+         * every card to every other card's box.
+         *
+         * Measured on a 189-shot board: nudging ONE card by a single pixel
+         * re-rendered all 189, and one `set_scene` (which moves a whole row)
+         * cost 280ms in card templates. Filing a feature's worth of shots onto
+         * their scenes took 35 seconds, almost all of it re-rendering cards
+         * whose own content had not changed.
+         *
+         * `peek` reads the same value and subscribes to nothing. Nothing is lost:
+         * a card's number can only change when shots move, and `relayoutShots`
+         * writes the boxes of every card that moved — so each of them re-renders
+         * for its own reason, with the new order already in the cache.
+         */
+        const gfx = block.model as unknown as { xywh$?: { peek(): string } };
+        const raw = gfx.xywh$?.peek()
+          ?? (block.model.props as ShotBlockModel['props']).xywh;
         let x = 0;
-        try { x = (JSON.parse(p.xywh || '[0,0,0,0]') as number[])[0] ?? 0; } catch { x = 0; }
-        return { id: block.id, x };
+        let y = 0;
+        try {
+          const box = JSON.parse(raw || '[0,0,0,0]') as number[];
+          x = box[0] ?? 0;
+          y = box[1] ?? 0;
+        } catch { x = 0; y = 0; }
+        return { id: block.id, x, y };
       })
-      .sort((a, b) => a.x - b.x);
+      /**
+       * READ THE BOARD THE WAY YOU READ A PAGE — down, then across.
+       *
+       * This sorted by x alone, which was right while every shot sat on one
+       * horizontal strip: where a card was WAS the order it cut in, and dragging
+       * one between two others reordered the film with no second hidden
+       * structure to disagree with the visible one.
+       *
+       * The board is a grid now (see `shot/layout.ts`) — a scene is a row, a
+       * sequence is a block of rows, an act is a block of sequences — so the
+       * same property needs the same rule in two dimensions. Top to bottom then
+       * left to right IS act ▸ sequence ▸ scene ▸ shot, by construction, because
+       * that is the order the layout places them in.
+       *
+       * The row tolerance is not tidiness: a card mid-drag is a few pixels off
+       * its row, and comparing raw `y` would flip it above or below its
+       * neighbours for the length of the gesture — the compile order flickering
+       * while somebody nudges a card. Half a card's height is comfortably
+       * narrower than the smallest gap the layout leaves between rows.
+       */
+      .sort((a, b) => {
+        const row = Math.abs(a.y - b.y) > SHOT_H / 2 ? a.y - b.y : 0;
+        return row || a.x - b.x;
+      });
 
     return {
       ids: rows.map(r => r.id),
@@ -196,7 +248,13 @@ export function readShot(std: BlockStdScope, id: string): ShotView | null {
 }
 
 /**
- * A shot's position in the filmstrip, 1-based — its SCENE number.
+ * A shot's position in the filmstrip, 1-based — its SHOT number.
+ *
+ * NOT a scene number, though it was called one. A scene is a place and a moment
+ * in the screenplay and its number comes from the script; a shot is one set-up
+ * covering part of one, and several shots routinely share a scene. The card
+ * showed this as "SCENE 1" an inch from a pill showing the real screenplay
+ * scene, so two controls disagreed about the same word.
  *
  * Here rather than in the card because the card computed it by scanning and
  * sorting every shot on the board on every render, which made painting the strip
@@ -205,9 +263,57 @@ export function readShot(std: BlockStdScope, id: string): ShotView | null {
  * 0 when the id is not a shot on this board, which is what a card mid-delete
  * sees for one frame.
  */
-export function sceneNumberOf(std: BlockStdScope, id: string): number {
+export function shotNumberOf(std: BlockStdScope, id: string): number {
   const at = shotOrder(std).at.get(id);
   return at === undefined ? 0 : at + 1;
+}
+
+/**
+ * The exact string the OLD "+ Add shot" minted, and nothing else.
+ *
+ * Anchored at both ends and requiring the em dash, because this is the licence
+ * to rewrite somebody's title: a shot a person actually named "Scene 3 — the
+ * kitchen" must not match, and neither must "SCENE 12 — untitled draft".
+ */
+const LEGACY_AUTO_TITLE = /^SCENE (\d+) — untitled$/;
+
+/**
+ * Bring old boards onto the naming the app now uses.
+ *
+ * ── WHY THIS REWRITES DATA AT ALL, WHICH IS NORMALLY WRONG ───────────────────
+ * The card's badge says SHOT 1 and its title said "SCENE 1 — untitled", an inch
+ * apart, with a third control beside them showing the real SCREENPLAY scene.
+ * Three numbers, two of them called the same thing. Renaming the badge fixed the
+ * label and left the contradiction sitting in the document — and the title is not
+ * only a label: it is carried into compile, so a film built from an old board
+ * still ships shots called "scene".
+ *
+ * That string was written BY THE APP and never by a person, which is what makes
+ * it safe to change: the pattern is the old minting function's exact output. A
+ * title anybody typed cannot match it.
+ *
+ * `withoutTransact` so it is not an undo step. There is nothing here a user did
+ * and nothing they would want to undo — and a board that greeted them with a
+ * pending Ctrl+Z that renames their shots back would be worse than the
+ * inconsistency.
+ */
+export function normaliseShotTitles(std: BlockStdScope): number {
+  if (std.store.readonly) return 0;
+  const stale = std.store
+    .getBlocksByFlavour('voidspace:shot')
+    .filter(b => LEGACY_AUTO_TITLE.test((b.model.props as ShotBlockModel['props']).title ?? ''));
+  if (!stale.length) return 0;
+
+  std.store.withoutTransact(() => {
+    for (const block of stale) {
+      const props = block.model.props as ShotBlockModel['props'];
+      const n = LEGACY_AUTO_TITLE.exec(props.title ?? '')?.[1] ?? '';
+      // The number IS kept: it was the shot's place in the film, which is what
+      // the badge shows and what the user has been reading it as.
+      std.store.updateBlock(block.model, { title: n ? `Shot ${n}` : '' });
+    }
+  });
+  return stale.length;
 }
 
 /**
@@ -239,29 +345,76 @@ export function createShots(std: BlockStdScope, surfaceId: string, titles: strin
       ));
     });
   });
+
+  /**
+   * THEN PUT THEM WHERE THEY BELONG.
+   *
+   * `shotBounds` above is a provisional spot at the end of the last row — a new
+   * shot is on no scene, so on a board with a screenplay its real home is the
+   * "not on the script yet" row, which only the plan knows where to put. Placing
+   * first and re-flowing second keeps the block creation in one transaction (so
+   * it is one undo step) without teaching it the grid.
+   */
+  relayoutShots(std, readShots(std).map(s => s.id));
   return ids;
 }
 
 /**
- * Re-flow the filmstrip into the given order.
+ * Re-flow the board into the film's own shape — Acts ▸ Sequences ▸ Scenes ▸
+ * Shots, one row per scene.
  *
- * Order is the ARGUMENT, never the current geometry: a user dragging a panel
- * aside to look at it must not silently re-cut their film. And because a shot
- * owns its media, moving one moves everything in it — there is nothing left
+ * ── WHAT THE `ids` ARGUMENT STILL DECIDES, AND WHAT IT NO LONGER DOES ────────
+ * It used to decide everything: position was `order * pitch` along one line, so
+ * the array WAS the film. Now it decides the order WITHIN a scene and nothing
+ * else — which row a shot lands in comes from the scene it says it covers, and
+ * that is the user's own statement (the pill on the card), not something to be
+ * inferred from where they happened to drag it.
+ *
+ * That split is the whole point. Dragging a card sideways past its neighbour
+ * still re-cuts the film, exactly as before. Dragging it into a different
+ * scene's row is a different act with a different meaning, and `reflow.ts` is
+ * where it becomes one.
+ *
+ * Order is still the ARGUMENT and never the current geometry: a user dragging a
+ * panel aside to look at it must not silently re-cut their film. And because a
+ * shot owns its media, moving one moves everything in it — there is nothing left
  * behind at the old coordinates.
  */
 export function relayoutShots(std: BlockStdScope, ids: string[]): void {
+  const rank = new Map(ids.map((id, i) => [id, i] as const));
+  const plan = planBoard(readParsed(std), ids.flatMap(id => {
+    const p = propsOf(std, id);
+    if (!p) return [];
+    // `rank` and not the stored x: the caller's order is the intent, and the
+    // geometry it is about to be given has not been written yet.
+    return [{ id, sceneKey: p.sceneKey ?? '', x: rank.get(id) ?? 0 }];
+  }));
+
   std.store.captureSync();
   std.store.transact(() => {
-    ids.forEach((id, order) => {
+    for (const [id, b] of plan.place) {
       const block = std.store.getBlock(id);
-      if (!block) return;
-      const b = shotBounds(order);
+      if (!block) continue;
       const current = (block.model.props as { xywh: string }).xywh;
       const next = `[${b.x},${b.y},${b.w},${b.h}]`;
       if (current !== next) std.store.updateBlock(block.model, { xywh: next });
-    });
+    }
   });
+}
+
+/**
+ * The board's current shape, for anything that DRAWS it.
+ *
+ * Memoised per document revision like the order is, and for the same reason: the
+ * bracket overlay repaints on every viewport change, and re-parsing the
+ * screenplay sixty times a second to find out where act two starts is not a
+ * thing to do on a pan.
+ */
+export function boardPlan(std: BlockStdScope): BoardPlan {
+  return perRev(std, 'shots:plan', () =>
+    planBoard(readParsed(std), readShots(std).map(s => ({
+      id: s.id, sceneKey: s.sceneKey, x: s.x,
+    }))));
 }
 
 export function deleteShot(std: BlockStdScope, id: string): boolean {
@@ -286,8 +439,24 @@ export function setShotFields(
 ): boolean {
   const block = std.store.getBlock(id);
   if (!block) return false;
+
+  /**
+   * PUTTING A SHOT ON A SCENE MOVES IT, because a scene IS a row.
+   *
+   * Everything else here is content — the title, the prompt, the model — and
+   * changes nothing about where the card sits. `sceneKey` is structural: it is
+   * the shot's own statement about which part of the film it covers, and the
+   * board draws that statement as a position (`shot/layout.ts`). Writing it
+   * without re-flowing leaves a card sitting under one scene's bracket while
+   * claiming another, which is the exact contradiction the grid exists to make
+   * impossible.
+   */
+  const moved = 'sceneKey' in patch
+    && (patch.sceneKey ?? '') !== ((block.model.props as { sceneKey?: string }).sceneKey ?? '');
+
   std.store.captureSync();
   std.store.updateBlock(block.model, patch);
+  if (moved) relayoutShots(std, readShots(std).map(s => s.id));
   return true;
 }
 
@@ -625,13 +794,32 @@ export function moveMedia(std: BlockStdScope, shotId: string, id: string, delta:
   }) ?? false;
 }
 
-/** The shot at a point in MODEL coordinates, if any. */
+/**
+ * The shot at a point in MODEL coordinates, if any.
+ *
+ * ── THIS RUNS ON EVERY POINTERMOVE OF EVERY DRAG ─────────────────────────────
+ * `canvas-drop.ts` asks it for each move so the shot under the pointer can light
+ * up, which puts it squarely on the frame budget of a gesture.
+ *
+ * It used to walk `readShots`, and that was the wrong tool twice over. It builds
+ * a full view of every shot — copying each one's takes and composition
+ * variables — to read four numbers off each. Worse, `shotOrder`'s cache is keyed
+ * on the DOCUMENT REVISION, and a drag moves a block, so every move invalidated
+ * it: the flavour scan, the `JSON.parse` of every `xywh` and the sort all ran
+ * again, per move, and then n view objects were allocated and thrown away. On a
+ * board of twenty shots that is the judder in "dragging media is glitchy".
+ *
+ * Reading the blocks directly costs one parse per shot and allocates nothing.
+ */
 export function shotAtPoint(std: BlockStdScope, point: [number, number]): string | null {
-  for (const shot of readShots(std)) {
-    const p = propsOf(std, shot.id);
-    if (!p) continue;
-    const [x, y, w, h] = JSON.parse(p.xywh) as number[];
-    if (point[0] >= x && point[0] <= x + w && point[1] >= y && point[1] <= y + h) return shot.id;
+  const [px, py] = point;
+  for (const block of std.store.getBlocksByFlavour('voidspace:shot')) {
+    const raw = (block.model.props as ShotBlockModel['props']).xywh;
+    if (!raw) continue;
+    let box: number[];
+    try { box = JSON.parse(raw) as number[]; } catch { continue; }
+    const [x, y, w, h] = box;
+    if (px >= x && px <= x + w && py >= y && py <= y + h) return block.id;
   }
   return null;
 }

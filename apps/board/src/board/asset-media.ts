@@ -52,6 +52,36 @@ import { getParentToken, withToken } from './parent-auth';
  *  anything past this is detail no one will see at board zoom. */
 const MAX_CANVAS_IMAGE_WIDTH = 960;
 
+/**
+ * How wide a placed CLIP or TRACK lands.
+ *
+ * `addAttachments` has one size for everything it makes — `cubeThick`, 170×132 —
+ * because it was written for file chips, where the card is a name and an icon
+ * and 170px is plenty. A clip is a picture, and 170px of picture is a thumbnail
+ * with a play button too small to hit and a caption too small to read: "I drag a
+ * video out and I can't expand it or play it".
+ *
+ * 360 is the width of a comfortable reference on a board that also holds 480px
+ * storyboard panels — big enough to recognise a shot and press play, small
+ * enough that four of them fit side by side.
+ */
+const CANVAS_CLIP_WIDTH = 360;
+
+/**
+ * And how TALL it may get once the real shape is known.
+ *
+ * Width alone is the wrong bound for a board that holds both orientations: a
+ * 9:16 clip — which is most of what this product makes — at 360 wide is 640
+ * tall, a slab three times the height of the storyboard panels beside it and
+ * taller than the viewport at any useful zoom. Capping the height lands a
+ * portrait clip at 236×420, which reads as a phone-shaped card next to a
+ * landscape one rather than as a wall.
+ */
+const CANVAS_CLIP_MAX_HEIGHT = 420;
+
+/** Until the real dimensions come back, assume the shape almost every clip is. */
+const DEFAULT_CLIP_RATIO = 9 / 16;
+
 export interface PlaceAssetInput {
   /** What the CANVAS loads. A thumbnail or 720p proxy when the server has one. */
   displayUrl: string;
@@ -134,6 +164,58 @@ async function fetchDisplayBlob(url: string): Promise<Blob | null> {
 
 function engineOf(std: BlockStdScope): BoardBlobEngine {
   return std.store.blobSync as unknown as BoardBlobEngine;
+}
+
+/**
+ * The box a clip should occupy once its REAL shape is known, or null if it is
+ * already right.
+ *
+ * Pure, and exported, because it is the only interesting thing in a callback
+ * that otherwise cannot be reached without a network and a decoder: the tests
+ * drive this rather than a mock of `<video>`.
+ *
+ * Two rules, and the second is the one that is easy to get wrong.
+ *
+ *  1. THE CARD TAKES THE CLIP'S ASPECT. A 16:9 card holding a 9:16 clip crops it
+ *     to a letterbox slot, which is exactly the "why is my video squashed"
+ *     report from the other direction.
+ *
+ *  2. THE HEIGHT CAP APPLIES ONLY TO A CARD NOBODY HAS TOUCHED. The probe can be
+ *     six seconds behind the drop — long enough for the user to have resized the
+ *     card themselves — and narrowing it from under them to obey a default they
+ *     never chose is worse than a tall card. So the width is recomputed only
+ *     while it is still exactly the one `placeAsset` placed.
+ */
+export function probedClipBox(
+  box: readonly number[],
+  dims: { w: number; h: number },
+): string | null {
+  const [x, y, ow, oh] = box;
+  if (!dims.w || !dims.h || !ow) return null;
+
+  let w = ow;
+  let h = Math.round((w * dims.h) / dims.w);
+  if (w === CANVAS_CLIP_WIDTH && h > CANVAS_CLIP_MAX_HEIGHT) {
+    h = CANVAS_CLIP_MAX_HEIGHT;
+    w = Math.round((h * dims.w) / dims.h);
+  }
+  if (w === ow && h === oh) return null;
+
+  // About the CENTRE, like the placement itself: a portrait clip that suddenly
+  // doubled in height downward would shove itself off the spot it was dropped on.
+  return `[${Math.round(x + (ow - w) / 2)},${Math.round(y + (oh - h) / 2)},${w},${h}]`;
+}
+
+/** Resize a just-placed block about its own centre, so it stays where it was
+ *  dropped rather than growing away from the pointer. */
+function resize(std: BlockStdScope, blockId: string, w: number, h: number): void {
+  const block = std.store.getBlock(blockId);
+  if (!block) return;
+  const box = JSON.parse((block.model.props as { xywh: string }).xywh) as number[];
+  const [x, y, ow, oh] = box;
+  std.store.updateBlock(block.model, {
+    xywh: `[${Math.round(x + (ow - w) / 2)},${Math.round(y + (oh - h) / 2)},${w},${h}]`,
+  });
 }
 
 /**
@@ -221,6 +303,17 @@ export async function placeAsset(
       // Turns the download CHIP into the PLAYER.
       std.get(AttachmentEmbedProvider).convertTo(model);
       /**
+       * A SIZE A PERSON CAN USE. `addAttachments` lands everything at 170×132 —
+       * the file-chip size — which for a clip is a thumbnail with a play button
+       * too small to hit and a caption too small to read.
+       *
+       * AFTER `convertTo`, not before: an embed config is allowed to set its own
+       * card size (AFFiNE's built-in video one jumps to 752×544), so this has to
+       * be the last word. Around the same CENTRE, so the card stays where it was
+       * dropped rather than growing away from the pointer.
+       */
+      resize(std, blockId, CANVAS_CLIP_WIDTH, Math.round(CANVAS_CLIP_WIDTH * DEFAULT_CLIP_RATIO));
+      /**
        * AN INDEX, because `addAttachments` does not set one.
        *
        * Unlike `addImages` (`affine-block-image/src/utils.ts:345`), the
@@ -250,9 +343,8 @@ export async function placeAsset(
           const live = std.store.getBlock(blockId);
           if (!live || std.store.readonly) return;
           const box = JSON.parse((live.model.props as { xywh: string }).xywh) as number[];
-          std.store.updateBlock(live.model, {
-            xywh: `[${box[0]},${box[1]},${box[2]},${Math.round((box[2] * dims.h) / dims.w)}]`,
-          });
+          const next = probedClipBox(box, dims);
+          if (next) std.store.updateBlock(live.model, { xywh: next });
         });
       }
     }

@@ -481,6 +481,19 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
         return fail('empty', 'Send the whole screenplay as `text`, in Fountain.');
       }
       writeScript(board.std, board.surfaceId, args.text);
+      /**
+       * THE SCRIPT IS THE BOARD'S SHAPE, so writing one re-lays the board.
+       *
+       * Rows are scenes and blocks of rows are sequences (`shot/layout.ts`), so
+       * adding a scene, reordering two, or splitting an act changes where every
+       * card below it belongs. Without this the cards stay on the old grid while
+       * the spine is drawn on the new one — brackets around the wrong rows,
+       * which is worse than no brackets.
+       *
+       * `relayoutShots` writes nothing for a card already in the right place, so
+       * an edit that does not change the structure costs one comparison a shot.
+       */
+      relayoutShots(board.std, readShots(board.std).map(s => s.id));
       rev++;
       return digest(board);
     },
@@ -1282,17 +1295,30 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
       const notes = ordered.map(m => m.note?.trim()).filter(Boolean).join(' ');
 
       /**
-       * WHETHER THE MODEL SPEAKS, resolved here rather than on the page.
+       * WHETHER THE MODEL SPEAKS — a fact about the MODEL, not a per-shot
+       * setting the user has to find and remember.
        *
-       * Two gates, and both matter. The user's choice comes first — a silent
-       * shot stays silent even on a model that could talk. But `dialogue` is
-       * only ever sent to a model that HAS native dialogue: asking one that
-       * cannot for it either errors deep in a provider or, worse, is accepted
-       * and ignored, and the user is charged for a clip that was never going to
-       * speak. `checkShot` already warns on the card when a narration is written
-       * against a model that cannot voice it.
+       * ── WHAT THIS REPLACED ────────────────────────────────────────────────
+       * It read `shot.voiceMode === 'dialogue' && caps.nativeDialogue`, and the
+       * card carried a Speaks / Silent toggle to set the first half. That was a
+       * third control deciding something the writing had already decided twice:
+       * SHOT describes the video including any dialogue in it, and NARRATION is
+       * a separate track laid over the top. Worse, it defaulted to SILENT — so
+       * a shot whose prompt said `she says "welcome my viewers"` generated a
+       * silent clip, with nothing on the card explaining why.
+       *
+       * ── AND WHY ENABLING IT IS SAFE ───────────────────────────────────────
+       * `dialogue` does not COMMAND speech, it permits it: a model with native
+       * dialogue speaks the lines it finds in the prompt and stays quiet when
+       * there are none. So the prompt decides, which is what everybody already
+       * believed was happening.
+       *
+       * The capability gate is unchanged and still matters. Asking a model that
+       * cannot speak for dialogue either errors deep in a provider or is
+       * accepted and ignored, and the user is charged for a clip that was never
+       * going to speak.
        */
-      const wantsDialogue = shot.voiceMode === 'dialogue' && !!caps?.nativeDialogue;
+      const wantsDialogue = !!caps?.nativeDialogue;
 
       return {
         ok: true as const,
@@ -1317,9 +1343,19 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
         /** What the user asked for, so the page can say if it moved. */
         requestedDurationSec: shot.durationSec,
         voiceMode: wantsDialogue ? 'dialogue' : 'silent',
-        /** Set when a narration was written but this model cannot voice it —
-         *  the line still gets spoken, separately, as TTS over the clip. */
-        narrationIsSeparate: !!shot.voiceover.trim() && !wantsDialogue,
+        /**
+         * A NARRATION IS ALWAYS SEPARATE. That is what the field means — the
+         * card says so under it, in the placeholder: "spoken separately, not by
+         * the video".
+         *
+         * This read `voiceover && !wantsDialogue`, which said the opposite on a
+         * model that speaks: write a narrator's line against Seedance and the
+         * clip claimed the narration was NOT separate, i.e. handed the
+         * voiceover to the video model to perform on camera. A narrator is not a
+         * character in the scene, and this is the flag that decides which one
+         * the line becomes.
+         */
+        narrationIsSeparate: !!shot.voiceover.trim(),
         takeNumber: shot.takes.length + 1,
       };
     },

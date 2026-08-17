@@ -17,6 +17,7 @@ import {
   clampPanelWidth, fetchAssetsCached, groupByRecency, hasMore, invalidateAssetCache, isAuthError,
   loadPanelWidth, loadThumbInto, loadViewMode, mergePage,
   mediaSrc, nextOffset, savePanelWidth, saveViewMode, tileSrc, videoPreviewSrc,
+  PANEL_GLYPH, isTypingTarget, loadPanelCollapsed, panelToggleTitle, savePanelCollapsed,
   type AssetBrowserHost, type AssetItem, type AssetKind, type AssetPage, type AssetScope,
   type PersonalCounts, type QuickFilter, type ViewMode,
 } from '@openreel/asset-browser';
@@ -36,7 +37,6 @@ import {
 } from '../shot/drop';
 import { lazyBlockPreview, mountBlockPreview, type PreviewHandle } from './block-preview';
 import { pendingToast, toast } from './toast';
-import { fitBoard } from './viewport';
 import type { MountedBoard } from '../blocksuite/editor';
 
 /**
@@ -376,7 +376,9 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
   let scope: AssetScope = 'generated';
   let kind: AssetKind | 'all' = 'all';
   let query = '';
-  let collapsed = false;
+  // Remembered, like the width beside it. The board was the only surface that
+  // reopened the panel on every load no matter how the user had left it.
+  let collapsed = loadPanelCollapsed('assets');
   // Both come from the CORE, so the preference follows the user between the
   // board and the video editor rather than being re-chosen on each surface.
   let viewMode: ViewMode = loadViewMode();
@@ -409,19 +411,43 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
       : ''}</div>`;
   }
 
+  /**
+   * The collapse control — the SAME button the React editors render.
+   *
+   * Not a look-alike: the markup comes from `PANEL_GLYPH` in the shared
+   * `panel-chrome` module, which holds the lucide path data both halves draw,
+   * and `panelToggleTitle` writes the tooltip both halves say. This panel used
+   * to hide behind a ◂ character wedged into the title, which was the one
+   * collapse control in the product that was a piece of TEXT.
+   */
+  function toggleBtn(): string {
+    return `<button type="button" class="vs-panel-toggle" data-a="toggle"
+              title="${panelToggleTitle('Assets', collapsed)}"
+              aria-label="${panelToggleTitle('Assets', collapsed)}"
+              aria-expanded="${!collapsed}"
+            >${collapsed ? PANEL_GLYPH['left-open'] : PANEL_GLYPH['left-close']}</button>`;
+  }
+
   function shell(): string {
+    // Collapsed: a rail carrying the mirrored button and the panel's name
+    // written down it, so a shut panel is still visibly a panel. The whole rail
+    // is the target, not just the 28px button.
+    if (collapsed) {
+      return `
+        <div class="vs-assets__rail">
+          ${toggleBtn()}
+          <button type="button" class="vs-assets__rail-label" data-a="toggle" tabindex="-1" aria-hidden="true">Assets</button>
+        </div>`;
+    }
     return `
-      ${collapsed ? '' : `
       <div class="vs-assets__bar">
         <img class="vs-assets__logo" src="/images/logo/logo.png" alt="Voidspace" />
         <a class="vs-assets__back" href="/studio/projects?tab=boards" target="_top">Back to Projects</a>
-      </div>`}
-      <button type="button" class="vs-assets__toggle" data-a="toggle"
-              title="${collapsed ? 'Show your assets' : 'Hide assets'}">
-        ${collapsed ? '<img class="vs-assets__logo" src="/images/logo/logo.png" alt="Voidspace" />' : '<span>Assets</span>'}
-        <span class="vs-assets__chev">${collapsed ? '▸' : '◂'}</span>
-      </button>
-      ${collapsed ? '' : `
+      </div>
+      <div class="vs-assets__head">
+        <span class="vs-assets__title">Assets</span>
+        ${toggleBtn()}
+      </div>
       <div class="vs-assets__body">
         <div class="vs-assets__scopes">
           ${scopes.map(s => `<button type="button" data-a="scope" data-v="${s}"
@@ -455,7 +481,7 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
         <div class="vs-assets__list vs-assets__list--${viewMode}" data-a="list"
              style="--vs-tile-min:${TILE_MIN_PX[viewMode]}px;--vs-tile-gap:${TILE_GAP_PX[viewMode]}px"><p class="vs-assets__muted">Loading…</p></div>
       </div>
-      <div class="vs-assets__grip" data-a="grip" title="Drag to resize"></div>`}`;
+      <div class="vs-assets__grip" data-a="grip" title="Drag to resize"></div>`;
   }
 
   function tile(a: AssetItem): string {
@@ -952,6 +978,62 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
   }
 
   /**
+   * The one way the panel opens or shuts, whatever asked.
+   *
+   * IT DOES NOT TOUCH THE VIEWPORT, and that is the point.
+   *
+   * This used to call `fitBoard()`, on the theory that the storyboard should
+   * re-frame itself to clear the panel's new width. In use that is the wrong
+   * trade every time: putting a panel away is a chrome gesture, and answering
+   * it by re-zooming and re-panning the whole board throws away the framing the
+   * user had chosen — you close a panel to see more of the shot you were
+   * looking at, and the shot is gone. The same applied to the resize grip
+   * below, where every drag ended in a jump.
+   *
+   * Nothing needs to move: this panel is `position: absolute` OVER the canvas
+   * (see `.vs-assets`), so collapsing it changes no layout the editor can see.
+   * The canvas is exactly as it was and 276 more pixels of it are simply
+   * visible. Content that was under the panel comes out from under it — which
+   * is what "I closed the panel" means.
+   *
+   * Re-framing that responds to CONTENT — the agent drafting a storyboard,
+   * `Fit`, a new shot — is untouched and still lives in `viewport.ts`.
+   */
+  function setCollapsed(next: boolean) {
+    if (next === collapsed) return;
+    collapsed = next;
+    savePanelCollapsed('assets', collapsed);
+    render();
+  }
+
+  /**
+   * Tab — the same "clear the panels away" gesture the video and image editors
+   * bind, on the surface that has exactly one panel to clear.
+   *
+   * CAPTURE PHASE, and that is not a style choice. BlockSuite's
+   * `UIEventDispatcher` binds keydown on `editor-host` and stops propagation,
+   * so with the canvas focused — which is nearly always, on a board — a
+   * bubble-phase listener on `window` is never reached and the key silently
+   * does nothing. Capture runs before the host sees the event at all.
+   *
+   * The guard is therefore doing real work: capture would otherwise steal Tab
+   * from every field on the surface. BlockSuite notes are contenteditable and
+   * Tab indents a list item inside one; a card title and the panel's own search
+   * box are ordinary inputs. `isTypingTarget` is the shared predicate, so all
+   * three editors agree on what "the user is typing" means, and we do NOT
+   * preventDefault when it trips — focus still moves and lists still indent the
+   * way they always did.
+   */
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (e.key !== 'Tab') return;
+    if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+    if (isTypingTarget(e.target)) return;
+    e.preventDefault();
+    setCollapsed(!collapsed);
+  };
+  window.addEventListener('keydown', onKeyDown, true);
+
+  /**
    * Drag the right edge to resize.
    *
    * Pointer events (not mouse) so a trackpad or pen works, and the pointer is
@@ -976,9 +1058,11 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
       t.removeEventListener('pointermove', onMove);
       t.removeEventListener('pointerup', onUp);
       savePanelWidth(width);
-      // Re-fit so the storyboard still clears the panel at its new width. The
-      // shared fit MEASURES the panel, so this stays right even mid-animation.
-      fitBoard();
+      // NO RE-FIT. Dragging a panel edge used to end in the whole storyboard
+      // zooming and panning to a new framing — a jump at the end of every
+      // drag, and the framing the user had was lost. See `setCollapsed`: the
+      // panel floats over the canvas, so its width changes nothing the canvas
+      // has to react to.
     };
     t.addEventListener('pointermove', onMove);
     t.addEventListener('pointerup', onUp);
@@ -988,7 +1072,7 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
     const t = (e.target as HTMLElement).closest<HTMLElement>('[data-a]');
     if (!t) return;
     const a = t.dataset.a;
-    if (a === 'toggle') { collapsed = !collapsed; render(); }
+    if (a === 'toggle') { setCollapsed(!collapsed); }
     else if (a === 'scope') { scope = t.dataset.v as AssetScope; render(); }
     else if (a === 'kind') {
       kind = t.dataset.v as AssetKind | 'all';
@@ -1225,6 +1309,7 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
     lightShot(null, null);
     sub.unsubscribe?.();
     disposeBlocks();
+    window.removeEventListener('keydown', onKeyDown, true);
     // A panel torn down while still waiting for a token must not reload into a
     // detached DOM when one finally arrives.
     stopAuthWait?.();

@@ -36,6 +36,7 @@ import { readBlockMeta } from '../board/board-meta';
 import { decodeMediaRef } from '../board/media-ref';
 import { toast } from '../ui/toast';
 import { findBlock } from './blocks';
+import { relayOffHostRelease } from './drag-release';
 import { dropZoneAt } from './drop';
 import { rolesFor, type MediaRole, type ShotMedia } from './model';
 import { addMedia, readShot, setMediaRole } from './shots';
@@ -116,6 +117,11 @@ export class CanvasMediaToShotExtension extends InteractivityExtension {
       const id = (only as unknown as { id?: string } | null)?.id;
       if (!id || !mediaOf(this.std, id)) return {};
 
+      // Same bridge as the shot reflow uses: a release over the asset panel is
+      // a release outside the editor host, and the manager never sees it. See
+      // `shot/drag-release.ts`.
+      const endRelease = relayOffHostRelease(this.std);
+
       return {
         onDragMove: (ctx: ExtensionDragMoveContext) => {
           const hit = dropZoneAt(this.std, ctx.event.clientX, ctx.event.clientY);
@@ -160,7 +166,7 @@ export class CanvasMediaToShotExtension extends InteractivityExtension {
           toast(`${media.name} → ${shot.title || 'the shot'}`, 'info');
         },
 
-        clear: () => this.light(null, null),
+        clear: () => { endRelease(); this.light(null, null); },
       };
     });
   }

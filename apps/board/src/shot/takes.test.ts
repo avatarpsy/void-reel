@@ -7,7 +7,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { makeTestBoard } from '../blocksuite/test-board';
-import { chosenTake, readyTakes, type ShotTake } from './model';
+import { chosenTake, readyTakes, takeThumb, type ShotTake } from './model';
 import {
   addTake, chooseTake, createShots, readShot, removeTake, updateTake,
 } from './shots';
@@ -179,5 +179,32 @@ describe('takes', () => {
     expect(removeTake(board.std, id, 'nope')).toBe(false);
     expect(updateTake(board.std, id, 'nope', { status: 'ready' })).toBe(false);
     expect(addTake(board.std, 'not-a-shot', take())).toBeNull();
+  });
+});
+
+describe('the picture a take tile draws', () => {
+  /**
+   * A PERFORMANCE RULE, and it looks like a cosmetic one.
+   *
+   * The card drew `poster || src`, and on a video take `src` is THE CLIP — so
+   * every take without a still handed an .mp4 to an <img>. The browser fetched
+   * the whole file, failed to decode it, and drew nothing: nine takes on a card
+   * was nine video downloads for nine blank tiles, and a board of fifty shots
+   * stalled for no reason anything on screen could explain.
+   */
+  it('never hands a video url to an image', () => {
+    expect(takeThumb({ kind: 'video', src: 'https://x.test/clip.mp4', poster: undefined }))
+      .toBe('');
+  });
+
+  it('uses the still when there is one', () => {
+    expect(takeThumb({
+      kind: 'video', src: 'https://x.test/clip.mp4', poster: 'https://x.test/p.jpg',
+    })).toBe('https://x.test/p.jpg');
+  });
+
+  it('lets a picture take be its own thumbnail — the one case src is an image', () => {
+    expect(takeThumb({ kind: 'image', src: 'https://x.test/frame.png', poster: undefined }))
+      .toBe('https://x.test/frame.png');
   });
 });

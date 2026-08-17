@@ -11,6 +11,7 @@ import { makeTestBoard } from '../blocksuite/test-board';
 import { SHOT_GAP, SHOT_W, trimWindow, type ShotMedia } from './model';
 import {
   addMedia, createShots, deleteShot, moveMedia, readShot, readShots,
+  normaliseShotTitles,
   relayoutShots, removeMedia, setMediaRole, setShotFields, shotAtPoint, tagMedia, trimMedia,
 } from './shots';
 
@@ -32,7 +33,12 @@ describe('shots', () => {
 
     const shots = readShots(board.std);
     expect(shots.map(s => s.title)).toEqual(['One', 'Two', 'Three']);
-    expect(shots.map(s => s.x)).toEqual([0, SHOT_W + SHOT_GAP, (SHOT_W + SHOT_GAP) * 2]);
+    // The PITCH, not the origin. Rows start past a gutter wide enough for the
+    // act and sequence brackets now (`shot/layout.ts`); what has to hold is that
+    // cards abut on a fixed grid in the order they were made.
+    const xs = shots.map(s => s.x);
+    expect(xs[1]! - xs[0]!).toBe(SHOT_W + SHOT_GAP);
+    expect(xs[2]! - xs[1]!).toBe(SHOT_W + SHOT_GAP);
   });
 
   /**
@@ -58,12 +64,21 @@ describe('shots', () => {
     expect(readShots(board.std).map(s => s.title)).toEqual(['C', 'A', 'B']);
   });
 
-  it('closes the gap when a shot is deleted, so scene numbers stay contiguous', () => {
+  it('closes the gap when a shot is deleted, so shot numbers stay contiguous', () => {
+    /**
+     * THE PROPERTY, NOT THE COORDINATES. This asserted `[0, SHOT_W + SHOT_GAP]`
+     * and so encoded the old single-strip origin; the board now starts its rows
+     * past a gutter wide enough for the act and sequence brackets
+     * (`shot/layout.ts`). What has to stay true is what the test is named for —
+     * no hole, and the pitch unchanged — and that survives any origin.
+     */
     const board = makeTestBoard();
     const [, b] = createShots(board.std, board.surfaceId, ['A', 'B', 'C']);
 
     expect(deleteShot(board.std, b)).toBe(true);
-    expect(readShots(board.std).map(s => s.x)).toEqual([0, SHOT_W + SHOT_GAP]);
+    const xs = readShots(board.std).map(s => s.x);
+    expect(xs).toHaveLength(2);
+    expect(xs[1]! - xs[0]!).toBe(SHOT_W + SHOT_GAP);
   });
 
   /** A shot OWNS its media — the whole point of the rewrite. Deleting it takes
@@ -208,10 +223,17 @@ describe('shots', () => {
     const board = makeTestBoard();
     const [a, b] = createShots(board.std, board.surfaceId, ['A', 'B']);
 
-    expect(shotAtPoint(board.std, [10, 10])).toBe(a);
-    expect(shotAtPoint(board.std, [SHOT_W + SHOT_GAP + 10, 10])).toBe(b);
+    // Asked of the cards' OWN boxes rather than of coordinates the old single
+    // strip happened to put them at.
+    const box = (id: string) =>
+      JSON.parse((board.store.getBlock(id)!.model.props as { xywh: string }).xywh) as number[];
+    const [ax, ay] = box(a);
+    const [bx, by] = box(b);
+
+    expect(shotAtPoint(board.std, [ax + 10, ay + 10])).toBe(a);
+    expect(shotAtPoint(board.std, [bx + 10, by + 10])).toBe(b);
     // The gap between panels belongs to neither — a drop there is open canvas.
-    expect(shotAtPoint(board.std, [SHOT_W + 10, 10])).toBeNull();
+    expect(shotAtPoint(board.std, [ax + SHOT_W + 10, ay + 10])).toBeNull();
   });
 
   /** A missing shot is a normal outcome (the user deleted it while the agent was
@@ -413,5 +435,54 @@ describe('graphic shots', () => {
     expect(s.media).toHaveLength(1);
     expect(s.media[0].role).toBe('firstFrame');
     expect(s.model).toBe('kling/v2-5-turbo-image-to-video-pro');
+  });
+});
+
+describe('normaliseShotTitles', () => {
+  /**
+   * The card's badge says SHOT 1 and its title said "SCENE 1 — untitled", an
+   * inch apart, beside a third control showing the real SCREENPLAY scene. The
+   * title is not only a label — it is carried into compile — so leaving it
+   * would ship a film whose shots are called scenes.
+   */
+  it('renames the string the old code minted, keeping the number', () => {
+    const board = makeTestBoard();
+    const [a, b] = createShots(board.std, board.surfaceId,
+      ['SCENE 1 — untitled', 'SCENE 2 — untitled']);
+
+    expect(normaliseShotTitles(board.std)).toBe(2);
+    expect(readShot(board.std, a)!.title).toBe('Shot 1');
+    expect(readShot(board.std, b)!.title).toBe('Shot 2');
+  });
+
+  it('never touches a title a person could have typed', () => {
+    /**
+     * THE LICENCE THIS FUNCTION HAS IS NARROW, and these are the cases that
+     * define its edge. Rewriting somebody's own words would be far worse than
+     * the inconsistency it exists to remove — so the pattern is anchored at
+     * both ends and demands the em dash the old minting used.
+     */
+    const board = makeTestBoard();
+    const kept = [
+      'Scene 3 — the kitchen',
+      'SCENE 12 — untitled draft',
+      'my SCENE 1 — untitled',
+      'SCENE 1 - untitled',
+      'Shot 1',
+      '',
+    ];
+    const ids = createShots(board.std, board.surfaceId, kept);
+
+    expect(normaliseShotTitles(board.std)).toBe(0);
+    ids.forEach((id, i) => expect(readShot(board.std, id)!.title).toBe(kept[i]));
+  });
+
+  it('does nothing on a board that has already been through it', () => {
+    // It runs on every open, so it has to be free the second time — and it must
+    // not keep marking the document dirty and re-syncing an unchanged board.
+    const board = makeTestBoard();
+    createShots(board.std, board.surfaceId, ['SCENE 1 — untitled']);
+    expect(normaliseShotTitles(board.std)).toBe(1);
+    expect(normaliseShotTitles(board.std)).toBe(0);
   });
 });

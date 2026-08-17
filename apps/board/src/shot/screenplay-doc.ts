@@ -34,7 +34,6 @@ import { BlockModel, BlockSchemaExtension, defineBlockSchema } from '@blocksuite
 import type { BlockStdScope } from '@blocksuite/std';
 import { GfxCompatible, type GfxCommonBlockProps } from '@blocksuite/std/gfx';
 
-import { perRev } from '../board/doc-cache';
 import { parseFountain, type ParsedScript } from './fountain';
 
 export interface ScreenplayProps extends GfxCommonBlockProps {
@@ -89,15 +88,41 @@ export function readScript(std: BlockStdScope): string {
 }
 
 /**
+ * The last parse, kept against the TEXT it came from.
+ *
+ * One entry: there is one screenplay per board and one board per tab, so a
+ * bigger cache would only hold documents nobody is looking at.
+ */
+let lastText: string | null = null;
+let lastParsed: ParsedScript | null = null;
+
+/**
  * The screenplay, parsed.
  *
- * MEMOISED PER DOCUMENT REVISION — see `board/doc-cache.ts`. Every shot card
- * calls this to draw its sequence pill, and the screenplay page calls it to draw
- * itself, so an uncached parse ran once per card per repaint. A four-hundred
- * line script on a sixty-shot board is sixty full parses for one pointermove.
+ * ── MEMOISED ON THE TEXT, NOT ON THE DOCUMENT REVISION ───────────────────────
+ * Every shot card calls this to draw its scene pill, the layout calls it to
+ * decide which row each shot belongs to, and the screenplay page calls it to
+ * draw itself — so an uncached parse ran once per card per repaint.
+ *
+ * It was keyed on the document revision, which is correct and far too broad: a
+ * parse depends on ONE string, and the revision moves for every write anywhere
+ * on the board. Filing a shot onto a scene changed a single prop and threw the
+ * parse away with it.
+ *
+ * Measured on a feature-sized board — 63 scenes, 189 shots — with the agent
+ * filing each shot onto its scene: 35 SECONDS, almost all of it re-parsing a
+ * screenplay that had not changed, 189 times. Keyed on the text it is one parse.
+ *
+ * Comparing whole strings is not the cost it looks like: JavaScript engines
+ * compare interned strings by pointer first, and this is the same string object
+ * the store handed back last time in the overwhelming majority of calls.
  */
 export function readParsed(std: BlockStdScope): ParsedScript {
-  return perRev(std, 'script:parsed', () => parseFountain(readScript(std)));
+  const text = readScript(std);
+  if (lastParsed && lastText === text) return lastParsed;
+  lastText = text;
+  lastParsed = parseFountain(text);
+  return lastParsed;
 }
 
 /**

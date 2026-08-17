@@ -364,6 +364,37 @@ export function sequenceOf(script: ParsedScript, scene: FountainScene): Section 
 }
 
 /**
+ * Which ACT something sits in — by line, not by a stored index.
+ *
+ * Fountain does not nest: `# ACT ONE` and `## SEQUENCE 1` are two flat lists of
+ * sections that happen to appear in an order. What makes a sequence belong to an
+ * act is simply that the act was declared above it and no other act has been
+ * declared since — which is exactly what a reader understands from the page, and
+ * the only thing the format actually says.
+ *
+ * Deriving it beats storing it: an index written at parse time would have to be
+ * kept in step with every edit that moves a heading, and the failure mode is a
+ * scene quietly filed under the wrong act. A line comparison cannot drift.
+ *
+ * -1 when nothing precedes it — a script with sequences and no acts is normal
+ * (most short films), and so is one with neither.
+ */
+export function actIndexAtLine(script: ParsedScript, line: number): number {
+  let at = -1;
+  for (let i = 0; i < script.acts.length; i++) {
+    if (script.acts[i]!.line <= line) at = i;
+    else break;
+  }
+  return at;
+}
+
+/** The act a scene sits in, or null. See `actIndexAtLine`. */
+export function actOf(script: ParsedScript, scene: FountainScene): Section | null {
+  const at = actIndexAtLine(script, scene.fromLine);
+  return at >= 0 ? script.acts[at] ?? null : null;
+}
+
+/**
  * A one-line-per-scene map of the whole script.
  *
  * The T1 tier: small enough to hold in context at every turn regardless of how

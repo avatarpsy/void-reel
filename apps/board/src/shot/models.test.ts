@@ -12,7 +12,7 @@ import { setBlockCatalogue } from './blocks';
 import { rolesFor } from './model';
 import {
   checkShot, defaultModel, effectiveModel, estimateShotCredits, findModel, formatCredits,
-  plannedSeconds, referenceTag, setModelCatalogue, type ModelCaps,
+  capChips, plannedSeconds, referenceTag, setModelCatalogue, slotSupport, type ModelCaps,
 } from './models';
 
 const SEEDANCE: ModelCaps = {
@@ -136,9 +136,20 @@ describe('checkShot', () => {
     expect(warnings[0].message).toContain('end-frame');
   });
 
-  it('warns that a spoken line will need separate TTS', () => {
+  it('says nothing about a narration, because a narration is always separate', () => {
+    /**
+     * THIS WARNING WAS REMOVED, and its absence is the assertion.
+     *
+     * It fired when a NARRATION was written against a model with no native
+     * dialogue: "this line will be voiced separately with TTS and laid over the
+     * clip". True — and true on EVERY model, because a narration is a separate
+     * track by definition ("spoken separately, not by the video", says the field
+     * itself). Flagging the normal case on some models and not others framed
+     * correct work as a problem, and implied that elsewhere a narrator would be
+     * performed on camera.
+     */
     const warnings = checkShot(shot({ model: KLING.id, voiceover: 'A line.' }));
-    expect(warnings.some(w => w.message.includes('does not speak'))).toBe(true);
+    expect(warnings).toEqual([]);
   });
 
   it('warns when the beat is longer than the model can render', () => {
@@ -161,8 +172,9 @@ describe('checkShot', () => {
         { id: 'b', role: 'motionRef', kind: 'video' },
       ],
     }));
-    // Four separate things wrong, four separate sentences, nothing blocked.
-    expect(warnings.length).toBe(4);
+    // Three separate things wrong, three separate sentences, nothing blocked.
+    // (The narration is NOT one of them — see the test above.)
+    expect(warnings.length).toBe(3);
     expect(warnings.every(w => typeof w.message === 'string' && w.message.length > 20)).toBe(true);
   });
 });
@@ -438,5 +450,77 @@ describe('a model on the user’s own hardware', () => {
       media: [{ id: 'm1', role: 'lastFrame', kind: 'image' }],
     });
     expect(warnings.map(w => w.message).join(' ')).not.toMatch(/end-frame/i);
+  });
+});
+
+describe('slotSupport — what the card may offer', () => {
+  beforeEach(() => setModelCatalogue([SEEDANCE, KLING], SEEDANCE.id));
+
+  it('offers every clip well on a model that takes them all', () => {
+    const caps = findModel(SEEDANCE.id);
+    for (const role of ['firstFrame', 'lastFrame', 'motionRef']) {
+      expect(slotSupport(caps, role).supported).toBe(true);
+    }
+  });
+
+  it('closes the wells the model cannot read, and says which capability is missing', () => {
+    /**
+     * The whole point of doing this BEFORE the work rather than after: a well is
+     * an invitation, and drawing one the model ignores invites somebody to go
+     * and find a reference, decide it is right, drag it in — and only then be
+     * told it will be discarded.
+     */
+    const caps = findModel(KLING.id);
+    const last = slotSupport(caps, 'lastFrame');
+    expect(last.supported).toBe(false);
+    expect(last.why).toContain('Kling 2.5 Turbo Pro');
+    expect(last.why).toMatch(/end-frame/i);
+
+    const motion = slotSupport(caps, 'motionRef');
+    expect(motion.supported).toBe(false);
+    expect(motion.why).toMatch(/tagged references/i);
+  });
+
+  it('offers everything while the catalogue is still loading', () => {
+    // A card that greys out its own inputs because a fetch has not landed is
+    // worse than one that lets the user work and warns afterwards — and the
+    // warning path still exists either way.
+    expect(slotSupport(null, 'lastFrame').supported).toBe(true);
+    expect(slotSupport(null, 'motionRef').supported).toBe(true);
+  });
+
+  it('says nothing about a role it does not govern', () => {
+    // `reference`, `sfx`, and a graphic block's own slot keys are not the video
+    // model's business — answering "unsupported" for them would close wells
+    // that have nothing to do with it.
+    const caps = findModel(KLING.id);
+    for (const role of ['reference', 'sfx', 'bgm', 'screenshot']) {
+      expect(slotSupport(caps, role).supported).toBe(true);
+    }
+  });
+});
+
+describe('capChips — the facts that change what you do', () => {
+  beforeEach(() => setModelCatalogue([SEEDANCE, KLING], SEEDANCE.id));
+
+  it('states the noes as plainly as the yeses', () => {
+    // A list of only the capabilities a model HAS leaves the user inferring the
+    // rest from silence, and "no end frame" is as much a thing worth knowing.
+    const chips = capChips(findModel(KLING.id));
+    const by = Object.fromEntries(chips.map(c => [c.label, c.on]));
+    expect(by['no end frame']).toBe(false);
+    expect(by['no @tags']).toBe(false);
+    expect(by['silent']).toBe(false);
+    expect(by['no sound']).toBe(false);
+    // Kling takes no voice reference, so no chip claims it does.
+    expect(chips.some(c => c.label === 'voice ref')).toBe(false);
+  });
+
+  it('names the lengths the model actually makes', () => {
+    expect(capChips(findModel(KLING.id)).some(c => c.label === '5 / 10s')).toBe(true);
+  });
+
+  it('is empty with no catalogue, rather than asserting a default', () => {
+    expect(capChips(null)).toEqual([]);
   });
 });

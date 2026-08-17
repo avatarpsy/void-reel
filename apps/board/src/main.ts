@@ -32,7 +32,9 @@ import { installBoardUi } from './ui/board-ui';
 import { installAssetPanel } from './ui/asset-panel';
 import { installMediaInspector } from './ui/media-inspector';
 import { installSpacePan } from './ui/space-pan';
+import { installSpine } from './ui/spine';
 import { installToasts, toast } from './ui/toast';
+import { installViewportAnchor } from './ui/viewport';
 
 /** Replace the boot overlay with a message the user can act on. Reachable before
  *  any chrome exists, so it writes into the overlay rather than a toast. */
@@ -144,6 +146,29 @@ async function boot(): Promise<void> {
 
   document.getElementById('board-boot')?.setAttribute('hidden', '');
 
+  /**
+   * Old boards said "SCENE 1 — untitled" on a card whose badge says SHOT 1.
+   * Rewritten once, here, because the title is carried into compile — see
+   * `normaliseShotTitles` for why touching stored text is justified in this one
+   * case. Runs before the cloud pull so a merge cannot resurrect the old string
+   * unnoticed; anything the pull brings in is normalised on the next open.
+   */
+  shots.normaliseShotTitles(board.std);
+
+  /**
+   * AND LAY THE BOARD OUT AS THE FILM IT IS.
+   *
+   * Every board made before the grid existed is one long horizontal strip; this
+   * is what turns it into acts, sequences and scenes the first time it opens.
+   * On a board already in the grid it writes nothing — `relayoutShots` compares
+   * each card's box and skips the ones that are already right — so it is free on
+   * every open after the first.
+   *
+   * After `normaliseShotTitles` and before the chrome, so the spine draws once,
+   * against the final geometry, rather than drawing the old strip and jumping.
+   */
+  shots.relayoutShots(board.std, shots.readShots(board.std).map(s => s.id));
+
   // Already-known board: merge whatever another device did, without making the
   // user wait for it.
   if (!emptyLocally) void cloud.pull();
@@ -207,6 +232,9 @@ async function boot(): Promise<void> {
    * positioned chrome lands in exactly the same place — with none of the above.
    */
   const chromeHost = root;
+  // The film's structure, drawn UNDER the cards — see ui/spine.ts. Installed
+  // before the rest of the chrome so it prepends beneath it.
+  installSpine(board, chromeHost);
   installToasts(chromeHost);
   installBoardUi(board, chromeHost);
   installAssetPanel(board, chromeHost);
@@ -214,6 +242,12 @@ async function boot(): Promise<void> {
   // Hold space and drag to pan — a gesture every other canvas tool has and
   // BlockSuite does not implement at all. See space-pan.ts.
   installSpacePan(board, chromeHost);
+  // Hold the board still when the WINDOW around it changes size — which on this
+  // surface means the studio shell collapsing the agent chat and handing this
+  // iframe the extra width. See `installViewportAnchor` for the why and the
+  // arithmetic. Installed after the editor is mounted, so it baselines against
+  // the size the board actually opened at.
+  installViewportAnchor(chromeHost);
   // The screenplay at page size. Installed after the panel so its overlay sits
   // above it in paint order without needing a higher z-index than the toasts.
   screenplay = installScreenplayFocus(board, chromeHost);

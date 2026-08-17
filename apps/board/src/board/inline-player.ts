@@ -35,6 +35,9 @@ interface Live {
   el: HTMLMediaElement;
   host: HTMLElement;
   observer: IntersectionObserver | null;
+  /** The card's "I am no longer playing" callback. Held here rather than in the
+   *  card because the card is not what tears playback down — see below. */
+  onStop?: () => void;
 }
 
 /**
@@ -44,10 +47,23 @@ interface Live {
  */
 let live: Live | null = null;
 
-/** Tear down whatever is playing. Idempotent. */
+/**
+ * Tear down whatever is playing. Idempotent.
+ *
+ * ── AND TELL THE CARD, because it is drawing a PAUSE button ──────────────────
+ * Playback is torn down from four directions: the user pressing the control
+ * again, the clip ending, the card scrolling off screen, and — the one that
+ * makes this necessary — SOMEBODY ELSE pressing play, since at most one thing
+ * streams at a time. Only the first of those is something the card can see.
+ *
+ * Without the callback here, pressing play on a second clip left the first
+ * card showing a pause button over silence, and pressing that button "resumed"
+ * something that had already been destroyed. One function ends playback, so one
+ * function reports it.
+ */
 export function stopInlinePlayback(): void {
   if (!live) return;
-  const { el, observer } = live;
+  const { el, observer, onStop } = live;
   live = null;
 
   observer?.disconnect();
@@ -58,6 +74,10 @@ export function stopInlinePlayback(): void {
   el.removeAttribute('src');
   el.load();
   el.remove();
+
+  // LAST, and outside the teardown: a card repainting itself must not be able
+  // to leave a half-dismantled player behind if it throws.
+  onStop?.();
 }
 
 /** Is this host the one currently playing? Drives the button's own icon. */
@@ -113,9 +133,19 @@ export function playInline(host: HTMLElement, opts: InlinePlayOptions): void {
     zIndex: '2',
   } as Partial<CSSStyleDeclaration>);
 
+  /**
+   * ONE PATH OUT. `stopInlinePlayback` is what calls `onStop`, so this must not
+   * call it as well — a clip that simply ended would otherwise report stopping
+   * twice, and a card that toggles state on each report would end up showing a
+   * pause button over nothing.
+   *
+   * The `else` covers the element having already been replaced by a later
+   * `playInline`: this one is dead, its card still believes it is playing, and
+   * nothing else is going to tell it.
+   */
   const finish = () => {
     if (live?.el === el) stopInlinePlayback();
-    opts.onStop?.();
+    else opts.onStop?.();
   };
   el.addEventListener('ended', finish, { once: true });
   // A dead library link is common enough that silence reads as a broken player.
@@ -142,7 +172,7 @@ export function playInline(host: HTMLElement, opts: InlinePlayOptions): void {
     // it just does not auto-stop, which is the lesser failure.
   }
 
-  live = { el, host, observer };
+  live = { el, host, observer, onStop: opts.onStop };
   void el.play().catch(() => {
     // Blocked or unplayable — leave the transport up so the user can try, rather
     // than tearing the card back to a poster and looking like nothing happened.

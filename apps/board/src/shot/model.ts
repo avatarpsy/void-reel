@@ -490,6 +490,56 @@ export function chosenTake(
   return ready.reduce((newest, t) => (t.createdAt > newest.createdAt ? t : newest), ready[0]);
 }
 
+/**
+ * A take, described the way everything else on the board is described.
+ *
+ * The viewer, the drag payload and the asset panel all speak ONE language —
+ * `ShotMedia` — so a take is translated once, here, rather than every consumer
+ * learning a second shape. Lives in the model and not in the viewer because the
+ * card, the drag and the dialog all need it, and the card must not import the
+ * chrome (the chrome already imports the card's document, and the cycle would
+ * take the editor down at boot rather than at the call).
+ *
+ * `id` stays the TAKE'S id. It is what `chooseTake` and `removeTake` address,
+ * and it is deliberately NOT a media id — see the note on `AssetDragEntity`.
+ */
+export function takeAsMedia(t: ShotTake): ShotMedia {
+  return {
+    id: t.id,
+    kind: t.kind === 'image' ? 'image' : 'video',
+    // A take is not a reference to anything; the role exists because every
+    // `ShotMedia` has one, and nothing reads it off a take.
+    role: 'reference',
+    // `src` is what a PLAYER should stream and `url` is full quality. Takes
+    // store them the same way round, and the recurring silent bug in this
+    // codebase is swapping them — hence one place that does it.
+    src: t.src || t.url,
+    url: t.url || t.src,
+    ...(t.poster ? { poster: t.poster } : {}),
+    name: t.label || 'Take',
+    ...(t.mediaId ? { mediaId: t.mediaId } : {}),
+    ...(t.durationSec ? { durationSec: t.durationSec } : {}),
+  };
+}
+
+/**
+ * The picture a take tile may draw, or '' for none.
+ *
+ * ── THE RULE, AND THE DOWNLOAD IT PREVENTS ───────────────────────────────────
+ * The card drew `t.poster || t.src`, and on a video take `src` is THE CLIP. So
+ * every take that had not been given a still handed an .mp4 to an `<img>`: the
+ * browser fetched the whole file, failed to decode it, and drew nothing. Nine
+ * takes on one card was nine video downloads for nine blank tiles, and a board
+ * of fifty shots was a stall with no visible cause — the requests are for files
+ * the page is not playing, so nothing on screen suggests why.
+ *
+ * `src` is a legitimate thumbnail in exactly one case, which is when the take IS
+ * a picture. `kind` is what says so, and it is the only thing that does.
+ */
+export function takeThumb(t: Pick<ShotTake, 'poster' | 'src' | 'kind'>): string {
+  return t.poster || (t.kind === 'image' ? t.src : '') || '';
+}
+
 /** `72.4` → `1:12.4`. Short form, because a trim readout is glanced at. */
 export function formatTime(sec: number): string {
   if (!Number.isFinite(sec) || sec < 0) return '0:00';
@@ -607,7 +657,7 @@ export const FIELD_SPECS: ReadonlyArray<{
   {
     key: 'voiceover',
     label: 'NARRATION',
-    placeholder: 'A voice over the top, if you want one — spoken separately, not by the video',
+    placeholder: 'A voice over the top, if you want one — spoken separately, added as a separate track on timeline',
   },
   {
     key: 'camera',

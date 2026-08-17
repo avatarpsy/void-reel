@@ -190,10 +190,55 @@ function caretAtEnd(el: HTMLElement): void {
  * While focus is ours it does nothing but remember where the selection is, so a
  * drag-select extends exactly as it would in a plain textarea.
  */
+/**
+ * WHAT "WHERE THE USER IS" MEANS, for the two kinds of field on a card.
+ *
+ * A contenteditable's caret is a DOM `Range`; an `<input>`'s is a pair of
+ * integer offsets, and the Selection API says nothing useful about it —
+ * `rangeInside` on an input returns null, because the range genuinely is not
+ * inside it. One guard serves both by asking the element which it is.
+ */
+interface CaretMemory {
+  read(): unknown;
+  restore(mark: unknown): void;
+}
+
+function caretMemory(el: HTMLElement): CaretMemory {
+  const input = el as HTMLInputElement;
+  const isFormField = /^(INPUT|TEXTAREA)$/.test(el.tagName);
+
+  if (isFormField) {
+    return {
+      read: () => {
+        // A number input throws on selectionStart in some browsers, and returns
+        // null in others. Neither is worth a broken guard.
+        try { return { s: input.selectionStart, e: input.selectionEnd }; } catch { return null; }
+      },
+      restore: mark => {
+        const m = mark as { s: number | null; e: number | null } | null;
+        if (!m || m.s === null || m.e === null) return;
+        try { input.setSelectionRange(m.s, m.e); } catch { /* see above */ }
+      },
+    };
+  }
+
+  return {
+    read: () => rangeInside(el),
+    restore: mark => {
+      const range = mark as Range | null;
+      const sel = el.ownerDocument.defaultView?.getSelection();
+      if (!sel || !range || !el.contains(range.startContainer)) return;
+      sel.removeAllRanges();
+      sel.addRange(range);
+    },
+  };
+}
+
 function holdFocus(std: BlockStdScope, el: HTMLElement): void {
   const doc = el.ownerDocument;
   const started = performance.now();
-  let lastGood: Range | null = rangeInside(el);
+  const caret = caretMemory(el);
+  let lastGood: unknown = caret.read();
   let done = false;
 
   /**
@@ -240,16 +285,12 @@ function holdFocus(std: BlockStdScope, el: HTMLElement): void {
 
     if (doc.activeElement === el) {
       // Ours. Remember where the user is, and otherwise keep hands off.
-      lastGood = rangeInside(el) ?? lastGood;
+      lastGood = caret.read() ?? lastGood;
     } else {
       // Stolen. Take it back, and put the selection where it was — the browser
       // discarded it when focus moved, so there is nothing here to overwrite.
       el.focus({ preventScroll: true });
-      const sel = doc.defaultView?.getSelection();
-      if (sel && lastGood && el.contains(lastGood.startContainer)) {
-        sel.removeAllRanges();
-        sel.addRange(lastGood);
-      }
+      caret.restore(lastGood);
     }
     requestAnimationFrame(tick);
   };
@@ -291,6 +332,46 @@ export function takeCaret(
     caretFromPoint(el, clientX, clientY);
   }
 
+  holdFocus(std, el);
+}
+
+/**
+ * Claim a canvas-hosted `<input>` / `<textarea>` — the LENGTH box, the block
+ * search, a graphic's fill fields.
+ *
+ * ── WHY `data-range-sync-exclude` WAS NOT ENOUGH, THOUGH IT LOOKS LIKE IT ────
+ * The attribute really is BlockSuite's own answer, and it really does stop the
+ * steal — in `_onNativeSelectionChanged`, which runs off `selectionchange` and
+ * begins `if (!isActiveInEditor(this.host)) return;`. That was the path the
+ * contenteditables were losing focus down, so applying it there fixed them and
+ * looked like it fixed everything.
+ *
+ * There is a SECOND steal, and it is a different function with a different
+ * trigger: `range-binding.ts` also reacts to the SELECTION MODEL changing, and
+ * that handler does not consult `isActiveInEditor` at all —
+ *
+ *     if (!text && selections.length > 0) {
+ *       const hasRecoverable = selections.find(s => s.constructor.recoverable);
+ *       if (!hasRecoverable) this.host.focus({ preventScroll: true });
+ *     }
+ *
+ * A shot card is SELECTED on the canvas while you work in it, and a
+ * `SurfaceSelection` is not recoverable — so every focus into a form control on
+ * a selected card was handed straight back to the editor host. Measured, on a
+ * click into the LENGTH box: `pointerdown → focus → mousedown → click → blur`,
+ * with `document.activeElement` ending as `EDITOR-HOST`. Exactly "I can't select
+ * the field and edit it".
+ *
+ * The cure is the one `takeCaret` already uses for the same steal: remove the
+ * provocation. Clear the canvas selection and keep clearing it for a few frames,
+ * so `selections.length > 0` is false when the handler runs.
+ *
+ * NO CARET PLACEMENT, and no `preventDefault`. An input positions its own caret
+ * and runs its own drag-select, and both are better than anything done for it.
+ */
+export function claimFormField(std: BlockStdScope, el: HTMLElement): void {
+  std.selection.clear([...CANVAS_SELECTION_TYPES]);
+  if (el.ownerDocument.activeElement !== el) el.focus({ preventScroll: true });
   holdFocus(std, el);
 }
 

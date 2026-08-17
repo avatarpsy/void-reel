@@ -121,6 +121,155 @@ export function effectiveModel(shotModel: string): ModelCaps | null {
 }
 
 /**
+ * WHAT THIS MODEL WILL ACTUALLY TAKE — the card's own question, answered before
+ * the user does the work rather than after.
+ *
+ * ── THE GAP THIS CLOSES ──────────────────────────────────────────────────────
+ * Every clip card drew the same three wells — FIRST FRAME, LAST FRAME, MOTION
+ * REF — whatever model the shot was set to. Most models take some of that and
+ * not the rest: only some accept a distinct end keyframe, only some read
+ * `@Image1` tags out of the prompt, only some speak. `checkShot` said so, but it
+ * said so AFTERWARDS, as a warning on a card the user had already filled in.
+ *
+ * That is the wrong end of the interaction. A well is an invitation: drawing one
+ * the model cannot read invites somebody to go and find a reference, decide it
+ * is right, drag it in — and only then be told it will be ignored. The time is
+ * already spent by the time the warning arrives, and being told after the fact
+ * that the tool knew all along is the specific thing that makes a tool feel like
+ * it is wasting you.
+ *
+ * ── WHY UNSUPPORTED WELLS ARE SHOWN, NOT HIDDEN ──────────────────────────────
+ * Hiding them would stop the wasted work and cost something worse: the user
+ * would never learn what the models differ ON. A card with two wells on one
+ * model and three on another, with nothing to say why, reads as a bug. So the
+ * well stays, visibly not-for-this-model, and says which capability is missing —
+ * which turns "why can't I do this" into "so THAT is what changing the model
+ * buys me", at the moment they are deciding.
+ *
+ * A well that ALREADY HOLDS media is never marked away: the reference is really
+ * there, it has to stay visible and draggable, and `checkShot` is what explains
+ * that it will not survive. Hiding media because the model changed is how a
+ * board loses something quietly.
+ */
+export interface SlotSupport {
+  /** False when this model cannot read anything put here. */
+  supported: boolean;
+  /** One sentence naming the missing capability, and what to do about it.
+   *  Empty when supported. */
+  why: string;
+}
+
+/**
+ * Can this model be given media in this named slot?
+ *
+ * Answers for the CLIP slots only — a graphic's wells come from its block's
+ * declared slots and no video model is involved, which is why `rolesFor` takes
+ * the block rather than the caps.
+ *
+ * An unknown model (catalogue still loading, or a shot pointing at something
+ * retired) answers YES to everything. A card that greys out its own inputs
+ * because a fetch has not landed is worse than one that lets the user work and
+ * warns later — and the warning path still exists.
+ */
+export function slotSupport(caps: ModelCaps | null, role: string): SlotSupport {
+  const ok: SlotSupport = { supported: true, why: '' };
+  if (!caps) return ok;
+
+  switch (role) {
+    case 'firstFrame':
+      return caps.deliveryModes.includes('first-frame') ? ok : {
+        supported: false,
+        why: `${caps.label} builds from references rather than from an opening frame, so a `
+          + 'first frame here is treated as one more reference. Pick a model with a '
+          + 'first-frame mode to pin the exact opening image.',
+      };
+    case 'lastFrame':
+      return caps.supportsLastFrame ? ok : {
+        supported: false,
+        why: `${caps.label} has no end-frame input — it decides its own last frame. Pick a `
+          + 'model that takes one if the shot has to land on a specific image.',
+      };
+    case 'motionRef':
+      return caps.usesReferenceTags ? ok : {
+        supported: false,
+        why: `${caps.label} does not read tagged references, so there is no way to point at a `
+          + 'motion reference from the prompt. Describe the move in SHOT instead, or pick a '
+          + 'model that reads @-tags.',
+      };
+    default:
+      return ok;
+  }
+}
+
+/**
+ * The capability facts worth putting ON the card, as short chips.
+ *
+ * Chosen for what CHANGES WHAT YOU DO: whether you can pin the end, whether
+ * references can be pointed at by name, whether the model speaks and makes its
+ * own sound, and how long a clip may be. Everything else in `ModelCaps` is
+ * either pricing (already shown) or plumbing.
+ *
+ * `on` drives the styling rather than the wording, so a chip reads the same way
+ * whichever answer it carries — "no end frame" is as much a fact worth knowing
+ * as "end frame", and a list of only the yeses would leave the user to infer the
+ * noes from silence.
+ */
+export interface CapChip {
+  label: string;
+  on: boolean;
+  title: string;
+}
+
+export function capChips(caps: ModelCaps | null): CapChip[] {
+  if (!caps) return [];
+
+  const lengths = caps.allowedDurations.length
+    ? `${caps.allowedDurations.join(' / ')}s`
+    : `${caps.minDurationSec}–${caps.maxDurationSec}s`;
+
+  return [
+    {
+      label: caps.supportsLastFrame ? 'end frame' : 'no end frame',
+      on: caps.supportsLastFrame,
+      title: caps.supportsLastFrame
+        ? 'Takes a distinct closing keyframe, so the shot can be made to land on an exact image.'
+        : 'Decides its own last frame. A LAST FRAME reference cannot be used with this model.',
+    },
+    {
+      label: caps.usesReferenceTags ? '@tags' : 'no @tags',
+      on: caps.usesReferenceTags,
+      title: caps.usesReferenceTags
+        ? `Reads @${caps.referenceTagSyntax}1-style tags, so the prompt can name a specific `
+          + 'reference — "she turns, like @Video1".'
+        : 'Reads references as a set, with no way to point at one from the prompt.',
+    },
+    {
+      label: caps.nativeDialogue ? 'speaks' : 'silent',
+      on: caps.nativeDialogue,
+      title: caps.nativeDialogue
+        ? 'Generates spoken dialogue itself, on camera, from lines written in SHOT.'
+        : 'Makes no speech. Anything in NARRATION is voiced separately and laid over the clip.',
+    },
+    {
+      label: caps.nativeAudio ? 'own sound' : 'no sound',
+      on: caps.nativeAudio,
+      title: caps.nativeAudio
+        ? 'Generates its own ambient sound. Effects you attach are layered on top.'
+        : 'Produces picture only — every sound on this shot comes from what you attach.',
+    },
+    ...(caps.acceptsVoiceReference ? [{
+      label: 'voice ref',
+      on: true,
+      title: 'Can be given a voice to imitate, attached as an audio reference.',
+    }] : []),
+    { label: lengths, on: true, title: `How long a clip this model will make. ${
+      caps.allowedDurations.length
+        ? 'It snaps to these lengths — anything else is rounded.'
+        : `Anything from ${caps.minDurationSec} to ${caps.maxDurationSec} seconds.`}` },
+  ];
+}
+
+/**
  * What is wrong with this shot's inputs, given its model.
  *
  * WARNINGS, NOT ERRORS, and that distinction is the whole design. A person
@@ -344,12 +493,20 @@ export function checkShot(
     }
   }
 
-  if (shot.voiceover.trim() && !caps.nativeDialogue) {
-    out.push({
-      message: `${caps.label} does not speak — this line will be voiced separately with TTS `
-        + 'and laid over the clip.',
-    });
-  }
+  /**
+   * THERE WAS A WARNING HERE, and removing it is the point.
+   *
+   * It fired when a NARRATION was written against a model with no native
+   * dialogue: "this line will be voiced separately with TTS and laid over the
+   * clip". Every word of that is true — and it is true on EVERY model, because
+   * a narration is a separate track by definition ("spoken separately, not by
+   * the video", says the field itself). Flagging it only on some models framed
+   * the normal case as a problem, and implied that on a speaking model the
+   * narrator would be performed on camera instead, which is not something
+   * anybody wants a narrator to be.
+   *
+   * A warning that fires on correct work teaches people to ignore warnings.
+   */
 
   if (shot.durationSec > 0 && shot.durationSec > caps.maxDurationSec) {
     out.push({
