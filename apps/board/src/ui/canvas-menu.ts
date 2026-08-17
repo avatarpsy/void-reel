@@ -123,6 +123,28 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
    * right-click's own collapse from erasing the answer.
    */
   const onPointerDown = (e: PointerEvent) => {
+    /**
+     * A RIGHT-CLICK INSIDE THE SELECTION MUST NOT SHRINK IT.
+     *
+     * BlockSuite treats that press as an ordinary selecting one, so it collapsed
+     * the selection to the single card under the cursor. The menu still said
+     * "Generate from 2 images" — correctly, from what the user had built — while
+     * the canvas drew a box around one of them. Two true statements that
+     * contradict each other on screen, which reads as the selection having been
+     * lost.
+     *
+     * Claiming the press keeps the live selection intact, so the outline, the
+     * menu and the references are the same set. It is claimed ONLY when the
+     * press lands on something already selected — a right-click anywhere else
+     * still selects what it hit, which is how you change your mind.
+     */
+    if (e.button === 2) {
+      const hit2 = (e.target as HTMLElement | null)?.closest<HTMLElement>('[data-block-id]');
+      const id2 = hit2?.dataset.blockId ?? '';
+      const live = [...gfx.selection.selectedIds];
+      if (live.length > 1 && id2 && live.includes(id2)) e.stopPropagation();
+      return;
+    }
     if (e.button !== 0) return;
 
     /**
