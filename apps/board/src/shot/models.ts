@@ -36,6 +36,25 @@ export interface ModelCaps {
   /** Discrete lengths the model snaps to. Empty = anything in range. */
   allowedDurations: number[];
 
+  /**
+   * Output sizes this model can render, cheapest first.
+   *
+   * Per-model because they genuinely differ — Seedance 2.5 reaches 1080p, H3
+   * reaches 2K, Fast stops at 720p — and because PRICE is keyed on them:
+   * `pricePerSec` has one entry per resolution. A shared list would offer sizes
+   * half the catalogue cannot render, at prices it does not charge.
+   *
+   * Empty for models that do not vary by size (and for local recipes), which is
+   * the signal to hide the control rather than draw an empty one.
+   *
+   * OPTIONAL, not required-and-empty: a parent page from before these were sent
+   * omits them entirely, and `undefined` is the honest description of that. The
+   * readers already treat missing and empty the same way — no picker.
+   */
+  resolutions?: string[];
+  /** Frame shapes the model accepts. Empty ⇒ it decides, so offer nothing. */
+  aspectRatios?: string[];
+
   /** The model generates spoken dialogue itself. */
   nativeDialogue: boolean;
   /** The model generates ambient sound / effects itself. */
@@ -358,8 +377,46 @@ export function snapDuration(caps: ModelCaps, wanted: number): number {
   return best;
 }
 
+/**
+ * The size this shot will actually render at.
+ *
+ * A shot stores `''` until someone picks, and `''` is not a size — so every
+ * reader would otherwise have to decide for itself what unset means, and they
+ * would not agree. The model's FIRST resolution is the answer, because that is
+ * already what `pricePerSec`, the server's `gen-frame` and every existing caller
+ * treat as the default; picking anything else here would quote one size and
+ * render another.
+ *
+ * A stored value that the model does not offer is discarded rather than
+ * honoured. Models change under saved boards — Fast has no 1080p — and a shot
+ * asking for a size its model cannot make is a generation that fails at the
+ * provider rather than at the picker.
+ */
+export function resolutionFor(
+  shot: { resolution?: string; model: string },
+  caps?: ModelCaps | null,
+): string {
+  const m = caps ?? effectiveModel(shot.model);
+  const offered = m?.resolutions ?? [];
+  if (!offered.length) return '';
+  const want = (shot.resolution ?? '').trim();
+  return want && offered.includes(want) ? want : offered[0];
+}
+
+/** Same rule for the frame shape. */
+export function aspectFor(
+  shot: { aspect?: string; model: string },
+  caps?: ModelCaps | null,
+): string {
+  const m = caps ?? effectiveModel(shot.model);
+  const offered = m?.aspectRatios ?? [];
+  if (!offered.length) return '';
+  const want = (shot.aspect ?? '').trim();
+  return want && offered.includes(want) ? want : offered[0];
+}
+
 export function estimateShotCredits(
-  shot: { kind?: string; model: string; durationSec: number },
+  shot: { kind?: string; model: string; durationSec: number; resolution?: string },
 ): number | null {
   // A composition is RENDERED, not generated. There is no model call to bill.
   if (shot.kind === 'hyperframes') return 0;
@@ -378,7 +435,13 @@ export function estimateShotCredits(
   // floor rather than a guess at what they will choose. See `plannedSeconds`.
   const seconds = plannedSeconds(shot);
 
-  const perSec = caps.pricePerSec ? Object.values(caps.pricePerSec)[0] : undefined;
+  // PRICE THE SIZE THEY CHOSE. This used to take the first entry of
+  // `pricePerSec` unconditionally, which was right while nobody could choose —
+  // and became a card quoting 480p over a shot set to render at 1080p, off by
+  // more than 4× on Seedance 2.5. `resolutionFor` falls back to that same first
+  // entry, so an unset shot is priced exactly as before.
+  const rate = caps.pricePerSec?.[resolutionFor(shot, caps)];
+  const perSec = typeof rate === 'number' ? rate : Object.values(caps.pricePerSec ?? {})[0];
   if (typeof perSec === 'number' && perSec > 0) return Math.round(perSec * seconds * 100) / 100;
   // Flat-priced models bill per call regardless of length.
   if (typeof caps.credits === 'number' && caps.credits > 0) return caps.credits;

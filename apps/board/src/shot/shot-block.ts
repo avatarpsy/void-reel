@@ -44,8 +44,8 @@ import { resolveSlots, slotFills } from './slots';
 import { readParsed } from './screenplay-doc';
 import { lazyBlockPreview, openBlockLightbox, type LazyPreview } from '../ui/block-preview';
 import {
-  allModels, capChips, checkShot, effectiveModel, estimateShotCredits, formatCredits,
-  onModelCatalogue, referenceTag, slotSupport, snapDuration,
+  allModels, aspectFor, capChips, checkShot, effectiveModel, estimateShotCredits,
+  formatCredits, onModelCatalogue, referenceTag, resolutionFor, slotSupport, snapDuration,
 } from './models';
 
 /** The form controls on this card, for the no-render-under-the-caret rule. See
@@ -1092,6 +1092,26 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
        being cut off (see .shot__foot). A field you have to hunt for reads as
        one that refuses you. */
     .shot__durwrap { flex: none; display: inline-flex; align-items: center; gap: 2px; }
+    /* Size and shape, beside the length — the other two levers on what a clip
+       costs. Styled as the duration box is, because they are the same KIND of
+       control (a small committed value on the generate row) and three different
+       looks along one row reads as three unrelated things. Sized to content
+       rather than fixed: "1080p" and "adaptive" are very different widths, and a
+       fixed box either clips the long one or leaves a hole after the short. */
+    .shot__pick {
+      appearance: none;
+      border: 1px solid var(--vs-border, rgba(15, 23, 42, 0.14));
+      border-radius: 5px;
+      padding: 3px 4px;
+      background: var(--vs-shot-field, rgba(127, 140, 170, 0.06));
+      color: inherit;
+      font: inherit;
+      outline: none;
+      cursor: pointer;
+      max-width: 92px;
+    }
+    .shot__pick:hover { border-color: var(--vs-accent-a, #4a9bd9); }
+
     .shot__durin {
       /* Wide enough for three digits and the caret after them. 44px fitted "5"
          and clipped the caret typing "120", which reads as the box refusing the
@@ -1443,6 +1463,30 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
     if (n === (this.model.props.durationSec ?? 0)) return;
     this.store.captureSync();
     this.store.updateBlock(this.model, { durationSec: n });
+  }
+
+  /**
+   * Store the picked size / shape.
+   *
+   * `captureSync` for the same reason `setDuration` uses it: this is a discrete
+   * decision the user made, and it should undo as one step rather than merge
+   * into whatever edit happened to precede it.
+   *
+   * The value is written RAW, not resolved. Storing what the model currently
+   * happens to lead with would freeze today's default into the document, so a
+   * shot left alone would stop following its model the moment either changed.
+   * `resolutionFor` does the resolving at read time, every time.
+   */
+  private setResolution(value: string) {
+    if (value === (this.model.props.resolution ?? '')) return;
+    this.store.captureSync();
+    this.store.updateBlock(this.model, { resolution: value });
+  }
+
+  private setAspect(value: string) {
+    if (value === (this.model.props.aspect ?? '')) return;
+    this.store.captureSync();
+    this.store.updateBlock(this.model, { aspect: value });
   }
 
   /**
@@ -2339,6 +2383,11 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
       kind: this.shotKind,
       model: this.model.props.model ?? '',
       durationSec: this.model.props.durationSec ?? 0,
+      // WITHOUT THIS THE ESTIMATE IGNORES THE PICKER. `estimateShotCredits`
+      // prices the resolution it is given and falls back to the model's first —
+      // so omitting it here quotes 480p over a shot set to 1080p, which on
+      // Seedance 2.5 is out by more than 4×.
+      resolution: this.model.props.resolution ?? '',
       voiceover: this.model.props.voiceover ?? '',
       composition: this.model.props.composition ?? '',
       compositionVars: this.model.props.compositionVars ?? {},
@@ -2930,6 +2979,45 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
           }}
         />s
       </span>
+
+      <!--
+        SIZE AND SHAPE, from the model itself.
+
+        Both lists come off the chosen model rather than a shared table, because
+        they genuinely differ — Seedance 2.5 reaches 1080p, MiniMax H3 reaches
+        2K, Fast stops at 720p — and offering a size a model cannot render is a
+        generation that fails at the provider, after the user has waited.
+
+        Beside the length on purpose: these are the three things that decide what
+        a clip costs, and the estimate to their right moves when any of them
+        does. Hidden entirely when the model offers no choice, rather than shown
+        with one option — a control that cannot be changed is furniture.
+      -->
+      ${isGraphic || !caps?.resolutions?.length ? nothing : html`
+        <select
+          class="shot__pick"
+          title="Output size. Bigger costs more per second — the estimate follows."
+          data-range-sync-exclude="true"
+          @pointerdown=${this.claimField}
+          @keydown=${this.stopKeys}
+          @change=${(e: Event) => this.setResolution((e.target as HTMLSelectElement).value)}
+        >${caps.resolutions.map(r => html`<option
+            value=${r}
+            ?selected=${r === resolutionFor(this.model.props as any, caps)}
+          >${r}</option>`)}</select>`}
+      ${isGraphic || !caps?.aspectRatios?.length ? nothing : html`
+        <select
+          class="shot__pick"
+          title="Frame shape. Does not change the price."
+          data-range-sync-exclude="true"
+          @pointerdown=${this.claimField}
+          @keydown=${this.stopKeys}
+          @change=${(e: Event) => this.setAspect((e.target as HTMLSelectElement).value)}
+        >${caps.aspectRatios.map(a => html`<option
+            value=${a}
+            ?selected=${a === aspectFor(this.model.props as any, caps)}
+          >${a}</option>`)}</select>`}
+
       ${credits !== null
         ? html`<span class="shot__cost" title=${isGraphic
             ? 'A composition is rendered, not generated — no model credits'

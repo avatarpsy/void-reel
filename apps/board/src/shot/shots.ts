@@ -47,6 +47,10 @@ export interface ShotView {
   model: string;
   /** Planned seconds, or 0 for "not decided". */
   durationSec: number;
+  /** Output size (`720p`); '' = follow the model. */
+  resolution: string;
+  /** Frame shape (`16:9`); '' = let the model decide. */
+  aspect: string;
   /** 'clip' (generated) or 'graphic' (a composition). */
   kind: ShotKind;
   /** The designed block a graphic is built from; '' when not chosen. */
@@ -199,6 +203,11 @@ function viewOf(std: BlockStdScope, id: string, x: number): ShotView | null {
     voiceMode: (p.voiceMode as ShotView['voiceMode']) ?? '',
     model: p.model ?? '',
     durationSec: p.durationSec ?? 0,
+    // `?? ''` for the same reason as `takes ?? []`: boards written before
+    // these props existed have no such key, and `props()` only defaults NEW
+    // blocks. Unset means 'follow the model', which is what they all did.
+    resolution: p.resolution ?? '',
+    aspect: p.aspect ?? '',
     // Boards written before graphic shots existed have neither prop. A shot
     // with no kind is a CLIP — that is what every one of them was.
     kind: (p.kind as ShotKind) ?? 'clip',

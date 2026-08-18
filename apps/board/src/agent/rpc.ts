@@ -80,8 +80,8 @@ function bounds(m: { xywh?: string }): { x: number; y: number; w: number; h: num
   }
 }
 import {
-  allModels, checkShot, effectiveModel, estimateShotCredits, findModel, plannedSeconds,
-  referenceTag, setModelCatalogue, type ModelCaps,
+  allModels, aspectFor, checkShot, effectiveModel, estimateShotCredits, findModel,
+  plannedSeconds, referenceTag, resolutionFor, setModelCatalogue, type ModelCaps,
 } from '../shot/models';
 import {
   addMedia, addTake, chooseTake, createShots, deleteShot, moveMedia, readShot, readShots,
@@ -1353,6 +1353,21 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
         durationSec: plannedSeconds({ kind: shot.kind, model: shot.model, durationSec: shot.durationSec }),
         /** What the user asked for, so the page can say if it moved. */
         requestedDurationSec: shot.durationSec,
+        /**
+         * SIZE AND SHAPE, RESOLVED THE SAME WAY THE PRICE WAS.
+         *
+         * `resolutionFor` is what the card costed with, so sending anything else
+         * would quote one size and render another. It also drops a stored value
+         * the model no longer offers — a board saved at 1080p and since switched
+         * to a 720p-only tier must not send 1080p and fail at the provider after
+         * the user has waited for it.
+         *
+         * Empty when the model exposes no choice, and omitted rather than sent
+         * blank: a generator reading `resolution: ''` has to decide what that
+         * means, and every one of them would decide differently.
+         */
+        ...(resolutionFor(shot) ? { resolution: resolutionFor(shot) } : {}),
+        ...(aspectFor(shot) ? { aspect: aspectFor(shot) } : {}),
         voiceMode: wantsDialogue ? 'dialogue' : 'silent',
         /**
          * A NARRATION IS ALWAYS SEPARATE. That is what the field means — the

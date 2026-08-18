@@ -691,6 +691,21 @@ type ShotProps = {
    *  generation time; kept here because the pacing is a story decision. */
   durationSec: number;
   /**
+   * Output size, e.g. `720p`. Empty means "whatever the model leads with".
+   *
+   * STORED PER SHOT, not per board, because it is a cost decision as much as
+   * a quality one: a 30s establishing shot at 1080p costs more than the four
+   * cutaways around it put together, and the whole point of choosing is being
+   * able to spend it where it shows.
+   *
+   * Empty rather than a default, so a shot written before this existed reads
+   * as "unset" and follows the model instead of claiming a size the model may
+   * not even offer. `resolutionFor` resolves it.
+   */
+  resolution: string;
+  /** Frame shape, e.g. `16:9`. Empty ⇒ the model decides. Same reasoning. */
+  aspect: string;
+  /**
    * Every attempt this shot has produced. See `ShotTake`.
    *
    * ⚠ READ IT AS `props.takes ?? []`, ALWAYS. Boards created before this field
@@ -838,6 +853,8 @@ export const ShotBlockSchema = defineBlockSchema({
     voiceMode: '',
     model: '',
     durationSec: 0,
+    resolution: '',
+    aspect: '',
     kind: 'clip',
     composition: '',
     compositionVars: {},
