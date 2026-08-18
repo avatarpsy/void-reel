@@ -1810,13 +1810,13 @@ editor-host {
    obstruction invisible instead of removing it. Opacity alone would leave
    AFFiNE's 80px-tall toolbar swallowing clicks along the whole bottom edge.
 
-   `transition` is on opacity and transform only. Animating visibility or
+   `transition` covers opacity and the offset only. Animating visibility or
    pointer-events would delay the canvas becoming clickable by the length of the
    fade, which reads as the board ignoring the first click. */
 :root[data-chrome='auto'] .vs-board-bar,
 :root[data-chrome='auto'] edgeless-toolbar-widget,
 :root[data-chrome='auto'] affine-edgeless-zoom-toolbar-widget {
-  transition: opacity 160ms ease, transform 160ms ease;
+  transition: opacity 160ms ease, transform 160ms ease, translate 160ms ease;
 }
 
 :root[data-chrome='auto'] .vs-board-bar {
@@ -1832,43 +1832,59 @@ editor-host {
   transform: translateX(-50%) translateY(0);
 }
 
+/* THE SLIDE USES `translate`, NOT `transform`, AND THAT IS NOT A STYLE CHOICE.
+   AFFiNE centres its toolbar with `left: 50%` plus `transform: translateX(-50%)`.
+   Setting `transform` here REPLACES that pair's second half, so the toolbar
+   stayed at the 50% mark with nothing pulling it back — half a viewport to the
+   right, clipped against the edge. `translate` is an independent property that
+   composes with whatever `transform` the element already carries, so we can add
+   a slide without knowing or caring how someone else positioned the thing. */
 :root[data-chrome='auto'] edgeless-toolbar-widget,
 :root[data-chrome='auto'] affine-edgeless-zoom-toolbar-widget {
   opacity: 0;
   pointer-events: none;
-  transform: translateY(12px);
+  translate: 0 12px;
 }
 :root[data-chrome='auto'][data-chrome-bottom='on'] edgeless-toolbar-widget,
 :root[data-chrome='auto'][data-chrome-bottom='on'] affine-edgeless-zoom-toolbar-widget {
   opacity: 1;
   pointer-events: auto;
-  transform: translateY(0);
+  translate: 0 0;
 }
 
 /* Someone who cannot hover cannot reveal. The script already declines to run on
    a coarse pointer; this is the belt to that braces, so a stylesheet cached from
    an older build can never hide a toolbar the user has no way to bring back. */
 @media (hover: none) {
-  :root[data-chrome='auto'] .vs-board-bar,
+  :root[data-chrome='auto'] .vs-board-bar {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateX(-50%);
+  }
   :root[data-chrome='auto'] edgeless-toolbar-widget,
   :root[data-chrome='auto'] affine-edgeless-zoom-toolbar-widget {
     opacity: 1;
     pointer-events: auto;
-    transform: none;
+    /* `translate`, never `transform` — see the note above. Writing
+       `transform: none` here would un-centre AFFiNE's toolbar for every touch
+       user, which is exactly the bug this block is trying to protect them
+       from having no way out of. */
+    translate: none;
   }
-  :root[data-chrome='auto'] .vs-board-bar { transform: translateX(-50%); }
 }
 
 /* Reduced motion: still hide and reveal, just without the slide. */
 @media (prefers-reduced-motion: reduce) {
-  :root[data-chrome='auto'] .vs-board-bar,
-  :root[data-chrome='auto'] edgeless-toolbar-widget,
-  :root[data-chrome='auto'] affine-edgeless-zoom-toolbar-widget {
+  :root[data-chrome='auto'] .vs-board-bar {
     transition: opacity 120ms ease;
-    transform: none;
   }
   :root[data-chrome='auto'] .vs-board-bar,
   :root[data-chrome='auto'][data-chrome-top='on'] .vs-board-bar {
     transform: translateX(-50%);
+  }
+  :root[data-chrome='auto'] edgeless-toolbar-widget,
+  :root[data-chrome='auto'] affine-edgeless-zoom-toolbar-widget {
+    transition: opacity 120ms ease;
+    translate: none;
   }
 }
