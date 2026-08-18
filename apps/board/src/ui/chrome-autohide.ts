@@ -209,23 +209,36 @@ export function installChromeAutohide(container: HTMLElement): ChromeAutohide {
 }
 
 /**
- * Fullscreen, from inside the iframe.
+ * Fullscreen — asked of the PARENT, not taken here.
  *
- * The board is embedded in the Voidspace page, so "expand" has two possible
- * meanings: fill the page, or fill the SCREEN. This is the second, because the
- * first already exists — collapsing the chat pane does it — and because the
- * thing the page still spends on its own chrome is exactly what a person
- * composing a storyboard does not need.
+ * ── WHY NOT JUST FULLSCREEN OURSELVES ────────────────────────────────────────
+ * Requesting on our own `documentElement` works and is one line: it fullscreens
+ * the IFRAME ELEMENT in the host page. It is also wrong, because the agent chat
+ * lives in the parent document, OUTSIDE this iframe — so fullscreening the
+ * iframe takes the board's collaborator off the screen at exactly the moment the
+ * user said they wanted to work. A focus mode you have to leave to ask a
+ * question is not a focus mode.
  *
- * Requesting on our own `documentElement` fullscreens the IFRAME ELEMENT in the
- * host page, which is what makes this work at all: the parent cannot be asked to
- * do it, because a postMessage is not user activation and the request would be
- * rejected. The click here IS the activation. `allow="fullscreen"` is already on
- * the iframe (`EditorPane.vue`).
+ * So the button asks the parent to fullscreen the whole workspace, which
+ * contains both the board and the chat.
  *
- * The board's own left panel comes with it — it lives in this document — so the
- * asset browser is still one click away in fullscreen, which is the difference
- * between a focus mode and a dead end.
+ * ── WHY THAT IS ALLOWED, WHICH IS NOT OBVIOUS ────────────────────────────────
+ * `requestFullscreen` needs transient user activation, and the click happens in
+ * THIS document, not the parent's. It works anyway: an activation notification
+ * propagates to every ancestor navigable, so the parent is transiently activated
+ * by a click in here. Measured, because it is exactly the kind of thing that
+ * sounds true and is not — with a host page and a real click, the parent
+ * reported `navigator.userActivation.isActive === true` and its request
+ * succeeded.
+ *
+ * The parent owns the state, because it owns the element that goes fullscreen;
+ * it pushes `voidspace:board-focus-state` back so the button can show the way
+ * out, including when the user leaves with Escape.
+ *
+ * ── STANDALONE STILL WORKS ───────────────────────────────────────────────────
+ * Served on its own (`vite preview`, a headless probe) there is no parent to
+ * ask, and fullscreening this document is then exactly right — there is no chat
+ * to lose.
  */
 export interface BoardFullscreen {
   toggle(): Promise<void>;
@@ -235,10 +248,28 @@ export interface BoardFullscreen {
   destroy(): void;
 }
 
+/** Ask the parent to fullscreen the workspace; the board is only a passenger. */
+export const FOCUS_REQUEST = 'voidspace:board-focus';
+/** The parent's answer, and its unsolicited updates when Escape is pressed. */
+export const FOCUS_STATE = 'voidspace:board-focus-state';
+
+function hasParent(): boolean {
+  try {
+    return !!window.parent && window.parent !== window;
+  } catch {
+    return false;
+  }
+}
+
 export function installBoardFullscreen(): BoardFullscreen {
   const root = document.documentElement;
   const listeners = new Set<(on: boolean) => void>();
-  const isOn = () => !!document.fullscreenElement;
+  const embedded = hasParent();
+
+  // Embedded, the element that goes fullscreen is the parent's, so this
+  // document is not `document.fullscreenElement` and we must be told instead.
+  let parentOn = false;
+  const isOn = () => (embedded ? parentOn : !!document.fullscreenElement);
 
   const sync = () => {
     const on = isOn();
@@ -249,10 +280,25 @@ export function installBoardFullscreen(): BoardFullscreen {
     }
   };
 
+  const onState = (e: MessageEvent) => {
+    const d = e.data as { type?: string; on?: boolean } | null;
+    if (d?.type !== FOCUS_STATE) return;
+    parentOn = d.on === true;
+    sync();
+  };
+
   document.addEventListener('fullscreenchange', sync);
+  if (embedded) window.addEventListener('message', onState);
 
   return {
     async toggle() {
+      if (embedded) {
+        // Posted SYNCHRONOUSLY inside the click handler. The parent's transient
+        // activation is inherited from this click and it does not last long —
+        // awaiting anything first would spend it.
+        window.parent.postMessage({ type: FOCUS_REQUEST, on: !isOn() }, '*');
+        return;
+      }
       try {
         if (isOn()) await document.exitFullscreen();
         else await root.requestFullscreen({ navigationUI: 'hide' });
@@ -268,6 +314,7 @@ export function installBoardFullscreen(): BoardFullscreen {
     },
     destroy() {
       document.removeEventListener('fullscreenchange', sync);
+      if (embedded) window.removeEventListener('message', onState);
       listeners.clear();
       delete root.dataset.boardFullscreen;
     },
