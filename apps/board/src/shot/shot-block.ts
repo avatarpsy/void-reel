@@ -1098,32 +1098,66 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
        looks along one row reads as three unrelated things. Sized to content
        rather than fixed: "1080p" and "adaptive" are very different widths, and a
        fixed box either clips the long one or leaves a hole after the short. */
-    .shot__size {
-      /* NO BACKTICKS IN HERE — this is inside a css tagged template, and one in
-         a comment ends it (see the same warning above the voiceMode note).
+    /* NO BACKTICKS IN THIS BLOCK — it is inside a css tagged template, and one
+       in a comment ends the template (284 errors from one comment, once).
 
-         appearance:none is what makes this match the duration box instead of
-         looking like a stray OS widget — and it also removes the arrow, which
-         is the ONLY thing marking the control as a menu rather than a label. So
-         the arrow is drawn back as an inline SVG, the way the caret on the model
-         button is. Without it this reads as a printed value, and nobody clicks
-         a label. */
-      appearance: none;
+       A button and a panel rather than a select: see renderSizeMenu. Styled to
+       match the duration box beside it, because they are the same kind of thing
+       — a small committed value on the generate row — and three different looks
+       along one row reads as three unrelated controls. */
+    .shot__sizewrap { position: relative; display: inline-flex; }
+    .shot__size {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
       border: 1px solid var(--vs-border, rgba(15, 23, 42, 0.14));
       border-radius: 5px;
-      padding: 3px 16px 3px 6px;
-      background-color: var(--vs-shot-field, rgba(127, 140, 170, 0.06));
-      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5' viewBox='0 0 8 5'%3E%3Cpath d='M1 1l3 3 3-3' fill='none' stroke='%23888' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-      background-repeat: no-repeat;
-      background-position: right 5px center;
+      padding: 3px 6px;
+      background: var(--vs-shot-field, rgba(127, 140, 170, 0.06));
       color: inherit;
       font: inherit;
+      line-height: 1;
       outline: none;
       cursor: pointer;
-      max-width: 104px;
+      white-space: nowrap;
     }
-    .shot__size:hover { border-color: var(--vs-accent-a, #4a9bd9); }
+    .shot__size:hover,
+    .shot__size.is-open,
     .shot__size:focus-visible { border-color: var(--vs-accent-a, #4a9bd9); }
+    .shot__sizecaret { opacity: 0.55; font-size: 9px; }
+
+    /* Opens UPWARDS. The generate row is the last thing on the card, so a panel
+       hanging below it would fall outside the card and be clipped by the
+       scrolling body. */
+    .shot__sizemenu {
+      position: absolute;
+      bottom: calc(100% + 4px);
+      left: 0;
+      z-index: 30;
+      display: flex;
+      flex-direction: column;
+      min-width: 100%;
+      padding: 4px;
+      border: 1px solid var(--vs-border, rgba(15, 23, 42, 0.14));
+      border-radius: 8px;
+      background: var(--vs-panel, #fff);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+      max-height: 220px;
+      overflow-y: auto;
+    }
+    .shot__sizeopt {
+      border: 0;
+      border-radius: 5px;
+      padding: 5px 9px;
+      background: transparent;
+      color: inherit;
+      font: inherit;
+      text-align: left;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+    .shot__sizeopt:hover { background: var(--vs-hover, rgba(127, 140, 170, 0.14)); }
+    .shot__sizeopt.is-on { color: var(--vs-accent-a, #4a9bd9); font-weight: 600; }
 
     .shot__durin {
       /* Wide enough for three digits and the caret after them. 44px fitted "5"
@@ -1384,6 +1418,9 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
   /** The model list, open. Inline rather than a floating layer: a popover on an
    *  infinite canvas has to track pan and zoom, and this one does not need to. */
   @state() private accessor _pickingModel = false;
+  /** Which size menu is open: '' | 'resolution' | 'aspect'. One at a time,
+   *  because two open panels overlap on a 640px row. */
+  @state() private accessor _pickingSize: '' | 'resolution' | 'aspect' = '';
   /** The block list, open. Same reasoning. */
   @state() private accessor _pickingBlock = false;
   /** True while the sequence menu is open on this card. */
@@ -1500,6 +1537,57 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
     if (value === (this.model.props.aspect ?? '')) return;
     this.store.captureSync();
     this.store.updateBlock(this.model, { aspect: value });
+  }
+
+  /**
+   * The size / shape menu — built like the MODEL menu, and for the same reason.
+   *
+   * A native `<select>` cannot survive here: `RangeBinding` takes focus to the
+   * editor host on any selection change, and the remedy every other field uses
+   * (take it straight back, see `holdFocus`) is the one thing that closes a
+   * select's list. Measured as `focusin: SELECT → focusout: SELECT →
+   * focusin: EDITOR-HOST` inside a single click.
+   *
+   * A button and a panel of buttons has none of that problem — it is ordinary
+   * DOM this card already owns, it is the interaction the model picker has
+   * always used, and it means these two controls behave like everything else on
+   * the card rather than like a browser widget dropped onto a canvas.
+   */
+  private renderSizeMenu(
+    which: 'resolution' | 'aspect',
+    options: string[],
+    current: string,
+    title: string,
+  ) {
+    const open = this._pickingSize === which;
+    return html`<span class="shot__sizewrap">
+      <button
+        type="button"
+        class="shot__size ${open ? 'is-open' : ''}"
+        title=${title}
+        aria-haspopup="listbox"
+        aria-expanded=${open ? 'true' : 'false'}
+        @pointerdown=${(e: Event) => e.stopPropagation()}
+        @click=${(e: Event) => {
+          e.stopPropagation();
+          this._pickingSize = open ? '' : which;
+        }}
+      >${current}<span class="shot__sizecaret">▾</span></button>
+      ${open ? html`<div class="shot__sizemenu" role="listbox"
+        @pointerdown=${(e: Event) => e.stopPropagation()}
+      >${options.map(opt => html`<button
+          type="button"
+          role="option"
+          aria-selected=${opt === current ? 'true' : 'false'}
+          class="shot__sizeopt ${opt === current ? 'is-on' : ''}"
+          @click=${(e: Event) => {
+            e.stopPropagation();
+            if (which === 'resolution') this.setResolution(opt);
+            else this.setAspect(opt);
+            this._pickingSize = '';
+          }}
+        >${opt}</button>`)}</div>` : nothing}
+    </span>`;
   }
 
   /**
@@ -3006,30 +3094,18 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
         does. Hidden entirely when the model offers no choice, rather than shown
         with one option — a control that cannot be changed is furniture.
       -->
-      ${isGraphic || !caps?.resolutions?.length ? nothing : html`
-        <select
-          class="shot__size"
-          title="Output size. Bigger costs more per second — the estimate follows."
-          data-range-sync-exclude="true"
-          @pointerdown=${this.claimField}
-          @keydown=${this.stopKeys}
-          @change=${(e: Event) => this.setResolution((e.target as HTMLSelectElement).value)}
-        >${caps.resolutions.map(r => html`<option
-            value=${r}
-            ?selected=${r === resolutionFor(this.model.props as any, caps)}
-          >${r}</option>`)}</select>`}
-      ${isGraphic || !caps?.aspectRatios?.length ? nothing : html`
-        <select
-          class="shot__size"
-          title="Frame shape. Does not change the price."
-          data-range-sync-exclude="true"
-          @pointerdown=${this.claimField}
-          @keydown=${this.stopKeys}
-          @change=${(e: Event) => this.setAspect((e.target as HTMLSelectElement).value)}
-        >${caps.aspectRatios.map(a => html`<option
-            value=${a}
-            ?selected=${a === aspectFor(this.model.props as any, caps)}
-          >${a}</option>`)}</select>`}
+      ${isGraphic || (caps?.resolutions?.length ?? 0) < 2 ? nothing : this.renderSizeMenu(
+        'resolution',
+        caps!.resolutions ?? [],
+        resolutionFor(this.model.props as any, caps),
+        'Output size. Bigger costs more per second — the estimate follows.',
+      )}
+      ${isGraphic || (caps?.aspectRatios?.length ?? 0) < 2 ? nothing : this.renderSizeMenu(
+        'aspect',
+        caps!.aspectRatios ?? [],
+        aspectFor(this.model.props as any, caps),
+        'Frame shape. Does not change the price.',
+      )}
 
       ${credits !== null
         ? html`<span class="shot__cost" title=${isGraphic

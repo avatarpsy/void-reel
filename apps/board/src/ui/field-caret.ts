@@ -438,6 +438,28 @@ export function claimFormField(std: BlockStdScope, el: HTMLElement): void {
 }
 
 /**
+ * ── WHY THERE IS NO `claimFormPopup`, AND WHY A `<select>` IS NOT USED ──────
+ *
+ * A native `<select>` cannot survive on this canvas, and three attempts to make
+ * it are worth recording so nobody spends the afternoon again.
+ *
+ * `RangeBinding` calls `host.focus()` whenever the std selection changes, and
+ * `holdFocus` above exists to take focus straight back — which is why the
+ * duration box works. A `<select>` cannot use that remedy: focusing a select is
+ * exactly what CLOSES its list, so the repair is indistinguishable from the
+ * damage. Measured with an event log, one click on a select produced
+ * `focusin: SELECT` → `focusout: SELECT` → `focusin: EDITOR-HOST` within a
+ * single gesture. Not clearing the selection ourselves did not help, and
+ * neither did a per-frame clear: the steal is inside one gesture, and a frame
+ * is already too late.
+ *
+ * So the shot card builds its size and shape menus the way it builds its MODEL
+ * menu — a button and a panel of buttons, both ordinary DOM the card already
+ * owns. That pattern is not a workaround; it is the one interaction on this
+ * card that was never in doubt.
+ */
+
+/**
  * Focus a field programmatically, caret at the end.
  *
  * For the ways in that are not a click — the keyboard, a "rename" affordance, an
