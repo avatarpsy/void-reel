@@ -1098,19 +1098,32 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
        looks along one row reads as three unrelated things. Sized to content
        rather than fixed: "1080p" and "adaptive" are very different widths, and a
        fixed box either clips the long one or leaves a hole after the short. */
-    .shot__pick {
+    .shot__size {
+      /* NO BACKTICKS IN HERE — this is inside a css tagged template, and one in
+         a comment ends it (see the same warning above the voiceMode note).
+
+         appearance:none is what makes this match the duration box instead of
+         looking like a stray OS widget — and it also removes the arrow, which
+         is the ONLY thing marking the control as a menu rather than a label. So
+         the arrow is drawn back as an inline SVG, the way the caret on the model
+         button is. Without it this reads as a printed value, and nobody clicks
+         a label. */
       appearance: none;
       border: 1px solid var(--vs-border, rgba(15, 23, 42, 0.14));
       border-radius: 5px;
-      padding: 3px 4px;
-      background: var(--vs-shot-field, rgba(127, 140, 170, 0.06));
+      padding: 3px 16px 3px 6px;
+      background-color: var(--vs-shot-field, rgba(127, 140, 170, 0.06));
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5' viewBox='0 0 8 5'%3E%3Cpath d='M1 1l3 3 3-3' fill='none' stroke='%23888' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 5px center;
       color: inherit;
       font: inherit;
       outline: none;
       cursor: pointer;
-      max-width: 92px;
+      max-width: 104px;
     }
-    .shot__pick:hover { border-color: var(--vs-accent-a, #4a9bd9); }
+    .shot__size:hover { border-color: var(--vs-accent-a, #4a9bd9); }
+    .shot__size:focus-visible { border-color: var(--vs-accent-a, #4a9bd9); }
 
     .shot__durin {
       /* Wide enough for three digits and the caret after them. 44px fitted "5"
@@ -2995,7 +3008,7 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
       -->
       ${isGraphic || !caps?.resolutions?.length ? nothing : html`
         <select
-          class="shot__pick"
+          class="shot__size"
           title="Output size. Bigger costs more per second — the estimate follows."
           data-range-sync-exclude="true"
           @pointerdown=${this.claimField}
@@ -3007,7 +3020,7 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
           >${r}</option>`)}</select>`}
       ${isGraphic || !caps?.aspectRatios?.length ? nothing : html`
         <select
-          class="shot__pick"
+          class="shot__size"
           title="Frame shape. Does not change the price."
           data-range-sync-exclude="true"
           @pointerdown=${this.claimField}
