@@ -205,6 +205,57 @@ describe('VoidspaceBlobSource', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it('waits for a session that has not arrived yet instead of killing the block', async () => {
+    /**
+     * THE "MY IMAGES DISAPPEARED" BUG, in one test.
+     *
+     * The parent restores Firebase asynchronously; until it does it answers "no
+     * token", and `NO_TOKEN_TTL` makes that answer stick for thirty seconds. So
+     * every image that connected in that window fetched unauthenticated, took a
+     * 401, and resolved NULL — which `ResourceController.blob()` turns into the
+     * permanent card reading "Image not found". Nothing retried, because nothing
+     * asks this source twice.
+     *
+     * The tell was that double-clicking fixed it: the peek view calls
+     * `refreshUrlWith` → `get` again, and by then the token had arrived.
+     */
+    unparent?.(); unparent = null;
+    __setToken(null);
+    const fetchMock = vi.fn(async (_u: string, init?: any) =>
+      (init?.headers?.Authorization
+        ? { ok: true, status: 200, blob: async () => pixel() }
+        : { ok: false, status: 401 }) as unknown as Response);
+    vi.stubGlobal('fetch', fetchMock);
+    const source = new VoidspaceBlobSource({ boardId: 'late-auth' });
+
+    const pending = source.get(IMAGE_REF);
+    // The parent pushes a token a moment later, exactly as board.vue does on
+    // iframe load. The block is still showing its spinner.
+    await tick();
+    __setToken('arrived-late');
+
+    // The picture, not a permanent error card — and without the user having to
+    // discover that double-clicking repairs it.
+    expect((await pending)!.size).toBe(3);
+  }, 20000);
+
+  it('still fails honestly when there is no session coming', async () => {
+    // The wait is bounded. A board with no auth at all must settle on the error
+    // card rather than spin forever — the message is what tells the user the
+    // link is dead rather than slow.
+    unparent?.(); unparent = null;
+    __setToken(null);
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 403 }) as unknown as Response));
+    const source = new VoidspaceBlobSource({ boardId: 'no-auth' });
+
+    const states: Array<string | null | undefined> = [];
+    source.blobState$(IMAGE_REF).subscribe(s => states.push(s.errorMessage));
+
+    expect(await source.get(IMAGE_REF)).toBeNull();
+    await tick();
+    expect(states.at(-1)).toMatch(/no longer available/i);
+  }, 30000);
+
   it('ignores the empty placeholder a streaming insert hands it', async () => {
     const source = new VoidspaceBlobSource({ boardId: 'b8' });
     // `placeAsset` gives `addAttachments` a zero-length File so nothing is

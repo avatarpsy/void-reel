@@ -238,3 +238,42 @@ export function onParentToken(fn: TokenListener): () => void {
   listeners.add(fn);
   return () => listeners.delete(fn);
 }
+
+/**
+ * A token, waiting for one to ARRIVE if we do not have it yet.
+ *
+ * `getParentToken` answers with what it can get by asking. This answers with
+ * what the parent eventually pushes — which is a different question, and the
+ * one a media fetch needs.
+ *
+ * THE CASE THIS EXISTS FOR. The parent restores its Firebase session
+ * asynchronously; until it does, it has no token to hand over and says so.
+ * `NO_TOKEN_TTL` then makes that answer stick for thirty seconds, so EVERY
+ * consumer in that window is told there is no auth. For a consumer that can
+ * show a spinner, believing that is wrong: the session is milliseconds away and
+ * the correct behaviour is to keep waiting, not to render a permanent failure
+ * for an asset that is perfectly fine.
+ *
+ * Bounded, because a genuinely signed-out board must still resolve. The wait
+ * ends the instant a token is pushed, so the normal path costs nothing.
+ */
+export function awaitParentToken(timeoutMs: number): Promise<string | null> {
+  if (token) return Promise.resolve(token);
+  return new Promise(resolve => {
+    let done = false;
+    const finish = (value: string | null) => {
+      if (done) return;
+      done = true;
+      stop();
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const stop = onParentToken(() => finish(token));
+    const timer = setTimeout(() => finish(token), timeoutMs);
+    // Also ASK, rather than only listening. A push is what normally arrives
+    // first, but a board opened into an already-signed-in page may have missed
+    // it — nobody would ever push again, and a pure listener would wait out the
+    // whole timeout for a token that was available the entire time.
+    void getParentToken(true).then(got => { if (got) finish(got); }).catch(() => {});
+  });
+}
