@@ -13,7 +13,7 @@
 // temp URL first (exactly like Generative Fill does) before sending.
 // -----------------------------------------------------------------------------
 
-import { getVoidspaceIdToken, NotSignedInError, withMediaToken, type VoidspaceLibraryItem } from './voidspace-storage';
+import { getVoidspaceIdToken, mintIdempotencyKey, NotSignedInError, withMediaToken, type VoidspaceLibraryItem } from './voidspace-storage';
 import { uploadReferenceImage } from './generative-fill';
 import type { CanvasSize } from '../types/project';
 
@@ -147,13 +147,22 @@ export async function generateStudioImage(opts: GenerateImageOpts): Promise<stri
 
   const res = await fetch('/api/studio/gen-frame', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      // See `mintIdempotencyKey` — without this a double-click or a dropped
+      // connection billed the user twice for one picture.
+      'Idempotency-Key': mintIdempotencyKey('img-editor-gen'),
+    },
     body: JSON.stringify({
       prompt: opts.prompt,
       aspectRatio: opts.aspectRatio,
       model: opts.model,
       resolution: opts.resolution,
       referenceImages: opts.referenceUrls && opts.referenceUrls.length ? opts.referenceUrls : undefined,
+      // Names this surface in the user's Library so a picture made while
+      // editing is distinguishable from one the agent generated in chat.
+      surface: 'image-editor',
     }),
   });
   if (!res.ok) await throwImageGenError(res);
@@ -174,7 +183,11 @@ export async function separateLayers(opts: { imageUrl: string; prompt?: string; 
   if (!token) throw new NotSignedInError();
   const res = await fetch('/api/studio/seedream-layers', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'Idempotency-Key': mintIdempotencyKey('img-editor-layers'),
+    },
     body: JSON.stringify({ imageUrl: opts.imageUrl, prompt: opts.prompt, resolution: opts.resolution, aspectRatio: opts.aspectRatio }),
   });
   if (!res.ok) await throwImageGenError(res);

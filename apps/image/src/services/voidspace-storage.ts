@@ -123,6 +123,37 @@ export async function isSignedInToVoidspace(): Promise<boolean> {
   return (await getVoidspaceIdToken()) !== null;
 }
 
+/**
+ * A per-request idempotency key for a generation call.
+ *
+ * ── WHY THE IMAGE EDITOR NEEDED THIS ────────────────────────────────────────
+ * Every other Voidspace surface sends one; this app sent none. Two things
+ * followed, and both cost the user money:
+ *
+ *   1. DOUBLE CHARGES. `withReceipt` on the server opts OUT of caching when
+ *      the key is absent (`if (!key || !uid) return fn()`), so a double-click,
+ *      a refresh mid-generation, or the Cloudflare edge cutting a long request
+ *      fired a second paid generation. Every other surface coalesces onto the
+ *      first.
+ *   2. NO LIBRARY ENTRY. `gen-frame` gated its ledger write on the key being
+ *      present, so images made here were charged for and written down
+ *      nowhere — gone with the tab unless the project happened to be saved.
+ *      (That gate is now removed server-side as well; the key still matters
+ *      because it is what makes a RETRY merge into one Library row instead of
+ *      creating a second.)
+ *
+ * Mirrors `mintIdempotencyKey` in the website's `studio-pipeline-helpers.ts`.
+ * Kept as a small local copy rather than an import because this app is built
+ * as a separate bundle and does not depend on the Nuxt workspace.
+ */
+export function mintIdempotencyKey(prefix: string): string {
+  try {
+    const c: any = (typeof globalThis !== 'undefined' ? (globalThis as any).crypto : undefined);
+    if (c?.randomUUID) return `${prefix}-${c.randomUUID()}`;
+  } catch { /* fall through to the time+random form */ }
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 // ─────────────────────── Reading the shared Library ───────────────────────
 // The same store video generations land in. GET /api/studio/library scans the
 // per-project disk manifests (zero Firebase) and returns every asset the user

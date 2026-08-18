@@ -194,10 +194,27 @@ registerImageRpc('voidspace:img-render', async (msg: any) => {
   const page = resolvePage(project, msg?.pageId);
   if (!page) return { ok: false, reason: 'page_not_found', message: `No page with id ${msg?.pageId}` };
 
+  // A named layer's own box, exactly as `img-measure` already accepts it.
+  //
+  // The two RPCs answer the same question about the same coordinates and only
+  // one of them understood `layerId`, so "render just this layer" had to be
+  // expressed as hand-computed x/y/width/height by the caller — which is both
+  // fiddly and wrong the moment the user nudges the layer. `img_generate`
+  // needs exactly this to turn "same style as that one" into a reference url.
+  let region = msg?.region;
+  if (!region && msg?.layerId) {
+    const layer = project.layers[msg.layerId];
+    if (!layer) return { ok: false, reason: 'layer_not_found', message: `No layer with id ${msg.layerId}` };
+    region = {
+      x: layer.transform.x, y: layer.transform.y,
+      width: layer.transform.width, height: layer.transform.height,
+    };
+  }
+
   try {
     let canvas = await renderPageCanvas(project, page, { maxPx: msg?.maxPx });
-    if (msg?.region) {
-      canvas = cropCanvas(canvas, msg.region, page.size);
+    if (region) {
+      canvas = cropCanvas(canvas, region, page.size);
     }
     const blob = await canvasToBlob(canvas);
     const file = new File([blob], `view-${page.id}.png`, { type: 'image/png' });

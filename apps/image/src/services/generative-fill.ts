@@ -9,7 +9,7 @@
 // selection (non-destructive).
 // -----------------------------------------------------------------------------
 
-import { getVoidspaceIdToken, NotSignedInError } from './voidspace-storage';
+import { getVoidspaceIdToken, mintIdempotencyKey, NotSignedInError } from './voidspace-storage';
 
 /** Generative-fill failure, classified by HTTP status — NO server/provider text
  *  is carried, so the UI can show clean copy (402 = user out of credits;
@@ -306,7 +306,12 @@ export async function runGenerativeFill(opts: GenerativeFillOpts): Promise<strin
 
   const res = await fetch('/api/studio/gen-fill', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      // A fill is a paid generation like any other — see mintIdempotencyKey.
+      'Idempotency-Key': mintIdempotencyKey('img-editor-fill'),
+    },
     body: JSON.stringify({ imageUrl, maskUrl, prompt: opts.prompt, model: opts.model, referenceUrl: opts.referenceUrl }),
   });
   if (!res.ok) await throwGenFillError(res);
@@ -517,7 +522,11 @@ export async function runKieEditFill(opts: {
 
   const res = await fetch('/api/studio/gen-fill', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'Idempotency-Key': mintIdempotencyKey('img-editor-fill-kie'),
+    },
     body: JSON.stringify({
       engine: 'kie', model: opts.model, imageUrl,
       referenceUrls: opts.referenceUrls, prompt: opts.prompt,

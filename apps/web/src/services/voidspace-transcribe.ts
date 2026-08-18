@@ -113,7 +113,15 @@ export async function transcribeViaVoidspace(
   });
   const txRes = await fetch(`${base}/api/studio/transcribe`, {
     method: "POST",
-    headers: { ...headers, "Content-Type": "application/json" },
+    headers: {
+      ...headers,
+      "Content-Type": "application/json",
+      // Transcription bills per MINUTE of audio, so a retried long recording is
+      // one of the more expensive things to accidentally pay for twice. Keyed on
+      // the uploaded url: a genuine retry of the SAME audio coalesces onto the
+      // first call, while a different recording gets its own key.
+      "Idempotency-Key": `stt-${up.url.slice(-64)}`,
+    },
     body: JSON.stringify({ mediaUrl: up.url }),
   });
   if (!txRes.ok) {

@@ -104,8 +104,19 @@ export async function synthesizeViaVoidspace(
 
   const res = await fetch(`${base}/api/studio/gen-voiceover`, {
     method: "POST",
-    headers: { ...headers, "Content-Type": "application/json" },
+    headers: {
+      ...headers,
+      "Content-Type": "application/json",
+      // Fresh key per invocation, same as the Suno client next door.
+      // `withReceipt` opts OUT of caching when the key is absent, so without
+      // this a double-click or a dropped connection billed the user twice for
+      // one read — and a retry created a second Library entry for one clip.
+      "Idempotency-Key": `tts-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+    },
     body: JSON.stringify({
+      // Names this surface in the Library, so a voice made in the editor is
+      // distinguishable from a scene narration.
+      surface: "video-editor-tts",
       script: text,
       voiceId: voiceId || undefined,
       model: safeModel,
