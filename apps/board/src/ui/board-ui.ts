@@ -21,12 +21,15 @@ import { GfxControllerIdentifier } from '@blocksuite/std/gfx';
 
 import { estimateShotCredits, onModelCatalogue, plannedSeconds } from '../shot/models';
 import { createShots, readShots } from '../shot/shots';
+import { installBoardFullscreen, installChromeAutohide } from './chrome-autohide';
 import { fitBoard } from './viewport';
 import type { MountedBoard } from '../blocksuite/editor';
 
 const ICONS = {
   plus: '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M8 3.5v9M3.5 8h9"/></svg>',
   fit: '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2H2v4M10 2h4v4M6 14H2v-4M10 14h4v-4"/></svg>',
+  expand: '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2H14v4.5M6.5 14H2V9.5M14 2l-5 5M2 14l5-5"/></svg>',
+  collapse: '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 6.5H9V2M2.5 9.5H7V14M9 6.5l5-5M7 9.5l-5 5"/></svg>',
   minus: '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3.5 8h9"/></svg>',
   undo: '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h7a3 3 0 0 1 0 6H7"/><path d="M6 5 3 8l3 3"/></svg>',
   redo: '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 8H6a3 3 0 0 0 0 6h3"/><path d="M10 5l3 3-3 3"/></svg>',
@@ -112,6 +115,7 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
     <button type="button" class="vs-board-btn" data-act="fit" title="Frame the whole storyboard">
       ${ICONS.fit}<span>Fit</span>
     </button>
+    <button type="button" class="vs-board-btn vs-board-icon" data-act="focus" title="Focus mode — fill the screen (Esc to leave)">${ICONS.expand}</button>
     <span class="vs-board-sep"></span>
     <div class="vs-board-total" data-total hidden></div>
     <!--
@@ -197,6 +201,24 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
     requestAnimationFrame(() => fitBoard());
   }
 
+  // ── Chrome that gets out of the way ───────────────────────────────────────
+  // Both bars fade until the pointer reaches for them; see `chrome-autohide.ts`
+  // for why proximity is measured rather than done with a CSS hover strip.
+  const chrome = installChromeAutohide(container);
+  const fullscreen = installBoardFullscreen();
+
+  const focusBtn = bar.querySelector<HTMLElement>('[data-act="focus"]')!;
+  const stopFullscreenWatch = fullscreen.onChange((on) => {
+    focusBtn.innerHTML = on ? ICONS.collapse : ICONS.expand;
+    focusBtn.title = on
+      ? 'Leave focus mode (Esc)'
+      : 'Focus mode — fill the screen (Esc to leave)';
+    // Entering fullscreen is a deliberate "show me the work" gesture, so the
+    // chrome should not be the first thing on screen. Leaving it is a return to
+    // the page, where the bar is where the user last saw it.
+    chrome.reveal();
+  });
+
   const onClick = (e: MouseEvent) => {
     const act = (e.target as HTMLElement).closest<HTMLElement>('[data-act]')?.dataset.act;
     if (!act) return;
@@ -206,6 +228,7 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
       case 'undo': board.store.undo(); break;
       case 'redo': board.store.redo(); break;
       case 'fit': fitBoard(); break;
+      case 'focus': void fullscreen.toggle(); break;
     }
   };
   empty.addEventListener('click', onClick);
@@ -249,6 +272,10 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
     if (has && hidden) return;
     hidden = has;
     empty.classList.toggle('is-hidden', has);
+    // An empty board has nothing to look at, so there is nothing for the
+    // chrome to be in the way OF — and hiding "Add shot" behind a hover is
+    // how a first-time user concludes the board cannot do anything.
+    chrome.setPinned(!has);
   }
   /**
    * The total is derived from every shot, so recomputing it on every
@@ -300,6 +327,9 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
     sub.unsubscribe?.();
     selectionSub.unsubscribe?.();
     stopModels();
+    stopFullscreenWatch();
+    fullscreen.destroy();
+    chrome.destroy();
     empty.remove();
     bar.remove();
   };
