@@ -32,7 +32,19 @@ function loadImageEl(src: string): Promise<HTMLImageElement | null> {
   });
 }
 
-export type ExportFormat = 'png' | 'jpg' | 'webp' | 'svg' | 'pdf';
+/**
+ * RE-EXPORTED, not redeclared. This was a second copy of the union in
+ * `image-core/project.ts`, and the two had already drifted apart the moment a
+ * format was added to one of them — the editor's own dialog types against THIS
+ * one, so a format added to the shared model was rejected here as "not
+ * assignable", which reads as the new format being wrong rather than as there
+ * being two answers to what a format is.
+ */
+import type { ExportFormat } from '../types/project';
+
+export type { ExportFormat };
+export { DOCUMENT_FORMATS } from '../types/project';
+
 export type ExportQuality = 'low' | 'medium' | 'high' | 'max';
 
 export interface ExportOptions {

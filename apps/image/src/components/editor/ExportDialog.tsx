@@ -25,12 +25,31 @@ type FormatInfo = {
   description: string;
   supportsTransparency: boolean;
   supportsQuality: boolean;
+  /** ONE file for the whole project rather than one per artboard. See
+   *  DOCUMENT_FORMATS — the export path branches on this, it is not a label. */
+  document?: boolean;
 };
 
 const FORMATS: FormatInfo[] = [
   { id: 'png', name: 'PNG', description: 'Lossless, best for graphics', supportsTransparency: true, supportsQuality: false },
   { id: 'jpg', name: 'JPG', description: 'Smaller size, photos', supportsTransparency: false, supportsQuality: true },
   { id: 'webp', name: 'WebP', description: 'Modern, best compression', supportsTransparency: true, supportsQuality: true },
+  {
+    id: 'pptx',
+    name: 'PowerPoint',
+    description: 'Every page a slide, still editable',
+    supportsTransparency: false,
+    supportsQuality: false,
+    document: true,
+  },
+  {
+    id: 'pdf',
+    name: 'PDF',
+    description: 'Every page a page, exactly as designed',
+    supportsTransparency: false,
+    supportsQuality: false,
+    document: true,
+  },
 ];
 
 const QUALITY_PRESETS: { id: ExportQuality; name: string; value: number }[] = [
@@ -289,6 +308,49 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
     setProgress(0);
 
     try {
+      /**
+       * ── A DOCUMENT IS ONE FILE, NOT N FILES ────────────────────────────────
+       *
+       * The raster path below renders each artboard and downloads one file per
+       * page, which is right for images and nonsense for a deck: ten separate
+       * .pptx files is not a presentation. So these formats take their own
+       * path, and "export all" stops being a choice — a one-slide deck made
+       * from a ten-page project is not something anyone means to ask for.
+       *
+       * Loaded on demand. pptxgenjs and pdf-lib are ~400KB together and are
+       * needed by neither the editor nor a PNG export, so they must not sit in
+       * the bundle everyone downloads to open a canvas.
+       */
+      if (currentFormat.document) {
+        const { exportProjectToPptx, exportProjectToPdf } = await import('../../services/pptx-export');
+        const onProgress = (p: number, msg: string) => { setProgress(p); setProgressMessage(msg); };
+        const safeName = (project.name || 'presentation').replace(/[^\w\s-]/g, '').trim() || 'presentation';
+
+        if (format === 'pptx') {
+          const { blob, dropped } = await exportProjectToPptx(project, {
+            scale: effectiveScale, onProgress,
+          });
+          downloadBlob(blob, `${safeName}.pptx`);
+          // Told, not hidden. A layer missing from slide six is something the
+          // user needs to know BEFORE they present it, and the export otherwise
+          // reports unqualified success.
+          if (dropped.length) {
+            showNotification(
+              'error',
+              `Exported, but ${dropped.length} layer${dropped.length > 1 ? 's' : ''} could not be included: ${dropped.slice(0, 3).join(', ')}${dropped.length > 3 ? '…' : ''}`,
+            );
+          } else {
+            showNotification('success', `Exported ${project.artboards.length} slides to PowerPoint`);
+          }
+        } else {
+          const blob = await exportProjectToPdf(project, { scale: effectiveScale, onProgress });
+          downloadBlob(blob, `${safeName}.pdf`);
+          showNotification('success', `Exported ${project.artboards.length} pages to PDF`);
+        }
+        onClose();
+        return;
+      }
+
       const options: ExportOptions = {
         format,
         quality,

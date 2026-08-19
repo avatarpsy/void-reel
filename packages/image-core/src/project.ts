@@ -271,7 +271,17 @@ export interface MediaAsset {
   blobUrl?: string;
 }
 
-export type ExportFormat = 'png' | 'jpg' | 'webp' | 'svg' | 'pdf';
+/**
+ * `pptx` and `pdf` are DOCUMENT formats: one file for the whole project, where
+ * the raster formats produce one file per artboard. That difference is not
+ * cosmetic — it changes what "export all" means, whether transparency applies,
+ * and how the result is named — so callers must branch on it rather than adding
+ * an entry here and assuming the per-artboard loop will cope.
+ */
+export type ExportFormat = 'png' | 'jpg' | 'webp' | 'svg' | 'pdf' | 'pptx';
+
+/** True for the formats that produce ONE file covering every page. */
+export const DOCUMENT_FORMATS: ReadonlySet<ExportFormat> = new Set<ExportFormat>(['pdf', 'pptx']);
 
 export type ExportBackgroundMode = 'transparent' | 'artboard' | 'custom';
 
