@@ -117,8 +117,9 @@ This document audits which tools, panels, and export formats in the
 | PNG | ✅ | Full artboard render with transparency |
 | JPEG | ✅ | Quality setting applied; transparent bg becomes white |
 | WebP | ✅ | Quality setting applied |
-| SVG | 🔲 | Option present in UI; not implemented |
-| PDF | 🔲 | Option present in UI; not implemented |
+| PowerPoint (.pptx) | ✅ | Every page a slide. Text/shapes export as REAL PowerPoint objects; anything PowerPoint cannot express (blend modes, adjustments, masks, glow, skew, gradient text, drawn paths, smart objects) is rasterised per layer so the slide still matches the design. Dropped layers are reported, never silent. |
+| PDF | ✅ | Every page a page, picture-based. Page size from the artboard, so a 2x export is sharper rather than larger. |
+| SVG | 🔲 | In the format type; no implementation and not offered in the UI. |
 
 ---
 
