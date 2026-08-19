@@ -680,7 +680,23 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
           </div>
         )}
 
-        {project.artboards.length > 1 && (
+        {/*
+          A DOCUMENT IS ALWAYS EVERY PAGE, so it must not offer the choice.
+
+          The checkbox stayed visible for PowerPoint and PDF, where the export
+          path ignores it and writes all pages regardless — a control that reads
+          as a choice, accepts a click, and changes nothing. Found in an
+          end-to-end run: unticking it still produced a five-slide deck.
+
+          Replaced with a statement of what will happen, which is the honest
+          version of the same line.
+        */}
+        {project.artboards.length > 1 && (currentFormat.document ? (
+          <p className="text-sm text-muted-foreground">
+            All {project.artboards.length} pages are included — a {currentFormat.name} file is the
+            whole document.
+          </p>
+        ) : (
           <div>
             <label className="flex items-center gap-3 cursor-pointer">
               <input
@@ -692,7 +708,7 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
               <span className="text-sm">Export all artboards ({project.artboards.length})</span>
             </label>
           </div>
-        )}
+        ))}
 
         <div className="p-4 bg-secondary/50 rounded-lg space-y-2">
           <div className="flex items-center justify-between text-sm">
