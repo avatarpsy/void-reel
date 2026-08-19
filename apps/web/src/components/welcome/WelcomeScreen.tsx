@@ -126,18 +126,50 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
     openStudio({ mode: "music" });
   }, [openStudio, track]);
 
+  /**
+   * BACK MEANS WHERE YOU CAME FROM.
+   *
+   * This used to be "My Projects", hardcoded to /studio/projects. But this
+   * screen is a format picker reached from several places — the /ai sidebar's
+   * Video row, the projects page's Create button, a bookmark — and sending
+   * everyone to the projects list means anyone who arrived from the chat has to
+   * navigate all the way back to it.
+   *
+   * `history.back()` when there is somewhere to go back TO, and the projects
+   * list when there is not. `document.referrer` is the reliable test for that:
+   * `history.length` counts the whole tab session, including entries from
+   * before this document, so it over-reports for a fresh tab. A same-origin
+   * referrer means we got here by a link, which is exactly when going back is
+   * meaningful — and it also refuses to bounce someone out to another site.
+   */
+  const goBack = useCallback(() => {
+    try {
+      if (
+        document.referrer &&
+        new URL(document.referrer).origin === window.location.origin &&
+        window.history.length > 1
+      ) {
+        window.history.back();
+        return;
+      }
+    } catch {
+      /* malformed referrer — fall through to the list */
+    }
+    window.location.href = "/studio/projects";
+  }, []);
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        // From templates → back home. From home → back to the projects
-        // list (never silently drop into the chat-less bare editor).
+        // From templates → back home. From home → wherever the user came from
+        // (never silently drop into the chat-less bare editor).
         if (viewMode !== "home") setViewMode("home");
-        else window.location.href = "/studio/projects";
+        else goBack();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [viewMode]);
+  }, [viewMode, goBack]);
 
   if (viewMode === "templates") {
     return (
@@ -174,14 +206,17 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
           of the site. Sits above the gradient washes, below the content. */}
       <CosmicField />
 
-      {/* Back to Voidspace projects (sticky in top-left of editor shell) */}
-      <a
-        href="/studio/projects"
+      {/* Back to wherever this was opened from — see `goBack`. A button, not an
+          <a href>, because the destination is the history entry rather than a
+          fixed URL. */}
+      <button
+        type="button"
+        onClick={goBack}
         className="absolute top-5 left-6 z-20 inline-flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary transition-colors"
       >
         <ArrowRight className="rotate-180" size={14} />
-        My Projects
-      </a>
+        Back
+      </button>
 
       <div className="relative z-10 h-full flex flex-col items-center justify-center px-6">
         <div className="w-full max-w-3xl">
