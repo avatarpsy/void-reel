@@ -20,14 +20,53 @@ import { resolveBootTheme, watchSiteTheme } from '@openreel/ui';
 // "edit this image" handoff)? Read once, synchronously, before first paint —
 // so we render a loading screen instead of flashing the welcome/landing page
 // and only then jumping into the editor.
-function readBootTarget(): { carouselId?: string; projectId?: string } | null {
+function readBootTarget(): { carouselId?: string; projectId?: string; preset?: NewPreset } | null {
   const p = new URLSearchParams(window.location.search);
   const carouselId = p.get('carousel');
   if (carouselId) return { carouselId };
   const projectId = p.get('project');
   if (projectId) return { projectId };
+  const preset = readNewPreset(p);
+  if (preset) return { preset };
   if (readHandoffParams()) return {};
   return null;
+}
+
+/**
+ * ── ?new=<preset> — LAND ON THE DOCUMENT, NOT ON THE PICKER ──────────────────
+ *
+ * The format grid is the right first screen for a person browsing: they are
+ * choosing, and choosing is what it is for. It is the wrong one for an intent
+ * that has already been stated. Someone who said "make me a deck about Q3" — in
+ * chat, to the primary agent, before this tab existed — has already answered
+ * every question the picker asks, and showing it to them means their answer was
+ * thrown away and they have to give it again.
+ *
+ * So the intent travels in the URL and the editor opens the document. The agent
+ * beside it can then start on slide one instead of on a menu.
+ *
+ * Sizes are the CANVAS_PRESETS values, restated here rather than looked up by
+ * name: the preset list is a UI catalogue that may be re-labelled or reordered,
+ * and a deep link resolving through a display string would break the day someone
+ * renames a tile. These four are a stable contract with the URL.
+ */
+type NewPreset = { name: string; width: number; height: number };
+const NEW_PRESETS: Record<string, NewPreset> = {
+  presentation: { name: 'Presentation', width: 1920, height: 1080 },
+  'presentation-4-3': { name: 'Presentation', width: 1024, height: 768 },
+  carousel: { name: 'Carousel', width: 1080, height: 1350 },
+  poster: { name: 'Poster', width: 2480, height: 3508 },
+};
+
+function readNewPreset(p: URLSearchParams): NewPreset | null {
+  const key = (p.get('new') ?? '').trim().toLowerCase();
+  if (!key) return null;
+  const preset = NEW_PRESETS[key];
+  if (!preset) return null;
+  // An explicit title beats the generic one — the deck is findable in the
+  // Images tab by what it is about rather than as a third "Presentation".
+  const title = (p.get('title') ?? '').trim().slice(0, 80);
+  return title ? { ...preset, name: title } : preset;
 }
 
 export default function App() {
@@ -125,6 +164,40 @@ export default function App() {
         setBooting(false);
       }
     })();
+  }, [setCurrentView]);
+
+  /**
+   * ?new=<preset> — mint the document and go straight to the editor.
+   *
+   * Runs BEFORE the handoff effect below and after the two that open an existing
+   * document, which is the correct order of specificity: reopening a real project
+   * always wins over creating a new one, and `?new` only ever fires when nothing
+   * else claimed the boot.
+   *
+   * The param is left in the URL rather than cleared. `?src=` is cleared because
+   * it is a one-shot handoff whose meaning expires the moment it is consumed —
+   * reloading with it would re-import the image over the user's work. `?new` is
+   * different only in that a reload would mint a SECOND empty project, so it is
+   * consumed here in the same way: guarded by the store, not by the address bar,
+   * because a page that has already loaded a project must never be re-minted.
+   */
+  useEffect(() => {
+    const preset = readNewPreset(new URLSearchParams(window.location.search));
+    if (!preset) return;
+    // React 18 StrictMode mounts effects twice in development, and a second
+    // createProject would silently discard the first document. The store is the
+    // only honest guard: if something is already open, this boot is over.
+    if (useProjectStore.getState().project) { setBooting(false); return; }
+    try {
+      useProjectStore.getState().createProject(preset.name, {
+        width: preset.width, height: preset.height,
+      });
+      setCurrentView('editor');
+    } catch (e) {
+      console.warn('[image] could not create project from ?new:', e);
+    } finally {
+      setBooting(false);
+    }
   }, [setCurrentView]);
 
   // "Edit this image" handoff: another surface opened us with ?src=…&from=…

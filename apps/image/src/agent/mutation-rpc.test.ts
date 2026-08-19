@@ -381,3 +381,145 @@ describe('rearranging: order, duplication, removal', () => {
     expect(layer.style.fontSize).toBe(90);
   });
 });
+
+/**
+ * The batch composer. What is worth asserting is not that it adds layers — the
+ * single-layer paths already prove that — but the four properties that are the
+ * whole reason it exists, and that a future refactor could silently lose.
+ */
+describe('img-compose-slide', () => {
+  beforeEach(reset);
+
+  it('builds a whole slide as ONE undo step', async () => {
+    await newProject();
+    const before = depth();
+    const r = await rpc({
+      type: 'voidspace:img-compose-slide',
+      background: '#0b1020',
+      elements: [
+        { kind: 'shape', shapeType: 'rectangle', fill: '#000000', fillOpacity: 0.5 },
+        { kind: 'text', text: 'The hook', fontSize: 120, color: '#ffffff', align: 'top-left' },
+        { kind: 'text', text: 'One supporting line', fontSize: 40, align: 'bottom-left' },
+      ],
+    });
+    expect(r.ok).toBe(true);
+    expect(r.created).toBe(3);
+    // Three layers and a background change — but ONE press of Ctrl+Z undoes the
+    // slide. That is the property; six entries would be the old behaviour.
+    expect(depth()).toBe(before + 1);
+  });
+
+  it('undo removes the entire slide, not part of it', async () => {
+    await newProject();
+    const layersBefore = Object.keys(project().layers).length;
+    await rpc({
+      type: 'voidspace:img-compose-slide',
+      elements: [
+        { kind: 'text', text: 'A' },
+        { kind: 'text', text: 'B' },
+        { kind: 'shape', shapeType: 'ellipse' },
+      ],
+    });
+    expect(Object.keys(project().layers).length).toBe(layersBefore + 3);
+    useProjectStore.getState().undo();
+    expect(Object.keys(project().layers).length).toBe(layersBefore);
+  });
+
+  it('adds elements in stacking order — later ones sit on top', async () => {
+    await newProject();
+    const r = await rpc({
+      type: 'voidspace:img-compose-slide',
+      elements: [
+        { kind: 'shape', shapeType: 'rectangle' },
+        { kind: 'text', text: 'over the top' },
+      ],
+    });
+    const page = project().artboards.find((a) => a.id === r.pageId)!;
+    // NOTE THE CONVENTION: index 0 of layerIds is the TOP layer. Canvas draws
+    // the array REVERSED (Canvas.tsx) and addLayer inserts at 0, so the LAST
+    // element listed ends up FIRST in the array — which is exactly what "later
+    // ones sit on top" means here. Asserting increasing indices would be
+    // asserting the opposite, which is the mistake this comment exists to stop.
+    const positions = r.layerIds.map((id: string) => page.layerIds.indexOf(id));
+    expect(positions.every((p: number) => p >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((a, b) => b - a));
+    // Stated bluntly so the intent survives a refactor of the convention:
+    // the text was listed last, so the text is on top.
+    expect(page.layerIds[0]).toBe(r.layerIds[1]);
+  });
+
+  it('newPage inherits the deck size, so slide 7 cannot be a different shape', async () => {
+    await newProject();
+    const r = await rpc({
+      type: 'voidspace:img-compose-slide',
+      newPage: true,
+      name: 'Slide 2',
+      elements: [{ kind: 'text', text: 'Second slide' }],
+    });
+    expect(r.ok).toBe(true);
+    expect(project().artboards).toHaveLength(2);
+    expect(r.size).toEqual(SIZE);
+    expect(r.pageName).toBe('Slide 2');
+  });
+
+  it('refuses the WHOLE slide when one image cannot be resolved', async () => {
+    await newProject();
+    const layersBefore = Object.keys(project().layers).length;
+    const r = await rpc({
+      type: 'voidspace:img-compose-slide',
+      elements: [
+        { kind: 'text', text: 'Kept?' },
+        { kind: 'image', assetId: 'does-not-exist' },
+      ],
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('asset_not_found');
+    // Names WHICH element failed — the agent can fix that one and resend.
+    expect(r.message).toContain('element 1');
+    // And nothing was committed: a half-built slide looks finished and is not.
+    expect(Object.keys(project().layers).length).toBe(layersBefore);
+  });
+
+  it('honours the stale-read guard', async () => {
+    await newProject();
+    const staleRev = getProjectRev() - 1;
+    const r = await rpc({
+      type: 'voidspace:img-compose-slide',
+      expectRev: staleRev,
+      elements: [{ kind: 'text', text: 'should not land' }],
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('canvas_changed');
+  });
+
+  it('refuses an unknown element kind rather than silently skipping it', async () => {
+    await newProject();
+    const r = await rpc({
+      type: 'voidspace:img-compose-slide',
+      elements: [{ kind: 'video', text: 'nope' }],
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('bad_request');
+  });
+});
+
+/**
+ * `img-place-image` used to hand-roll its transaction and, in doing so, dropped
+ * the rev guard its own schema tells the agent to pass. This is the regression
+ * test for that: the tool that says "pass expectRev — it is what stops you
+ * overwriting an edit the user just made" must actually honour it.
+ */
+describe('img-place-image — the stale-read guard', () => {
+  beforeEach(reset);
+
+  it('refuses a placement computed from a stale read', async () => {
+    await newProject();
+    const r = await rpc({
+      type: 'voidspace:img-place-image',
+      assetId: 'anything',
+      expectRev: getProjectRev() - 1,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('canvas_changed');
+  });
+});

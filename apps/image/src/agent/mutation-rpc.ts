@@ -23,7 +23,7 @@
 
 import { useProjectStore } from '../stores/project-store';
 import { useUIStore } from '../stores/ui-store';
-import { registerImageMutation, registerImageRpc } from './rpc';
+import { registerImageMutation, registerImageRpc, registerImageAsyncMutation } from './rpc';
 import { getPopularFonts, loadGoogleFont } from '../services/fonts-service';
 import { libraryImageToAsset, getVoidspaceIdToken } from '../services/voidspace-storage';
 import type { Layer, Project, Artboard, MediaAsset, TextLayer, ShapeLayer } from '../types/project';
@@ -256,58 +256,68 @@ function fitBox(
   };
 }
 
-registerImageRpc('voidspace:img-place-image', async (msg: any) => {
-  const store = useProjectStore.getState();
-  const project = store.project;
-  if (!project) return fail('no_project', 'No image project is open.');
-
-  const page = resolvePage(project, msg?.pageId);
-  if (!page) return fail('page_not_found', `No page with id ${msg?.pageId}`);
-
-  // The FETCH happens outside the transaction — a transaction must stay
-  // synchronous so its commands commit as one atomic step, and network time has
-  // no business inside an undo entry.
-  let asset: MediaAsset | null = null;
-  const assetId = typeof msg?.assetId === 'string' ? msg.assetId : '';
+/**
+ * Resolve one image source to an asset, fetching it if it is a url.
+ *
+ * Shared by `img-place-image` and `img-compose-slide` — the second was written
+ * afterwards, and a slide that acquires its picture differently from a single
+ * placement is a slide whose picture can be subtly different. Returns a refusal
+ * rather than throwing, so a caller composing several images can report exactly
+ * which one failed.
+ */
+async function resolveImageAsset(
+  project: Project,
+  spec: { assetId?: unknown; url?: unknown; name?: unknown },
+): Promise<MediaAsset | ReturnType<typeof fail>> {
+  const assetId = typeof spec?.assetId === 'string' ? spec.assetId : '';
   if (assetId) {
-    asset = project.assets[assetId] ?? null;
-    if (!asset) return fail('asset_not_found', `No asset with id ${assetId}`);
-  } else if (typeof msg?.url === 'string' && msg.url) {
+    const found = project.assets[assetId] ?? null;
+    return found ?? fail('asset_not_found', `No asset with id ${assetId}`);
+  }
+  if (typeof spec?.url === 'string' && spec.url) {
+    let asset: MediaAsset | null = null;
     try {
       const token = await getVoidspaceIdToken();
-      asset = await libraryImageToAsset({ url: msg.url, name: msg?.name } as any, token);
+      asset = await libraryImageToAsset({ url: spec.url, name: spec?.name } as any, token);
     } catch (e: any) {
       return fail('fetch_failed', `Could not load that image: ${e?.message ?? e}`);
     }
-    if (!asset) return fail('fetch_failed', 'Could not load that image.');
-  } else {
-    return fail('bad_request', 'Pass assetId (already in the project) or url.');
+    return asset ?? fail('fetch_failed', 'Could not load that image.');
   }
+  return fail('bad_request', 'Pass assetId (already in the project) or url.');
+}
 
-  const box = resolveBox(page, msg ?? {}, { width: page.size.width, height: page.size.height });
-  const fit = (msg?.fit === 'contain' || msg?.fit === 'stretch') ? msg.fit : 'cover';
-  const placed = fitBox({ width: asset.width, height: asset.height }, box, fit);
+registerImageAsyncMutation(
+  'voidspace:img-place-image',
+  'Place image',
+  async (msg: any) => {
+    const project = useProjectStore.getState().project!;
+    const page = resolvePage(project, msg?.pageId);
+    if (!page) return fail('page_not_found', `No page with id ${msg?.pageId}`);
 
-  const existing = !!project.assets[asset.id];
-  const layerId = useProjectStore.getState().runTransaction('Place image', () => {
-    if (page.id !== useProjectStore.getState().selectedArtboardId) {
-      useProjectStore.getState().selectArtboard(page.id);
-    }
+    // The FETCH happens outside the transaction — a transaction must stay
+    // synchronous so its commands commit as one atomic step, and network time
+    // has no business inside an undo entry.
+    const asset = await resolveImageAsset(project, msg ?? {});
+    if ((asset as any).ok === false) return asset as ReturnType<typeof fail>;
+
+    return { page, asset: asset as MediaAsset };
+  },
+  (msg: any, { page, asset }) => {
+    const box = resolveBox(page, msg ?? {}, { width: page.size.width, height: page.size.height });
+    const fit = (msg?.fit === 'contain' || msg?.fit === 'stretch') ? msg.fit : 'cover';
+    const placed = fitBox({ width: asset.width, height: asset.height }, box, fit);
+
+    const store = useProjectStore.getState();
+    if (page.id !== store.selectedArtboardId) store.selectArtboard(page.id);
     // Registering the asset is itself undoable, so undo removes BOTH and leaves
     // no orphan in the Assets panel.
-    if (!existing) useProjectStore.getState().addAsset(asset!);
-    return useProjectStore.getState().addImageLayer(asset!.id, placed);
-  });
+    if (!store.project!.assets[asset.id]) useProjectStore.getState().addAsset(asset);
+    const layerId = useProjectStore.getState().addImageLayer(asset.id, placed);
 
-  return {
-    ok: true,
-    layerId,
-    assetId: asset.id,
-    pageId: page.id,
-    bounds: placed,
-    rev: useProjectStore.getState().project?.updatedAt,
-  };
-});
+    return { layerId, assetId: asset.id, pageId: page.id, bounds: placed };
+  },
+);
 
 // ── Generic layer edit ──────────────────────────────────────────────────────
 
@@ -538,6 +548,243 @@ registerImageMutation('voidspace:img-page', 'Edit pages', (msg: any) => {
       throw new Error(`unknown page action: ${action}`);
   }
 });
+
+// ── Compose a whole slide in one call ───────────────────────────────────────
+
+/**
+ * ONE SLIDE, ONE CALL, ONE UNDO STEP.
+ *
+ * ── WHY THIS EXISTS ──────────────────────────────────────────────────────────
+ * A slide is a page, a background, a headline, some body copy, usually a picture
+ * and often a rule or a scrim. Built one tool call at a time that is six or seven
+ * round trips, six or seven undo entries, and — on a ten-slide deck — the better
+ * part of a hundred calls. Three separate costs, and the third is the one that
+ * actually shows:
+ *
+ *   • MONEY. Every round trip is a full model call carrying the whole context.
+ *     The slide's CONTENT is decided once; paying to re-establish it seven times
+ *     is paying for nothing.
+ *   • TIME, and worse, VISIBLE time — the user watches the slide assemble itself
+ *     one layer at a time, which looks like the tool struggling rather than
+ *     working.
+ *   • UNDO. Seven entries means "undo that slide" is seven Ctrl+Zs, and the
+ *     first six leave a half-built slide on screen. One entry means one press.
+ *
+ * `board_draw` already established the shape on the board surface for the same
+ * reasons — send the whole picture, get one undoable action — and this is
+ * deliberately its counterpart rather than a second idea.
+ *
+ * ── WHY IT DOES NOT REPLACE THE SINGLE-LAYER TOOLS ──────────────────────────
+ * Composing is not editing. "Move the headline up a bit" must stay one small,
+ * cheap, individually-undoable change; routing that through a whole-slide call
+ * would rebuild the slide to nudge one layer. This is for BUILDING a slide;
+ * `img_add_text` and `img_edit_layer` remain right for changing one.
+ *
+ * ── ORDER IS Z-ORDER ────────────────────────────────────────────────────────
+ * Elements are added in the order given, so later ones sit on top. That makes
+ * the natural way to write a slide — background first, then the scrim, then the
+ * type — also the correct way, with no separate arrange step.
+ */
+/** One member PER kind, not `'text' | 'shape'` on a shared member: a union whose
+ *  discriminant is itself a union does not narrow away, so the image branch would
+ *  still be seen as possibly-text and `asset` unreachable. */
+type PreparedElement =
+  | { kind: 'text'; spec: any }
+  | { kind: 'shape'; spec: any }
+  | { kind: 'image'; spec: any; asset: MediaAsset };
+
+registerImageAsyncMutation(
+  'voidspace:img-compose-slide',
+  'Compose slide',
+  async (msg: any) => {
+    const project = useProjectStore.getState().project!;
+
+    const elements = Array.isArray(msg?.elements) ? msg.elements : [];
+    if (!elements.length) {
+      return fail('bad_request', 'elements is required — send the whole slide in one call.');
+    }
+    if (elements.length > 24) {
+      return fail(
+        'too_many',
+        `${elements.length} elements on one slide. A slide that needs more than about a dozen `
+        + 'is not a slide — split it, or you are building something the audience cannot read.',
+      );
+    }
+
+    // A page that already exists must be resolvable BEFORE anything is fetched,
+    // so a typo'd pageId costs nothing.
+    const newPage = msg?.newPage === true;
+    let page: Artboard | null = null;
+    if (!newPage) {
+      page = resolvePage(project, msg?.pageId);
+      if (!page) return fail('page_not_found', `No page with id ${msg?.pageId}`);
+    }
+
+    /**
+     * FETCH EVERY PICTURE FIRST, and refuse the whole slide if one fails.
+     *
+     * All-or-nothing on purpose. A slide committed with two of its three images
+     * looks finished and is not, and the agent — which got an `ok` — has no
+     * reason to look. Refusing names the element that failed so it can fix that
+     * one and resend, which is both cheaper and more honest than a partial
+     * success it has to detect.
+     */
+    const prepared: PreparedElement[] = [];
+    for (let i = 0; i < elements.length; i++) {
+      const spec = elements[i] ?? {};
+      const kind = String(spec.kind ?? '');
+      if (kind === 'text' || kind === 'shape') {
+        prepared.push({ kind, spec });
+        continue;
+      }
+      if (kind !== 'image') {
+        return fail('bad_request', `element ${i}: unknown kind "${kind}". One of: text, shape, image.`);
+      }
+      const asset = await resolveImageAsset(project, spec);
+      if ((asset as any).ok === false) {
+        const r = asset as ReturnType<typeof fail>;
+        return fail(r.reason, `element ${i} (image): ${r.message}`);
+      }
+      prepared.push({ kind: 'image', spec, asset: asset as MediaAsset });
+    }
+
+    return { page, newPage, prepared };
+  },
+  (msg: any, { page, newPage, prepared }) => {
+    const store = useProjectStore.getState();
+    const project = store.project!;
+
+    // A deck keeps ONE page size. Inheriting the first page's dimensions rather
+    // than asking for them is what stops slide 7 being a different shape because
+    // the agent forgot to repeat them.
+    let target: Artboard;
+    if (newPage) {
+      const first = project.artboards[0];
+      const size = {
+        width: Math.max(1, Math.round(Number(msg?.width) || first?.size.width || 1920)),
+        height: Math.max(1, Math.round(Number(msg?.height) || first?.size.height || 1080)),
+      };
+      const name = String(msg?.name || `Page ${project.artboards.length + 1}`);
+      const id = useProjectStore.getState().addArtboard(name, size);
+      useProjectStore.getState().selectArtboard(id);
+      target = useProjectStore.getState().project!.artboards.find((a) => a.id === id)!;
+    } else {
+      target = page!;
+      if (target.id !== store.selectedArtboardId) useProjectStore.getState().selectArtboard(target.id);
+    }
+
+    if (typeof msg?.background === 'string' && msg.background) {
+      useProjectStore.getState().updateArtboard(target.id, {
+        background: { type: 'color', color: msg.background },
+      } as any);
+    }
+
+    const layerIds: string[] = [];
+    const warnings: string[] = [];
+
+    for (const el of prepared) {
+      const spec = el.spec ?? {};
+
+      if (el.kind === 'text') {
+        const content = String(spec.text ?? '').trim();
+        // Skipped rather than fatal: one empty string should not lose a slide's
+        // worth of work that is otherwise fine. Reported so it is not silent.
+        if (!content) { warnings.push('an empty text element was skipped'); continue; }
+
+        const fontSize = Number(spec.fontSize) || Math.round(target.size.width * 0.08);
+        const lineHeight = Number(spec.lineHeight) || 1.2;
+        const lines = content.split('\n').length;
+        const box = resolveBox(target, spec, {
+          width: Math.round(target.size.width * 0.86),
+          height: Math.ceil(fontSize * lineHeight * lines),
+        });
+
+        const id = useProjectStore.getState().addTextLayer(content, {
+          x: box.x, y: box.y, width: box.width, height: box.height,
+          ...(spec.rotation !== undefined ? { rotation: Number(spec.rotation) } : {}),
+          ...(spec.opacity !== undefined ? { opacity: Number(spec.opacity) } : {}),
+        });
+
+        const layer = useProjectStore.getState().project!.layers[id] as TextLayer;
+        const style = defined({
+          fontFamily: spec.fontFamily,
+          fontSize,
+          fontWeight: spec.fontWeight,
+          fontStyle: spec.fontStyle,
+          textAlign: spec.textAlign,
+          verticalAlign: spec.verticalAlign,
+          lineHeight,
+          letterSpacing: spec.letterSpacing,
+          color: spec.color,
+          strokeColor: spec.strokeColor,
+          strokeWidth: spec.strokeWidth,
+          backgroundColor: spec.backgroundColor,
+          backgroundPadding: spec.backgroundPadding,
+          backgroundRadius: spec.backgroundRadius,
+          textDecoration: spec.textDecoration,
+        });
+        if (Object.keys(style).length) {
+          useProjectStore.getState().updateLayer<TextLayer>(id, {
+            style: { ...layer.style, ...style } as TextLayer['style'],
+          });
+        }
+        const fontWarning = requestFont(spec.fontFamily);
+        if (fontWarning) warnings.push(fontWarning);
+        layerIds.push(id);
+        continue;
+      }
+
+      if (el.kind === 'shape') {
+        const shapeType = String(spec.shapeType ?? 'rectangle') as ShapeLayer['shapeType'];
+        const box = resolveBox(target, spec, {
+          width: Math.round(target.size.width * 0.4),
+          height: Math.round(target.size.width * 0.4),
+        });
+        const id = useProjectStore.getState().addShapeLayer(shapeType, {
+          x: box.x, y: box.y, width: box.width, height: box.height,
+          ...(spec.rotation !== undefined ? { rotation: Number(spec.rotation) } : {}),
+          ...(spec.opacity !== undefined ? { opacity: Number(spec.opacity) } : {}),
+        });
+        const layer = useProjectStore.getState().project!.layers[id] as ShapeLayer;
+        const shapeStyle = defined({
+          fill: spec.fill,
+          fillOpacity: spec.fillOpacity,
+          stroke: spec.stroke,
+          strokeWidth: spec.strokeWidth,
+          cornerRadius: spec.cornerRadius,
+        });
+        if (Object.keys(shapeStyle).length) {
+          useProjectStore.getState().updateLayer<ShapeLayer>(id, {
+            shapeStyle: { ...layer.shapeStyle, ...shapeStyle } as ShapeLayer['shapeStyle'],
+          });
+        }
+        layerIds.push(id);
+        continue;
+      }
+
+      // image — the asset is already in hand (fetched in `prepare`).
+      const { asset } = el;
+      const box = resolveBox(target, spec, {
+        width: target.size.width, height: target.size.height,
+      });
+      const fit = (spec.fit === 'contain' || spec.fit === 'stretch') ? spec.fit : 'cover';
+      const placed = fitBox({ width: asset.width, height: asset.height }, box, fit);
+      if (!useProjectStore.getState().project!.assets[asset.id]) {
+        useProjectStore.getState().addAsset(asset);
+      }
+      layerIds.push(useProjectStore.getState().addImageLayer(asset.id, placed));
+    }
+
+    return {
+      pageId: target.id,
+      pageName: target.name,
+      size: target.size,
+      layerIds,
+      created: layerIds.length,
+      ...(warnings.length ? { warnings } : {}),
+    };
+  },
+);
 
 // ── New project ─────────────────────────────────────────────────────────────
 

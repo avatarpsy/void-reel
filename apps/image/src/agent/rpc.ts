@@ -203,6 +203,72 @@ export function registerImageMutation<T extends Record<string, unknown>>(
   registerImageRpc(type, mutation(label, fn));
 }
 
+/**
+ * A mutation that has to FETCH something first.
+ *
+ * ── WHY THIS EXISTS ──────────────────────────────────────────────────────────
+ * A transaction must stay synchronous: its commands commit as one atomic undo
+ * entry, and awaiting a network round-trip in the middle of one would leave the
+ * history open across seconds of dead time. So anything that needs bytes from
+ * elsewhere splits in two — `prepare` awaits outside, `commit` mutates inside.
+ *
+ * `img-place-image` already had that shape, hand-rolled. Hand-rolling it cost
+ * exactly what hand-rolling a guard usually costs: it called `runTransaction`
+ * and `addAsset` correctly and silently DROPPED the rev check, so the one tool
+ * whose schema tells the agent "pass expectRev — it is what stops you
+ * overwriting an edit the user just made by hand" was the one tool where
+ * passing it did nothing. A hand edit made while an image was being fetched was
+ * overwritten with no warning.
+ *
+ * Both halves of the split now come from here, so a new async mutation cannot
+ * be written without the guard, and neither could the old one.
+ *
+ * `prepare` returns either a refusal (`ok: false`) — network failures, a missing
+ * asset, a bad argument — or the value `commit` needs. Refusing before the
+ * transaction opens is deliberate: a failed fetch should leave no undo entry at
+ * all, not an empty one the user has to step back through.
+ */
+export function registerImageAsyncMutation<P, T extends Record<string, unknown>>(
+  type: string,
+  label: string,
+  prepare: (msg: any) => Promise<P | ReturnType<typeof fail>>,
+  commit: (msg: any, prepared: P) => T,
+) {
+  registerImageRpc(type, async (msg: any) => {
+    const gate = checkRev(msg?.expectRev);
+    if (!gate.ok) return gate;
+    if (!useProjectStore.getState().project) {
+      return fail('no_project', 'No image project is open.');
+    }
+
+    const prepared = await prepare(msg);
+    if (prepared && (prepared as any).ok === false) return prepared as Record<string, unknown>;
+
+    /**
+     * RE-CHECK AFTER THE AWAIT. The first check was against the canvas as it was
+     * BEFORE a fetch that can take several seconds — which is precisely the
+     * window in which a user moves the layer this call is about to land on.
+     * Checking only on the way in guards the short gap and leaves the long one
+     * open, which is the wrong way round.
+     */
+    const gateAfter = checkRev(msg?.expectRev);
+    if (!gateAfter.ok) return gateAfter;
+
+    let out: T;
+    try {
+      out = useProjectStore.getState().runTransaction(label, () => commit(msg, prepared as P));
+    } finally {
+      useHistoryStore.getState().breakCoalescing();
+    }
+    return {
+      ok: true,
+      ...out,
+      rev: getProjectRev(),
+      undoDepth: useHistoryStore.getState().getUndoDepth(),
+    };
+  });
+}
+
 /** True when this message is ours to answer. */
 export function isImageRpc(type: string): boolean {
   return type.startsWith('voidspace:img-');
