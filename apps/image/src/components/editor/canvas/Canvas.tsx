@@ -3804,6 +3804,17 @@ function renderImageLayerInternal(
 ) {
   const asset = project.assets[layer.sourceId];
   if (!asset) {
+    /**
+     * A COMPOSITION WITH NO RENDER IS NOT A BROKEN IMAGE.
+     *
+     * The blue "Image" placeholder below is for a layer whose picture went
+     * missing, which is a fault worth showing. A composition has no bitmap
+     * because nothing has rendered it yet — that is its normal state, and the
+     * live frame over the canvas is what shows it. Drawing the placeholder here
+     * would put a blue slab behind every composition, visible wherever the
+     * overlay is not: the second composition on a page, or one panned half off.
+     */
+    if (layer.composition) return;
     ctx.fillStyle = '#3b82f6';
     ctx.fillRect(0, 0, layer.transform.width, layer.transform.height);
     ctx.fillStyle = '#ffffff';

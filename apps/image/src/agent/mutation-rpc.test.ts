@@ -1,10 +1,12 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import './mutation-rpc';
 import { handleImageRpc } from './rpc';
 import { useProjectStore, getProjectRev } from '../stores/project-store';
 import { useHistoryStore } from '../stores/history-store';
 import { useUIStore } from '../stores/ui-store';
-import type { TextLayer, ShapeLayer } from '../types/project';
+import { forgetBlock } from '../services/composition/block-source';
+import { needsRerender } from '../services/composition/hash';
+import type { TextLayer, ShapeLayer, ImageLayer } from '../types/project';
 
 const SIZE = { width: 1000, height: 1000 };
 
@@ -521,5 +523,206 @@ describe('img-place-image — the stale-read guard', () => {
     });
     expect(r.ok).toBe(false);
     expect(r.reason).toBe('canvas_changed');
+  });
+});
+
+/**
+ * A composition is the opposite trade from `img-compose-slide`: the layout, the
+ * type scale and the margins were designed by somebody who knew what they were
+ * doing, and the agent supplies only the words. These pin the places where
+ * supplying the words can go wrong QUIETLY — a slot name the block does not
+ * have, the older `variables` vocabulary, and a render that does not exist.
+ */
+describe('img-place-composition', () => {
+  const BLOCK_HTML = '<!DOCTYPE html><html><body>'
+    + '<div data-composition-id="stat-punch" data-width="1080" data-height="1920">'
+    + '<div class="headline">Sample headline</div></div></body></html>';
+
+  const MANIFEST = {
+    headline: { kind: 'text', sel: '.headline', sample: 'Sample headline' },
+    subtitle: { kind: 'text', sel: '.subtitle', sample: 'Sample subtitle' },
+    accent: { kind: 'color', var: '--accent' },
+  };
+
+  const realFetch = globalThis.fetch;
+
+  /** Answer the blocks route for `name` and 404 for anything else, which is what
+   *  a block that does not exist actually looks like. */
+  function library(name: string, tier = 'starter') {
+    globalThis.fetch = (async (_url: unknown, init: { body?: string }) => {
+      const body = JSON.parse(String(init?.body ?? '{}'));
+      if (body.name !== name) return { ok: false, json: async () => ({ ok: false }) } as Response;
+      return {
+        ok: true,
+        json: async () => ({ ok: true, name, tier, html: BLOCK_HTML, slots: MANIFEST }),
+      } as Response;
+    }) as unknown as typeof fetch;
+  }
+
+  beforeEach(() => {
+    reset();
+    // The block loader caches by name for the life of the module, so each test
+    // starts by forgetting the previous one's answer rather than inheriting it.
+    forgetBlock('stat-punch');
+  });
+
+  afterEach(() => { globalThis.fetch = realFetch; });
+
+  async function place(over: Record<string, unknown> = {}) {
+    library('stat-punch');
+    return rpc({
+      type: 'voidspace:img-place-composition',
+      block: 'stat-punch',
+      slots: { headline: 'Reach by month' },
+      ...over,
+    });
+  }
+
+  it('places a composition in ONE undo step', async () => {
+    await newProject();
+    const before = depth();
+    const r = await place();
+    expect(r.ok).toBe(true);
+    expect(depth()).toBe(before + 1);
+  });
+
+  it('lands as an IMAGE layer carrying its source, not a new layer type', async () => {
+    // The load-bearing decision: z-order, opacity, masks and export all work
+    // with no special cases precisely because this is an image layer.
+    await newProject();
+    const r = await place();
+    const layer = project().layers[r.layerId] as ImageLayer;
+    expect(layer.type).toBe('image');
+    expect(layer.composition?.block).toBe('stat-punch');
+    expect(layer.composition?.slots).toEqual({ headline: 'Reach by month' });
+  });
+
+  it('records the tier the block resolved from', async () => {
+    // A user block can shadow a starter of the same name; without this, a later
+    // render could resolve a different design under the same label.
+    await newProject();
+    library('stat-punch', 'user');
+    const r = await rpc({ type: 'voidspace:img-place-composition', block: 'stat-punch' });
+    expect((project().layers[r.layerId] as ImageLayer).composition?.tier).toBe('user');
+  });
+
+  it('leaves renderHash empty, because nothing has rendered it', async () => {
+    // Stamping a current hash would tell needsRerender that pixels nobody has
+    // made are up to date.
+    await newProject();
+    const r = await place();
+    const layer = project().layers[r.layerId] as ImageLayer;
+    expect(layer.composition?.renderHash).toBe('');
+    expect(needsRerender(layer.composition!)).toBe(true);
+  });
+
+  it('is full-bleed by default, and lays the block out in the PAGE frame', async () => {
+    await newProject();
+    const r = await place();
+    expect(r.bounds).toEqual({ x: 0, y: 0, width: SIZE.width, height: SIZE.height });
+    const layer = project().layers[r.layerId] as ImageLayer;
+    // Not the block's native 1080x1920. The frame is the decision the page makes
+    // and the block follows it — that is the whole point of the override.
+    expect(layer.composition?.frameWidth).toBe(SIZE.width);
+    expect(layer.composition?.frameHeight).toBe(SIZE.height);
+  });
+
+  it('honours an explicit box and alignment', async () => {
+    await newProject();
+    const r = await place({ width: 400, height: 300, align: 'top-left', margin: 20 });
+    expect(r.bounds).toEqual({ x: 20, y: 20, width: 400, height: 300 });
+  });
+
+  it('REFUSES `variables`, and says which word to use', async () => {
+    // The board settled this vocabulary. Accepting it quietly would spread the
+    // wrong word across two surfaces; ignoring it would drop the agent's content
+    // on the floor with an `ok` in front of it.
+    await newProject();
+    library('stat-punch');
+    const r = await rpc({
+      type: 'voidspace:img-place-composition',
+      block: 'stat-punch',
+      variables: { headline: 'Reach by month' },
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('bad_request');
+    expect(r.message).toMatch(/slots/);
+  });
+
+  it('REFUSES a slot the block does not declare, and names the ones it has', async () => {
+    // A slide committed with its headline missing looks finished and is not, and
+    // the agent that got an `ok` has no reason to look.
+    await newProject();
+    const r = await place({ slots: { headlin: 'typo' } });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('unknown_slot');
+    expect(r.message).toMatch(/headline, subtitle, accent/);
+  });
+
+  it('reports the slots nobody filled', async () => {
+    await newProject();
+    const r = await place();
+    expect([...r.unfilled].sort()).toEqual(['accent', 'subtitle']);
+  });
+
+  it('refuses a block that cannot be loaded, leaving no undo entry', async () => {
+    // The fetch happens before the transaction opens, so a bad name costs
+    // nothing and leaves no empty step to press Ctrl+Z through.
+    await newProject();
+    const before = depth();
+    library('something-else');
+    const r = await rpc({ type: 'voidspace:img-place-composition', block: 'stat-punch' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('block_not_found');
+    expect(depth()).toBe(before);
+  });
+
+  it('refuses a call that names neither a block nor html', async () => {
+    await newProject();
+    const r = await rpc({ type: 'voidspace:img-place-composition', slots: {} });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('bad_request');
+  });
+
+  it('takes authored html, which declares no slots to check against', async () => {
+    await newProject();
+    const r = await rpc({
+      type: 'voidspace:img-place-composition',
+      html: '<div data-composition-id="mine" data-width="1920" data-height="1080"></div>',
+      slots: { anything: 'goes' },
+    });
+    expect(r.ok).toBe(true);
+    const layer = project().layers[r.layerId] as ImageLayer;
+    expect(layer.composition?.inlineHtml).toContain('data-composition-id="mine"');
+    expect(layer.composition?.slots).toEqual({ anything: 'goes' });
+  });
+
+  it('drops a blank slot value rather than storing the blank', async () => {
+    // Blank and absent render identically and key differently, so storing the
+    // blank would give two identical slides two renders.
+    await newProject();
+    const r = await place({ slots: { headline: 'Reach', subtitle: '  ' } });
+    expect((project().layers[r.layerId] as ImageLayer).composition?.slots)
+      .toEqual({ headline: 'Reach' });
+  });
+
+  it('refuses a stale read, like every other mutation', async () => {
+    await newProject();
+    library('stat-punch');
+    const r = await rpc({
+      type: 'voidspace:img-place-composition',
+      block: 'stat-punch',
+      expectRev: getProjectRev() - 1,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('canvas_changed');
+  });
+
+  it('one undo takes the whole composition back off the page', async () => {
+    await newProject();
+    const r = await place();
+    expect(project().layers[r.layerId]).toBeDefined();
+    useProjectStore.getState().undo();
+    expect(project().layers[r.layerId]).toBeUndefined();
   });
 });

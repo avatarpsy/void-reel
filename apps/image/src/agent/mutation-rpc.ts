@@ -27,7 +27,9 @@ import { registerImageMutation, registerImageRpc, registerImageAsyncMutation } f
 import { getPopularFonts, loadGoogleFont } from '../services/fonts-service';
 import { libraryImageToAsset, getVoidspaceIdToken } from '../services/voidspace-storage';
 import { createTextDocument, layoutText } from '../tools/text/text-engine';
-import type { Layer, Project, Artboard, MediaAsset, TextLayer, ShapeLayer } from '../types/project';
+import { loadBlock } from '../services/composition/block-source';
+import type { SlotSpec } from '../services/composition/document';
+import type { Layer, Project, Artboard, MediaAsset, TextLayer, ShapeLayer, ImageLayer, CompositionSource } from '../types/project';
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -465,6 +467,174 @@ registerImageAsyncMutation(
     const layerId = useProjectStore.getState().addImageLayer(asset.id, placed);
 
     return { layerId, assetId: asset.id, pageId: page.id, bounds: placed };
+  },
+);
+
+// ── Place a composition ─────────────────────────────────────────────────────
+
+/**
+ * PUT A DESIGNED BLOCK ON THE PAGE, AND KEEP IT A BLOCK.
+ *
+ * `img_compose_slide` builds a slide out of primitives — a rectangle, a
+ * headline, a picture — which is the right tool when nothing in the library
+ * fits. A composition is the opposite trade: the layout, the type scale, the
+ * motion and the margins were designed once by somebody who knew what they were
+ * doing, and the agent supplies only the words. That is both cheaper and better
+ * looking, and it is the difference between an agent that lays out a deck and
+ * one that fills one in.
+ *
+ * WHAT LANDS IS AN IMAGE LAYER carrying a `CompositionSource`, not a new layer
+ * type — which is what makes z-order, opacity, blend modes, masks, transforms
+ * and export work with no special cases anywhere downstream.
+ *
+ * ── SLOTS, NEVER VARIABLES ──────────────────────────────────────────────────
+ * The board settled this vocabulary and this surface uses the same one. A block
+ * declares SLOTS; `variables` is the older word for the same idea and still
+ * appears in some block metadata, so a model that has seen both will reach for
+ * it. Accepting it quietly would let the wrong word spread across two surfaces,
+ * and IGNORING it would drop the agent's content on the floor with an `ok` in
+ * front of it. So it is refused, by name, with the fix in the message.
+ */
+registerImageAsyncMutation(
+  'voidspace:img-place-composition',
+  'Place composition',
+  async (msg: any) => {
+    const project = useProjectStore.getState().project!;
+    const page = resolvePage(project, msg?.pageId);
+    if (!page) return fail('page_not_found', `No page with id ${msg?.pageId}`);
+
+    if (msg?.variables !== undefined && msg?.slots === undefined) {
+      return fail(
+        'bad_request',
+        'This surface takes `slots`, not `variables`. Send the values as slots — the same '
+        + 'shape the board uses and the same one the Inspector edits.',
+      );
+    }
+
+    const block = typeof msg?.block === 'string' ? msg.block.trim() : '';
+    const html = typeof msg?.html === 'string' ? msg.html : '';
+    if (!block && !html) {
+      return fail('bad_request', 'Pass block (a name from the library) or html (authored markup).');
+    }
+
+    const slots: Record<string, string> = {};
+    if (msg?.slots !== undefined) {
+      if (typeof msg.slots !== 'object' || Array.isArray(msg.slots) || msg.slots === null) {
+        return fail('bad_request', 'slots must be an object of slot name to value.');
+      }
+      for (const [k, v] of Object.entries(msg.slots as Record<string, unknown>)) {
+        if (v === null || v === undefined) continue;
+        // Empty means unfilled, and STORING the blank is not the same as leaving
+        // it out: the cache key carries every key it finds, so the blank would
+        // give two identical slides two different renders.
+        const s = String(v);
+        if (s.trim()) slots[k] = s;
+      }
+    }
+
+    /**
+     * The block is fetched BEFORE the transaction opens, because a transaction
+     * has to stay synchronous — its commands commit as one atomic undo entry,
+     * and a network round trip has no business inside one. A failed fetch
+     * therefore leaves no undo entry at all, rather than an empty one the user
+     * has to step back through.
+     */
+    let manifest: Record<string, SlotSpec> = {};
+    let tier: CompositionSource['tier'];
+    if (block) {
+      const doc = await loadBlock(block);
+      if (!doc) {
+        return fail(
+          'block_not_found',
+          `No block named "${block}" could be loaded. Call find_blocks to see what exists.`,
+        );
+      }
+      manifest = doc.slots;
+      tier = doc.tier;
+    }
+
+    /**
+     * A SLOT THE BLOCK DOES NOT DECLARE IS REFUSED, not warned about.
+     *
+     * The same reasoning as a compose_slide image that fails to fetch: a slide
+     * committed with the headline missing looks finished and is not, and the
+     * agent — which got an `ok` back — has no reason to look. Naming the keys
+     * that exist lets it fix the call in one turn.
+     *
+     * Only enforced when there IS a manifest. Authored html declares nothing, and
+     * refusing every slot on it would make the authored path unusable.
+     */
+    const declared = Object.keys(manifest);
+    if (declared.length) {
+      const unknown = Object.keys(slots).filter((k) => !manifest[k]);
+      if (unknown.length) {
+        return fail(
+          'unknown_slot',
+          `"${block}" does not declare ${unknown.map((k) => `"${k}"`).join(', ')}. `
+          + `Its slots are: ${declared.join(', ')}.`,
+        );
+      }
+    }
+
+    return { page, block, html, slots, manifest, tier };
+  },
+  (msg: any, { page, block, html, slots, manifest, tier }) => {
+    const box = resolveBox(page, msg ?? {}, { width: page.size.width, height: page.size.height });
+
+    /**
+     * THE FRAME DEFAULTS TO THE PAGE, NOT TO THE LAYER'S BOX.
+     *
+     * The frame is what the block LAYS OUT in, and laying out is not scaling:
+     * text rewraps and `clamp()` resolves against the frame's width. A block
+     * given a 400px frame because it happens to sit in a 400px column is a block
+     * designed at 400px — tiny type, different line breaks — and then scaled to
+     * fit, which is a different design rather than a smaller one. The page's own
+     * frame is the decision the deck already made, and the layer box scales it.
+     */
+    const frameWidth = Math.max(1, Math.round(Number(msg?.frameWidth) || page.size.width));
+    const frameHeight = Math.max(1, Math.round(Number(msg?.frameHeight) || page.size.height));
+
+    const poseTime = msg?.poseTime === undefined || msg.poseTime === 'end'
+      ? 'end'
+      : (Number.isFinite(Number(msg.poseTime)) ? Number(msg.poseTime) : 'end');
+
+    const composition: CompositionSource = {
+      ...(block ? { block, tier } : {}),
+      ...(html ? { inlineHtml: html } : {}),
+      slots,
+      fillMode: msg?.fillMode === 'preview' ? 'preview' : 'render',
+      poseTime,
+      frameWidth,
+      frameHeight,
+      /**
+       * NO RENDER EXISTS YET, so the hash must say so. `renderHash` records
+       * which render the layer's pixels came from; stamping a current one here
+       * would tell `needsRerender` that pixels nobody has made are up to date.
+       */
+      renderHash: '',
+    };
+
+    const store = useProjectStore.getState();
+    if (page.id !== store.selectedArtboardId) store.selectArtboard(page.id);
+
+    /**
+     * The layer carries no asset. A composition's pixels come from a render that
+     * happens elsewhere, and until one exists the live frame over the canvas is
+     * what shows it — which is also why placing one selects it, since the live
+     * frame follows the selection.
+     */
+    const layerId = useProjectStore.getState().addImageLayer('', box);
+    useProjectStore.getState().updateLayer<ImageLayer>(layerId, {
+      name: String(msg?.name || block || 'Composition'),
+      composition,
+    });
+
+    // What the block declares but nobody filled. Reported rather than silently
+    // dropped, so the agent can say "this block also takes a subtitle" instead
+    // of shipping a slide with a hole in it.
+    const unfilled = Object.keys(manifest).filter((k) => !slots[k]);
+
+    return { layerId, pageId: page.id, bounds: box, block, tier, unfilled };
   },
 );
 
