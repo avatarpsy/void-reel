@@ -26,6 +26,7 @@ import { useUIStore } from '../stores/ui-store';
 import { registerImageMutation, registerImageRpc, registerImageAsyncMutation } from './rpc';
 import { getPopularFonts, loadGoogleFont } from '../services/fonts-service';
 import { libraryImageToAsset, getVoidspaceIdToken } from '../services/voidspace-storage';
+import { createTextDocument, layoutText } from '../tools/text/text-engine';
 import type { Layer, Project, Artboard, MediaAsset, TextLayer, ShapeLayer } from '../types/project';
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -87,6 +88,150 @@ function resolveBox(
   };
 }
 
+/**
+ * TEXT BOXES ARE SIZED BY MEASURING, NOT BY COUNTING NEWLINES.
+ *
+ * Both text paths used to derive the box height from `content.split('\n').length`
+ * — the number of newlines the agent TYPED. That is not the number of lines that
+ * render. A 150px headline in an 86%-wide box wraps, and every wrapped line past
+ * the estimate fell outside the box and was clipped away.
+ *
+ * The deck that prompted this shipped a slide reading "A DIGITAL YOU" whose layer
+ * actually said "A DIGITAL YOU\nTHAT NEVER CLOCKS OFF", and one reading "THE
+ * PRESENCE THAT NEVER". Half the sentence was simply gone. That looks like an
+ * agent that cannot write a headline; it was a box that could not measure one.
+ *
+ * Measured with the SAME engine that draws it, so the two cannot disagree.
+ */
+let sharedMeasureCtx: CanvasRenderingContext2D | null | undefined;
+function measuringContext(): CanvasRenderingContext2D | null {
+  if (sharedMeasureCtx !== undefined) return sharedMeasureCtx;
+  try {
+    sharedMeasureCtx = document.createElement('canvas').getContext('2d');
+  } catch {
+    sharedMeasureCtx = null;
+  }
+  return sharedMeasureCtx;
+}
+
+
+/**
+ * Fit text to its box: choose the WIDTH (a layout decision), then hard-wrap the
+ * words to it and give the box the height those lines need.
+ *
+ * WHY WE WRAP THE CONTENT RATHER THAN LEAVING IT TO THE RENDERER: the canvas
+ * renderer and the exporter both draw text with `content.split('\n')` — they honour
+ * typed line breaks and nothing else. There is a full wrapping engine in
+ * tools/text, but it is not what paints a layer. So a headline longer than its
+ * box does not wrap; it runs straight past the artboard edge and is cut there,
+ * which is how a slide came to read "HAT NEVER CLOCKS OF".
+ *
+ * Baking the breaks into the text is what makes canvas, PDF and PPTX agree,
+ * because all three read the same newlines. It also means a later width change
+ * keeps these breaks — the tradeoff we want, since the alternative is losing
+ * words silently.
+ *
+ * A single word too long for the box cannot be wrapped, only shrunk, so the
+ * font steps down until the longest line fits.
+ */
+function fitTextToBox(
+  page: Artboard,
+  opts: { x?: number; y?: number; width?: number; height?: number; align?: string; margin?: number },
+  content: string,
+  style: { fontSize: number; lineHeight: number; [k: string]: unknown },
+): { x: number; y: number; width: number; height: number; text: string; fontSize: number; note: string | null } {
+  const width = Math.max(1, Math.round(Number(opts.width) || Math.round(page.size.width * 0.86)));
+  const ctx = measuringContext();
+  let fontSize = style.fontSize;
+  let text = content;
+  let note: string | null = null;
+
+  if (ctx) {
+    // Up to three passes: wrap, and if a word still overhangs, shrink and re-wrap.
+    for (let pass = 0; pass < 3; pass++) {
+      const measured = measureWrap(ctx, content, { ...style, fontSize }, width);
+      if (!measured) break;
+      text = measured.lines.join('\n');
+      if (measured.widest <= width || fontSize <= 8) break;
+      // Overhang is a single unbreakable word. Step down to what fits, with a
+      // little margin so rounding does not leave one pixel over.
+      const next = Math.max(8, Math.floor(fontSize * (width / measured.widest) * 0.98));
+      if (next >= fontSize) break;
+      note = `a word was too wide for ${width}px, so the type stepped down from ${style.fontSize}px to ${next}px`;
+      fontSize = next;
+    }
+  }
+
+  const lines = text.split('\n').length;
+  const needed = Math.ceil(fontSize * style.lineHeight * lines);
+  const height = Math.max(Math.round(Number(opts.height) || 0), needed);
+  const box = resolveBox(page, { ...opts, width, height }, { width, height });
+  return { ...box, text, fontSize, note };
+}
+
+/** Wrapped lines and the widest of them, using the engine that knows fonts. */
+function measureWrap(
+  ctx: CanvasRenderingContext2D,
+  content: string,
+  style: Record<string, unknown>,
+  width: number,
+): { lines: string[]; widest: number } | null {
+  try {
+    // defined() matters: createTextDocument SPREADS this over the engine defaults,
+    // so an explicit `letterSpacing: undefined` replaces the default 0 and every
+    // width becomes NaN — which fails silently as "cannot measure".
+    const doc = createTextDocument(content, defined(style) as any, { width, height: 0 });
+    const m = layoutText(ctx, doc);
+    if (!m.lines.length) return null;
+    return {
+      lines: m.lines.map((l) => l.text),
+      widest: Math.ceil(Math.max(...m.lines.map((l) => l.width))),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Text layers whose boxes intersect, described so the caller can move one. */
+function overlappingText(layerIds: string[]): string[] {
+  const project = useProjectStore.getState().project;
+  if (!project) return [];
+  const boxes = layerIds
+    .map((id) => project.layers[id])
+    .filter((l): l is TextLayer => !!l && l.type === 'text')
+    .map((l) => ({ id: l.id, t: l.transform, label: String(l.content ?? '').split('\n')[0].slice(0, 24) }));
+
+  const out: string[] = [];
+  for (let i = 0; i < boxes.length; i++) {
+    for (let j = i + 1; j < boxes.length; j++) {
+      const a = boxes[i].t;
+      const b = boxes[j].t;
+      const overlapX = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
+      const overlapY = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y);
+      if (overlapX <= 0 || overlapY <= 0) continue;
+      out.push(
+        `"${boxes[i].label}" and "${boxes[j].label}" overlap by ${Math.round(overlapY)}px vertically. `
+        + 'Text wraps to fit its box, so a headline can be taller than you assumed — '
+        + 'move the lower one down or give it a y below the other box.',
+      );
+    }
+  }
+  return out.slice(0, 3);
+}
+/** Fonts must be LOADED before measuring: metrics taken against a fallback face
+ *  size the box for the wrong typeface. Bounded, because a slow font CDN must
+ *  not hold up a slide — a slightly stale metric beats a hung tool call. */
+async function fontsReady(families: Array<unknown>, budgetMs = 4000): Promise<void> {
+  const names = [...new Set(families.map((f) => (typeof f === 'string' ? f.trim() : '')).filter(Boolean))];
+  if (!names.length) return;
+  const loads = names.map((n) => loadGoogleFont(n).catch(() => {}));
+  const ready = (globalThis as any).document?.fonts?.ready;
+  await Promise.race([
+    Promise.all([...loads, ready].filter(Boolean)),
+    new Promise((r) => setTimeout(r, budgetMs)),
+  ]);
+}
+
 /** Drop undefined keys so a patch never clobbers a field the caller omitted. */
 function defined<T extends Record<string, unknown>>(o: T): Partial<T> {
   const out: Record<string, unknown> = {};
@@ -142,15 +287,19 @@ registerImageMutation('voidspace:img-add-text', 'Add text', (msg: any) => {
   if (!content) throw new Error('text is required');
 
   const fontSize = Number(msg?.fontSize) || Math.round(page.size.width * 0.08);
-  // Height from the real line count so a multi-line block is not clipped.
-  const lines = content.split('\n').length;
   const lineHeight = Number(msg?.lineHeight) || 1.2;
-  const box = resolveBox(page, msg ?? {}, {
-    width: Math.round(page.size.width * 0.86),
-    height: Math.ceil(fontSize * lineHeight * lines),
+  // Wrapped to the box, not just split on typed newlines — see fitTextToBox.
+  const box = fitTextToBox(page, msg ?? {}, content, {
+    fontSize,
+    lineHeight,
+    fontFamily: msg?.fontFamily,
+    fontWeight: msg?.fontWeight,
+    fontStyle: msg?.fontStyle,
+    letterSpacing: msg?.letterSpacing,
+    textAlign: msg?.textAlign,
   });
 
-  const id = useProjectStore.getState().addTextLayer(content, {
+  const id = useProjectStore.getState().addTextLayer(box.text, {
     x: box.x, y: box.y, width: box.width, height: box.height,
     ...(msg?.rotation !== undefined ? { rotation: Number(msg.rotation) } : {}),
     ...(msg?.opacity !== undefined ? { opacity: Number(msg.opacity) } : {}),
@@ -161,7 +310,7 @@ registerImageMutation('voidspace:img-add-text', 'Add text', (msg: any) => {
   const layer = useProjectStore.getState().project!.layers[id] as TextLayer;
   const style = defined({
     fontFamily: msg?.fontFamily,
-    fontSize,
+    fontSize: box.fontSize,
     fontWeight: msg?.fontWeight,
     fontStyle: msg?.fontStyle,
     textAlign: msg?.textAlign,
@@ -648,6 +797,11 @@ registerImageAsyncMutation(
       prepared.push({ kind: 'image', spec, asset: asset as MediaAsset });
     }
 
+    // Fonts BEFORE the commit measures anything. The commit phase is synchronous,
+    // so this is the only place that can await them — and a text box measured
+    // against a fallback face is sized for a typeface the slide will not use.
+    await fontsReady(prepared.filter((e) => e.kind === 'text').map((e) => (e as any).spec?.fontFamily));
+
     return { page, newPage, prepared };
   },
   (msg: any, { page, newPage, prepared }) => {
@@ -693,13 +847,20 @@ registerImageAsyncMutation(
 
         const fontSize = Number(spec.fontSize) || Math.round(target.size.width * 0.08);
         const lineHeight = Number(spec.lineHeight) || 1.2;
-        const lines = content.split('\n').length;
-        const box = resolveBox(target, spec, {
-          width: Math.round(target.size.width * 0.86),
-          height: Math.ceil(fontSize * lineHeight * lines),
+        // Fonts for this slide were awaited in prepare, so this measures the
+        // typeface that will actually render rather than a fallback.
+        const box = fitTextToBox(target, spec, content, {
+          fontSize,
+          lineHeight,
+          fontFamily: spec.fontFamily,
+          fontWeight: spec.fontWeight,
+          fontStyle: spec.fontStyle,
+          letterSpacing: spec.letterSpacing,
+          textAlign: spec.textAlign,
         });
+        if (box.note) warnings.push(`"${content.slice(0, 28)}": ${box.note}.`);
 
-        const id = useProjectStore.getState().addTextLayer(content, {
+        const id = useProjectStore.getState().addTextLayer(box.text, {
           x: box.x, y: box.y, width: box.width, height: box.height,
           ...(spec.rotation !== undefined ? { rotation: Number(spec.rotation) } : {}),
           ...(spec.opacity !== undefined ? { opacity: Number(spec.opacity) } : {}),
@@ -708,7 +869,7 @@ registerImageAsyncMutation(
         const layer = useProjectStore.getState().project!.layers[id] as TextLayer;
         const style = defined({
           fontFamily: spec.fontFamily,
-          fontSize,
+          fontSize: box.fontSize,
           fontWeight: spec.fontWeight,
           fontStyle: spec.fontStyle,
           textAlign: spec.textAlign,
@@ -774,6 +935,14 @@ registerImageAsyncMutation(
       }
       layerIds.push(useProjectStore.getState().addImageLayer(asset.id, placed));
     }
+
+    // COLLISION CHECK — the one thing the caller cannot predict.
+    // Text boxes are positioned before anyone knows how tall the type will be:
+    // a headline written as one line may wrap to three, and the subline placed
+    // beneath "it" then lands on top of it. The caller chose those coordinates
+    // in good faith and has no way to know, so tell it rather than let it ship
+    // a slide with two sentences printed over each other.
+    for (const warning of overlappingText(layerIds)) warnings.push(warning);
 
     return {
       pageId: target.id,
