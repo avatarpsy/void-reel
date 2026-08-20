@@ -114,10 +114,55 @@ export interface BaseLayer {
   threshold: ThresholdAdjustment;
 }
 
+/**
+ * Where an image layer's pixels came from, when they were rendered from a
+ * HyperFrames composition rather than uploaded, generated or drawn.
+ *
+ * ── WHY THIS IS A FIELD AND NOT A LAYER TYPE ────────────────────────────────
+ * A composition layer composites exactly like an image layer — that is the whole
+ * point of the design, because it means z-order, opacity, blend modes, masks,
+ * transforms, adjustments, thumbnails and export all work with no special cases.
+ * Adding a member to `LayerType` would force all six places that switch on layer
+ * type to learn about compositions, and a switch that quietly forgets a case
+ * fails silently. Nothing downstream needs to know this exists, so nothing
+ * downstream is told.
+ *
+ * The bitmap is a PROJECTION of this, never the origin: keeping the source is
+ * what lets a slide be re-slotted, re-themed, re-posed or re-rendered at a
+ * different resolution long after it was made.
+ */
+export interface CompositionSource {
+  /** A block from the library, by name. Absent when the html was authored. */
+  block?: string;
+  /** Which tier the block resolved from. Recorded so a later render resolves the
+   *  SAME block: a user block can shadow a starter of the same name. */
+  tier?: 'user' | 'shared' | 'starter';
+  /** Authored html, for work no block covers. Large documents are stored by
+   *  content address elsewhere; this holds the reference or the html itself. */
+  inlineHtml?: string;
+  /** Values by slot key. This is the surface both the agent and the user edit. */
+  slots: Record<string, string>;
+  /** `preview` keeps the designer's sample in an unfilled slot; `render` hides
+   *  it. Matches the board renderer's contract exactly. */
+  fillMode: 'preview' | 'render';
+  /** Which instant of the animation these pixels are. Seconds, or the settled
+   *  end state — which is what a static page should show. */
+  poseTime: number | 'end';
+  /** The size the block was DESIGNED at. Renders happen here and are scaled;
+   *  re-laying-out at a different width would be a different design. */
+  nativeWidth: number;
+  nativeHeight: number;
+  /** Cache key over everything above. A render is reusable exactly when this
+   *  matches, so it must cover every input that can change a pixel. */
+  renderHash: string;
+}
+
 export interface ImageLayer extends BaseLayer {
   type: 'image';
   sourceId: string;
   cropRect: { x: number; y: number; width: number; height: number } | null;
+  /** Present when these pixels were rendered from a composition. */
+  composition?: CompositionSource;
 }
 
 export type TextFillType = 'solid' | 'gradient';
