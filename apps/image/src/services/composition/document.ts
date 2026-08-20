@@ -146,11 +146,17 @@ function applySlot(
 
 /**
  * Hide a declared slot that nobody filled. Only meaningful for element-bound
- * slots: a colour is a variable with no element to hide, and it already falls
- * back to whatever the stylesheet declares.
+ * slots: a colour is a CSS variable with no element to hide, and it already
+ * falls back to whatever the stylesheet declares.
+ *
+ * The `kind !== 'color'` test is redundant with `!spec.var` for every block in
+ * the shipped library (all 48 colour slots bind by variable), and is kept anyway
+ * so this matches `render-hyperframes.post.ts` condition for condition. Two
+ * surfaces that hide slightly different sets of elements would render the same
+ * block differently, and nobody would work out why.
  */
 function hideUnfilled(doc: Document, spec: SlotSpec): void {
-  if (!spec.sel || spec.var) return;
+  if (!spec.sel || spec.var || spec.kind === 'color') return;
   const el = doc.querySelector(spec.sel);
   if (el instanceof HTMLElement) el.style.display = 'none';
   else if (el) el.setAttribute('style', `${el.getAttribute('style') ?? ''};display:none`);
@@ -270,9 +276,20 @@ export function prepareComposition(html: string, opts: PrepareOptions = {}): Pre
   const warnings: string[] = [];
   const slots = opts.slots ?? {};
   const values = opts.values ?? {};
-  const fillMode: FillMode = opts.fillMode ?? 'preview';
+  const fillMode: FillMode = opts.fillMode ?? 'render';
   const poseTime = opts.poseTime ?? 'end';
   const readyTimeoutMs = opts.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
+
+  /**
+   * NOTHING FILLED MEANS HIDE NOTHING, even in `render`.
+   *
+   * A decorative block — a transition, a sting, a background — declares slots
+   * and is often chosen precisely for the content baked into it. Hiding every
+   * unfilled slot there does not tidy the design, it blanks it. Matches the same
+   * guard in `render-hyperframes.post.ts`, which is where the reasoning was
+   * worked out for the board.
+   */
+  const anyFilled = Object.keys(slots).some((k) => filled(values[k]));
 
   const doc = new DOMParser().parseFromString(html, 'text/html');
   const root = doc.querySelector(ROOT_SELECTOR);
@@ -293,7 +310,7 @@ export function prepareComposition(html: string, opts: PrepareOptions = {}): Pre
       continue;
     }
     unfilled.push(key);
-    if (fillMode === 'render') hideUnfilled(doc, spec);
+    if (fillMode === 'render' && anyFilled) hideUnfilled(doc, spec);
   }
   // Values for keys the manifest never declared are a caller bug, and silently
   // dropping them is how "I set the headline and nothing happened" happens.

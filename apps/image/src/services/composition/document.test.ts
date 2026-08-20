@@ -95,7 +95,7 @@ describe('fill modes', () => {
   });
 
   it('render leaves a colour slot alone — a variable has no element to hide', () => {
-    const r = prepareComposition(BLOCK, { slots: SLOTS, fillMode: 'render', values: {} });
+    const r = prepareComposition(BLOCK, { slots: SLOTS, fillMode: 'render', values: { headline: 'X' } });
     const root = parse(r.html).querySelector('[data-composition-id]') as HTMLElement;
     expect(root.getAttribute('style') ?? '').not.toMatch(/display:\s*none/);
   });
@@ -194,5 +194,36 @@ describe('the ready signal survives a late listener', () => {
     const broadcast = r.html.indexOf('parent.postMessage(payload');
     expect(latch).toBeGreaterThan(-1);
     expect(broadcast).toBeGreaterThan(latch);
+  });
+});
+
+describe('consistency with the board renderer', () => {
+  /**
+   * The board and the image editor must render the same block the same way.
+   * These pin the three places the two implementations could quietly diverge —
+   * each one taken from `render-hyperframes.post.ts`, where the reasoning was
+   * worked out first.
+   */
+  it('defaults to render, the mode that cannot leak a designer sample into finished work', () => {
+    const r = prepareComposition(BLOCK, { slots: SLOTS, values: { headline: 'X' } });
+    expect((parse(r.html).querySelector('.subtitle') as HTMLElement).style.display).toBe('none');
+  });
+
+  it('hides NOTHING when nothing was filled, so a decorative block is not blanked', () => {
+    // A transition or sting declares slots and is often chosen precisely for the
+    // content baked into it. Hiding every unfilled slot there does not tidy the
+    // design, it erases it.
+    const r = prepareComposition(BLOCK, { slots: SLOTS, fillMode: 'render', values: {} });
+    const d = parse(r.html);
+    expect((d.querySelector('.headline') as HTMLElement).style.display).not.toBe('none');
+    expect((d.querySelector('.subtitle') as HTMLElement).style.display).not.toBe('none');
+    expect(d.querySelector('.headline')?.textContent).toBe('Sample headline');
+  });
+
+  it('never hides a colour slot, by binding AND by kind', () => {
+    const slots = { tint: { kind: 'color', sel: '.headline' } as SlotSpec, headline: SLOTS.headline };
+    const r = prepareComposition(BLOCK, { slots, fillMode: 'render', values: { headline: 'X' } });
+    // `tint` is unfilled and element-bound, but it is a colour — it must survive.
+    expect((parse(r.html).querySelector('.headline') as HTMLElement).style.display).not.toBe('none');
   });
 });
