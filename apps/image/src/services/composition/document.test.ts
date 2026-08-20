@@ -283,3 +283,53 @@ describe('waiting only for what is actually coming', () => {
     expect(r.html).toMatch(/addEventListener\('load'/);
   });
 });
+
+describe('the frame a composition renders into', () => {
+  /**
+   * The twelve deck-ready blocks are 1080x1920 natively while listing 16:9 among
+   * their aspects. Reading the root's declared size therefore hands a landscape
+   * deck a portrait frame. Their CSS does adapt — stat-punch forced to 1920×1080
+   * reflows into landscape correctly — but the frame has to be given.
+   */
+  const PORTRAIT = BLOCK.replace('data-width="1920" data-height="1080"', 'data-width="1080" data-height="1920"');
+
+  it('defaults to the size the block declares', () => {
+    const r = prepareComposition(PORTRAIT);
+    expect([r.width, r.height]).toEqual([1080, 1920]);
+    expect([r.nativeWidth, r.nativeHeight]).toEqual([1080, 1920]);
+  });
+
+  it('renders into a requested frame instead', () => {
+    const r = prepareComposition(PORTRAIT, { frameWidth: 1920, frameHeight: 1080 });
+    expect([r.width, r.height]).toEqual([1920, 1080]);
+  });
+
+  it('writes the frame onto the root, which is what a renderer sizes the page from', () => {
+    // Leaving the declared value there renders a landscape slide in a portrait
+    // page, whatever the caller believed it asked for.
+    const r = prepareComposition(PORTRAIT, { frameWidth: 1920, frameHeight: 1080 });
+    const root = parse(r.html).querySelector('[data-composition-id]')!;
+    expect(root.getAttribute('data-width')).toBe('1920');
+    expect(root.getAttribute('data-height')).toBe('1080');
+  });
+
+  it('still reports what the block declared, so a caller can see it overrode it', () => {
+    const r = prepareComposition(PORTRAIT, { frameWidth: 1920, frameHeight: 1080 });
+    expect([r.nativeWidth, r.nativeHeight]).toEqual([1080, 1920]);
+  });
+
+  it('leaves the root alone when the frame matches', () => {
+    const r = prepareComposition(BLOCK, { frameWidth: 1920, frameHeight: 1080 });
+    expect(parse(r.html).querySelector('[data-composition-id]')!.getAttribute('data-width')).toBe('1920');
+  });
+
+  it('falls back to the block frame for a nonsense request', () => {
+    // ?? alone accepts 0 and NaN, and clamping then turns a zero into a
+    // one-pixel page: nonsense answered with nonsense rather than with the
+    // frame the block actually declares.
+    for (const bad of [0, -5, Number.NaN]) {
+      const r = prepareComposition(BLOCK, { frameWidth: bad, frameHeight: bad });
+      expect([r.width, r.height]).toEqual([1920, 1080]);
+    }
+  });
+});

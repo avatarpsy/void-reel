@@ -13,8 +13,8 @@ const base: HashableComposition = {
   slots: { headline: 'Reach by month', subtitle: 'Jan–Jun' },
   fillMode: 'render',
   poseTime: 'end',
-  nativeWidth: 1920,
-  nativeHeight: 1080,
+  frameWidth: 1920,
+  frameHeight: 1080,
 };
 
 describe('the same slide always keys the same', () => {
@@ -49,7 +49,7 @@ describe('every input that changes a pixel changes the key', () => {
   it('the block', () => differs({ block: 'flowchart' }));
   it('the fill mode', () => differs({ fillMode: 'preview' }));
   it('the pose time', () => differs({ poseTime: 2.5 }));
-  it('the native size', () => differs({ nativeWidth: 1080, nativeHeight: 1350 }));
+  it('the frame it renders into', () => differs({ frameWidth: 1080, frameHeight: 1350 }));
   it('the authored html', () => differs({ inlineHtml: '<div>one</div>' }));
 
   it('the tier, because a user block can shadow a starter of the same name', () => {
@@ -123,8 +123,8 @@ describe('the key space holds up', () => {
         slots: { headline: `Headline ${i}`, subtitle: `Sub ${i % 977}`, source: `S${i % 31}` },
         fillMode: i % 2 ? 'render' : 'preview',
         poseTime: i % 7 === 0 ? 'end' : (i % 7),
-        nativeWidth: 1920,
-        nativeHeight: 1080,
+        frameWidth: 1920,
+        frameHeight: 1080,
       }));
       n++;
     }
@@ -134,7 +134,7 @@ describe('the key space holds up', () => {
   it('uses both halves — a degenerate second half would halve the space silently', () => {
     const h = compositionHash({
       block: 'x', slots: { a: 'b' }, fillMode: 'render', poseTime: 'end',
-      nativeWidth: 1, nativeHeight: 2,
+      frameWidth: 1, frameHeight: 2,
     });
     expect(h.slice(0, 8)).not.toBe(h.slice(8));
   });

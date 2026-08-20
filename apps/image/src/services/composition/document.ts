@@ -71,15 +71,34 @@ export interface PrepareOptions {
   /** Milliseconds to wait for fonts, images and the timeline before giving up
    *  and capturing anyway. A late font is worth a bounded wait, never a hang. */
   readyTimeoutMs?: number;
+  /**
+   * Render into THIS frame instead of the one the block declares.
+   *
+   * Needed because the twelve deck-ready blocks are `1080x1920` natively while
+   * listing 16:9 among their supported aspects: reading the root's declared size
+   * yields a portrait frame for a landscape deck. Their CSS does adapt —
+   * `stat-punch` forced to 1920×1080 reflows into landscape correctly — but the
+   * frame has to be given, not inferred.
+   *
+   * This is a LAYOUT change, not a resolution one: text rewraps and `clamp()`
+   * resolves against the new width. Export scale is a separate multiplier
+   * applied at render time.
+   */
+  frameWidth?: number;
+  frameHeight?: number;
 }
 
 export interface PreparedComposition {
   html: string;
-  /** The size the block was DESIGNED at. Render here and scale — never resize the
-   *  frame to fit a box, because blocks are laid out in pixels (only 15 of 128
-   *  use `vw`, none use `vh`), so a different frame width is a different design. */
+  /** The frame this document will render into — the requested one when given,
+   *  otherwise what the block declares. This is what a renderer should size to. */
   width: number;
   height: number;
+  /** What the block declared, before any override. Kept so a caller can tell
+   *  that it asked a portrait block to lay out landscape, which is worth knowing
+   *  when a design comes back looking unlike its thumbnail. */
+  nativeWidth: number;
+  nativeHeight: number;
   durationSec: number;
   /** Slot keys that had no value. Reported so a caller can say so rather than
    *  shipping a slide with the designer's placeholder still in it. */
@@ -111,7 +130,6 @@ function filled(v: unknown): boolean {
  */
 function applySlot(
   doc: Document,
-  root: Element,
   spec: SlotSpec,
   value: unknown,
   warnings: string[],
@@ -210,16 +228,31 @@ export function prepareComposition(html: string, opts: PrepareOptions = {}): Pre
     warnings.push(`no ${ROOT_SELECTOR} element — falling back to 1920x1080`);
   }
 
-  const width = num(root?.getAttribute('data-width'), 1920);
-  const height = num(root?.getAttribute('data-height'), 1080);
+  const nativeWidth = num(root?.getAttribute('data-width'), 1920);
+  const nativeHeight = num(root?.getAttribute('data-height'), 1080);
   const durationSec = num(root?.getAttribute('data-duration'), 0);
+
+  /**
+   * The frame the block will lay out into. Written back onto the root, because
+   * that is what every renderer sizes the page from — leaving the declared value
+   * there would render a landscape deck slide in a portrait frame.
+   */
+  // `??` alone would accept 0 and NaN as a frame, and Math.max would then turn a
+  // zero into a one-pixel page — a nonsense request answered with nonsense
+  // instead of the block's own frame.
+  const width = num(String(opts.frameWidth ?? ''), nativeWidth);
+  const height = num(String(opts.frameHeight ?? ''), nativeHeight);
+  if (root && (width !== nativeWidth || height !== nativeHeight)) {
+    root.setAttribute('data-width', String(width));
+    root.setAttribute('data-height', String(height));
+  }
 
   // ── Slots ────────────────────────────────────────────────────────────────
   const unfilled: string[] = [];
   for (const [key, spec] of Object.entries(slots)) {
     if (!spec) continue;
     if (filled(values[key])) {
-      if (root) applySlot(doc, root, spec, values[key], warnings, key);
+      applySlot(doc, spec, values[key], warnings, key);
       continue;
     }
     unfilled.push(key);
@@ -279,6 +312,8 @@ export function prepareComposition(html: string, opts: PrepareOptions = {}): Pre
     html: `<!DOCTYPE html>${doc.documentElement.outerHTML}`,
     width,
     height,
+    nativeWidth,
+    nativeHeight,
     durationSec,
     unfilled,
     warnings,

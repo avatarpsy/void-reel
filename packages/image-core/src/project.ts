@@ -148,10 +148,22 @@ export interface CompositionSource {
   /** Which instant of the animation these pixels are. Seconds, or the settled
    *  end state — which is what a static page should show. */
   poseTime: number | 'end';
-  /** The size the block was DESIGNED at. Renders happen here and are scaled;
-   *  re-laying-out at a different width would be a different design. */
-  nativeWidth: number;
-  nativeHeight: number;
+  /**
+   * The frame this composition is rendered INTO, in CSS pixels.
+   *
+   * Not the same as the size the block declares. The twelve deck-ready blocks
+   * are `1080x1920` natively while listing 16:9 among the aspects they support,
+   * and their CSS does adapt — `stat-punch` forced to 1920×1080 reflows into
+   * landscape correctly. So the frame is a decision the page makes, usually the
+   * artboard's aspect, and the block follows it.
+   *
+   * It belongs in the cache key because a different frame is a different layout,
+   * not merely a different resolution: text rewraps and `clamp()` resolves
+   * differently. Scale (for export DPI) multiplies this and is applied at render
+   * time, so it is deliberately NOT stored here.
+   */
+  frameWidth: number;
+  frameHeight: number;
   /** Cache key over everything above. A render is reusable exactly when this
    *  matches, so it must cover every input that can change a pixel. */
   renderHash: string;
