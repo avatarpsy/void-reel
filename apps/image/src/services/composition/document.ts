@@ -119,8 +119,22 @@ function applySlot(
 ): void {
   const v = String(value);
 
-  if (spec.var) {
-    (root as HTMLElement).style.setProperty(spec.var, v);
+  /**
+   * COLOURS GO ON THE DOCUMENT ROOT, NOT THE COMPOSITION ROOT.
+   *
+   * Custom properties inherit downward only, and blocks consume these ABOVE the
+   * composition element — `html,body{background:var(--bg,#0A0A12)}` is the
+   * shipped pattern. Set on the composition div, a variable reaches its
+   * descendants and never reaches body.
+   *
+   * `render-hyperframes.post.ts` sets them on `document.documentElement` for the
+   * same reason, including the `--<key>` fallback for a slot that names no
+   * variable. Matching it exactly is the point: the same block themed two ways
+   * on two surfaces is a bug nobody can diagnose from either side.
+   */
+  if (spec.var || spec.kind === 'color') {
+    const prop = spec.var || `--${key}`;
+    (doc.documentElement as HTMLElement).style.setProperty(prop, v);
     return;
   }
   if (!spec.sel) {

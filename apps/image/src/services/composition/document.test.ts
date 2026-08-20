@@ -60,10 +60,22 @@ describe('filling slots', () => {
     expect(parse(r.html).querySelector('.shot')?.getAttribute('src')).toBe(url);
   });
 
-  it('sets a colour as a custom property on the root, since it has no element', () => {
+  it('sets a colour on the DOCUMENT root, where body can inherit it', () => {
+    // Custom properties inherit downward only, and blocks consume these ABOVE
+    // the composition element: html,body{background:var(--bg)} is the shipped
+    // pattern, so a variable set on the composition div never reaches body.
+    // render-hyperframes.post.ts sets them on documentElement for the same
+    // reason; matching it is what keeps one block from theming two ways.
     const r = prepareComposition(BLOCK, { slots: SLOTS, values: { accent: '#FF1493' } });
-    const root = parse(r.html).querySelector('[data-composition-id]') as HTMLElement;
-    expect(root.style.getPropertyValue('--accent')).toBe('#FF1493');
+    const html = parse(r.html).documentElement as HTMLElement;
+    expect(html.style.getPropertyValue('--accent')).toBe('#FF1493');
+  });
+
+  it('falls back to --<key> for a colour slot that names no variable', () => {
+    const slots = { tint: { kind: 'color' } as SlotSpec };
+    const r = prepareComposition(BLOCK, { slots, values: { tint: '#123456' } });
+    const html = parse(r.html).documentElement as HTMLElement;
+    expect(html.style.getPropertyValue('--tint')).toBe('#123456');
   });
 
   it('reports a value for a slot the block does not declare, rather than dropping it', () => {
