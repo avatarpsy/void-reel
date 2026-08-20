@@ -1,0 +1,207 @@
+import { useEffect, useState } from 'react';
+import { useProjectStore } from '../../../stores/project-store';
+import { resolveComposition } from '../../../services/composition/block-source';
+import { slotFields, withSlotValue, type SlotField } from '../../../services/composition/slot-fields';
+import type { SlotSpec } from '../../../services/composition/document';
+import type { CompositionSource, ImageLayer } from '../../../types/project';
+
+interface Props {
+  layer: ImageLayer;
+}
+
+const INPUT =
+  'w-full px-2 py-1.5 text-xs bg-background border border-input rounded-md focus:outline-none focus:ring-1 focus:ring-primary';
+
+/**
+ * The slots of a composition layer, as editable fields.
+ *
+ * ── WHY THIS IS THE WHOLE UI FOR A COMPOSITION ──────────────────────────────
+ * A composition is a block plus the values put into its holes. The agent writes
+ * those values and a person edits the same ones here, so automation and manual
+ * editing are one operation on one structure — which is the merge point the
+ * design is built around, not a convenience. Anything else about the layer
+ * (position, opacity, effects, masks) is already handled by the ordinary image
+ * sections, because a composition composites exactly like an image layer.
+ *
+ * ── THE MANIFEST IS FETCHED, NOT STORED ─────────────────────────────────────
+ * What holes exist belongs to the BLOCK. Copying it onto the layer would leave
+ * every slide placed before an edit offering yesterday's holes, so the block is
+ * asked each time and the answer is cached for the page. Until it arrives, or
+ * when it never does, the panel falls back to the keys that are already filled:
+ * fewer rows than the block really has, but never a value the user cannot reach.
+ */
+export function CompositionSection({ layer }: Props) {
+  const { updateLayer } = useProjectStore();
+  const source = layer.composition as CompositionSource;
+
+  const [manifest, setManifest] = useState<Record<string, SlotSpec>>({});
+  const [notice, setNotice] = useState('');
+
+  /**
+   * Keyed on the BLOCK, not on the layer or its values.
+   *
+   * The manifest changes when the block does and at no other time, so making
+   * this depend on the layer would re-ask for it on every keystroke — a fetch
+   * per character, and a panel that rebuilds itself while somebody types in it.
+   */
+  const blockKey = source.block ?? (source.inlineHtml ? 'inline' : '');
+
+  useEffect(() => {
+    let cancelled = false;
+    setNotice('');
+    void resolveComposition(source).then((resolved) => {
+      if (cancelled) return;
+      if (!resolved) {
+        setManifest({});
+        setNotice(
+          source.block
+            ? `Could not load "${source.block}", so only the slots already filled are shown.`
+            : 'This composition has no block and no html.',
+        );
+        return;
+      }
+      setManifest(resolved.manifest);
+      setNotice(resolved.warnings[0] ?? '');
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blockKey]);
+
+  const setSlot = (key: string, value: string) => {
+    updateLayer<ImageLayer>(layer.id, {
+      composition: withSlotValue(layer.composition as CompositionSource, key, value),
+    });
+  };
+
+  const fields = slotFields(manifest, source.slots ?? {});
+
+  return (
+    <div className="space-y-4">
+      <div className="p-3 bg-secondary/30 rounded-lg space-y-1">
+        <div className="text-[11px] text-foreground">
+          {source.block ? source.block : 'Authored composition'}
+        </div>
+        <div className="text-[10px] text-muted-foreground">
+          {source.tier ? `${source.tier} block · ` : ''}
+          {source.frameWidth} × {source.frameHeight}
+        </div>
+      </div>
+
+      {notice && (
+        <p className="text-[10px] text-muted-foreground leading-relaxed">{notice}</p>
+      )}
+
+      {fields.length === 0 ? (
+        <p className="text-[10px] text-muted-foreground leading-relaxed">
+          This block declares no slots — it is used as designed.
+        </p>
+      ) : (
+        <div className="space-y-3">
+          {fields.map((field) => (
+            <SlotInput key={field.key} field={field} onChange={(v) => setSlot(field.key, v)} />
+          ))}
+        </div>
+      )}
+
+      <div>
+        <label className="block text-[10px] text-muted-foreground mb-1">Unfilled slots</label>
+        <select
+          value={source.fillMode}
+          onChange={(e) => updateLayer<ImageLayer>(layer.id, {
+            composition: { ...source, fillMode: e.target.value as CompositionSource['fillMode'] },
+          })}
+          className={INPUT}
+        >
+          {/* The wording is the decision, not the mode name: "render" hiding an
+              unfilled slot is what stops the designer's demo text shipping
+              inside somebody's deck. */}
+          <option value="render">Hide them</option>
+          <option value="preview">Show the designer&apos;s sample</option>
+        </select>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * One slot, typed.
+ *
+ * A colour is a CSS variable and gets a swatch; media is a url and gets a url
+ * field with a thumbnail, because the thing that goes wrong with an image slot
+ * is a url that does not load, and a preview is how you see that immediately.
+ * Everything else is text.
+ */
+function SlotInput({ field, onChange }: { field: SlotField; onChange: (value: string) => void }) {
+  const label = (
+    <label className="block text-[10px] text-muted-foreground mb-1">
+      {field.label}
+      {field.undeclared && (
+        <span
+          className="ml-1 text-[9px] text-muted-foreground/70"
+          title="This value is set, but the block does not declare a slot for it — it may have been edited since."
+        >
+          (not in this block)
+        </span>
+      )}
+    </label>
+  );
+
+  if (field.kind === 'color') {
+    // A colour slot with nothing in it has no colour to show, and a swatch
+    // defaulting to black would read as "black is set" when nothing is.
+    const swatch = field.value || field.placeholder || '#000000';
+    return (
+      <div>
+        {label}
+        <div className="flex items-center gap-2">
+          <input
+            type="color"
+            value={/^#[0-9a-f]{6}$/i.test(swatch) ? swatch : '#000000'}
+            onChange={(e) => onChange(e.target.value)}
+            className="w-8 h-8 rounded border border-input cursor-pointer"
+          />
+          <input
+            type="text"
+            value={field.value}
+            placeholder={field.placeholder || '#000000'}
+            onChange={(e) => onChange(e.target.value)}
+            className={`${INPUT} font-mono flex-1`}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  if (field.kind === 'image' || field.kind === 'video') {
+    return (
+      <div>
+        {label}
+        <input
+          type="text"
+          value={field.value}
+          placeholder={field.placeholder || 'Image URL'}
+          onChange={(e) => onChange(e.target.value)}
+          className={INPUT}
+        />
+        {field.kind === 'image' && field.value && (
+          <div className="mt-1.5 rounded-md border border-input bg-background overflow-hidden">
+            <img src={field.value} alt="" className="block max-h-24 w-full object-contain" />
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      {label}
+      <input
+        type="text"
+        value={field.value}
+        placeholder={field.placeholder}
+        onChange={(e) => onChange(e.target.value)}
+        className={INPUT}
+      />
+    </div>
+  );
+}

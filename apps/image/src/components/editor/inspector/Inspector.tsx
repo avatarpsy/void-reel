@@ -8,8 +8,9 @@ import { EffectsSection } from './EffectsSection';
 import { ArtboardSection } from './ArtboardSection';
 import { PenSettingsSection } from './PenSettingsSection';
 import { ColorHarmonySection } from './ColorHarmonySection';
-import { ChevronRight, Sliders, Palette, Wand2, Sparkles, Image as ImageIcon, Layers } from 'lucide-react';
+import { ChevronRight, Sliders, Palette, Wand2, Sparkles, Image as ImageIcon, Layers, LayoutTemplate } from 'lucide-react';
 import { ScrollArea } from '@openreel/ui';
+import { isCompositionLayer } from '../../../services/composition/overlay-model';
 import type { Layer, ImageLayer, TextLayer, ShapeLayer } from '../../../types/project';
 import type { Tool } from '../../../stores/ui-store';
 
@@ -39,6 +40,7 @@ const GradientMapSection = lazy(() => import('./GradientMapSection').then(m => (
 const PosterizeSection = lazy(() => import('./PosterizeSection').then(m => ({ default: m.PosterizeSection })));
 const ThresholdSection = lazy(() => import('./ThresholdSection').then(m => ({ default: m.ThresholdSection })));
 const MaskSection = lazy(() => import('./MaskSection').then(m => ({ default: m.MaskSection })));
+const CompositionSection = lazy(() => import('./CompositionSection').then(m => ({ default: m.CompositionSection })));
 const SelectionToolsPanel = lazy(() => import('./SelectionToolsPanel').then(m => ({ default: m.SelectionToolsPanel })));
 const EraserToolPanel = lazy(() => import('./EraserToolPanel').then(m => ({ default: m.EraserToolPanel })));
 const DodgeBurnToolPanel = lazy(() => import('./DodgeBurnToolPanel').then(m => ({ default: m.DodgeBurnToolPanel })));
@@ -368,6 +370,20 @@ function InspectorContent() {
           <AccordionItem id="effects" icon={Sparkles} title="Effects">
             <EffectsSection layer={singleLayer} />
           </AccordionItem>
+
+          {/* A composition's slots come FIRST, because for a composition layer
+              they are the content — everything below edits the picture, and
+              this edits what the picture says. Rendered only when the layer
+              carries a source, so an ordinary image layer is untouched. */}
+          {isCompositionLayer(singleLayer) && (
+            <Suspense fallback={<SectionLoader />}>
+              <AccordionItem id="composition" icon={LayoutTemplate} title="Composition">
+                <div className="px-4">
+                  <CompositionSection layer={singleLayer} />
+                </div>
+              </AccordionItem>
+            </Suspense>
+          )}
 
           {singleLayer.type === 'image' && (
             <Suspense fallback={<SectionLoader />}>
