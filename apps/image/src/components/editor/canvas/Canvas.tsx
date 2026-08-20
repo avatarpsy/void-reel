@@ -9,6 +9,7 @@ import { selectionToPath2D, boundsFromPath, combineSelections, type Selection } 
 import { calculateSnap } from '../../../utils/snapping';
 import type { Layer, ImageLayer, TextLayer, ShapeLayer, GroupLayer } from '../../../types/project';
 import { Rulers } from './Rulers';
+import { CompositionOverlay } from './CompositionOverlay';
 import { ContextMenu, type ContextMenuPosition, type ContextMenuType } from './ContextMenu';
 import { hasActiveAdjustments, applyAllAdjustments, type LayerAdjustments } from '../../../utils/apply-adjustments';
 import { getToolCursor } from '../../../utils/cursors';
@@ -3309,6 +3310,16 @@ export function Canvas() {
           cursor: effectiveCursor,
         }}
       />
+      {/* A composition layer's pixels are a live HTML document, which no canvas
+          can draw — so it rides above this one, landed on the layer's box. Sits
+          here deliberately: after <canvas> it stacks above the artwork by
+          document order, and below the rulers (z-10/z-20) and the drop
+          affordance (z-30), which are chrome and belong on top. */}
+      <CompositionOverlay
+        containerWidth={containerSize.width}
+        containerHeight={containerSize.height}
+      />
+
       {/* Drop-an-image affordance. pointer-events-none so the drop event still
           reaches the container underneath. */}
       {isFileDropTarget && (
