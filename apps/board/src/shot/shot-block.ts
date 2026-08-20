@@ -32,15 +32,18 @@ import {
 import { blockScrollWheel, claimScrollWheel } from '../ui/wheel';
 import {
   FIELD_SPECS, REF_KIND_LABEL, roleLabel, SHOT_KIND_HINT, SHOT_KIND_LABEL, SHOT_KINDS,
-  chosenTake, formatTime, isTimed, rolesFor, takeAsMedia, takeThumb, trimWindow,
-  type MediaRole, type ShotBlockModel, type ShotKind, type ShotMedia,
+  checkGraphic, chosenTake, formatTime, isTimed, rolesFor, takeAsMedia, takeThumb, trimWindow,
+  type MediaRole, type ShotBlockModel, type ShotGraphic, type ShotKind, type ShotMedia,
   type ShotTake,
 } from './model';
 import { allBlocks, findBlock, onBlockCatalogue, searchBlocks, type BlockInfo } from './blocks';
 import { ASSET_DRAG_TYPE, type AssetDragEntity } from './drop';
-import { chooseTake, removeTake, setShotFields, shotNumberOf } from './shots';
+import {
+  addGraphic, chooseTake, removeGraphic, removeTake, reorderGraphic, setShotFields,
+  shotNumberOf, updateGraphic,
+} from './shots';
 import { onTakeProgress, setTakeProgress, takeProgress } from './take-progress';
-import { resolveSlots, slotFills } from './slots';
+import { resolveLayerSlots, resolveSlots, slotFills } from './slots';
 import { readParsed } from './screenplay-doc';
 import { lazyBlockPreview, openBlockLightbox, type LazyPreview } from '../ui/block-preview';
 import {
@@ -142,6 +145,30 @@ const GRAPHIC_SLOTS = [
   { role: 'figure', label: 'FIGURE', hint: 'The picture in the layout' },
   { role: 'logo', label: 'LOGO', hint: 'Mark or wordmark' },
 ] as const;
+
+/**
+ * When a layer plays, in words, on a card that does not know how long the shot
+ * is.
+ *
+ * It genuinely cannot know: the shot's length is whatever take the user ends up
+ * picking, and the whole point of anchoring is that the layer survives that
+ * changing. So the label says the RULE ("last 2s") rather than a pair of
+ * timecodes that would be wrong the moment a different take was chosen — and
+ * the common case, a graphic that runs the whole shot, says exactly that
+ * instead of "0s → 0s".
+ */
+function timingLabel(g: Pick<ShotGraphic, 'offsetSec' | 'durationSec' | 'anchor'>): string {
+  const off = Math.max(0, Number(g.offsetSec) || 0);
+  const dur = Math.max(0, Number(g.durationSec) || 0);
+  const n = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
+  if (g.anchor === 'end') {
+    if (!dur) return off ? `to ${n(off)}s before the end` : 'whole shot';
+    return off ? `${n(dur)}s, ending ${n(off)}s early` : `last ${n(dur)}s`;
+  }
+  if (!off && !dur) return 'whole shot';
+  if (!dur) return `from ${n(off)}s`;
+  return `${n(off)}s → ${n(off + dur)}s`;
+}
 
 export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
   static override styles = css`
@@ -467,6 +494,187 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
       color: var(--vs-text-mute, rgba(26, 26, 46, 0.45));
       padding: 4px;
       pointer-events: none;
+    }
+
+    /* ── GRAPHIC LAYERS ──────────────────────────────────────────────────────
+       Drawn as ROWS, not as wells, and that is the difference between a layer
+       and a slot: a slot is one hole in one design, where a layer is a whole
+       composition with its own block, its own timing and its own content. A row
+       can hold that; a 16:9 well cannot, and stacking four of them would eat
+       the card.
+
+       Deliberately quiet — a hairline box, no accent — because layers are the
+       LAST thing added to a shot and the section is present on every card
+       whether or not it holds anything. Loud empty state on every shot would
+       make the common case (no layers at all) look unfinished. */
+    .graphics { flex: none; }
+    .graphics__add {
+      appearance: none;
+      border: 1px solid var(--vs-border, rgba(15, 23, 42, 0.14));
+      border-radius: 5px;
+      background: transparent;
+      color: var(--vs-text-dim, rgba(26, 26, 46, 0.6));
+      font: 500 9.5px/1 var(--affine-font-family, sans-serif);
+      padding: 4px 7px;
+      cursor: pointer;
+      flex: none;
+    }
+    .graphics__add:hover {
+      background: var(--vs-accent-b, #2f6fa3);
+      border-color: transparent;
+      color: #fff;
+    }
+    .graphics__empty {
+      display: block;
+      border: 1px dashed var(--vs-border-strong, rgba(15, 23, 42, 0.25));
+      border-radius: 8px;
+      padding: 10px 8px;
+      text-align: center;
+      font: 400 10px/1.4 var(--affine-font-family, sans-serif);
+      color: var(--vs-text-mute, rgba(26, 26, 46, 0.45));
+    }
+    .graphics.is-over .graphics__empty,
+    .graphics.is-over .glayer {
+      border-color: var(--vs-accent-a, #4a9bd9);
+      background: rgba(74, 155, 217, 0.08);
+    }
+    .glayer {
+      border: 1px solid var(--vs-border, rgba(15, 23, 42, 0.14));
+      border-radius: 8px;
+      padding: 6px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      background: var(--vs-shot-well, rgba(127, 140, 170, 0.06));
+    }
+    .glayer + .glayer { margin-top: 6px; }
+    .glayer__top { display: flex; align-items: center; gap: 5px; }
+    .glayer__block,
+    .glayer__time,
+    .glayer__fill,
+    .glayer__mode,
+    .glayer__btn {
+      appearance: none;
+      border: 1px solid var(--vs-border, rgba(15, 23, 42, 0.14));
+      border-radius: 5px;
+      background: var(--vs-surface, #fff);
+      color: var(--vs-text-dim, rgba(26, 26, 46, 0.6));
+      font: 500 9.5px/1 var(--affine-font-family, sans-serif);
+      padding: 5px 7px;
+      cursor: pointer;
+      flex: none;
+      white-space: nowrap;
+    }
+    /* The block name is the row's subject, so it takes the room and truncates
+       rather than pushing the controls off the edge. */
+    .glayer__block {
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      text-align: left;
+    }
+    .glayer__block.is-set { color: var(--vs-text, #1a1a2e); }
+    .glayer__block:not(.is-set) { font-style: italic; }
+    .glayer__fill.is-done { color: var(--vs-ok, #2f8f5b); }
+    /* Baking is the committing choice, so it is the one that looks different.
+       Filled rather than outlined because "this clip is now one thing" is a
+       state, not an action. */
+    .glayer__mode { min-width: 42px; text-align: center; }
+    .glayer__mode.is-bake {
+      background: var(--vs-accent-b, #2f6fa3);
+      border-color: transparent;
+      color: #fff;
+    }
+    .glayer__warn {
+      font: 400 10px/1.4 var(--affine-font-family, sans-serif);
+      color: var(--vs-danger, #c8553d);
+      padding: 2px 1px 0;
+    }
+    .glayer__btn { padding: 5px 6px; }
+    .glayer__btn:hover,
+    .glayer__block:hover,
+    .glayer__time:hover,
+    .glayer__mode:hover,
+    .glayer__fill:hover {
+      border-color: var(--vs-accent-a, #4a9bd9);
+      color: var(--vs-text, #1a1a2e);
+    }
+    .glayer__btn--x:hover {
+      border-color: var(--vs-danger, #c8553d);
+      color: var(--vs-danger, #c8553d);
+    }
+    .glayer__slots { display: flex; gap: 6px; flex-wrap: wrap; }
+    .gslot {
+      position: relative;
+      width: 76px;
+      aspect-ratio: 16 / 9;
+      border: 1px dashed var(--vs-border-strong, rgba(15, 23, 42, 0.25));
+      border-radius: 6px;
+      overflow: hidden;
+      display: grid;
+      place-items: center;
+      background: var(--vs-shot-well, rgba(127, 140, 170, 0.06));
+      flex: none;
+    }
+    .gslot.is-over {
+      border-color: var(--vs-accent-a, #4a9bd9);
+      background: rgba(74, 155, 217, 0.12);
+    }
+    .gslot.is-filled { border-style: solid; }
+    .gslot__thumb {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .gslot__label {
+      position: relative;
+      font: 500 8.5px/1.2 var(--affine-font-family, sans-serif);
+      letter-spacing: 0.06em;
+      text-align: center;
+      padding: 2px;
+      pointer-events: none;
+      color: var(--vs-text-mute, rgba(26, 26, 46, 0.45));
+    }
+    /* On a filled well the label sits ON the picture, so it needs its own
+       ground — a caption over an arbitrary photo is unreadable otherwise. */
+    .gslot.is-filled .gslot__label {
+      align-self: end;
+      justify-self: stretch;
+      background: rgba(6, 10, 20, 0.62);
+      color: #fff;
+    }
+    .gslot__x {
+      position: absolute;
+      top: 2px; right: 2px;
+      width: 14px; height: 14px;
+      padding: 0;
+      border: 0;
+      border-radius: 4px;
+      background: rgba(6, 10, 20, 0.6);
+      color: #fff;
+      font-size: 9px;
+      line-height: 1;
+      cursor: pointer;
+      opacity: 0;
+    }
+    .gslot:hover .gslot__x { opacity: 1; }
+    .glayer__timing { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+    .glayer__timelabel {
+      font: 500 9px/1 var(--affine-font-family, sans-serif);
+      letter-spacing: 0.06em;
+      color: var(--vs-text-mute, rgba(26, 26, 46, 0.45));
+    }
+    .glayer__num {
+      width: 52px;
+      border: 1px solid var(--vs-border, rgba(15, 23, 42, 0.14));
+      border-radius: 5px;
+      background: var(--vs-surface, #fff);
+      color: var(--vs-text, #1a1a2e);
+      font: 400 10px/1 var(--affine-font-family, sans-serif);
+      padding: 4px 5px;
     }
 
     .lane { flex: none; }
@@ -1427,9 +1635,24 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
   @state() private accessor _pickingSeq = false;
   /** The block's text and colour slots, open for filling. */
   @state() private accessor _filling = false;
+  /**
+   * WHICH COMPOSITION THE PICKER AND THE FILL PANEL ARE ACTING ON.
+   *
+   * `''` is the shot's own graphic — the bed that fills the frame. Anything else
+   * is a GRAPHIC LAYER's id.
+   *
+   * One sheet, one target, rather than a picker per layer. A shot can carry
+   * several layers and the sheets are card-sized overlays; drawing one per layer
+   * would stack them, and giving each its own open/closed state would mean four
+   * places that have to remember to close the other three. The target is the
+   * only thing that actually differs between them.
+   */
+  @state() private accessor _target = '';
   /** What has been typed into the block filter. Deliberately NOT stored on the
    *  shot: it is how you find one block among 128, not a property of the scene. */
   @state() private accessor _blockQuery = '';
+  /** The layer whose timing controls are open, or ''. */
+  @state() private accessor _timing = '';
 
   /**
    * The blocks worth showing right now.
@@ -1468,8 +1691,17 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
    * on every letter is unusable to type next to.
    */
   private setSlotValue(key: string, raw: string): void {
-    const vars = { ...(this.model.props.compositionVars ?? {}) };
+    if (this.targetLost()) return;
     const value = raw.trim();
+    const layer = this.targetGraphic();
+    if (layer) {
+      const slots = { ...(layer.slots ?? {}) };
+      if (value) slots[key] = value; else delete slots[key];
+      if (JSON.stringify(slots) === JSON.stringify(layer.slots ?? {})) return;
+      updateGraphic(this.std, this.model.id, layer.id, { slots });
+      return;
+    }
+    const vars = { ...(this.model.props.compositionVars ?? {}) };
     if (value) vars[key] = value;
     else delete vars[key];
     if (JSON.stringify(vars) === JSON.stringify(this.model.props.compositionVars ?? {})) return;
@@ -1481,12 +1713,98 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
     this._pickingBlock = false;
     // The filter is a way of finding one block, not a state to come back to.
     this._blockQuery = '';
+    if (this.targetLost()) return;
+    const layer = this.targetGraphic();
+    if (layer) {
+      if (name === layer.block) return;
+      // Same rule as the bed below: the values belonged to the OLD block's
+      // slots and mean nothing in a different layout.
+      updateGraphic(this.std, this.model.id, layer.id, { block: name, slots: {} });
+      return;
+    }
     if (name === this.model.props.composition) return;
     this.store.captureSync();
     // The values belong to the OLD block's slots — a `stat` from a stat-card
     // means nothing in a bullet list, and carrying them over would put stale
     // words in a new layout.
     this.store.updateBlock(this.model, { composition: name, compositionVars: {} });
+  }
+
+  /** The layer the sheets are pointed at, or null when they mean the bed. */
+  private targetGraphic(): ShotGraphic | null {
+    if (!this._target) return null;
+    return (this.model.props.graphics ?? []).find(g => g.id === this._target) ?? null;
+  }
+
+  /**
+   * THE LAYER THE SHEETS WERE POINTED AT HAS GONE, and the sheets are still open.
+   *
+   * `''` means the bed, so "no layer found" and "the bed" are the same value to
+   * `targetGraphic` — which meant a picker left open while the layer was deleted
+   * would quietly write to the SHOT'S OWN composition instead. Choosing a block
+   * would replace the graphic filling the frame; typing would overwrite its
+   * words. Silent, destructive, and one the user cannot connect to what they did.
+   *
+   * Reachable from the card (the ✕ clears the target itself) but not only from
+   * there: the agent can remove a layer at any time, and the card is a live view
+   * of a document two people are writing to.
+   *
+   * Closes the sheets rather than just refusing, because a panel still sitting
+   * over the card claiming to edit something that no longer exists is its own
+   * confusion.
+   */
+  private targetLost(): boolean {
+    if (!this._target) return false;
+    if (this.targetGraphic()) return false;
+    this._target = '';
+    this._pickingBlock = false;
+    this._filling = false;
+    return true;
+  }
+
+  /**
+   * The block name the sheets are editing — the layer's, or the shot's own.
+   *
+   * One accessor rather than a conditional at every call site, because there are
+   * six of them (the picker's is-on state, the fill panel's title, the preview,
+   * the lightbox, the slot wells, the warnings) and the one that gets forgotten
+   * silently edits the wrong composition.
+   */
+  private targetBlockName(): string {
+    return this.targetGraphic()?.block ?? (this.model.props.composition ?? '');
+  }
+
+  /**
+   * The WORD and COLOUR rows the fill panel draws, for whatever it is pointed
+   * at.
+   *
+   * A layer resolves from its own flat map and the bed resolves against the
+   * shot's media, so the two cannot share a resolver — but they produce the
+   * same rows, which is what lets one panel serve both.
+   */
+  private targetValueRows() {
+    const layer = this.targetGraphic();
+    if (layer) return resolveLayerSlots(layer.block, layer.slots).values;
+    return resolveSlots({
+      composition: this.model.props.composition,
+      compositionVars: this.model.props.compositionVars,
+      media: this.model.props.media,
+    }).values;
+  }
+
+  /** Point the sheets at a layer (or at the bed) and open exactly one of them. */
+  private openSheet(target: string, which: 'block' | 'fill'): void {
+    const same = this._target === target;
+    this._target = target;
+    this._pickingModel = false;
+    this._timing = '';
+    if (which === 'block') {
+      this._filling = false;
+      this._pickingBlock = !(same && this._pickingBlock);
+    } else {
+      this._pickingBlock = false;
+      this._filling = !(same && this._filling);
+    }
   }
 
   /**
@@ -2575,12 +2893,7 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
             title=${block
               ? `${block.name}${block.description ? ` — ${block.description}` : ''}`
               : 'Choose a HyperFrames block for this graphic'}
-            @click=${(e: Event) => {
-              e.stopPropagation();
-              this._pickingModel = false;
-              this._filling = false;
-              this._pickingBlock = !this._pickingBlock;
-            }}
+            @click=${(e: Event) => { e.stopPropagation(); this.openSheet('', 'block'); }}
           >${this.model.props.composition || 'choose a block'} <span class="shot__caret">▾</span></button>` : nothing}
           <!--
             HOW MUCH OF THE BLOCK IS FILLED, and the way in.
@@ -2595,12 +2908,7 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
             ? html`<button
                 class="shot__fillbtn ${slotView.values.every(v => !v.empty) ? 'is-done' : ''}"
                 title="Fill in this block’s words and colours"
-                @click=${(e: Event) => {
-                  e.stopPropagation();
-                  this._pickingBlock = false;
-                  this._pickingModel = false;
-                  this._filling = !this._filling;
-                }}
+                @click=${(e: Event) => { e.stopPropagation(); this.openSheet('', 'fill'); }}
               >${slotView.values.filter(v => !v.empty).length}/${slotView.values.length} filled</button>`
             : nothing}
         </div>
@@ -2764,6 +3072,22 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
           </div>`;
         })}
 
+        <!--
+          WHAT IS DRAWN OVER THIS SHOT.
+
+          LAST in the body, and that ordering is the argument the card has been
+          making all the way down: the sentence, then the frames that pin it,
+          then the references that steer it, then what gets laid on top. A layer
+          is the last decision anybody makes about a shot, and putting it above
+          the references would push the shot's own inputs below the fold to make
+          room for a section most shots never use.
+
+          Present on a CLIP as well as a graphic. That is the whole feature —
+          "her name while she talks" used to mean turning the clip into a title
+          card and losing the footage.
+        -->
+        ${this.renderGraphics()}
+
       </div>
 
         <!--
@@ -2815,7 +3139,7 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
         one that bakes its content in is a starting DESIGN, not a template, and
         using it as-is renders the designer's copy in your video.
         -->
-        ${isGraphic && this._pickingBlock ? html`<div
+        ${this._pickingBlock ? html`<div
         class="shot__pick"
         @pointerdown=${(e: PointerEvent) => e.stopPropagation()}
         @dblclick=${(e: Event) => e.stopPropagation()}
@@ -2848,7 +3172,7 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
         <div class="shot__models">
           ${blocksShown.length
             ? blocksShown.map(b => html`<button
-                class="shot__modelopt ${b.name === this.model.props.composition ? 'is-on' : ''}"
+                class="shot__modelopt ${b.name === this.targetBlockName() ? 'is-on' : ''}"
                 title=${b.description ?? b.name}
                 @click=${(e: Event) => { e.stopPropagation(); this.chooseBlock(b.name); }}
               >
@@ -2878,19 +3202,20 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
           Committed on change, not per keystroke: every write is an undo step
           and repaints the preview.
         -->
-        ${isGraphic && this._filling ? html`<div
+        ${this._filling ? html`<div
           class="shot__pick"
           @pointerdown=${(e: PointerEvent) => e.stopPropagation()}
           @dblclick=${(e: Event) => e.stopPropagation()}
         >
           <div class="shot__pickhead">
             <span class="shot__picktitle">FILL</span>
-            <span class="shot__pickhint">${this.model.props.composition}</span>
+            <span class="shot__pickhint">${this.targetBlockName()}${
+              this.targetGraphic() ? ' · graphic layer' : ''}</span>
             <button class="shot__pickx" title="Close"
               @click=${(e: Event) => { e.stopPropagation(); this._filling = false; }}>✕</button>
           </div>
           <div class="shot__fills">
-            ${(slotView?.values ?? []).map(r => html`<label class="shot__fill">
+            ${this.targetValueRows().map(r => html`<label class="shot__fill">
               <span class="shot__fillkey">${r.slot.key}</span>
               ${r.slot.kind === 'color'
                 ? html`<input
@@ -3187,6 +3512,290 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
    * A running or failed take has nothing to open, so its click still falls
    * through to `chooseTake`, which refuses it. A spinner is a no-op, as before.
    */
+  /**
+   * WHAT IS DRAWN OVER THIS SHOT.
+   *
+   * ── PRESENT ON EVERY SHOT, AND THAT IS THE FEATURE ───────────────────────
+   * A shot used to be a clip OR a graphic, so "put a name on screen while she
+   * talks" had no answer: making it a graphic threw away the footage. Layers are
+   * how a shot keeps its picture AND gains something over it, and they read the
+   * same over generated footage, over a phone recording and over a graphic bed.
+   *
+   * ── THE TIMING IS RELATIVE TO THE SHOT, NEVER TO A TAKE ──────────────────
+   * The card cannot know how long the shot will run — that is whatever the take
+   * the user eventually picks measures — so the controls talk in offsets and an
+   * anchor, and the timeline resolves them against the real slot. It is also
+   * what keeps a layer correct when somebody swaps an 8s take for a 5s one.
+   */
+  private renderGraphics() {
+    const layers = this.model.props.graphics ?? [];
+    const over = this._over === 'graphics';
+
+    return html`<div
+      class="graphics ${over ? 'is-over' : ''}"
+      data-graphics-drop
+    >
+      <div class="lane__head">
+        <span class="lane__label">GRAPHICS</span>
+        ${layers.length
+          ? html`<span
+              class="lane__count"
+              title="Rendered transparent and laid over this shot on their own tracks, so the picture underneath keeps playing."
+            >${layers.length} over this shot</span>`
+          : nothing}
+        <button
+          class="graphics__add"
+          title="Add a graphic over this shot — a lower third, a stat, a ticker. The picture keeps playing underneath."
+          @pointerdown=${(e: Event) => e.stopPropagation()}
+          @click=${(e: Event) => {
+            e.stopPropagation();
+            const id = addGraphic(this.std, this.model.id);
+            // Straight into the picker: a layer with no block is a row that
+            // cannot do anything yet, and making the user find the button a
+            // second time is a step with no decision in it.
+            if (id) this.openSheet(id, 'block');
+          }}
+        >+ Graphic</button>
+      </div>
+      ${layers.length
+        ? repeat(layers, g => g.id, (g, i) => this.renderLayer(g, i, layers.length))
+        : html`<span class="graphics__empty">
+            Drag a block here, or press + Graphic — it draws over this shot
+          </span>`}
+    </div>`;
+  }
+
+  /** One layer row. */
+  private renderLayer(g: ShotGraphic, i: number, count: number) {
+    const view = resolveLayerSlots(g.block, g.slots);
+    const words = view.values;
+    const filled = words.filter(v => !v.empty).length;
+    const baked = g.mode === 'bake';
+    /**
+     * WHAT IS WRONG WITH THIS LAYER, said HERE — which is the difference
+     * between a feature and a mystery.
+     *
+     * The render refuses an impossible bake too, but that happens minutes later
+     * inside a compile. The card is where the person who flipped the toggle is
+     * looking, and it can answer immediately.
+     */
+    const hasPicture = !!chosenTake(
+      this.model.props.takes ?? [], this.model.props.chosenTakeId ?? '',
+    );
+    const layerWarnings = checkGraphic(g, view.block, hasPicture);
+
+    return html`<div class="glayer">
+      <div class="glayer__top">
+        <button
+          class="glayer__block ${g.block ? 'is-set' : ''}"
+          title=${view.block
+            ? `${view.block.name}${view.block.description ? ` — ${view.block.description}` : ''}`
+            : 'Choose a HyperFrames block for this layer'}
+          @pointerdown=${(e: Event) => e.stopPropagation()}
+          @click=${(e: Event) => { e.stopPropagation(); this.openSheet(g.id, 'block'); }}
+        >${g.block || 'choose a block'} <span class="shot__caret">▾</span></button>
+
+        <!--
+          OVER THE PICTURE, OR BURNED INTO IT.
+
+          Two words rather than a settings row, because it is a genuine fork and
+          the user has to be able to see which one is on without opening
+          anything. The tooltip carries the cost, which is the part that decides
+          it: an overlay can be moved and retimed for free, a bake cannot.
+        -->
+        <button
+          class="glayer__mode ${baked ? 'is-bake' : ''}"
+          title=${baked
+            ? 'BAKED INTO the shot — the picture is composited into the render and '
+              + 'you get one flat clip. The only way a block can HOLD the footage '
+              + '(a browser frame, a phone mockup). Bound to the take that plays, '
+              + 'and re-rendered whenever anything changes. Click for Over.'
+            : 'OVER the shot — rendered transparent on its own track, so the picture '
+              + 'underneath stays a separate clip you can retime, swap or trim '
+              + 'without re-rendering this. Click to bake it in instead.'}
+          @pointerdown=${(e: Event) => e.stopPropagation()}
+          @click=${(e: Event) => {
+            e.stopPropagation();
+            updateGraphic(this.std, this.model.id, g.id, {
+              mode: baked ? 'overlay' : 'bake',
+            });
+          }}
+        >${baked ? 'Into' : 'Over'}</button>
+
+        <!--
+          A BAKE HAS NO TIMING TO SHOW. It IS the shot's picture once rendered,
+          so it runs exactly as long as the footage does — offering an offset
+          would be offering a control that changes nothing.
+        -->
+        ${baked
+          ? nothing
+          : html`<button
+              class="glayer__time"
+              title="When it appears, relative to this shot. Anchoring to the end keeps it on the last beat even if you pick a longer take."
+              @pointerdown=${(e: Event) => e.stopPropagation()}
+              @click=${(e: Event) => {
+                e.stopPropagation();
+                this._timing = this._timing === g.id ? '' : g.id;
+              }}
+            >${timingLabel(g)}</button>`}
+
+        ${words.length
+          ? html`<button
+              class="glayer__fill ${filled === words.length ? 'is-done' : ''}"
+              title="Fill in this block’s words and colours"
+              @pointerdown=${(e: Event) => e.stopPropagation()}
+              @click=${(e: Event) => { e.stopPropagation(); this.openSheet(g.id, 'fill'); }}
+            >${filled}/${words.length}</button>`
+          : nothing}
+
+        ${count > 1
+          ? html`<button
+              class="glayer__btn"
+              title="Move down a layer — the one below is drawn first, so this ends up behind it"
+              ?disabled=${i === 0}
+              @pointerdown=${(e: Event) => e.stopPropagation()}
+              @click=${(e: Event) => {
+                e.stopPropagation();
+                reorderGraphic(this.std, this.model.id, g.id, i - 1);
+              }}
+            >⌃</button>
+            <button
+              class="glayer__btn"
+              title="Move up a layer — drawn later, so it ends up in front"
+              ?disabled=${i === count - 1}
+              @pointerdown=${(e: Event) => e.stopPropagation()}
+              @click=${(e: Event) => {
+                e.stopPropagation();
+                reorderGraphic(this.std, this.model.id, g.id, i + 1);
+              }}
+            >⌄</button>`
+          : nothing}
+
+        <button
+          class="glayer__btn glayer__btn--x"
+          title="Remove this layer. Anything already rendered from it stays in your Library."
+          @pointerdown=${(e: Event) => e.stopPropagation()}
+          @click=${(e: Event) => {
+            e.stopPropagation();
+            if (this._target === g.id) {
+              this._pickingBlock = false;
+              this._filling = false;
+              this._target = '';
+            }
+            removeGraphic(this.std, this.model.id, g.id);
+          }}
+        >✕</button>
+      </div>
+
+      <!--
+        THE BLOCK'S OWN MEDIA HOLES, as wells you drop onto.
+
+        Drawn only when the block declares some — most blocks are pure type and
+        would otherwise show an empty row that never does anything.
+
+        A VIDEO SLOT NEVER GETS AN <img>. Handing an .mp4 to an image element
+        downloads the whole file to draw nothing, which is the bug the take
+        strip was fixed for; a filled video well says so in words instead.
+      -->
+      ${view.media.length
+        ? html`<div class="glayer__slots">
+            ${view.media.map(r => {
+              const zone = `graphic:${g.id}:${r.slot.key}`;
+              const isImage = r.slot.kind === 'image';
+              return html`<div
+                class="gslot ${this._over === zone ? 'is-over' : ''} ${r.value ? 'is-filled' : ''}"
+                data-gslot="${g.id}:${r.slot.key}"
+                title=${r.value
+                  ? `${r.slot.key} — drop another to replace it`
+                  : `Drop ${r.slot.kind === 'video' ? 'a clip' : 'a picture'} here for ${r.slot.key}`}
+              >
+                ${r.value && isImage
+                  ? html`<img
+                      class="gslot__thumb"
+                      src=${withToken(r.value)}
+                      alt=""
+                      draggable="false"
+                      loading="lazy"
+                      decoding="async"
+                    />`
+                  : nothing}
+                <span class="gslot__label">${
+                  r.value && !isImage ? `${r.slot.key} · clip` : r.slot.key
+                }</span>
+                ${r.value
+                  ? html`<button
+                      class="gslot__x"
+                      title="Clear this slot"
+                      @pointerdown=${(e: Event) => e.stopPropagation()}
+                      @click=${(e: Event) => {
+                        e.stopPropagation();
+                        const slots = { ...(g.slots ?? {}) };
+                        delete slots[r.slot.key];
+                        updateGraphic(this.std, this.model.id, g.id, { slots });
+                      }}
+                    >✕</button>`
+                  : nothing}
+              </div>`;
+            })}
+          </div>`
+        : nothing}
+
+      ${layerWarnings.length
+        ? html`<div class="glayer__warn">${layerWarnings.join(' ')}</div>`
+        : nothing}
+
+      ${this._timing === g.id && !baked
+        ? html`<div class="glayer__timing" @pointerdown=${(e: Event) => e.stopPropagation()}>
+            <span class="glayer__timelabel">FROM</span>
+            <button
+              class="glayer__btn"
+              title=${g.anchor === 'end'
+                ? 'Measured back from the END of the shot — it stays on the last beat however long the take is'
+                : 'Measured from the START of the shot'}
+              @click=${(e: Event) => {
+                e.stopPropagation();
+                updateGraphic(this.std, this.model.id, g.id, {
+                  anchor: g.anchor === 'end' ? 'start' : 'end',
+                });
+              }}
+            >${g.anchor === 'end' ? 'end' : 'start'}</button>
+            <input
+              class="glayer__num"
+              type="number"
+              min="0"
+              step="0.1"
+              data-range-sync-exclude="true"
+              .value=${String(g.offsetSec ?? 0)}
+              @pointerdown=${this.claimField}
+              @blur=${() => this.flushDeferred()}
+              @keydown=${this.stopKeys}
+              @change=${(e: Event) => updateGraphic(this.std, this.model.id, g.id, {
+                offsetSec: Math.max(0, Number((e.target as HTMLInputElement).value) || 0),
+              })}
+            />
+            <span class="glayer__timelabel">FOR</span>
+            <input
+              class="glayer__num"
+              type="number"
+              min="0"
+              step="0.1"
+              data-range-sync-exclude="true"
+              placeholder="all"
+              .value=${g.durationSec ? String(g.durationSec) : ''}
+              title="Blank runs it to the end of the shot"
+              @pointerdown=${this.claimField}
+              @blur=${() => this.flushDeferred()}
+              @keydown=${this.stopKeys}
+              @change=${(e: Event) => updateGraphic(this.std, this.model.id, g.id, {
+                durationSec: Math.max(0, Number((e.target as HTMLInputElement).value) || 0),
+              })}
+            />
+            <span class="glayer__timelabel">SEC</span>
+          </div>`
+        : nothing}
+    </div>`;
+  }
+
   private renderTakes() {
     const takes = this.model.props.takes ?? [];
     if (!takes.length) return nothing;
@@ -3443,8 +4052,22 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
   zoneAt(clientX: number, clientY: number): string | null {
     const el = this.ownerDocument
       .elementFromPoint(clientX, clientY) as HTMLElement | null;
+    /**
+     * A GRAPHIC LAYER'S WELL, and it is checked FIRST.
+     *
+     * A layer's wells sit inside the graphics section, which is itself a drop
+     * zone for adding a layer. Innermost wins, or dropping a picture on the
+     * `screenshot` well would add an empty second layer instead of filling the
+     * one under the pointer.
+     *
+     * The zone carries the layer AND the slot because a shot can hold several
+     * layers built from the same block — "the `logo` well" is not an address.
+     */
+    const gslot = el?.closest<HTMLElement>('[data-gslot]')?.dataset.gslot;
+    if (gslot) return `graphic:${gslot}`;
     const slot = el?.closest<HTMLElement>('[data-slot]')?.dataset.slot;
     if (slot) return slot;
+    if (el?.closest<HTMLElement>('[data-graphics-drop]')) return 'graphics';
     return el?.closest<HTMLElement>('[data-lane]')?.dataset.lane ?? null;
   }
 }

@@ -40,6 +40,11 @@ const SEEDANCE: ModelCaps = {
 
 const BLOCKS = [
   { name: 'stat-card', tier: 'starter', fill: 'slots', slots: { stat: { kind: 'text' }, caption: { kind: 'text' } } },
+  // A block that HOLDS footage, which is the case bake exists for.
+  {
+    name: 'video-hero', tier: 'starter', fill: 'slots', overlay: false,
+    slots: { clip: { kind: 'video', sel: 'video.media' }, headline: { kind: 'text', sel: '.headline' } },
+  },
   { name: 'my-lower-third', tier: 'user', fill: 'slots' },
   {
     name: 'browser-mockup', tier: 'starter', fill: 'slots',
@@ -289,7 +294,9 @@ describe('board_block_catalog', () => {
     // its name — and comes first, because a user block outranks a starter.
     const res = await call('voidspace:board-block-catalog', { q: 'lower-third' });
     expect(res.blocks.map((b: any) => b.name)).toEqual(['my-lower-third', 'lt-clean-bar']);
-    expect(res.total).toBe(4);
+    // The whole installed catalogue, matched or not — so it tracks BLOCKS plus
+    // the one this test adds, rather than a number somebody has to remember.
+    expect(res.total).toBe(BLOCKS.length + 1);
     expect(res.matched).toBe(2);
 
     // And a term that only ever appears in a tag still finds it.
@@ -1069,5 +1076,311 @@ describe('board_shot_gen_input · whether the clip speaks', () => {
     await call('voidspace:board-update-shot', { shotId, action: 'She turns.' });
     const out = await call('voidspace:board-shot-gen-input', { shotId });
     expect(out.narrationIsSeparate).toBe(false);
+  });
+});
+
+/**
+ * GRAPHIC LAYERS over a shot.
+ *
+ * The agent surface for the thing a shot could never do before: keep its picture
+ * AND have something drawn on top of it. Each test names the failure it stops.
+ */
+describe('board graphic layers', () => {
+  const newShot = async () => {
+    const shots = await call('voidspace:board-add-shots', { titles: ['A'] });
+    return shots.shots[0].id as string;
+  };
+
+  it('adds a layer to a CLIP shot, leaving what fills the frame alone', async () => {
+    // THE point of the feature. Before this, "her name while she talks" meant
+    // turning the shot into a graphic and losing the footage.
+    const shotId = await newShot();
+
+    const res = await call('voidspace:board-add-graphic', { shotId, block: 'stat-card' });
+
+    expect(res.ok).not.toBe(false);
+    expect(res.graphicId).toBeTruthy();
+    const shot = res.shots.find((x: any) => x.id === shotId);
+    expect(shot.kind).toBe('clip');
+    expect(shot.graphics.map((g: any) => g.block)).toEqual(['stat-card']);
+  });
+
+  it('refuses a block that is not installed, and says how to find one', async () => {
+    // A name the agent half-remembers renders as nothing at all, three minutes
+    // and one compile later. Costing it a turn is much cheaper.
+    const shotId = await newShot();
+
+    const res = await call('voidspace:board-add-graphic', { shotId, block: 'stat-crad' });
+
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe('unknown_block');
+    expect(res.message).toContain('board_block_catalog');
+  });
+
+  it('names the near matches when the search can find any', async () => {
+    // The refusal is only as useful as what it offers instead. A partial name
+    // is the common case -- the agent remembers the idea, not the spelling.
+    const shotId = await newShot();
+
+    const res = await call('voidspace:board-add-graphic', { shotId, block: 'stat' });
+
+    expect(res.ok).toBe(false);
+    expect(res.message).toContain('stat-card');
+  });
+
+  it('allows a layer with NO block yet, because the card shows a picker', async () => {
+    const shotId = await newShot();
+    const res = await call('voidspace:board-add-graphic', { shotId });
+    expect(res.graphicId).toBeTruthy();
+  });
+
+  it('MERGES slots rather than replacing them', async () => {
+    // A layer is filled from two directions -- typed here, dropped on the card.
+    // A wholesale write is guaranteed to destroy one of them.
+    const shotId = await newShot();
+    const add = await call('voidspace:board-add-graphic', { shotId, block: 'browser-mockup' });
+    await call('voidspace:board-update-graphic', {
+      shotId, graphicId: add.graphicId, slots: { screenshot: 'https://x.test/a.png' },
+    });
+
+    const res = await call('voidspace:board-update-graphic', {
+      shotId, graphicId: add.graphicId, slots: { headline: 'Ship it' },
+    });
+
+    const g = res.shots.find((x: any) => x.id === shotId).graphics[0];
+    // The digest reports a media slot as "set" rather than its url, on purpose.
+    expect(g.slots).toEqual({ screenshot: 'set', headline: 'Ship it' });
+  });
+
+  it('an empty string CLEARS one slot', async () => {
+    const shotId = await newShot();
+    const add = await call('voidspace:board-add-graphic', { shotId, block: 'stat-card' });
+    await call('voidspace:board-update-graphic', {
+      shotId, graphicId: add.graphicId, slots: { stat: '92%', caption: 'of users' },
+    });
+
+    const res = await call('voidspace:board-update-graphic', {
+      shotId, graphicId: add.graphicId, slots: { caption: '' },
+    });
+
+    const g = res.shots.find((x: any) => x.id === shotId).graphics[0];
+    expect(g.slots).toEqual({ stat: '92%' });
+  });
+
+  it('drops a key the block never declared, and names it back', async () => {
+    // The filler passes every key through whether the block asked for it or not,
+    // so a typo renders the placeholder and looks exactly like the value never
+    // arriving.
+    const shotId = await newShot();
+    const add = await call('voidspace:board-add-graphic', { shotId, block: 'stat-card' });
+
+    const res = await call('voidspace:board-update-graphic', {
+      shotId, graphicId: add.graphicId, slots: { stat: '92%', headine: 'oops' },
+    });
+
+    expect(res.ignoredKeys).toEqual(['headine']);
+    expect(res.accepted).toEqual(['stat']);
+    expect(res.note).toContain('stat');
+  });
+
+  it('does NOT report a media url in the digest', async () => {
+    // Same rule the reference list follows: a board with a dozen pictures in
+    // graphics would otherwise put a dozen signed urls into every read.
+    const shotId = await newShot();
+    const add = await call('voidspace:board-add-graphic', { shotId, block: 'browser-mockup' });
+    await call('voidspace:board-update-graphic', {
+      shotId, graphicId: add.graphicId, slots: { screenshot: 'https://x.test/secret.png' },
+    });
+
+    const res = await call('voidspace:board-read');
+
+    const g = res.shots.find((x: any) => x.id === shotId).graphics[0];
+    expect(g.slots.screenshot).toBe('set');
+    expect(JSON.stringify(res)).not.toContain('secret.png');
+  });
+
+  it('reports the REAL url to the render channel, which is not a tool', async () => {
+    // Rendering needs the actual file. It asks on a channel no model is offered,
+    // which is what lets the digest stay redacted.
+    const shotId = await newShot();
+    const add = await call('voidspace:board-add-graphic', { shotId, block: 'browser-mockup' });
+    await call('voidspace:board-update-graphic', {
+      shotId, graphicId: add.graphicId, slots: { screenshot: 'https://x.test/real.png' },
+    });
+
+    const res = await call('voidspace:board-graphic-fills');
+
+    expect(res.pending).toHaveLength(1);
+    expect(res.pending[0].slots.screenshot).toBe('https://x.test/real.png');
+    expect(res.pending[0].block).toBe('browser-mockup');
+  });
+
+  it('a layer that already has its file is NOT offered for rendering again', async () => {
+    // What makes recompiling cheap. Offering it would tempt the caller into
+    // paying for a render of something that has not changed.
+    const shotId = await newShot();
+    const add = await call('voidspace:board-add-graphic', { shotId, block: 'stat-card' });
+    await call('voidspace:board-update-graphic', {
+      shotId, graphicId: add.graphicId, renderedUrl: 'https://x.test/a.webm', renderHash: 'h1',
+    });
+
+    const res = await call('voidspace:board-graphic-fills');
+
+    expect(res.pending).toEqual([]);
+  });
+
+  it('a layer with no block is never offered for rendering', async () => {
+    const shotId = await newShot();
+    await call('voidspace:board-add-graphic', { shotId });
+    const res = await call('voidspace:board-graphic-fills');
+    expect(res.pending).toEqual([]);
+  });
+
+  it('changing the words INVALIDATES the render, so compile cannot ship stale copy', async () => {
+    const shotId = await newShot();
+    const add = await call('voidspace:board-add-graphic', { shotId, block: 'stat-card' });
+    await call('voidspace:board-update-graphic', {
+      shotId, graphicId: add.graphicId, renderedUrl: 'https://x.test/a.webm', renderHash: 'h1',
+    });
+
+    await call('voidspace:board-update-graphic', {
+      shotId, graphicId: add.graphicId, slots: { stat: '48%' },
+    });
+
+    const res = await call('voidspace:board-graphic-fills');
+    expect(res.pending).toHaveLength(1);
+  });
+
+  it('removes a layer', async () => {
+    const shotId = await newShot();
+    const add = await call('voidspace:board-add-graphic', { shotId, block: 'stat-card' });
+
+    const res = await call('voidspace:board-remove-graphic', {
+      shotId, graphicId: add.graphicId,
+    });
+
+    expect(res.shots.find((x: any) => x.id === shotId).graphics).toEqual([]);
+  });
+
+  it('refuses a graphic id that is not on that shot', async () => {
+    const shotId = await newShot();
+    const res = await call('voidspace:board-remove-graphic', { shotId, graphicId: 'nope' });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe('not_found');
+  });
+
+  it('carries the timing rules through, including the end anchor', async () => {
+    // An end-anchored layer follows a longer take instead of stranding itself
+    // where the shorter one used to finish.
+    const shotId = await newShot();
+    const add = await call('voidspace:board-add-graphic', {
+      shotId, block: 'stat-card', offsetSec: 1.5, durationSec: 2, anchor: 'end',
+    });
+
+    const g = add.shots.find((x: any) => x.id === shotId).graphics[0];
+    expect(g.offsetSec).toBe(1.5);
+    expect(g.durationSec).toBe(2);
+    expect(g.anchor).toBe('end');
+  });
+});
+
+describe('board graphic layers: over or baked', () => {
+  const newShot = async () => {
+    const shots = await call('voidspace:board-add-shots', { titles: ['A'] });
+    return shots.shots[0].id as string;
+  };
+
+  it('reports the mode on every layer, so the agent can advise on the cost', async () => {
+    const shotId = await newShot();
+    await call('voidspace:board-add-graphic', { shotId, block: 'stat-card' });
+
+    const res = await call('voidspace:board-read');
+
+    expect(res.shots.find((x: any) => x.id === shotId).graphics[0].mode).toBe('overlay');
+  });
+
+  it('BLOCKS a bake on a shot with no picture, and says how to fix it', async () => {
+    // Skipping it would make the layer vanish from the render queue and then
+    // from the compile, with nothing anywhere saying why. The user would see an
+    // empty graphic track and conclude the feature is broken.
+    const shotId = await newShot();
+    await call('voidspace:board-add-graphic', { shotId, block: 'stat-card', mode: 'bake' });
+
+    const res = await call('voidspace:board-graphic-fills');
+
+    expect(res.pending).toHaveLength(1);
+    expect(res.pending[0].blocked).toContain('generate this shot first');
+    expect(res.pending[0].backdropUrl).toBeUndefined();
+  });
+
+  it('puts the footage in the BLOCK’S VIDEO SLOT when it declares one', async () => {
+    // The block was laid out around that slot, and it is the whole reason to
+    // bake rather than overlay. A backdrop behind the composition would be
+    // hidden entirely for the 13 starters that paint an opaque #root.
+    const shotId = await newShot();
+    await call('voidspace:board-add-take', {
+      shotId, status: 'ready', url: 'https://example.test/master.mp4', kind: 'video', durationSec: 5,
+    });
+    await call('voidspace:board-add-graphic', { shotId, block: 'video-hero', mode: 'bake' });
+
+    const res = await call('voidspace:board-graphic-fills');
+
+    expect(res.pending[0].slots.clip).toBe('https://example.test/master.mp4');
+    // No backdrop: the block has somewhere better to put it.
+    expect(res.pending[0].backdropUrl).toBeUndefined();
+  });
+
+  it('never overwrites a video slot the user filled themselves', async () => {
+    const shotId = await newShot();
+    await call('voidspace:board-add-take', {
+      shotId, status: 'ready', url: 'https://example.test/master.mp4', kind: 'video', durationSec: 5,
+    });
+    const add = await call('voidspace:board-add-graphic', {
+      shotId, block: 'video-hero', mode: 'bake',
+    });
+    await call('voidspace:board-update-graphic', {
+      shotId, graphicId: add.graphicId, slots: { clip: 'https://example.test/theirs.mp4' },
+    });
+
+    const res = await call('voidspace:board-graphic-fills');
+
+    expect(res.pending[0].slots.clip).toBe('https://example.test/theirs.mp4');
+  });
+
+  it('hands a bake the PLAYING take as its backdrop, at full quality', async () => {
+    const shotId = await newShot();
+    await call('voidspace:board-add-take', {
+      shotId,
+      status: 'ready',
+      url: 'https://example.test/master.mp4',
+      src: 'https://example.test/poster.jpg',
+      kind: 'video',
+      durationSec: 7,
+    });
+    await call('voidspace:board-add-graphic', { shotId, block: 'stat-card', mode: 'bake' });
+
+    const res = await call('voidspace:board-graphic-fills');
+
+    expect(res.pending[0].blocked).toBeUndefined();
+    // The master, never the poster: baking from `src` would blow a still up to
+    // fill the frame.
+    expect(res.pending[0].backdropUrl).toBe('https://example.test/master.mp4');
+    // A bake IS the shot's picture, so it runs as long as the footage does.
+    expect(res.pending[0].durationSec).toBe(7);
+  });
+
+  it('an overlay is rendered at the GRAPHIC\u2019s length, not the footage\u2019s', async () => {
+    // The whole economic argument for overlays. A 3s lower third over a
+    // ten-minute take is three seconds of rendering.
+    const shotId = await newShot();
+    await call('voidspace:board-add-take', {
+      shotId, status: 'ready', url: 'https://example.test/long.mp4', kind: 'video', durationSec: 600,
+    });
+    await call('voidspace:board-add-graphic', { shotId, block: 'stat-card', durationSec: 3 });
+
+    const res = await call('voidspace:board-graphic-fills');
+
+    expect(res.pending[0].durationSec).toBe(3);
+    expect(res.pending[0].backdropUrl).toBeUndefined();
   });
 });

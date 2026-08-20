@@ -88,6 +88,79 @@ export function resolveSlots(shot: SlotShot): ShotSlotView {
   };
 }
 
+/**
+ * A GRAPHIC LAYER'S SLOTS, resolved from ONE flat map.
+ *
+ * ── WHY A LAYER FILLS ITS SLOTS DIFFERENTLY FROM THE BED ─────────────────────
+ * The shot's own graphic fills media slots by ROLE: you drop a picture on the
+ * card, it becomes a `ShotMedia` with `role: 'screenshot'`, and `resolveSlots`
+ * marries the two. That works because a shot has exactly one composition, so a
+ * role can name a slot without ambiguity.
+ *
+ * A shot can have SEVERAL layers, and two of them can be built from the same
+ * block. `role: 'logo'` would then name two different holes, and there would be
+ * no way to say which. So a layer holds its media url directly, keyed by slot —
+ * one map for pictures and words alike, which is also exactly the shape the
+ * render route's `slots` parameter takes.
+ *
+ * The return shape is the same `ShotSlotView` the bed produces, so the card
+ * draws one kind of well and one kind of field either way.
+ */
+export function resolveLayerSlots(
+  blockName: string,
+  values: Record<string, string> | undefined,
+): ShotSlotView {
+  const block = findBlock(blockName ?? '');
+  const vals = values ?? {};
+
+  const media: ResolvedSlot[] = mediaSlots(block).map(slot => {
+    const url = (vals[slot.key] ?? '').trim();
+    return { slot, value: url || undefined, empty: !url };
+  });
+  const valueRows: ResolvedSlot[] = valueSlots(block).map(slot => {
+    const v = (vals[slot.key] ?? '').trim();
+    return { slot, value: v || undefined, empty: !v };
+  });
+
+  const all = (block?.slots ?? []).map(slot =>
+    media.find(m => m.slot.key === slot.key) ?? valueRows.find(v => v.slot.key === slot.key)!,
+  ).filter(Boolean);
+
+  return {
+    block,
+    media,
+    values: valueRows,
+    all,
+    filled: all.filter(s => !s.empty).length,
+    total: all.length,
+  };
+}
+
+/**
+ * A layer's fills, ready for the preview and for the render route.
+ *
+ * The flat-map twin of `slotFills`. Same output shape, so the preview shim and
+ * the render both take one kind of thing however the values were gathered.
+ */
+export function layerFills(
+  blockName: string,
+  values: Record<string, string> | undefined,
+): SlotFillInput[] {
+  const view = resolveLayerSlots(blockName, values);
+  const out: SlotFillInput[] = [];
+  for (const r of view.all) {
+    if (!r.value) continue;
+    out.push({
+      key: r.slot.key,
+      kind: r.slot.kind as SlotFillInput['kind'],
+      value: r.value,
+      sel: r.slot.sel,
+      cssVar: r.slot.cssVar,
+    });
+  }
+  return out;
+}
+
 /** One resolved slot, in the shape the renderer patches with. */
 export interface SlotFillInput {
   key: string;

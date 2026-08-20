@@ -25,8 +25,8 @@ import { perRev } from '../board/doc-cache';
 import { planBoard, type BoardPlan } from './layout';
 import {
   SHOT_GAP, SHOT_H, SHOT_W, normaliseTag,
-  type MediaRole, type RefKind, type ShotBlockModel, type ShotKind, type ShotMedia,
-  type ShotTake,
+  type MediaRole, type RefKind, type ShotBlockModel, type ShotGraphic, type ShotKind,
+  type ShotMedia, type ShotTake,
 } from './model';
 import { readParsed } from './screenplay-doc';
 
@@ -57,6 +57,8 @@ export interface ShotView {
   composition: string;
   /** Values for that block's declared slots. */
   compositionVars: Record<string, string>;
+  /** Graphic layers over this shot's picture, bottom-most first. */
+  graphics: ShotGraphic[];
   /** Which screenplay scene this shot covers. '' when off-script. */
   sceneKey: string;
   x: number;
@@ -231,6 +233,16 @@ function viewOf(std: BlockStdScope, id: string, x: number): ShotView | null {
      * rather than these objects.
      */
     compositionVars: { ...(p.compositionVars ?? {}) },
+    /**
+     * FLATTENED TWO DEEP, and the second level is the one that matters.
+     *
+     * `{ ...g }` alone would copy the layer but hand `slots` straight through as
+     * the live Yjs proxy — and a proxy anywhere inside the message is what kills
+     * the WHOLE postMessage, not just the field. That is the exact failure
+     * `compositionVars` was fixed for above; a nested map is the same trap one
+     * level down, where it is easier to miss.
+     */
+    graphics: (p.graphics ?? []).map(g => ({ ...g, slots: { ...(g.slots ?? {}) } })),
     sceneKey: p.sceneKey ?? '',
     x,
   };
@@ -631,6 +643,147 @@ export function removeTake(std: BlockStdScope, shotId: string, takeId: string): 
     std.store.updateBlock(block.model, { chosenTakeId: '' });
   }
   return true;
+}
+
+/**
+ * THE GRAPHICS LIST, edited in place — backfilled if missing.
+ *
+ * Identical to `editTakes`, and for the identical reason: `graphics` did not
+ * exist when every board currently on disk was made, and a BlockSuite schema
+ * default only applies to blocks created AFTERWARDS. A helper that bailed on a
+ * missing list would make "add a graphic" do nothing, silently, on exactly the
+ * boards holding real work. Seed the key, then act.
+ */
+function editGraphics<T>(
+  std: BlockStdScope,
+  shotId: string,
+  edit: (list: ShotGraphic[]) => T | null,
+): T | null {
+  const block = std.store.getBlock(shotId);
+  if (!block) return null;
+  const props = block.model.props as { graphics?: ShotGraphic[] };
+  std.store.captureSync();
+  if (!props.graphics) {
+    // Seed the key, then re-read: the reactive proxy hands back the live
+    // Y-backed array only after the prop exists.
+    std.store.updateBlock(block.model, { graphics: [] });
+  }
+  const list = (block.model.props as { graphics?: ShotGraphic[] }).graphics;
+  if (!list) return null;
+  let result: T | null = null;
+  std.store.updateBlock(block.model, () => { result = edit(list) ?? null; });
+  return result;
+}
+
+/** Defaults for a layer somebody has just added and not yet configured. A layer
+ *  with no block is a legal, visible state — the card shows a picker. */
+export function addGraphic(
+  std: BlockStdScope,
+  shotId: string,
+  graphic: Partial<Omit<ShotGraphic, 'id'>> = {},
+): string | null {
+  const entry: ShotGraphic = {
+    id: mediaId(),
+    block: '',
+    slots: {},
+    // OVERLAY unless the caller says otherwise. It is the non-destructive one:
+    // nothing is bound to a take, nothing has to be re-rendered to be moved, and
+    // the cost is the graphic's length rather than the footage's. A caller that
+    // knows the block passes `defaultGraphicMode(block.overlay)`.
+    mode: 'overlay',
+    offsetSec: 0,
+    // 0 = "to the end of the shot", which is what a lower third usually wants
+    // and what someone who never opens the timing control should get.
+    durationSec: 0,
+    anchor: 'start',
+    ...graphic,
+  };
+  return editGraphics(std, shotId, list => {
+    list.splice(list.length, 0, entry);
+    return entry.id;
+  });
+}
+
+/**
+ * Change one layer, field by field.
+ *
+ * ── CHANGING WHAT IS RENDERED INVALIDATES THE RENDER ─────────────────────────
+ * `renderedUrl` and `renderHash` describe a FILE that was made from a specific
+ * block, values and length. Edit any of those and the file no longer matches —
+ * so they are cleared here rather than left for compile to notice. Leaving them
+ * would make the next compile look at a stale hash, decide nothing had changed,
+ * and ship the old graphic with the old words on it.
+ *
+ * A patch that only sets render results (compile writing back what it made)
+ * does NOT clear them, or compile could never record anything.
+ */
+export function updateGraphic(
+  std: BlockStdScope,
+  shotId: string,
+  graphicId: string,
+  patch: Partial<Omit<ShotGraphic, 'id'>>,
+): boolean {
+  return editGraphics(std, shotId, list => {
+    const target = list.find(g => g.id === graphicId);
+    if (!target) return null;
+    /**
+     * WHAT CHANGES THE FILE, as opposed to where the file is placed.
+     *
+     * `mode` is in this list and `offsetSec` / `anchor` are not, and the split
+     * matters: an overlay is rendered transparent and a bake has the footage
+     * composited into it, so switching between them produces a genuinely
+     * different picture. Moving a layer half a second does not.
+     */
+    const touchesOutput = ['block', 'slots', 'durationSec', 'mode'].some(k => k in patch);
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === undefined) continue;
+      (target as unknown as Record<string, unknown>)[k] = v;
+    }
+    if (touchesOutput && !('renderedUrl' in patch)) {
+      target.renderedUrl = '';
+      target.renderHash = '';
+      target.renderedDurationSec = 0;
+      target.error = '';
+    }
+    return true;
+  }) ?? false;
+}
+
+/** Drop a layer. The rendered file is left in the Library — it may already be
+ *  cut into a film, and this only says the shot no longer asks for it. */
+export function removeGraphic(std: BlockStdScope, shotId: string, graphicId: string): boolean {
+  return editGraphics(std, shotId, list => {
+    const at = list.findIndex(g => g.id === graphicId);
+    if (at < 0) return null;
+    list.splice(at, 1);
+    return true;
+  }) ?? false;
+}
+
+/**
+ * Move a layer within the stack.
+ *
+ * ORDER IS Z-ORDER, and it reads the way the card draws it: index 0 is the
+ * bottom layer, the last entry is on top. That matches how the card lists them
+ * (first added, first drawn) and is the opposite of the TIMELINE's convention,
+ * which is why the loader inverts it in one place rather than everyone
+ * remembering to.
+ */
+export function reorderGraphic(
+  std: BlockStdScope,
+  shotId: string,
+  graphicId: string,
+  toIndex: number,
+): boolean {
+  return editGraphics(std, shotId, list => {
+    const from = list.findIndex(g => g.id === graphicId);
+    if (from < 0) return null;
+    const to = Math.max(0, Math.min(list.length - 1, Math.floor(toIndex)));
+    if (to === from) return true;
+    const [entry] = list.splice(from, 1);
+    list.splice(to, 0, entry);
+    return true;
+  }) ?? false;
 }
 
 /**

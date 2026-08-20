@@ -179,12 +179,17 @@ export function mergeSavedArrangement(rebuilt: Project, saved: Project): Project
 
   /**
    * A TRACK THE SAVED PROJECT HAS NEVER HAD — a "Take 2" that appeared because
-   * the user generated an alternate since they last saved.
+   * the user generated an alternate since they last saved, or a "Graphic 1"
+   * because they laid a lower third over a shot.
    *
    * Inserted before the first VIDEO track rather than appended, because array
    * order is z-order here and appending would put it at the BOTTOM of the
-   * stack, underneath the footage it is an alternate to. Same rule the rebuild
+   * stack, underneath the footage it belongs over. Same rule the rebuild
    * follows; see the note there.
+   *
+   * Both prefixes, for the same reason and with the same fix. A graphic
+   * appended below the picture is not subtly wrong — it is invisible, and the
+   * user's report is "the overlay did nothing".
    */
   for (const t of rebuilt.timeline.tracks) {
     if (savedTrackIds.has(t.id)) continue;
@@ -192,7 +197,8 @@ export function mergeSavedArrangement(rebuilt: Project, saved: Project): Project
     if (!add?.length) continue;
     const fresh: Track = { ...t, clips: add.map(shift) };
     const firstVideo = tracks.findIndex((x) => x.type === "video");
-    if (t.id.startsWith("track-take-") && firstVideo >= 0) tracks.splice(firstVideo, 0, fresh);
+    const stacksOnTop = t.id.startsWith("track-take-") || t.id.startsWith("track-graphic-");
+    if (stacksOnTop && firstVideo >= 0) tracks.splice(firstVideo, 0, fresh);
     else tracks.push(fresh);
   }
 
@@ -289,6 +295,106 @@ export function buildTakeTracks(clipsBySlot: Map<number, Clip[]>): Track[] {
       locked: false,
       hidden: true,
       muted: true,
+      solo: false,
+    });
+  }
+  return out;
+}
+
+/**
+ * The GRAPHIC LAYER tracks — the take tracks' twin, and deliberately so.
+ *
+ * ── AN ORDINARY VIDEO TRACK, AND THAT IS THE DESIGN ──────────────────────────
+ * A rendered graphic IS a video: an alpha WebM that composites over whatever is
+ * below it. So it goes on `type: "video"` like everything else, and every
+ * feature the editor already has — trim, move, razor, opacity, transitions,
+ * save and load — works on it because there is nothing new to teach. The id and
+ * the NAME are what make it recognisable; nothing keys behaviour off either.
+ *
+ * The one thing that IS special is where it sits in the array, and that is not
+ * a graphics rule — it is the z-order rule every pixel track obeys.
+ *
+ * ── ONE TRACK PER LAYER POSITION, NOT PER SHOT ───────────────────────────────
+ * Every shot's first layer shares "Graphic 1". A track per shot would give a
+ * forty-shot film forty near-empty rows; per position gives it as many rows as
+ * the busiest shot has layers, which is almost always one or two.
+ *
+ * ── VISIBLE AND UNMUTED, WHICH IS THE INVERSE OF A TAKE TRACK ────────────────
+ * Takes are alternates you audition, so they arrive hidden and muted. A graphic
+ * is part of the picture — it is supposed to be on screen — so it arrives
+ * playing. Unmuted rather than muted because these renders carry no audio at
+ * all; muting them would be a flag that means nothing and that somebody would
+ * later have to explain.
+ *
+ * Highest layer number FIRST, so Graphic 2 ends up above Graphic 1 above the
+ * picture — matching the card, where the last layer in the list is on top.
+ */
+/**
+ * WHERE A GRAPHIC LAYER SITS INSIDE ITS SHOT.
+ *
+ * ── WHY THIS LIVES HERE AND NOT ON THE BOARD ─────────────────────────────────
+ * The board stores a RULE — an offset, an anchor and a hold — never a position,
+ * because the shot's real length is whatever take the user finally picks. Only
+ * this loop knows that number. An earlier draft had a twin of this function on
+ * the board that nothing called: it was tested, it looked authoritative, and it
+ * disagreed with the code that actually runs on exactly the case below. Deleted,
+ * so there is one rule and it is the one that executes.
+ *
+ * ── THE FILE'S OWN LENGTH IS A CEILING ───────────────────────────────────────
+ * `hold: 0` means "for the whole shot", and taken literally that would stretch a
+ * 3-second render across an 8-second shot — five seconds frozen on its last
+ * frame, which reads as a stall rather than a design. So a layer never plays
+ * longer than the file it was rendered from.
+ *
+ * All three inputs are clamped, because every one of them can arrive wrong from
+ * a real board: a hold longer than the shot, an offset past the end, an
+ * end-anchored layer on a take shorter than itself.
+ */
+export function resolveGraphicWindow(
+  layer: { offsetSec?: number; holdSec?: number; anchor?: string },
+  slotStart: number,
+  slotSec: number,
+  fileSec: number,
+): { startTime: number; duration: number } {
+  const slot = Math.max(0, Number(slotSec) || 0);
+  const file = Math.max(0, Number(fileSec) || 0);
+  const offset = Math.max(0, Number(layer.offsetSec) || 0);
+  const hold = Math.max(0, Number(layer.holdSec) || 0);
+  // What it was ASKED to run for: its own hold, else the file, else the shot.
+  const asked = hold || file || slot;
+
+  const startTime = layer.anchor === "end"
+    // Counted back from the end, so it follows a longer take instead of
+    // stranding itself where the shorter one used to finish.
+    ? Math.max(slotStart, slotStart + slot - offset - asked)
+    : Math.min(slotStart + offset, slotStart + slot);
+
+  const duration = Math.max(0, Math.min(
+    asked,
+    // Never runs into the next shot.
+    slotStart + slot - startTime,
+    // Never outlives the render it came from.
+    file || asked,
+  ));
+
+  return { startTime, duration };
+}
+
+export function buildGraphicTracks(clipsByLayer: Map<number, Clip[]>): Track[] {
+  const out: Track[] = [];
+  const layers = [...clipsByLayer.keys()].sort((a, b) => b - a);   // highest first
+  for (const layer of layers) {
+    const clips = clipsByLayer.get(layer) ?? [];
+    if (!clips.length) continue;
+    out.push({
+      id: `track-graphic-${layer}`,
+      type: "video",
+      name: `Graphic ${layer}`,
+      clips,
+      transitions: [],
+      locked: false,
+      hidden: false,
+      muted: false,
       solo: false,
     });
   }
@@ -1820,6 +1926,12 @@ export async function loadSceneListAsProject(
    */
   const alternateTakeClips = new Map<number, Clip[]>();
   /**
+   * The GRAPHIC LAYERS, keyed by layer position — the same idea as the takes
+   * above, for the same reason: every shot's first layer shares "Graphic 1", so
+   * a forty-shot film gets one or two extra rows rather than forty.
+   */
+  const graphicLayerClips = new Map<number, Clip[]>();
+  /**
    * Screenplay sequences, as stretches of the finished timeline.
    *
    * Filled as the scene loop walks the film, because that loop is the only
@@ -2332,6 +2444,101 @@ export async function loadSceneListAsProject(
         keyframes: [],
       });
       alternateTakeClips.set(takeSlot, list);
+    }
+
+    /**
+     * ── THE GRAPHICS LAID OVER THIS SHOT ─────────────────────────────────────
+     *
+     * Each layer is an alpha WebM rendered from a HyperFrames block, placed on
+     * its own ordinary video track ABOVE the picture, where the compositor
+     * blends it over whatever is playing.
+     *
+     * ── THE WINDOW IS RESOLVED HERE, AND ONLY HERE ───────────────────────────
+     * The board stores an offset and an anchor, never a timeline position,
+     * because the shot's length is whatever the CHOSEN TAKE measures — which is
+     * `sceneDuration`, known at this exact point and nowhere earlier. Resolving
+     * it at compile time would bake in the length of whichever take happened to
+     * be ticked, and the graphic would be in the wrong place the moment somebody
+     * swapped it.
+     *
+     * ── CLAMPED TO THE SHOT, DELIBERATELY ────────────────────────────────────
+     * A 5s lower third on a shot whose chosen take runs 4s is trimmed to 4s
+     * rather than allowed to run into the next shot. A graphic that outlives its
+     * scene reads as the editor having lost the cut, and it is the one failure
+     * that survives all the way to a published video.
+     */
+    const graphicList = Array.isArray((scene as any).graphic_layers)
+      ? ((scene as any).graphic_layers as any[])
+      : [];
+    let layerSlot = 0;
+    for (const g of graphicList) {
+      const gUrl = String(g?.url ?? "");
+      if (!gUrl) continue;
+      layerSlot += 1;
+
+      const resolvedG = await resolveMediaUrl(gUrl);
+      if (!resolvedG) continue;
+
+      const fileDur = Number(g?.duration_sec) > 0 ? Number(g.duration_sec) : 0;
+      const { startTime: start, duration } = resolveGraphicWindow(
+        {
+          offsetSec: Number(g?.offset_sec) || 0,
+          holdSec: Number(g?.hold_sec) || 0,
+          anchor: g?.anchor === "end" ? "end" : "start",
+        },
+        currentTime,
+        sceneDuration,
+        fileDur,
+      );
+      // A layer with nowhere left to play is dropped rather than added at zero
+      // length, which the timeline draws as an unselectable sliver.
+      if (duration <= 0.01) continue;
+
+      const gId = String(g?.id ?? "");
+      const gMediaId = `media-graphic-${idKey}-${gId || layerSlot}`;
+
+      mediaItems.push({
+        id: gMediaId,
+        name: `Scene ${scene.scene_number} · ${String(g?.label || g?.block || `Graphic ${layerSlot}`)}`,
+        type: "video",
+        fileHandle: null,
+        // No blob, for the same reason a take has none: the url is durable and
+        // the editor fetches on demand. A film with a lower third on every shot
+        // would otherwise pre-fetch one render per shot just to open.
+        blob: null,
+        metadata: mediaMeta({ duration: fileDur || duration, fileSize: 0 }),
+        thumbnailUrl: null,
+        waveformData: null,
+        originalUrl: resolvedG,
+        // Its own bucket in the Assets panel. A graphic is neither scene footage
+        // nor an alternate take, and filing it as either makes a shot look like
+        // it has material it does not.
+        category: "Graphics",
+        sceneNumber: scene.scene_number,
+        shotId: scene.source_shot_id,
+        role: "graphic",
+      });
+
+      const list = graphicLayerClips.get(layerSlot) ?? [];
+      list.push({
+        id: `clip-graphic-${idKey}-${gId || layerSlot}`,
+        shotId: scene.source_shot_id,
+        mediaId: gMediaId,
+        trackId: `track-graphic-${layerSlot}`,
+        startTime: start,
+        duration,
+        inPoint: 0,
+        outPoint: duration,
+        effects: [],
+        audioEffects: [],
+        transform: makeDefaultTransform(),
+        // These renders carry no audio. 1 rather than 0 so the clip behaves like
+        // any other if the user later replaces its media with something that
+        // does — a silent-by-flag clip is a trap nobody remembers setting.
+        volume: 1,
+        keyframes: [],
+      });
+      graphicLayerClips.set(layerSlot, list);
     }
 
     // ── Still clip (scenes with no moving picture) ──
@@ -2901,6 +3108,17 @@ export async function loadSceneListAsProject(
    * "Take 2", so unhiding it shows the alternate for exactly the shots that have
    * one and leaves every other shot showing what it showed.
    */
+  /**
+   * GRAPHICS FIRST, THEN TAKES, THEN THE PICTURE.
+   *
+   * Array order is z-order — a lower index paints last, and therefore on top —
+   * so pushing graphics before the take tracks is what puts a lower third over
+   * BOTH the playing take and any alternate the user unhides to compare.
+   *
+   * Getting this order wrong is not subtly wrong: a graphic under the footage is
+   * invisible, and the report is "the overlay did nothing".
+   */
+  for (const t of buildGraphicTracks(graphicLayerClips)) tracks.push(t);
   for (const t of buildTakeTracks(alternateTakeClips)) tracks.push(t);
 
   tracks.push({

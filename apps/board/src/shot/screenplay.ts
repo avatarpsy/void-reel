@@ -58,7 +58,7 @@
 import type { BlockStdScope } from '@blocksuite/std';
 
 import {
-  chosenTake, readyTakes, roleLabel, formatTime, isTimed, trimWindow,
+  chosenTake, readyGraphics, readyTakes, roleLabel, formatTime, isTimed, trimWindow,
   type MediaRole, type RefKind, type ShotMedia,
 } from './model';
 import { effectiveModel, referenceTag } from './models';
@@ -161,6 +161,62 @@ export interface CompiledShot {
    * pipeline should generate the scene rather than assemble it.
    */
   takes?: CompiledTake[];
+  /**
+   * GRAPHIC LAYERS OVER THIS SHOT'S PICTURE, bottom-most first.
+   *
+   * Independent of `kind`, and that is the point: they travel the same whether
+   * the picture underneath is a generated clip, a recorded take or a graphic
+   * bed. Omitted entirely when the shot has none, which is every shot made
+   * before layers existed.
+   *
+   * Only RENDERED layers travel. One that names a block but has no file yet
+   * would arrive on the timeline as a hole — the same rule takes follow.
+   */
+  graphics?: CompiledGraphic[];
+}
+
+/** One rendered graphic layer, as compile hands it over. */
+export interface CompiledGraphic {
+  /** Stable id from the board. Lets a timeline clip say which layer it is. */
+  id: string;
+  /** The block it was rendered from. Shown on the clip, and what a re-render
+   *  reuses. */
+  block: string;
+  /**
+   * HOW THIS MEETS THE PICTURE.
+   *
+   *   overlay — an alpha clip the editor composites over the shot, on its own
+   *             track. `url` is transparent.
+   *   bake    — the shot's footage is already inside this render, so `url` IS
+   *             the shot's picture and there is nothing to composite it over.
+   *
+   * Carried explicitly rather than inferred from the container, because "is it
+   * a webm" is a fact about the file and this is a fact about the EDIT.
+   */
+  mode: 'overlay' | 'bake';
+  /** The rendered clip — full quality. Transparent for an overlay, opaque and
+   *  containing the footage for a bake. */
+  url: string;
+  /** Measured length of that file. */
+  durationSec: number;
+  /**
+   * Seconds from the shot's start, or from its end when `anchor` is `end`.
+   *
+   * Deliberately NOT resolved to a timeline position here. The shot's slot is
+   * worth whatever the CHOSEN TAKE measures, and that is decided when the
+   * timeline is built — resolving it at compile time would bake in the length
+   * of whichever take happened to be ticked and put the graphic in the wrong
+   * place the moment somebody swapped it.
+   */
+  offsetSec: number;
+  /** How long it was asked to stay up. 0 = to the end of the shot. */
+  holdSec: number;
+  /** Which end of the shot it holds when a take changes the shot's length. */
+  anchor: 'start' | 'end';
+  /** Voidspace Library id, so the editor can relink it later. */
+  mediaId?: string;
+  /** Names the track it lands on. */
+  label: string;
 }
 
 /** One generated attempt, as compile hands it over. */
@@ -369,6 +425,31 @@ export function compileBoard(
           }))
       : [];
 
+    /**
+     * THE LAYERS THAT ACTUALLY HAVE SOMETHING TO SHOW.
+     *
+     * `readyGraphics` is the same gate `readyTakes` applies: a layer that names
+     * a block but has not been rendered yet has no file, and a clip with no url
+     * arrives on the timeline as a hole rather than as a graphic.
+     *
+     * Order is preserved — the board lists them bottom-most first — because the
+     * loader turns that order into z-order, and a stack that reshuffled between
+     * the card and the film would be unexplainable.
+     */
+    const compiledGraphics: CompiledGraphic[] = readyGraphics(shot.graphics)
+      .map((g, gi) => ({
+        id: g.id,
+        block: g.block,
+        mode: g.mode === 'bake' ? 'bake' as const : 'overlay' as const,
+        url: g.renderedUrl!,
+        durationSec: Number(g.renderedDurationSec) || 0,
+        offsetSec: Number(g.offsetSec) || 0,
+        holdSec: Number(g.durationSec) || 0,
+        anchor: g.anchor === 'end' ? 'end' as const : 'start' as const,
+        ...(g.mediaId ? { mediaId: g.mediaId } : {}),
+        label: g.block || `Graphic ${gi + 1}`,
+      }));
+
     return {
       n: i + 1,
       id: shot.id,
@@ -407,6 +488,7 @@ export function compileBoard(
       ...(isGraphic && graphicSlots.length ? { slots: graphicSlots } : {}),
       references: ordered.map(m => toReference(m, referenceTag(caps, ordered, m.id))),
       ...(compiledTakes.length ? { takes: compiledTakes } : {}),
+      ...(compiledGraphics.length ? { graphics: compiledGraphics } : {}),
     };
   });
 

@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
+  buildGraphicTracks,
+  resolveGraphicWindow,
   buildTakeTracks,
   sceneIdKey,
   mergeSavedArrangement,
@@ -448,5 +450,159 @@ describe("buildTakeTracks", () => {
     const [t] = buildTakeTracks(new Map([[2, [clip("a", "track-take-2")]]]));
     expect(t.locked).toBe(false);
     expect(t.solo).toBe(false);
+  });
+});
+
+/**
+ * THE GRAPHIC LAYER TRACKS.
+ *
+ * A rendered graphic is an ORDINARY VIDEO TRACK — that is the design, and it is
+ * what makes trim, razor, opacity, transitions, save and load work on it with
+ * nothing new taught to the editor. What is special is only where it sits in the
+ * array, which is the z-order rule every pixel track already obeys.
+ *
+ * These rules are invisible in the running product until they are wrong, and
+ * when they are wrong the graphic is not subtly misplaced — it is behind the
+ * footage, which reads as "the overlay did nothing".
+ */
+describe("buildGraphicTracks", () => {
+  const clip = (id: string, trackId: string) => ({
+    id, mediaId: `m-${id}`, trackId, startTime: 0, duration: 3,
+    inPoint: 0, outPoint: 3, effects: [], audioEffects: [],
+    transform: {} as any, volume: 1, keyframes: [],
+  }) as any;
+
+  it("is empty when no shot has a graphic over it", () => {
+    expect(buildGraphicTracks(new Map())).toEqual([]);
+  });
+
+  it("orders HIGHEST layer first, so Graphic 2 sits above Graphic 1", () => {
+    // Array order is z-order and a LOWER index paints on top. The card lists
+    // layers bottom-most first, so the last one there must be the first here —
+    // otherwise the stack the user built is inverted in the film.
+    const tracks = buildGraphicTracks(new Map([
+      [1, [clip("a", "track-graphic-1")]],
+      [2, [clip("b", "track-graphic-2")]],
+    ]));
+    expect(tracks.map((t) => t.id)).toEqual(["track-graphic-2", "track-graphic-1"]);
+  });
+
+  it("is VISIBLE and UNMUTED — the inverse of a take track, deliberately", () => {
+    // A take is an alternate you audition; a graphic is part of the picture and
+    // is supposed to be on screen. Shipping these hidden would mean every
+    // overlay the user designed arrived switched off.
+    const [t] = buildGraphicTracks(new Map([[1, [clip("a", "track-graphic-1")]]]));
+    expect(t.hidden).toBe(false);
+    expect(t.muted).toBe(false);
+  });
+
+  it("is an ORDINARY VIDEO TRACK, named so it can be recognised", () => {
+    // Not a new track TYPE. Everything that saves, loads and renders a timeline
+    // already handles `video`; a bespoke type would need all of it taught again
+    // and would break saving a project that contains one.
+    const [t] = buildGraphicTracks(new Map([[1, [clip("a", "track-graphic-1")]]]));
+    expect(t.type).toBe("video");
+    expect(t.name).toBe("Graphic 1");
+    expect(t.id).toBe("track-graphic-1");
+  });
+
+  it("skips a layer position with no clips rather than adding an empty row", () => {
+    const tracks = buildGraphicTracks(new Map([
+      [1, [clip("a", "track-graphic-1")]],
+      [2, []],
+    ]));
+    expect(tracks.map((t) => t.id)).toEqual(["track-graphic-1"]);
+  });
+
+  it("leaves the clips exactly as given — placement is decided upstream", () => {
+    // Where a layer sits depends on the chosen take's measured length, which the
+    // scene loop knows and this function does not. Retiming here would slide a
+    // lower third off the shot it names.
+    const clips = [clip("a", "track-graphic-1")];
+    const [t] = buildGraphicTracks(new Map([[1, clips]]));
+    expect(t.clips).toBe(clips);
+  });
+
+  it("is not locked and not soloed", () => {
+    const [t] = buildGraphicTracks(new Map([[1, [clip("a", "track-graphic-1")]]]));
+    expect(t.locked).toBe(false);
+    expect(t.solo).toBe(false);
+  });
+});
+
+/**
+ * WHERE A GRAPHIC LAYER SITS INSIDE ITS SHOT.
+ *
+ * The board stores a RULE, never a position, because the shot's real length is
+ * whatever take the user finally picks. These tests pin the resolution of that
+ * rule against the code the timeline actually runs -- an earlier draft had a
+ * twin of this on the board that nothing called, which tested a behaviour the
+ * product did not have.
+ */
+describe("resolveGraphicWindow", () => {
+  const layer = (over: Record<string, unknown> = {}) =>
+    ({ offsetSec: 0, holdSec: 0, anchor: "start", ...over });
+
+  it("runs the whole shot when the render is long enough to cover it", () => {
+    expect(resolveGraphicWindow(layer(), 0, 8, 12))
+      .toEqual({ startTime: 0, duration: 8 });
+  });
+
+  it("NEVER outlives the file it was rendered from", () => {
+    // "For the whole shot" taken literally would stretch a 3s render across an
+    // 8s shot -- five seconds frozen on its last frame, which reads as a stall
+    // rather than a design. This is the case the deleted board twin got wrong.
+    expect(resolveGraphicWindow(layer(), 0, 8, 3))
+      .toEqual({ startTime: 0, duration: 3 });
+  });
+
+  it("an offset shortens what is left and never runs into the next shot", () => {
+    expect(resolveGraphicWindow(layer({ offsetSec: 1.5, holdSec: 10 }), 0, 8, 10))
+      .toEqual({ startTime: 1.5, duration: 6.5 });
+  });
+
+  it("places the layer against the SHOT, not against the timeline origin", () => {
+    // Shot three starts 20s in. A layer that ignored the slot start would land
+    // over the opening shot instead.
+    expect(resolveGraphicWindow(layer({ offsetSec: 1 }), 20, 8, 3))
+      .toEqual({ startTime: 21, duration: 3 });
+  });
+
+  it("a start-anchored layer stays put when a longer take arrives", () => {
+    // THE take invariant. The user generates an 8s alternate to a 5s take and
+    // picks it; the speaker's name still appears when the speaker does.
+    const g = layer({ offsetSec: 0.5, holdSec: 3 });
+    expect(resolveGraphicWindow(g, 0, 5, 3)).toEqual({ startTime: 0.5, duration: 3 });
+    expect(resolveGraphicWindow(g, 0, 8, 3)).toEqual({ startTime: 0.5, duration: 3 });
+  });
+
+  it("an end-anchored layer FOLLOWS the new ending", () => {
+    // The other half of the same invariant. An end card measured from the start
+    // would land in the middle of a longer take, over live footage.
+    const g = layer({ anchor: "end", holdSec: 2 });
+    expect(resolveGraphicWindow(g, 0, 5, 2)).toEqual({ startTime: 3, duration: 2 });
+    expect(resolveGraphicWindow(g, 0, 8, 2)).toEqual({ startTime: 6, duration: 2 });
+  });
+
+  it("an end-anchored layer with an offset holds off the end by that much", () => {
+    expect(resolveGraphicWindow(layer({ anchor: "end", offsetSec: 1, holdSec: 2 }), 0, 10, 2))
+      .toEqual({ startTime: 7, duration: 2 });
+  });
+
+  it("never produces a start before the shot or a negative length", () => {
+    // A chosen take shorter than the layer asked for. Clamping here is what
+    // stops a clip with a negative start reaching the timeline, where it is a
+    // crash rather than a bad edit.
+    expect(resolveGraphicWindow(layer({ anchor: "end", holdSec: 9 }), 0, 3, 9))
+      .toEqual({ startTime: 0, duration: 3 });
+    expect(resolveGraphicWindow(layer({ offsetSec: 12, holdSec: 4 }), 0, 3, 4))
+      .toEqual({ startTime: 3, duration: 0 });
+  });
+
+  it("falls back to the shot when nothing knows the file length", () => {
+    // A layer whose render never reported a duration. Better to hold for the
+    // shot than to drop it.
+    expect(resolveGraphicWindow(layer(), 0, 6, 0))
+      .toEqual({ startTime: 0, duration: 6 });
   });
 });

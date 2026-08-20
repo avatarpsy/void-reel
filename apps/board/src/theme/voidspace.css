@@ -332,6 +332,27 @@ editor-host {
 }
 .vs-board-btn--primary:hover { background: var(--vs-accent-a); color: #fff; }
 
+/* SEND TO EDITOR — the way OUT of the board.
+   Outlined rather than filled: "Add shot" is already the bar's filled primary,
+   and two solid buttons at opposite ends of one strip read as a choice between
+   them rather than as a beginning and an end. The accent border is enough to
+   say this one finishes something. */
+.vs-board-btn--send {
+  border: 1px solid var(--vs-accent-b);
+  color: var(--vs-accent-b);
+  margin-left: 2px;
+}
+.vs-board-btn--send:hover { background: var(--vs-accent-b); color: #fff; }
+/* Busy: no hover response and no pointer, because pressing again during a
+   render would queue a second one. */
+.vs-board-btn--send[data-busy] {
+  opacity: 0.72;
+  cursor: default;
+  border-color: var(--vs-border);
+  color: var(--vs-text-dim);
+}
+.vs-board-btn--send[data-busy]:hover { background: transparent; color: var(--vs-text-dim); }
+
 .vs-board-empty__card .vs-board-btn--primary {
   height: 36px;
   padding: 0 16px;

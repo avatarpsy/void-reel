@@ -40,8 +40,9 @@ import { pendingToast } from '../ui/toast';
 import { renderBoardThumbnail } from '../board/thumbnail';
 import { compileBoard, describeShot } from '../shot/screenplay';
 import {
-  MEDIA_ROLES, REF_KINDS, SHOT_H, SHOT_W, chosenTake, isTimed, normaliseShotKind, rolesFor,
-  trimWindow, type MediaRole, type RefKind, type ShotTake,
+  MEDIA_ROLES, REF_KINDS, SHOT_H, SHOT_W, checkGraphic, chosenTake, defaultGraphicMode,
+  isTimed, normaliseShotKind, rolesFor, trimWindow,
+  type MediaRole, type RefKind, type ShotTake,
 } from '../shot/model';
 
 /** Accepted `source` values, so a typo becomes the safe default rather than a
@@ -84,9 +85,9 @@ import {
   plannedSeconds, referenceTag, resolutionFor, setModelCatalogue, type ModelCaps,
 } from '../shot/models';
 import {
-  addMedia, addTake, chooseTake, createShots, deleteShot, moveMedia, readShot, readShots,
-  relayoutShots, removeMedia, removeTake, setMediaRole, setShotFields, shotAtPoint, tagMedia,
-  trimMedia, updateTake,
+  addGraphic, addMedia, addTake, chooseTake, createShots, deleteShot, moveMedia, readShot,
+  readShots, relayoutShots, removeGraphic, removeMedia, removeTake, setMediaRole, setShotFields,
+  shotAtPoint, tagMedia, trimMedia, updateGraphic, updateTake,
 } from '../shot/shots';
 import { ensureVisible, fitBoard } from '../ui/viewport';
 
@@ -255,7 +256,24 @@ function digest(board: MountedBoard) {
       // invitation for the agent to start reasoning about a model that will
       // never run. It also decides @-tag numbering, which a block does not use.
       const caps = s.kind === 'hyperframes' ? null : effectiveModel(s.model);
-      const warnings = checkShot(s);
+      /**
+       * THE SHOT'S WARNINGS AND ITS LAYERS' WARNINGS, in ONE list.
+       *
+       * The card draws layer warnings on the layer row, where the person who set
+       * it is looking. The agent has no rows — it has this list — so keeping
+       * them separate meant it could add a full-frame block as an overlay, be
+       * told nothing, and only find out when the finished video had a graphic
+       * covering the shot.
+       *
+       * Prefixed with the block name, because "will cover the picture" is
+       * useless on a shot carrying three layers.
+       */
+      const hasPicture = !!chosenTake(s.takes, s.chosenTakeId);
+      const warnings = [
+        ...checkShot(s).map(w => w.message),
+        ...(s.graphics ?? []).flatMap(g =>
+          checkGraphic(g, findBlock(g.block), hasPicture).map(m => `${g.block || 'graphic'}: ${m}`)),
+      ];
       const credits = estimateShotCredits(s);
       return {
         id: s.id,
@@ -348,9 +366,46 @@ function digest(board: MountedBoard) {
          * fallback the card draws and compile will use, so all three agree.
          */
         chosenTakeId: chosenTake(s.takes, s.chosenTakeId)?.id ?? '',
+        /**
+         * WHAT IS DRAWN OVER THIS SHOT.
+         *
+         * Reported on every shot, not only graphics: a layer runs over footage
+         * and over a graphic bed alike, and an agent that could only see them on
+         * one kind would keep proposing to "add a lower third" to a clip that
+         * already has one.
+         *
+         * NO URLS, the same rule the media and take lists follow. `rendered` is
+         * the one bit that matters — whether this layer has a file yet — and it
+         * is what separates "the user has designed this" from "it is ready to
+         * travel to the editor".
+         *
+         * `slots` carries KEYS ONLY for media, values for words. A slot filled
+         * with a picture is filled with a signed url, and putting a dozen of
+         * those in every read is exactly the context burn the rule exists to
+         * prevent — while "screenshot: set" is all the agent needs to know.
+         */
+        graphics: s.graphics.map((g, gi) => ({
+          id: g.id,
+          order: gi,
+          block: g.block,
+          // OVER the picture, or burned INTO it. The agent cannot advise on a
+          // layer without knowing which, and the two have opposite costs.
+          mode: g.mode === 'bake' ? 'bake' : 'overlay',
+          offsetSec: g.offsetSec,
+          durationSec: g.durationSec,
+          anchor: g.anchor,
+          rendered: !!g.renderedUrl,
+          slots: Object.fromEntries(
+            Object.entries(g.slots ?? {}).map(([k, v]) => [
+              k,
+              /^(https?:|data:|blob:|\/)/i.test(String(v)) ? 'set' : String(v).slice(0, 120),
+            ]),
+          ),
+          ...(g.error ? { error: g.error } : {}),
+        })),
         // SAID OUT LOUD, every read. A warning the agent has to go and ask for
         // is a warning it will not ask for.
-        warnings: warnings.map(w => w.message),
+        warnings,
         // Roughly what this shot costs to generate. Approximate on purpose —
         // see `estimateShotCredits` — and null when it genuinely cannot be
         // known, which is not the same as free.
@@ -1527,6 +1582,272 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
       // the map for the life of the page, and a long board session that
       // generated and discarded a lot would accumulate them.
       clearTakeProgress(takeId);
+      return digest(board);
+    },
+
+    /**
+     * ADD A GRAPHIC LAYER OVER THIS SHOT.
+     *
+     * Works on ANY shot, and that is the point of the feature: a lower third
+     * over generated footage, a ticker over a graphic bed, a callout over a clip
+     * the user recorded on their phone. `kind` decides what fills the frame;
+     * this decides what is drawn on top of it.
+     *
+     * The block is CHECKED AGAINST THE CATALOGUE, for the same reason
+     * `board-set-composition` checks it: a name the agent half-remembers renders
+     * as nothing at all, three minutes and one compile later. An unknown name is
+     * refused with the near matches, so the correction costs a turn rather than
+     * a render.
+     */
+    'voidspace:board-add-graphic': args => {
+      const g = guard(args); if (!g.ok) return g;
+      const shotId = String(args.shotId ?? '');
+      if (!readShot(board.std, shotId)) {
+        return fail('not_found', `No shot ${shotId} on this board.`);
+      }
+      const name = String(args.block ?? '').trim();
+      const block = name ? findBlock(name) : null;
+      if (name && !block) {
+        const near = searchBlocks(name).slice(0, 5).map(b => b.name);
+        return fail(
+          'unknown_block',
+          `No block called "${name}" is installed.`
+          + (near.length ? ` Closest: ${near.join(', ')}.` : ' Call board_block_catalog to see what is.'),
+        );
+      }
+      const id = addGraphic(board.std, shotId, {
+        block: block?.name ?? '',
+        // ALWAYS overlay unless asked otherwise — see `defaultGraphicMode` for
+        // why this is not derived from the block's own flag.
+        mode: args.mode === 'bake' || args.mode === 'overlay'
+          ? args.mode
+          : defaultGraphicMode(),
+        ...(args.offsetSec !== undefined ? { offsetSec: Math.max(0, Number(args.offsetSec) || 0) } : {}),
+        ...(args.durationSec !== undefined ? { durationSec: Math.max(0, Number(args.durationSec) || 0) } : {}),
+        ...(args.anchor === 'end' ? { anchor: 'end' as const } : {}),
+      });
+      if (!id) return fail('not_found', `Could not add a graphic to shot ${shotId}.`);
+      return { ...digest(board), graphicId: id };
+    },
+
+    /**
+     * Change one layer — its block, its values, or when it plays.
+     *
+     * VALUES ARE CHECKED AGAINST WHAT THE BLOCK DECLARES, exactly as
+     * `board-set-composition` checks them, and for exactly the same reason: the
+     * filler passes every key through whether the block asked for it or not, so
+     * a typo renders the designer's placeholder and looks identical to the value
+     * never arriving. Unknown keys are DROPPED and named back together with the
+     * ones that worked.
+     */
+    'voidspace:board-update-graphic': args => {
+      const g = guard(args); if (!g.ok) return g;
+      const shotId = String(args.shotId ?? '');
+      const graphicId = String(args.graphicId ?? '');
+      const shot = readShot(board.std, shotId);
+      const current = shot?.graphics.find(x => x.id === graphicId);
+      if (!current) return fail('not_found', `Shot ${shotId} has no graphic ${graphicId}.`);
+
+      const patch: Record<string, unknown> = {};
+      if (args.block !== undefined) {
+        const name = String(args.block ?? '').trim();
+        const found = name ? findBlock(name) : null;
+        if (name && !found) {
+          const near = searchBlocks(name).slice(0, 5).map(b => b.name);
+          return fail(
+            'unknown_block',
+            `No block called "${name}" is installed.`
+            + (near.length ? ` Closest: ${near.join(', ')}.` : ''),
+          );
+        }
+        patch.block = found?.name ?? '';
+      }
+      if (args.offsetSec !== undefined) patch.offsetSec = Math.max(0, Number(args.offsetSec) || 0);
+      if (args.durationSec !== undefined) patch.durationSec = Math.max(0, Number(args.durationSec) || 0);
+      if (args.anchor !== undefined) patch.anchor = args.anchor === 'end' ? 'end' : 'start';
+      if (args.mode === 'bake' || args.mode === 'overlay') patch.mode = args.mode;
+
+      /**
+       * WHAT COMPILE MADE, written back through the same door.
+       *
+       * These are RESULTS, not design decisions — the file, its measured
+       * length, the hash that proves it still matches, and why it failed if it
+       * did. The page writes them after a render; the agent tool deliberately
+       * does not offer them, exactly as it does not offer `board_update_take`.
+       *
+       * `updateGraphic` treats a patch carrying `renderedUrl` as a result and
+       * leaves it alone, rather than clearing it the way it clears a render when
+       * the DESIGN changes.
+       */
+      if (typeof args.renderedUrl === 'string') patch.renderedUrl = args.renderedUrl;
+      if (typeof args.renderHash === 'string') patch.renderHash = args.renderHash;
+      if (args.renderedDurationSec !== undefined) {
+        patch.renderedDurationSec = Math.max(0, Number(args.renderedDurationSec) || 0);
+      }
+      if (typeof args.mediaId === 'string') patch.mediaId = args.mediaId;
+      if (typeof args.error === 'string') patch.error = args.error;
+
+      let ignored: string[] = [];
+      const accepted: string[] = [];
+      if (args.slots && typeof args.slots === 'object' && !Array.isArray(args.slots)) {
+        const blockName = typeof patch.block === 'string' ? patch.block : current.block;
+        const decl = findBlock(blockName);
+        const declared = new Set((decl?.slots ?? []).map(sl => sl.key));
+        // MERGED, not replaced. A caller setting the headline must not blank the
+        // picture somebody dropped on the layer three edits ago — and a shot's
+        // slots are filled from two directions (typed here, dropped on the card),
+        // so a wholesale write is guaranteed to destroy one of them.
+        const next: Record<string, string> = { ...(current.slots ?? {}) };
+        for (const [k, v] of Object.entries(args.slots as Record<string, unknown>)) {
+          if (typeof v !== 'string' && typeof v !== 'number') continue;
+          if (declared.size && !declared.has(k)) { ignored.push(k); continue; }
+          const val = String(v);
+          // An explicit empty string CLEARS a slot, which is how "take the
+          // subtitle off" is said. Under render-mode fill that hides the element
+          // rather than reinstating the designer's sample.
+          if (val === '') delete next[k]; else next[k] = val;
+          accepted.push(k);
+        }
+        patch.slots = next;
+      }
+
+      if (!Object.keys(patch).length) {
+        return fail('empty', 'Give a block, slots, a time, or any combination.');
+      }
+      if (!updateGraphic(board.std, shotId, graphicId, patch as never)) {
+        return fail('not_found', `Shot ${shotId} has no graphic ${graphicId}.`);
+      }
+
+      if (ignored.length) {
+        const decl = findBlock(typeof patch.block === 'string' ? patch.block : current.block);
+        return {
+          ...digest(board),
+          ignoredKeys: ignored,
+          accepted,
+          note: `${decl?.name ?? 'That block'} has no slot called `
+            + `${ignored.map(k => `"${k}"`).join(', ')}. It declares: `
+            + `${(decl?.slots ?? []).map(sl => `${sl.key} (${sl.kind})`).join(', ')}.`,
+        };
+      }
+      return digest(board);
+    },
+
+    /**
+     * EVERY LAYER THAT STILL NEEDS RENDERING, with its REAL values.
+     *
+     * ── WHY THE DIGEST CANNOT ANSWER THIS ────────────────────────────────────
+     * `board_read` reports a filled media slot as the word "set" rather than its
+     * signed url. That is deliberate and worth keeping: a board with a dozen
+     * pictures in graphics would otherwise put a dozen signed urls into every
+     * read, which is exactly the context burn the rule exists to prevent.
+     *
+     * Rendering needs the actual url. So it asks for it explicitly, on a call
+     * that no language model is offered — this is the page's own channel, not a
+     * tool. Same shape as `board-shot-gen-input`, and for the same reason.
+     *
+     * Reports what is PENDING, not everything: a layer whose file still matches
+     * its values does not need to be looked at, and returning it would tempt the
+     * caller into re-rendering it.
+     */
+    'voidspace:board-graphic-fills': () => {
+      const shots = readShots(board.std);
+      const out: Array<{
+        shotId: string;
+        graphicId: string;
+        block: string;
+        slots: Record<string, string>;
+        durationSec: number;
+        mode: 'overlay' | 'bake';
+        /** The picture to composite INTO the render. Bakes only. */
+        backdropUrl?: string;
+        /** Why this layer cannot be rendered as asked. Present = do not render. */
+        blocked?: string;
+      }> = [];
+      for (const s of shots) {
+        for (const g of s.graphics ?? []) {
+          if (!g.block) continue;
+          if (g.renderedUrl) continue;
+          const mode = g.mode === 'bake' ? 'bake' as const : 'overlay' as const;
+          /**
+           * A BAKE NEEDS A PICTURE TO BAKE ONTO.
+           *
+           * Reported as BLOCKED rather than skipped. Skipping would make the
+           * layer vanish from the render queue and then from the compile, with
+           * nothing anywhere saying why — the user would see an empty graphic
+           * track and conclude the feature is broken. The page writes this
+           * sentence onto the layer, where the person who set it can read it.
+           */
+          const playing = mode === 'bake' ? chosenTake(s.takes, s.chosenTakeId) : null;
+          const blocked = mode === 'bake' && !playing
+            ? 'Baking needs a picture to bake onto — generate this shot first, or '
+              + 'switch the layer to Over.'
+            : '';
+
+          const slots: Record<string, string> = { ...(g.slots ?? {}) };
+          /**
+           * WHERE THE FOOTAGE GOES IN A BAKE, and it is not one answer.
+           *
+           * If the block DECLARES A VIDEO SLOT, the footage goes in there. That
+           * is what the slot is for, the block was laid out around it, and it is
+           * the whole reason to bake rather than overlay — `video-hero` frames a
+           * clip, `browser-mockup` puts one in a window.
+           *
+           * Only a block with NO video slot falls back to a backdrop behind the
+           * composition. That path has a real limit, said out loud by
+           * `checkGraphic`: 13 of the installed starters paint an opaque `#root`
+           * background, and a backdrop behind one of those is invisible. It
+           * works for the transparent overlay blocks, which is exactly the set
+           * somebody would bake for a flat single-file export.
+           *
+           * A slot the user has already filled is NOT overwritten — they put
+           * something specific there on purpose.
+           */
+          const videoSlot = playing
+            ? (findBlock(g.block)?.slots ?? [])
+              .find(sl => sl.kind === 'video' && !slots[sl.key])
+            : undefined;
+          if (playing && videoSlot) {
+            slots[videoSlot.key] = playing.url || playing.src;
+          }
+
+          out.push({
+            shotId: s.id,
+            graphicId: g.id,
+            block: g.block,
+            slots,
+            mode,
+            /**
+             * A BAKE IS THE LENGTH OF THE FOOTAGE, not of the graphic.
+             *
+             * It IS the shot's picture once rendered, so cutting it short would
+             * cut the shot short. An overlay is the opposite: it costs only its
+             * own seconds, which is the whole reason it is the default.
+             */
+            durationSec: mode === 'bake'
+              ? (Number(playing?.durationSec) > 0
+                ? Number(playing!.durationSec)
+                : plannedSeconds(s))
+              : (Number(g.durationSec) > 0 ? Number(g.durationSec) : plannedSeconds(s)),
+            // FULL QUALITY, and only when the block has nowhere better to put
+            // it. `src` is the card's thumbnail; baking from it would blow a
+            // poster frame up to fill the frame.
+            ...(playing && !videoSlot ? { backdropUrl: playing.url || playing.src } : {}),
+            ...(blocked ? { blocked } : {}),
+          });
+        }
+      }
+      return { ok: true as const, rev, pending: out };
+    },
+
+    /** Drop a layer. Its rendered file stays in the Library — a cut already
+     *  using it plays on, the same rule a discarded take follows. */
+    'voidspace:board-remove-graphic': args => {
+      const g = guard(args); if (!g.ok) return g;
+      const shotId = String(args.shotId ?? '');
+      const graphicId = String(args.graphicId ?? '');
+      if (!removeGraphic(board.std, shotId, graphicId)) {
+        return fail('not_found', `Shot ${shotId} has no graphic ${graphicId}.`);
+      }
       return digest(board);
     },
 

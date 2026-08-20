@@ -33,6 +33,9 @@ const ICONS = {
   minus: '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3.5 8h9"/></svg>',
   undo: '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h7a3 3 0 0 1 0 6H7"/><path d="M6 5 3 8l3 3"/></svg>',
   redo: '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 8H6a3 3 0 0 0 0 6h3"/><path d="M10 5l3 3-3 3"/></svg>',
+  // An arrow INTO a frame: the storyboard going somewhere, not a file being
+  // exported. Deliberately not a download glyph — nothing leaves the machine.
+  send: '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8h8"/><path d="M7 5l3 3-3 3"/><path d="M11.5 2.5H14v11h-2.5"/></svg>',
 };
 
 function el<T extends HTMLElement>(tag: string, cls?: string, html?: string): T {
@@ -119,6 +122,25 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
     <span class="vs-board-sep"></span>
     <div class="vs-board-total" data-total hidden></div>
     <!--
+      THE WAY OUT OF THE BOARD, and until now there was not one.
+
+      Compile has been reachable ONLY by asking the agent for it — a feature with
+      no control, on the surface whose entire purpose is to become a video. The
+      cost line to the left of this is introduced in code as answering "the
+      question people actually ask before they hit compile", and there was
+      nothing to hit.
+
+      CALLED "SEND TO EDITOR", NOT "COMPILE". Compile is what it does; sending is
+      what it means. The distinction matters because the operation is ADDITIVE —
+      it creates the project the first time and afterwards adds new shots, new
+      takes and changed text without reordering or removing anything. A button
+      labelled "Compile" reads like a one-way, final act, which is exactly the
+      belief that stops people pressing it early and often.
+    -->
+    <button type="button" class="vs-board-btn vs-board-btn--send" data-act="send" hidden>
+      ${ICONS.send}<span data-send-label>Send to editor</span>
+    </button>
+    <!--
       WHAT THE SELECTION IS FOR.
 
       Selecting a few references and asking the agent to generate from them is
@@ -181,6 +203,58 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
     totalEl.hidden = false;
   }
 
+  /**
+   * THE SEND BUTTON'S STATE, and each of the four says something the user needs.
+   *
+   * Hidden with no shots — a board being thought on has nothing to send, and a
+   * disabled button on an empty canvas is a question with no answer.
+   *
+   * Once a project exists the label carries its NAME, because a board can be
+   * sent more than once and "where did my shots go" is otherwise a real
+   * question the banner alone does not answer at the moment of pressing.
+   *
+   * Busy is set by the PAGE, not here: the render-and-compile happens over
+   * there, and a button that reset itself on a timer would go back to "Send to
+   * editor" halfway through a render and invite a second press.
+   */
+  const sendBtn = bar.querySelector<HTMLButtonElement>('[data-act="send"]')!;
+  const sendLabel = sendBtn.querySelector<HTMLElement>('[data-send-label]')!;
+  let sentProject = '';
+
+  function syncSend() {
+    const n = shotCount();
+    sendBtn.hidden = n === 0;
+    if (sendBtn.hasAttribute('data-busy')) return;
+    sendLabel.textContent = sentProject ? 'Send changes' : 'Send to editor';
+    sendBtn.title = sentProject
+      ? 'Send what has changed to the project this board already made. It ADDS new shots, '
+        + 'takes and text — it never reorders or removes anything you have cut.'
+      : 'Build a video project from this storyboard and open it in the editor. '
+        + 'The board stays yours to keep editing.';
+  }
+
+  /**
+   * The page tells the board what it is doing, and the board draws it.
+   *
+   * One-way on purpose. The board cannot know whether a render is running, how
+   * many graphics are left, or which project it landed in — all of that lives
+   * where the network is.
+   */
+  const onParentMessage = (e: MessageEvent) => {
+    const data = e.data as { type?: string; busy?: boolean; label?: string; projectId?: string };
+    if (data?.type !== 'voidspace:board-send-state') return;
+    if (data.busy) {
+      sendBtn.setAttribute('data-busy', '1');
+      sendLabel.textContent = data.label || 'Sending…';
+      sendBtn.title = 'Working — this renders your graphics on this computer first.';
+    } else {
+      sendBtn.removeAttribute('data-busy');
+      if (typeof data.projectId === 'string' && data.projectId) sentProject = data.projectId;
+      syncSend();
+    }
+  };
+  window.addEventListener('message', onParentMessage);
+
   function addShot() {
     /**
      * NAMED FOR WHAT IT IS — a shot, not a scene.
@@ -229,6 +303,18 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
       case 'redo': board.store.redo(); break;
       case 'fit': fitBoard(); break;
       case 'focus': void fullscreen.toggle(); break;
+      /**
+       * The card raises intent; the PAGE owns the network.
+       *
+       * Same split as Generate on a shot card, and it has to be: an iframe has
+       * no credentials and no credit balance, and compiling renders the
+       * graphics and writes a project. The board's only job is to say that the
+       * user asked.
+       */
+      case 'send':
+        if (sendBtn.hasAttribute('data-busy')) return;
+        window.parent?.postMessage({ type: 'voidspace:board-send' }, '*');
+        break;
     }
   };
   empty.addEventListener('click', onClick);
@@ -286,7 +372,7 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
   function queueTotal() {
     if (totalQueued) return;
     totalQueued = true;
-    requestAnimationFrame(() => { totalQueued = false; syncTotal(); });
+    requestAnimationFrame(() => { totalQueued = false; syncTotal(); syncSend(); });
   }
 
   /**
@@ -318,6 +404,14 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
   });
   sync();
   syncTotal();
+  // AND THE SEND BUTTON, at mount, not only when something changes.
+  //
+  // It ships `hidden` in the markup — a board being thought on has nothing to
+  // send — and `syncSend` is what reveals it once there are shots. Reached only
+  // through `queueTotal` it would stay invisible on a board that OPENS with
+  // shots and is then left alone, which is every board somebody comes back to:
+  // the way out of the surface would appear only after an unrelated edit.
+  syncSend();
   // The catalogue arrives after paint, and no model means no price — so the
   // first total would read "no gen cost" for a board full of clips until
   // something else happened to change.
@@ -328,6 +422,7 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
     selectionSub.unsubscribe?.();
     stopModels();
     stopFullscreenWatch();
+    window.removeEventListener('message', onParentMessage);
     fullscreen.destroy();
     chrome.destroy();
     empty.remove();

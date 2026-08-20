@@ -540,6 +540,204 @@ export function takeThumb(t: Pick<ShotTake, 'poster' | 'src' | 'kind'>): string 
   return t.poster || (t.kind === 'image' ? t.src : '') || '';
 }
 
+/**
+ * A GRAPHIC THAT RUNS OVER THE SHOT, rather than instead of it.
+ *
+ * ── WHY THIS IS A LIST AND NOT A SECOND `kind` ───────────────────────────────
+ * `kind` answers "what fills the frame" — footage, or a full-frame composition.
+ * That is a real question and it stays. What it could never answer is "and a
+ * lower third over the top", because a shot was allowed exactly one of the two
+ * and a graphic consumed the whole slot.
+ *
+ * Layers make the third case ordinary: a clip with two overlays, a graphic bed
+ * with a ticker over it, or no layers at all — which is every shot that exists
+ * today, unchanged.
+ *
+ * ── AND WHY THE BED IS NOT ONE OF THEM ───────────────────────────────────────
+ * A `hyperframes` shot keeps `composition` / `compositionVars`. Folding the bed
+ * into `graphics[0]` would have been tidier on paper and would have rewritten
+ * every board on disk to gain nothing: `slots.ts`, `checkShot`, the card's block
+ * picker and compile all already speak that pair. The layers sit ON TOP of
+ * whatever the shot's picture turns out to be, which is exactly what makes them
+ * work identically over footage and over a bed.
+ *
+ * ── EVERY FIELD HERE IS ABOUT SURVIVING THE EDITOR ───────────────────────────
+ * A graphic is anchored to the shot's SLOT, never to a take. Takes come and go,
+ * get re-chosen, and measure different lengths; a layer that pinned itself to
+ * one of them would be on the wrong picture the moment somebody auditioned an
+ * alternate. `offsetSec` + `anchor` are how it stays put.
+ */
+export interface ShotGraphic {
+  /** Stable within the shot. What the card, the agent and the timeline address. */
+  id: string;
+  /**
+   * The block name, resolved against the installed library the same way
+   * `ShotProps.composition` is. Empty means "chosen a layer, not a block yet" —
+   * a state the card shows as a picker rather than as an error.
+   */
+  block: string;
+  /**
+   * Key → value for the block's own declared slots: media urls, typed words and
+   * colours together, exactly what `slotFills` produces and what the render
+   * route's `slots` takes.
+   *
+   * ONE MAP, not three. A block's slots are one vocabulary — `screenshot`,
+   * `headline`, `accent` — and splitting them by kind here would mean every
+   * consumer re-joining them against `block.json` to do anything useful.
+   */
+  slots: Record<string, string>;
+  /**
+   * HOW THIS GRAPHIC MEETS THE PICTURE. The user's choice, per layer.
+   *
+   *   overlay — rendered TRANSPARENT and laid over the shot on its own track.
+   *             The picture underneath is still a separate clip: retime the
+   *             graphic, trim it, delete it, swap the take beneath it, all
+   *             without re-rendering anything. Costs a render of the GRAPHIC'S
+   *             length, so a 3s lower third is 3 seconds of work whether the
+   *             shot under it runs 8 seconds or ten minutes.
+   *
+   *   bake    — the shot's picture is composited INTO the render and the result
+   *             is one flat clip. This is the only way a block can HOLD the
+   *             footage rather than sit on it — a browser frame with a screen
+   *             recording in its window, a phone mockup, a masked reveal — and
+   *             it is the only way to get a single self-contained file.
+   *
+   * ── WHY THIS IS A CHOICE AND NOT A RULE ──────────────────────────────────
+   * An earlier design derived it from the block's own `overlay` flag. That is a
+   * good default and a bad law: the flag says what the DESIGNER intended, and
+   * plenty of legitimate work goes against it — burning a lower third in on
+   * purpose because the clip is going somewhere that cannot carry two tracks,
+   * or laying a "full-frame" block over footage because it happens to be mostly
+   * transparent. The flag still picks the default; the user picks the answer.
+   *
+   * ── WHAT BAKING COSTS, SAID PLAINLY ──────────────────────────────────────
+   * It is bound to ONE take and it is not retimable. Change the words, pick a
+   * different take, or move the graphic half a second, and the whole clip is
+   * re-rendered — at a cost that scales with the FOOTAGE, not the graphic. That
+   * is why `overlay` is the default.
+   */
+  mode: 'overlay' | 'bake';
+  /** Seconds from the shot's start (or its end — see `anchor`). */
+  offsetSec: number;
+  /** How long it stays up. 0 means "to the end of the shot". */
+  durationSec: number;
+  /**
+   * WHICH END OF THE SHOT IT HOLDS ONTO, and this exists because takes measure
+   * different lengths.
+   *
+   * Choose an 8s take over a 5s one and the shot's slot grows by three seconds.
+   * A lower third introducing the speaker belongs at the top and should not
+   * move (`start`). An end card belongs on the last beat and must follow the
+   * new ending (`end`). Neither is a sensible default for the other, and
+   * guessing is how a graphic lands over black.
+   */
+  anchor: 'start' | 'end';
+  /**
+   * The rendered alpha clip, once it exists. Written by compile, never by hand.
+   *
+   * Empty is the normal state of a layer that has just been added — the card
+   * shows the block's own preview until a render replaces it.
+   */
+  renderedUrl?: string;
+  /** Library id of that render, so deleting the shot cannot break a cut that
+   *  already uses it. Same rule as a take's `mediaId`, for the same reason. */
+  mediaId?: string;
+  /** Measured length of `renderedUrl`. The clip's slot on the timeline. */
+  renderedDurationSec?: number;
+  /**
+   * WHAT WAS RENDERED, hashed — and this is what makes recompiling cheap.
+   *
+   * A render is a function of the block, its values, the length and the aspect.
+   * Storing the hash of those means a second compile can prove the existing file
+   * is still correct and skip the work; change one word and exactly one layer
+   * re-renders. Without it every compile re-renders every graphic, and a board
+   * with nine of them becomes something people avoid pressing.
+   */
+  renderHash?: string;
+  /** Why the last render failed, in words a person can read. Cleared on success. */
+  error?: string;
+}
+
+/** A layer worth compositing: it names a block, and it has a file to show. */
+export function readyGraphics(gs: readonly ShotGraphic[] | undefined): ShotGraphic[] {
+  return (gs ?? []).filter(g => g.block && g.renderedUrl);
+}
+
+/** True for a layer the user has asked to burn into the picture. */
+export function isBaked(g: Pick<ShotGraphic, 'mode'>): boolean {
+  return g.mode === 'bake';
+}
+
+/**
+ * A LAYER ALWAYS STARTS AS AN OVERLAY, and this is deliberately NOT derived from
+ * the block.
+ *
+ * An earlier draft read the block's own `overlay` flag and started a
+ * non-overlay block as a bake. It looked clever and it was wrong twice:
+ *
+ *  1. `overlay: false` is the ABSENCE of a claim at least as often as it is a
+ *     claim. Nothing forces a block author to set it, and a block with no
+ *     manifest opinion normalises to false — so "the designer says this is
+ *     full-frame" and "nobody said anything" were the same value, and both
+ *     silently chose the destructive mode.
+ *  2. A bake needs a take to bake ONTO. On a storyboard most shots have not been
+ *     generated when the graphic is added, so that default lands the user with a
+ *     layer that refuses to render until they go and do something else first.
+ *
+ * So the default is the reversible one, always. The block's flag earns its keep
+ * as a WARNING instead — `checkGraphic` says when an overlay is built from a
+ * block that paints its own background, which is the case the flag actually
+ * predicts.
+ */
+export function defaultGraphicMode(): 'overlay' | 'bake' {
+  return 'overlay';
+}
+
+/**
+ * What is wrong with this layer, in words the person who set it can act on.
+ *
+ * Same shape and same reasoning as `checkShot`: a warning the user has to go
+ * looking for is a warning they will not see, so the card says it in place.
+ */
+export function checkGraphic(
+  g: Pick<ShotGraphic, 'block' | 'mode'>,
+  block: { overlay?: boolean; slots?: ReadonlyArray<{ kind: string }> } | null | undefined,
+  hasPicture: boolean,
+): string[] {
+  const out: string[] = [];
+  if (!g.block) return out;
+  if (g.mode === 'bake' && !hasPicture) {
+    out.push(
+      'Baking needs a picture to bake onto — generate this shot, or switch back to Over.',
+    );
+  }
+  /**
+   * BAKING A BLOCK THAT PAINTS ITS OWN GROUND AND HAS NOWHERE TO PUT FOOTAGE.
+   *
+   * A bake puts the picture in the block's video slot when it declares one. With
+   * no such slot the picture goes BEHIND the composition — and 13 of the
+   * installed starters fill `#root` with an opaque colour, which covers it
+   * completely. The render succeeds and the footage is simply not in it, which
+   * is the worst shape a failure can take.
+   */
+  if (g.mode === 'bake' && block && block.overlay === false
+      && !(block.slots ?? []).some(sl => sl.kind === 'video')) {
+    out.push(
+      `${g.block} paints its own background and has no video slot, so baking would hide `
+      + 'the shot behind it. Use a block with a video slot, or leave this Over.',
+    );
+  }
+  if (g.mode !== 'bake' && block && block.overlay === false) {
+    // The single most likely way a layer disappoints: it renders correctly and
+    // hides the shot, because the block was drawn to own the whole frame.
+    out.push(
+      `${g.block} was designed to fill the frame, not to sit on footage — over a shot it `
+      + 'will cover the picture. Bake it in, or choose a block marked as an overlay.',
+    );
+  }
+  return out;
+}
+
 /** `72.4` → `1:12.4`. Short form, because a trim readout is glanced at. */
 export function formatTime(sec: number): string {
   if (!Number.isFinite(sec) || sec < 0) return '0:00';
@@ -782,6 +980,13 @@ type ShotProps = {
    */
   compositionVars: Record<string, string>;
   /**
+   * GRAPHIC LAYERS OVER THIS SHOT'S PICTURE. See `ShotGraphic`.
+   *
+   * Independent of `kind`: a clip can carry them, and so can a graphic bed. An
+   * empty list is every shot made before this existed.
+   */
+  graphics: ShotGraphic[];
+  /**
    * WHICH SCENE OF THE SCREENPLAY THIS SHOT COVERS.
    *
    * The only link between the document and the filmstrip, and the reason either
@@ -858,6 +1063,7 @@ export const ShotBlockSchema = defineBlockSchema({
     kind: 'clip',
     composition: '',
     compositionVars: {},
+    graphics: [],
     sceneKey: '',
     xywh: `[0,0,${SHOT_W},${SHOT_H}]`,
     index: 'a0',

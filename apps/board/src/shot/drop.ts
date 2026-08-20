@@ -23,7 +23,8 @@ import { GfxControllerIdentifier } from '@blocksuite/std/gfx';
 
 import type { ShotBlockComponent } from './shot-block';
 import {
-  addMedia, moveMedia, readShot, removeMedia, setMediaRole, setShotFields, shotAtPoint,
+  addGraphic, addMedia, moveMedia, readShot, removeMedia, setMediaRole, setShotFields,
+  shotAtPoint, updateGraphic,
 } from './shots';
 import { rolesFor, type MediaRole, type ShotMedia } from './model';
 import { findBlock } from './blocks';
@@ -268,6 +269,46 @@ export async function handleAssetDrop(
   }
 
   const kind = entity.media.kind;
+
+  /**
+   * DROPPED INTO A GRAPHIC LAYER'S SLOT.
+   *
+   * Handled BEFORE `addMedia`, and that ordering is the decision: a layer's
+   * media is CONTENT INSIDE A COMPOSITION, not a reference the video model
+   * reads. Adding it to `media` as well would put the user's screenshot into
+   * the generation prompt's reference set, where it would change the clip
+   * underneath the graphic — the opposite of what dropping it on a graphic
+   * means.
+   *
+   * The url is stored on the layer directly. There is no role to set, because a
+   * layer's slot key IS the address, and no lane to file it in, because it is
+   * not a reference.
+   */
+  if (hit.zone?.startsWith('graphic:')) {
+    const [, graphicId, ...rest] = hit.zone.split(':');
+    const key = rest.join(':');
+    const shot = readShot(std, hit.shotId);
+    const layer = shot?.graphics.find(g => g.id === graphicId);
+    if (layer && key) {
+      // FULL QUALITY. `src` is the thumbnail the card draws; a composition
+      // rendered from it would be a 300px image blown up to fill the frame.
+      const url = entity.media.url || entity.media.src;
+      if (url) {
+        updateGraphic(std, hit.shotId, graphicId, {
+          slots: { ...(layer.slots ?? {}), [key]: url },
+        });
+      }
+      // A REFERENCE dragged off another shot into a layer still leaves the shot
+      // it came from — the same move-not-copy rule the lanes follow. A take is
+      // copied, for the same reason it is copied onto the canvas.
+      if (entity.origin?.mediaId && !entity.origin.takeId
+          && entity.origin.shotId !== hit.shotId) {
+        removeMedia(std, entity.origin.shotId, entity.origin.mediaId);
+      }
+      return { target: 'shot', shotId: hit.shotId };
+    }
+  }
+
   const id = addMedia(std, hit.shotId, { ...entity.media, role: defaultRole(kind) });
   if (!id) return { target: 'canvas' };
 
@@ -332,6 +373,24 @@ export function handleBlockDrop(
   const shot = readShot(std, shotId);
   if (!shot) {
     return { target: 'refused', reason: 'That shot is no longer on the board.' };
+  }
+
+  /**
+   * DROPPED ON THE GRAPHICS ROW: A LAYER, NOT A REPLACEMENT.
+   *
+   * The same gesture has to mean two things because the card now has two places
+   * a block can go, and getting it wrong is expensive in one direction only:
+   * turning a clip the user has written and generated into a title card is a
+   * loss, where adding a layer they did not want is one ✕.
+   *
+   * So the ROW decides. Dropping onto the graphics row adds a layer over
+   * whatever the shot already is; dropping anywhere else on the card is the old
+   * behaviour — the shot becomes that block.
+   */
+  const zone = shotComponentAt(std, shotId)?.zoneAt(at.clientX, at.clientY) ?? null;
+  if (zone === 'graphics' || zone?.startsWith('graphic:')) {
+    addGraphic(std, shotId, { block: entity.name });
+    return { target: 'shot', shotId, title: shot.title || 'the shot' };
   }
 
   setShotFields(std, shotId, {
