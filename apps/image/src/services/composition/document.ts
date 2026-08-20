@@ -27,6 +27,7 @@
  */
 
 import { frameRuntimeSource } from './frame-runtime';
+import type { CompositionSource } from '../../types/project';
 
 /** How a block declares one fillable hole. Verified against the shipped library:
  *  every slot binds by EXACTLY ONE of `sel` or `var` — colours by variable (48 of
@@ -318,4 +319,37 @@ export function prepareComposition(html: string, opts: PrepareOptions = {}): Pre
     unfilled,
     warnings,
   };
+}
+
+/**
+ * Prepare the document for a composition that is already ON a layer.
+ *
+ * The one way to build a document from a stored `CompositionSource`, and it
+ * exists because the alternative was every caller hand-mapping five fields.
+ * That is not tedium, it is a correctness hole: the cache key is computed over
+ * `frameWidth`/`frameHeight`/`slots`/`fillMode`/`poseTime`, so a caller that
+ * passed a different frame than the one on the source would render something the
+ * key does not describe — and the cache would then hand that render to a
+ * composition it does not match. Reading them from one place makes the two agree
+ * by construction rather than by everyone remembering.
+ *
+ * `slots` here is the block's MANIFEST (what holes exist); `source.slots` is the
+ * VALUES. Two different things that both got called slots long before this.
+ */
+export function prepareFromSource(
+  html: string,
+  source: CompositionSource,
+  manifest: Record<string, SlotSpec> = {},
+  opts: Pick<PrepareOptions, 'runtimeUrl' | 'readyTimeoutMs'> = {},
+): PreparedComposition {
+  return prepareComposition(html, {
+    slots: manifest,
+    values: source.slots,
+    fillMode: source.fillMode,
+    poseTime: source.poseTime,
+    frameWidth: source.frameWidth,
+    frameHeight: source.frameHeight,
+    runtimeUrl: opts.runtimeUrl,
+    readyTimeoutMs: opts.readyTimeoutMs,
+  });
 }

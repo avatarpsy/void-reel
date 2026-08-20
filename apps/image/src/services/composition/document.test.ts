@@ -7,7 +7,7 @@
  * here protects some part of "the same input renders the same finished frame".
  */
 import { describe, it, expect } from 'vitest';
-import { prepareComposition, type SlotSpec } from './document';
+import { prepareComposition, prepareFromSource, type SlotSpec } from './document';
 
 /** Shaped like a real block: root carries the frame, GSAP comes from the CDN,
  *  and a timeline is registered on `window.__timelines`. */
@@ -331,5 +331,49 @@ describe('the frame a composition renders into', () => {
       const r = prepareComposition(BLOCK, { frameWidth: bad, frameHeight: bad });
       expect([r.width, r.height]).toEqual([1920, 1080]);
     }
+  });
+});
+
+describe('preparing from a stored composition', () => {
+  /**
+   * The bridge exists to stop the document and the cache key describing
+   * different things. The key covers frame, slots, fill mode and pose; a caller
+   * hand-mapping those could pass a frame the key does not mention, and the
+   * cache would then serve that render to a composition it does not match.
+   */
+  const source = {
+    block: 'stat-card',
+    tier: 'starter' as const,
+    slots: { headline: 'From the layer' },
+    fillMode: 'render' as const,
+    poseTime: 1.5,
+    frameWidth: 1080,
+    frameHeight: 1350,
+    renderHash: 'whatever',
+  };
+
+  it('renders into the frame the source records, not the block default', () => {
+    const r = prepareFromSource(BLOCK, source, SLOTS);
+    expect([r.width, r.height]).toEqual([1080, 1350]);
+  });
+
+  it('fills from the source values against the block manifest', () => {
+    const r = prepareFromSource(BLOCK, source, SLOTS);
+    expect(parse(r.html).querySelector('.headline')?.textContent).toBe('From the layer');
+  });
+
+  it('carries the fill mode, so an unfilled slot is hidden as the source asked', () => {
+    const r = prepareFromSource(BLOCK, source, SLOTS);
+    expect((parse(r.html).querySelector('.subtitle') as HTMLElement).style.display).toBe('none');
+  });
+
+  it('carries the pose time', () => {
+    expect(prepareFromSource(BLOCK, source, SLOTS).html).toMatch(/POSE = 1\.5/);
+  });
+
+  it('works with no manifest — an authored block declares no slots', () => {
+    const r = prepareFromSource(BLOCK, { ...source, slots: {} });
+    expect(r.unfilled).toEqual([]);
+    expect(r.width).toBe(1080);
   });
 });

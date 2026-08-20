@@ -8,7 +8,7 @@
  * with it rather than being left to describe a feature nobody can use.
  */
 import { describe, it, expect } from 'vitest';
-import { frameRuntimeSource, MAX_CANVAS_DIMENSION, MAX_CANVAS_AREA } from './frame-runtime';
+import { frameRuntimeSource } from './frame-runtime';
 
 const src = (over: Partial<Parameters<typeof frameRuntimeSource>[0]> = {}) =>
   frameRuntimeSource({ poseTime: 'end', timeoutMs: 8000, expectsTimeline: true, ...over });
@@ -90,11 +90,3 @@ describe('sequences that silently truncate or break the runtime', () => {
   });
 });
 
-describe('raster limits are still declared', () => {
-  it('states the ceiling any raster target has to respect', () => {
-    // Kept after in-frame capture was removed: they bound what a SERVER-side
-    // raster can hold too. A0 at 300dpi is ~140 megapixels.
-    expect(MAX_CANVAS_DIMENSION).toBe(16384);
-    expect(MAX_CANVAS_AREA).toBeLessThan(MAX_CANVAS_DIMENSION * MAX_CANVAS_DIMENSION);
-  });
-});

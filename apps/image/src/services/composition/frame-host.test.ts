@@ -224,3 +224,42 @@ describe('the frame is sandboxed', () => {
     await p;
   });
 });
+
+describe('mounting twice', () => {
+  /**
+   * A re-render or a React strict-mode double-effect calls this twice. It used
+   * to build a second frame, orphan the first in the DOM, and overwrite the
+   * pending resolver — so the FIRST promise never settled. A leak and a hang
+   * from one duplicated call.
+   */
+  it('returns the same mount rather than building a second frame', async () => {
+    const { host, container } = makeHost();
+    const a = host.mount();
+    const b = host.mount();
+    expect(a).toBe(b);
+    expect(container.querySelectorAll('iframe').length).toBe(1);
+    settleAs(host, 'ok');
+    await expect(a).resolves.toMatchObject({ status: 'ready' });
+  });
+
+  it('settles BOTH callers, not just the later one', async () => {
+    const { host } = makeHost();
+    const first = host.mount();
+    host.mount();
+    settleAs(host, 'ok');
+    // The bug was that the first caller waited for a resolver that had been
+    // replaced, so this is the assertion that would have hung.
+    await expect(first).resolves.toMatchObject({ status: 'ready' });
+  });
+
+  it('can mount again after being destroyed', async () => {
+    const { host, container } = makeHost();
+    const p = host.mount();
+    host.destroy();
+    await p;
+    const again = host.mount();
+    expect(container.querySelectorAll('iframe').length).toBe(1);
+    settleAs(host, 'ok');
+    await expect(again).resolves.toMatchObject({ status: 'ready' });
+  });
+});

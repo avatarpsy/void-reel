@@ -12,8 +12,8 @@
  *   ready    — unprompted, once the frame has genuinely settled
  *   ping     — the same answer again, for a host that asked late
  *
- * It does NOT rasterise. That was tried and it cannot work in a browser: see
- * the note on the canvas limits below.
+ * It does NOT rasterise. That was built, measured, and removed — the note below
+ * says why, and where stills come from instead.
  *
  * WHY `ping` EXISTS. A postMessage only reaches a listener that is already
  * attached, and a same-origin host can fall back to reading the latch off the
@@ -25,29 +25,25 @@
  */
 
 /**
- * WHY RASTERISING DOES NOT HAPPEN IN THE BROWSER.
+ * WHY RASTERISING DOES NOT HAPPEN IN THIS FILE, OR ANY FILE IN THE BROWSER.
  *
  * The obvious route is an SVG foreignObject holding the frame's markup, drawn to
- * a canvas — it uses the browser's own engine, so typography and layout come out
- * exactly right. It was built, and it does not work: **a foreignObject taints
- * the canvas**, so toDataURL throws SecurityError and no pixels can be read back.
+ * a canvas — the browser's own engine renders it, so typography and layout come
+ * out exact. It was built, and it cannot work: **a foreignObject taints the
+ * canvas**, so toDataURL throws SecurityError and no pixels are readable.
  *
- * Measured, because the first failure looked like a fonts problem: a MINIMAL
- * foreignObject holding one plain div, with no external reference of any kind,
- * taints — while a plain SVG rect in the same page does not. Confirmed on two
- * independent browsers, Chromium 148 and Chromium 150, so it is platform
- * behaviour rather than one browser's hardening. `html-to-image` uses the same
- * technique and would fail identically.
+ * Measured rather than assumed, because the first failure looked like a fonts
+ * problem: a MINIMAL foreignObject holding one plain div, with no external
+ * reference of any kind, taints — while a plain SVG rect in the same page does
+ * not. Confirmed on Chromium 148 and Chromium 150, so it is platform behaviour
+ * rather than one browser's hardening, and `html-to-image` would fail the same
+ * way for the same reason.
  *
- * Rasterising therefore belongs server-side, where a headless browser can render
- * and screenshot without a canvas in the path at all. These limits are kept
- * because they still bound what any RASTER target can hold: a poster at A0/300dpi
- * is ~140 megapixels and half a gigabyte of RGBA. The honest answer at that size
- * is a refusal naming the number — or a vector PDF, which a server-side renderer
- * can also produce and a canvas never could.
+ * Stills come from the user's own machine instead: the desktop app bundles Node
+ * and a pinned hyperframes, which renders with real Chrome. See §15 and §16 of
+ * PRESENTATION_BLOCKS_PLAN.md for the measurements, including which frame to
+ * keep — the first one is the unplayed state and is blank.
  */
-export const MAX_CANVAS_DIMENSION = 16384;
-export const MAX_CANVAS_AREA = 64_000_000; // ~8000×8000
 
 /**
  * What the runtime posts out, and the only thing a host should act on.

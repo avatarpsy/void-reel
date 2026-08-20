@@ -78,6 +78,7 @@ export class CompositionHost {
   private timers: ReturnType<typeof setTimeout>[] = [];
   private settle: ((s: HostState) => void) | null = null;
   private state: HostState = { status: 'loading' };
+  private mounted: Promise<HostState> | null = null;
 
   constructor(
     private readonly container: HTMLElement,
@@ -101,6 +102,15 @@ export class CompositionHost {
    * worth showing. Only a genuinely broken mount is an error.
    */
   mount(): Promise<HostState> {
+    /**
+     * Mounting twice is a caller mistake — a re-render or a React strict-mode
+     * double-effect — and it used to be a bad one: the second call built another
+     * frame, orphaned the first in the DOM, and overwrote the pending resolver
+     * so the FIRST promise never settled at all. Returning the existing mount
+     * makes it harmless instead of a leak plus a hang.
+     */
+    if (this.mounted) return this.mounted;
+
     const { html, frameWidth, frameHeight } = this.opts;
     const readyTimeoutMs = this.opts.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
     const pingAfterMs = this.opts.pingAfterMs ?? DEFAULT_PING_AFTER_MS;
@@ -122,7 +132,7 @@ export class CompositionHost {
      */
     frame.setAttribute('sandbox', 'allow-scripts');
 
-    return new Promise<HostState>((resolve) => {
+    this.mounted = new Promise<HostState>((resolve) => {
       this.settle = resolve;
 
       // ── 1. Listen BEFORE the document exists ──────────────────────────────
@@ -151,6 +161,7 @@ export class CompositionHost {
         this.finish({ status: 'timeout', detail: null });
       }, readyTimeoutMs));
     });
+    return this.mounted;
   }
 
   /** Re-ask a frame that may have answered before anyone was listening. */
@@ -176,6 +187,7 @@ export class CompositionHost {
     this.onMessage = null;
     this.frame?.parentNode?.removeChild(this.frame);
     this.frame = null;
+    this.mounted = null;
     // A pending mount() must not hang forever on an unmounted host.
     this.finish({ status: 'destroyed' });
   }
