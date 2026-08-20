@@ -171,18 +171,22 @@ function hideUnfilled(doc: Document, spec: SlotSpec): void {
  * frame is genuinely settled, and never later than the timeout — a render that
  * hangs waiting for a font is worse than one that ships a fallback face.
  */
-function readyAgent(poseTime: number | 'end', timeoutMs: number): string {
+function readyAgent(poseTime: number | 'end', timeoutMs: number, expectsTimeline: boolean): string {
   const pose = poseTime === 'end' ? '"end"' : String(poseTime);
   return `
 (function () {
   var POSE = ${pose};
   var TIMEOUT = ${timeoutMs};
+  var EXPECTS_TIMELINE = ${expectsTimeline ? 'true' : 'false'};
   var done = false;
 
   function post(state, detail) {
     if (done) return;
     done = true;
-    var payload = { __composition: 'ready', state: state, detail: detail || null };
+    /* When the frame settled, measured from its own navigation start. The
+       host cannot compute this — it only knows when it noticed. Kept because a
+       slow composition is a thing you diagnose by knowing WHICH gate was slow. */
+    var payload = { __composition: 'ready', state: state, detail: detail || null, atMs: Math.round(performance.now()) };
     /* LATCH BEFORE BROADCASTING. A message is only received by whoever is already
        listening, and the host attaches its listener around creating the frame —
        so any ordering slip loses the signal permanently and the render hangs
@@ -231,8 +235,15 @@ function readyAgent(poseTime: number | 'end', timeoutMs: number): string {
   }
 
   /* The timeline is registered by a script that runs after GSAP loads, so it is
-     not there on DOMContentLoaded. Poll briefly rather than guess a delay. */
+     not there on DOMContentLoaded. Poll briefly rather than guess a delay.
+
+     ONLY WHEN ONE IS COMING. 15 of the 128 shipped blocks carry no GSAP at all —
+     browser-mockup, cta-endcard, hook-statement, list-steps among them, which
+     are some of the most slide-shaped in the library. Waiting for a timeline
+     that was never going to arrive spent the WHOLE timeout on every render of
+     those blocks, turning an instant static composition into an 8-second one. */
   function timeline() {
+    if (!EXPECTS_TIMELINE) return Promise.resolve(false);
     return new Promise(function (res) {
       var waited = 0;
       (function tick() {
@@ -244,11 +255,22 @@ function readyAgent(poseTime: number | 'end', timeoutMs: number): string {
     });
   }
 
+  /* Subresources the other gates miss: a CSS background-image is not in
+     document.images and is not a font, so without this a composition can be
+     captured before its backdrop has painted. The load event covers them. */
+  function subresources() {
+    if (document.readyState === 'complete') return Promise.resolve();
+    return new Promise(function (res) {
+      window.addEventListener('load', function () { res(); }, { once: true });
+      setTimeout(res, TIMEOUT);
+    });
+  }
+
   setTimeout(function () { seek(); post('timeout'); }, TIMEOUT);
 
   Promise.resolve()
     .then(function () { return timeline(); })
-    .then(function () { return Promise.all([fonts(), images()]); })
+    .then(function () { return Promise.all([fonts(), images(), subresources()]); })
     .then(function (r) {
       var brokenImages = (r && r[1]) || [];
       /* Seek AFTER the assets settle. Seeking first lets a late image resize its
@@ -343,8 +365,19 @@ export function prepareComposition(html: string, opts: PrepareOptions = {}): Pre
   }
 
   // ── Ready agent ──────────────────────────────────────────────────────────
+  /**
+   * Does this document animate at all? A block with no GSAP registers no
+   * timeline, and waiting for one that is never coming costs the whole timeout
+   * on every render — measured against the 15 shipped blocks that have none.
+   */
+  const expectsTimeline = Array.from(doc.querySelectorAll('script')).some((s) =>
+    GSAP_SRC.test(s.getAttribute('src') ?? '')
+    || /gsap/i.test(s.getAttribute('src') ?? '')
+    || /__timelines/.test(s.textContent ?? ''),
+  );
+
   const agent = doc.createElement('script');
-  agent.textContent = readyAgent(poseTime, readyTimeoutMs);
+  agent.textContent = readyAgent(poseTime, readyTimeoutMs, expectsTimeline);
   (doc.body ?? doc.documentElement).appendChild(agent);
 
   return {

@@ -227,3 +227,41 @@ describe('consistency with the board renderer', () => {
     expect((parse(r.html).querySelector('.headline') as HTMLElement).style.display).not.toBe('none');
   });
 });
+
+describe('waiting only for what is actually coming', () => {
+  /**
+   * 15 of the 128 shipped blocks carry no GSAP — browser-mockup, cta-endcard,
+   * hook-statement and list-steps among them, which are some of the most
+   * slide-shaped in the library. Waiting for a timeline that will never register
+   * spent the WHOLE timeout on every render of those, turning an instant static
+   * composition into an eight-second one.
+   */
+  it('expects a timeline when the block loads gsap', () => {
+    const r = prepareComposition(BLOCK);
+    expect(r.html).toMatch(/var EXPECTS_TIMELINE = true/);
+  });
+
+  it('does not wait for a timeline in a block that has no animation runtime', () => {
+    const still = `<!DOCTYPE html><html><body>
+      <div data-composition-id="poster" data-width="1080" data-height="1350">
+        <div class="headline">Static</div>
+      </div></body></html>`;
+    const r = prepareComposition(still);
+    expect(r.html).toMatch(/var EXPECTS_TIMELINE = false/);
+  });
+
+  it('recognises a timeline registered without a gsap script tag', () => {
+    const inline = BLOCK.replace(/<script src="https:\/\/cdn[^"]*"><\/script>/, '');
+    const r = prepareComposition(inline);
+    // The block still registers on __timelines, so a timeline IS coming.
+    expect(r.html).toMatch(/var EXPECTS_TIMELINE = true/);
+  });
+
+  it('waits for the load event, so a CSS background image cannot be missed', () => {
+    // A background-image is not in document.images and is not a font, so the
+    // other two gates do not see it at all.
+    const r = prepareComposition(BLOCK);
+    expect(r.html).toMatch(/function subresources/);
+    expect(r.html).toMatch(/addEventListener\('load'/);
+  });
+});
