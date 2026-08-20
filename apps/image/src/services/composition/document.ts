@@ -26,6 +26,8 @@
  * and is testable without a browser, and the capture half needs a real renderer.
  */
 
+import { frameRuntimeSource } from './frame-runtime';
+
 /** How a block declares one fillable hole. Verified against the shipped library:
  *  every slot binds by EXACTLY ONE of `sel` or `var` — colours by variable (48 of
  *  48), everything else by selector (397 of 397). */
@@ -163,131 +165,6 @@ function hideUnfilled(doc: Document, spec: SlotSpec): void {
 }
 
 /**
- * The agent that runs INSIDE the frame.
- *
- * It exists because the frame is sandboxed with an opaque origin: the host
- * cannot reach in to seek the timeline or ask whether the fonts arrived, so the
- * document has to answer for itself. It reports `composition:ready` once the
- * frame is genuinely settled, and never later than the timeout — a render that
- * hangs waiting for a font is worse than one that ships a fallback face.
- */
-function readyAgent(poseTime: number | 'end', timeoutMs: number, expectsTimeline: boolean): string {
-  const pose = poseTime === 'end' ? '"end"' : String(poseTime);
-  return `
-(function () {
-  var POSE = ${pose};
-  var TIMEOUT = ${timeoutMs};
-  var EXPECTS_TIMELINE = ${expectsTimeline ? 'true' : 'false'};
-  var done = false;
-
-  function post(state, detail) {
-    if (done) return;
-    done = true;
-    /* When the frame settled, measured from its own navigation start. The
-       host cannot compute this — it only knows when it noticed. Kept because a
-       slow composition is a thing you diagnose by knowing WHICH gate was slow. */
-    var payload = { __composition: 'ready', state: state, detail: detail || null, atMs: Math.round(performance.now()) };
-    /* LATCH BEFORE BROADCASTING. A message is only received by whoever is already
-       listening, and the host attaches its listener around creating the frame —
-       so any ordering slip loses the signal permanently and the render hangs
-       waiting for something that already happened. Recording the outcome on the
-       document means a late host can ASK instead of having to have been present.
-       Found by testing: a listener attached a second late saw nothing, while the
-       frame behind it was fully settled. */
-    try { window.__compositionReady = payload; } catch (e) {}
-    try { document.documentElement.setAttribute('data-composition-ready', state); } catch (e) {}
-    try { parent.postMessage(payload, '*'); } catch (e) {}
-  }
-
-  /* Seek every registered timeline, not just the first: a document can host more
-     than one, and a half-seeked frame is the blank-chart bug in a subtler form. */
-  function seek() {
-    var seeked = 0;
-    var reg = window.__timelines || {};
-    for (var id in reg) {
-      if (!Object.prototype.hasOwnProperty.call(reg, id)) continue;
-      var tl = reg[id];
-      if (!tl || typeof tl.pause !== 'function') continue;
-      try {
-        if (POSE === 'end') { tl.progress(1); }
-        else if (typeof tl.seek === 'function') { tl.seek(POSE); }
-        tl.pause();
-        seeked++;
-      } catch (e) {}
-    }
-    return seeked;
-  }
-
-  function images() {
-    var list = Array.prototype.slice.call(document.images || []);
-    return Promise.all(list.map(function (img) {
-      if (img.complete) return null;
-      return new Promise(function (res) {
-        img.addEventListener('load', function () { res(null); }, { once: true });
-        img.addEventListener('error', function () { res(img.getAttribute('data-vs-slot') || 'image'); }, { once: true });
-      });
-    })).then(function (r) { return r.filter(Boolean); });
-  }
-
-  function fonts() {
-    try { return document.fonts && document.fonts.ready ? document.fonts.ready : Promise.resolve(); }
-    catch (e) { return Promise.resolve(); }
-  }
-
-  /* The timeline is registered by a script that runs after GSAP loads, so it is
-     not there on DOMContentLoaded. Poll briefly rather than guess a delay.
-
-     ONLY WHEN ONE IS COMING. 15 of the 128 shipped blocks carry no GSAP at all —
-     browser-mockup, cta-endcard, hook-statement, list-steps among them, which
-     are some of the most slide-shaped in the library. Waiting for a timeline
-     that was never going to arrive spent the WHOLE timeout on every render of
-     those blocks, turning an instant static composition into an 8-second one. */
-  function timeline() {
-    if (!EXPECTS_TIMELINE) return Promise.resolve(false);
-    return new Promise(function (res) {
-      var waited = 0;
-      (function tick() {
-        if (window.__timelines && Object.keys(window.__timelines).length) return res(true);
-        if (waited >= TIMEOUT) return res(false);
-        waited += 50;
-        setTimeout(tick, 50);
-      })();
-    });
-  }
-
-  /* Subresources the other gates miss: a CSS background-image is not in
-     document.images and is not a font, so without this a composition can be
-     captured before its backdrop has painted. The load event covers them. */
-  function subresources() {
-    if (document.readyState === 'complete') return Promise.resolve();
-    return new Promise(function (res) {
-      window.addEventListener('load', function () { res(); }, { once: true });
-      setTimeout(res, TIMEOUT);
-    });
-  }
-
-  setTimeout(function () { seek(); post('timeout'); }, TIMEOUT);
-
-  Promise.resolve()
-    .then(function () { return timeline(); })
-    .then(function () { return Promise.all([fonts(), images(), subresources()]); })
-    .then(function (r) {
-      var brokenImages = (r && r[1]) || [];
-      /* Seek AFTER the assets settle. Seeking first lets a late image resize its
-         container underneath a finished layout. */
-      var seeked = seek();
-      /* One frame for the seek to paint before anyone captures. */
-      requestAnimationFrame(function () {
-        requestAnimationFrame(function () {
-          post('ok', { seeked: seeked, brokenImages: brokenImages });
-        });
-      });
-    })
-    .catch(function (e) { seek(); post('error', String(e && e.message ? e.message : e)); });
-})();`;
-}
-
-/**
  * Produce a deterministic, self-contained document for one composition.
  *
  * Pure DOM work — no rendering, no network. Runs in a browser or in jsdom, which
@@ -377,7 +254,11 @@ export function prepareComposition(html: string, opts: PrepareOptions = {}): Pre
   );
 
   const agent = doc.createElement('script');
-  agent.textContent = readyAgent(poseTime, readyTimeoutMs, expectsTimeline);
+  agent.textContent = frameRuntimeSource({
+    poseTime,
+    timeoutMs: readyTimeoutMs,
+    expectsTimeline,
+  });
   (doc.body ?? doc.documentElement).appendChild(agent);
 
   return {

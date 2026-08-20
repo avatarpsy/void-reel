@@ -176,24 +176,30 @@ describe('the document stays a document', () => {
 
 describe('the ready signal survives a late listener', () => {
   /**
-   * A postMessage only reaches whoever is already listening. The host attaches
-   * its listener around creating the frame, so any ordering slip loses the
-   * signal for good and the render waits forever for something that already
-   * happened — observed in a browser: a listener attached one second late saw
-   * nothing while the frame behind it was fully settled.
+   * A postMessage only reaches a listener that is already attached. A same-origin
+   * host can fall back to reading the latch off the document — but a SANDBOXED
+   * frame has an opaque origin, so that latch is unreadable from outside and the
+   * host must be able to ASK again. Observed in a browser before this existed: a
+   * listener attached one second late saw nothing while the frame behind it was
+   * fully settled.
+   *
+   * Asserted by behaviour rather than by variable name — the first version of
+   * these pinned an identifier and broke on a rename that changed nothing.
    */
-  it('latches the outcome where a late host can read it', () => {
+  it('latches the outcome where a same-origin host can read it', () => {
     const r = prepareComposition(BLOCK);
-    expect(r.html).toMatch(/window\.__compositionReady = payload/);
+    expect(r.html).toMatch(/window\.__compositionReady\s*=/);
     expect(r.html).toMatch(/data-composition-ready/);
   });
 
-  it('latches before it broadcasts, so the record cannot be missed', () => {
+  it('answers a ping, which is the only way a sandboxed host can re-ask', () => {
     const r = prepareComposition(BLOCK);
-    const latch = r.html.indexOf('__compositionReady = payload');
-    const broadcast = r.html.indexOf('parent.postMessage(payload');
-    expect(latch).toBeGreaterThan(-1);
-    expect(broadcast).toBeGreaterThan(latch);
+    expect(r.html).toMatch(/'ping'/);
+  });
+
+  it('reports pending rather than silence when asked before it has settled', () => {
+    const r = prepareComposition(BLOCK);
+    expect(r.html).toMatch(/pending/);
   });
 });
 
