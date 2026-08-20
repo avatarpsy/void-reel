@@ -49,6 +49,20 @@
 export const MAX_CANVAS_DIMENSION = 16384;
 export const MAX_CANVAS_AREA = 64_000_000; // ~8000×8000
 
+/**
+ * What the runtime posts out, and the only thing a host should act on.
+ *
+ * `pending` is a real answer to a ping — the frame exists and has not settled —
+ * and is deliberately distinct from silence, which means nobody is home.
+ */
+export interface CompositionMessage {
+  __composition: 'ready';
+  state: 'ok' | 'timeout' | 'error' | 'pending';
+  detail?: { seeked?: number; brokenImages?: string[] } | null;
+  /** When the frame settled, by its own clock. The host only knows when it noticed. */
+  atMs?: number;
+}
+
 export interface FrameRuntimeOptions {
   poseTime: number | 'end';
   timeoutMs: number;
