@@ -725,4 +725,103 @@ describe('img-place-composition', () => {
     useProjectStore.getState().undo();
     expect(project().layers[r.layerId]).toBeUndefined();
   });
+
+  /**
+   * ── EDITING A PLACED BLOCK ────────────────────────────────────────────────
+   * Changing one slot used to mean placing the block again, which is not the
+   * same operation: every other slot has to be retyped from memory, anything
+   * forgotten reverts to the sample or vanishes, and the slide arrives as a
+   * second layer beside the first. Watched an agent spend fifteen minutes, two
+   * renders and a vision call on a one-word change for exactly this reason.
+   */
+  describe('slot patch via img-edit-layer', () => {
+    it('MERGES: a slot you do not name keeps its value', async () => {
+      await newProject();
+      const r = await place({ slots: { headline: 'Reach by month', subtitle: 'Since May' } });
+      library('stat-punch');
+      const e = await rpc({
+        type: 'voidspace:img-edit-layer', layerId: r.layerId, slots: { headline: 'Reach by week' },
+      });
+      expect(e.ok).toBe(true);
+      const layer = project().layers[r.layerId] as ImageLayer;
+      expect(layer.composition?.slots).toEqual({ headline: 'Reach by week', subtitle: 'Since May' });
+    });
+
+    it('does not place a second layer', async () => {
+      // The whole point: an edit edits, and the deck keeps one layer per slide.
+      await newProject();
+      const r = await place();
+      const countBefore = Object.keys(project().layers).length;
+      library('stat-punch');
+      await rpc({ type: 'voidspace:img-edit-layer', layerId: r.layerId, slots: { subtitle: 'New' } });
+      expect(Object.keys(project().layers).length).toBe(countBefore);
+    });
+
+    it('CLEARS a slot on empty, rather than storing a blank', async () => {
+      // A stored "" would give a cleared slide and a slide that never had the
+      // line two different render keys for the same picture.
+      await newProject();
+      const r = await place({ slots: { headline: 'Keep', subtitle: 'Drop me' } });
+      library('stat-punch');
+      await rpc({ type: 'voidspace:img-edit-layer', layerId: r.layerId, slots: { subtitle: '' } });
+      const layer = project().layers[r.layerId] as ImageLayer;
+      expect(layer.composition?.slots).toEqual({ headline: 'Keep' });
+      expect('subtitle' in (layer.composition?.slots ?? {})).toBe(false);
+    });
+
+    it('restyles several slides in ONE undo step', async () => {
+      await newProject();
+      const a = await place();
+      library('stat-punch');
+      const b = await place();
+      const before = depth();
+      library('stat-punch');
+      const e = await rpc({
+        type: 'voidspace:img-edit-layer', layerIds: [a.layerId, b.layerId],
+        slots: { accent: '#0066FF' },
+      });
+      expect(e.ok).toBe(true);
+      expect(depth()).toBe(before + 1);
+      for (const id of [a.layerId, b.layerId]) {
+        expect((project().layers[id] as ImageLayer).composition?.slots.accent).toBe('#0066FF');
+      }
+    });
+
+    it('refuses a slot the block does not declare, and names the ones it does', async () => {
+      // Accepted-and-ignored is the worst outcome: the agent is told the edit
+      // landed and then describes a slide that is not on screen.
+      await newProject();
+      const r = await place();
+      library('stat-punch');
+      const e = await rpc({
+        type: 'voidspace:img-edit-layer', layerId: r.layerId, slots: { nope: 'x' },
+      });
+      expect(e.type).toBe('voidspace:error');
+      expect(String(e.error)).toContain('nope');
+      expect(String(e.error)).toContain('headline');
+    });
+
+    it('refuses slots on a layer that is not a placed block', async () => {
+      await newProject();
+      const t = await rpc({ type: 'voidspace:img-add-text', text: 'Hi' });
+      const e = await rpc({
+        type: 'voidspace:img-edit-layer', layerId: t.layerId, slots: { headline: 'x' },
+      });
+      expect(e.type).toBe('voidspace:error');
+      expect(String(e.error)).toContain('placed block');
+    });
+
+    it('leaves an ordinary edit alone — no block fetch, no slot changes', async () => {
+      // The common edit must not pay for a manifest lookup, so `fetch` is left
+      // pointing at nothing: reaching for it here would throw.
+      await newProject();
+      const r = await place({ slots: { headline: 'Keep me' } });
+      globalThis.fetch = (() => { throw new Error('should not fetch'); }) as unknown as typeof fetch;
+      const e = await rpc({ type: 'voidspace:img-edit-layer', layerId: r.layerId, opacity: 0.5 });
+      expect(e.ok).toBe(true);
+      const layer = project().layers[r.layerId] as ImageLayer;
+      expect(layer.transform.opacity).toBe(0.5);
+      expect(layer.composition?.slots).toEqual({ headline: 'Keep me' });
+    });
+  });
 });

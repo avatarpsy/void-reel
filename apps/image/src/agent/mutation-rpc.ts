@@ -668,27 +668,32 @@ registerImageAsyncMutation(
   'voidspace:img-edit-layer',
   'Edit layer',
   async (msg: any) => {
+    /**
+     * These THROW rather than returning a refusal, and deliberately: this
+     * handler answered a bad argument with `voidspace:error` long before it
+     * grew a prepare step, and quietly changing the shape of an error is how a
+     * caller's error handling stops running. One tool, one error shape.
+     */
     const project = useProjectStore.getState().project!;
     const ids: string[] = Array.isArray(msg?.layerIds)
       ? msg.layerIds
       : (msg?.layerId ? [msg.layerId] : []);
-    if (!ids.length) return fail('bad_request', 'layerId or layerIds is required');
+    if (!ids.length) throw new Error('layerId or layerIds is required');
 
     const missing = ids.filter((id) => !project.layers[id]);
-    if (missing.length) return fail('unknown_layer', `unknown layerIds: ${missing.join(', ')}`);
+    if (missing.length) throw new Error(`unknown layerIds: ${missing.join(', ')}`);
 
     // Nothing to look up unless slots are being patched — the common edit
     // (move, recolour, retype) must not pay for a block fetch.
     if (msg?.slots === undefined) return { manifests: {} as Record<string, Record<string, SlotSpec>> };
 
     if (typeof msg.slots !== 'object' || Array.isArray(msg.slots) || msg.slots === null) {
-      return fail('bad_request', 'slots must be an object of slot name to value.');
+      throw new Error('slots must be an object of slot name to value.');
     }
 
     const notBlocks = ids.filter((id) => !(project.layers[id] as ImageLayer)?.composition);
     if (notBlocks.length) {
-      return fail(
-        'bad_request',
+      throw new Error(
         `slots only apply to a placed block; ${notBlocks.join(', ')} `
         + `${notBlocks.length > 1 ? 'are not' : 'is not'} one. `
         + 'For a text layer use `text`, and for its styling the font and colour fields.',
@@ -712,8 +717,7 @@ registerImageAsyncMutation(
       if (!declared.length) continue;
       const unknown = Object.keys(msg.slots).filter((k) => !doc.slots[k]);
       if (unknown.length) {
-        return fail(
-          'unknown_slot',
+        throw new Error(
           `"${source.block}" does not declare ${unknown.map((k) => `"${k}"`).join(', ')}. `
           + `Its slots are: ${declared.join(', ')}.`,
         );
