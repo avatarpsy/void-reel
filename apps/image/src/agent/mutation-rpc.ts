@@ -27,8 +27,10 @@ import { registerImageMutation, registerImageRpc, registerImageAsyncMutation } f
 import { getPopularFonts, loadGoogleFont } from '../services/fonts-service';
 import { libraryImageToAsset, getVoidspaceIdToken } from '../services/voidspace-storage';
 import { createTextDocument, layoutText } from '../tools/text/text-engine';
-import { loadBlock } from '../services/composition/block-source';
+import { loadBlock, resolveComposition } from '../services/composition/block-source';
 import { bakeComposition } from '../services/composition/bake';
+import { saveRegionToLibrary } from '../services/library-save';
+import { uploadToLibrary } from '@openreel/asset-browser';
 import type { SlotSpec } from '../services/composition/document';
 import type { Layer, Project, Artboard, MediaAsset, TextLayer, ShapeLayer, ImageLayer, CompositionSource } from '../types/project';
 
@@ -830,6 +832,137 @@ registerImageAsyncMutation(
     };
   },
 );
+
+/**
+ * ── THE DOCUMENT BEHIND A PLACED BLOCK ───────────────────────────────────────
+ *
+ * Read-only, and it exists so "save this block to my library" does not require
+ * the agent to re-emit a whole HTML document it already put on the canvas.
+ *
+ * Returns the AUTHORED html when the layer carries its own (the agent edited a
+ * block and placed the result), and otherwise resolves the named block. Either
+ * way the caller gets exactly what is on screen, which is the thing the user
+ * just approved.
+ */
+registerImageRpc('voidspace:img-composition-html', async (msg: any) => {
+  const project = useProjectStore.getState().project;
+  if (!project) return fail('no_project', 'No image project is open.');
+
+  const layerId = String(msg?.layerId ?? '');
+  const layer = project.layers[layerId] as ImageLayer | undefined;
+  if (!layer) return fail('unknown_layer', `No layer with id ${layerId}`);
+
+  const source = layer.composition;
+  if (!source) {
+    return fail(
+      'not_a_block',
+      `"${layer.name}" is an ordinary layer, not a placed block. Only a block has a document to save.`,
+    );
+  }
+
+  const resolved = await resolveComposition(source);
+  if (!resolved) {
+    return fail('unresolved', 'That block could not be loaded, so there is nothing to save.');
+  }
+
+  return {
+    ok: true,
+    html: resolved.html,
+    /** Set when the layer carries its own markup rather than pointing at a block. */
+    authored: !!String(source.inlineHtml ?? '').trim(),
+    block: source.block ?? '',
+    slots: source.slots ?? {},
+    frameWidth: source.frameWidth,
+    frameHeight: source.frameHeight,
+    name: layer.name,
+  };
+});
+
+/**
+ * ── KEEP A PIECE OF THE CANVAS ───────────────────────────────────────────────
+ *
+ * Registered as a plain RPC rather than a mutation: it changes nothing about
+ * the document, so it must not open a transaction, must not appear in the undo
+ * stack, and must not be blocked by an `expectRev` check — saving a crop while
+ * the user moves something is not a conflict.
+ *
+ * Everything that makes it a real library asset — dedupe, ownership, the
+ * catalog and per-kind index, and metering the bytes against the user's storage
+ * quota — happens in `POST /api/media-library/upload`, the one endpoint every
+ * other editor already uploads through. See `library-save.ts`.
+ */
+registerImageRpc('voidspace:img-save-asset', async (msg: any) => {
+  const project = useProjectStore.getState().project;
+  if (!project) return fail('no_project', 'No image project is open.');
+
+  const page = resolvePage(project, msg?.pageId);
+  if (!page) return fail('page_not_found', `No page with id ${msg?.pageId}`);
+
+  const ids: string[] = Array.isArray(msg?.layerIds)
+    ? msg.layerIds
+    : (msg?.layerId ? [msg.layerId] : []);
+  const missing = ids.filter((id) => !project.layers[id]);
+  if (missing.length) return fail('unknown_layer', `unknown layerIds: ${missing.join(', ')}`);
+
+  const region = msg?.region && typeof msg.region === 'object'
+    ? {
+        x: Number(msg.region.x) || 0,
+        y: Number(msg.region.y) || 0,
+        width: Number(msg.region.width) || 0,
+        height: Number(msg.region.height) || 0,
+      }
+    : undefined;
+
+  /**
+   * A NAME, DERIVED WHEN NOT GIVEN. The file name is what the library shows in
+   * search and in a pack listing, so falling through to "cutout.png" for every
+   * save would make a folder nobody can read.
+   */
+  const named = String(msg?.name ?? '').trim()
+    || (ids.length === 1 ? String(project.layers[ids[0]]?.name ?? '') : '')
+    || page.name;
+
+  const token = await getVoidspaceIdToken().catch(() => null);
+  if (!token) {
+    return fail('signed_out', 'Saving to the library needs the user to be signed in.');
+  }
+
+  const result = await saveRegionToLibrary(
+    project,
+    page,
+    {
+      layerIds: ids.length ? ids : undefined,
+      region,
+      // Default ON for a single layer: the reason to save one layer is almost
+      // always that it has just been cut out of its background, and saving the
+      // page-sized transparent rectangle around it keeps mostly nothing.
+      trim: msg?.trim === undefined ? ids.length === 1 : msg.trim !== false,
+      name: named,
+      scale: Number(msg?.scale) || 1,
+    },
+    { getIdToken: async () => token },
+    uploadToLibrary,
+  );
+
+  if (!result.ok) {
+    const why: Record<string, string> = {
+      empty: 'Nothing to save — every pixel in that area is transparent.',
+      no_layers: 'No layers to draw. Name a layer, or leave layerIds off for the whole page.',
+      render_failed: 'That area could not be rendered.',
+      upload_failed: 'The library refused the upload — it may be over the storage quota.',
+    };
+    return fail(result.reason ?? 'save_failed', why[result.reason ?? ''] ?? 'Could not save it.');
+  }
+
+  return {
+    ok: true,
+    fileName: result.fileName,
+    width: result.width,
+    height: result.height,
+    bytes: result.bytes,
+    note: 'Saved to the user\'s media library, private to them. Find it later with search_media.',
+  };
+});
 
 // ── Arrange ─────────────────────────────────────────────────────────────────
 
