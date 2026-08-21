@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>contact sheet</title>
+<style>
+ html,body{margin:0;background:#000;font:12px system-ui;color:#888}
+ .grid{display:grid;grid-template-columns:repeat(3,640px);grid-auto-rows:378px}
+ .cell{position:relative;overflow:hidden}
+ .cell iframe{width:1920px;height:1080px;border:0;transform:scale(0.3333);transform-origin:0 0;
+   position:absolute;left:0;top:18px}
+ .cap{position:absolute;left:6px;top:1px;z-index:9;font-weight:600;color:#5af}
+</style></head><body>
+<div class="grid" id="g"></div>
+<script type="module">
+const which = new URLSearchParams(location.search).get('case') || 'samples';
+const filter = new URLSearchParams(location.search).get('filter') || 'deck-';
+const names = (await (await fetch('cases/index.json')).json())
+  .filter((r) => r.case === which && r.block.startsWith(filter))
+  .map((r) => r.block);
+document.getElementById('g').innerHTML = names.map((n) =>
+  '<div class="cell"><div class="cap">' + n + ' / ' + which + '</div>' +
+  '<iframe src="cases/' + n + '__' + which + '.html"></iframe></div>').join('');
+</script>
+</body></html>

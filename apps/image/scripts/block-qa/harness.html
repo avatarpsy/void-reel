@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>deck block QA</title></head>
+<body style="margin:0;background:#111;color:#eee;font:13px system-ui">
+<div id="log" style="padding:12px;white-space:pre-wrap"></div>
+<iframe id="stage" style="position:fixed;left:-99999px;top:0;border:0"></iframe>
+<script>
+/*
+ * Measure every prepared case instead of looking at it.
+ *
+ * Eight blocks reviewed by eye at one size with one set of samples proves those
+ * eight pictures. What a user does is different: empty slots, five points
+ * instead of three, a headline pasted from a paragraph, a 9:16 frame the
+ * manifest promised. These are the faults that only show up then, and they are
+ * all measurable — a design does not need a human to notice that its type has
+ * left the frame.
+ */
+const IN = (r) => r && isFinite(r.width);
+
+async function measure(url, w, h) {
+  const stage = document.getElementById('stage');
+  stage.width = w; stage.height = h;
+  stage.style.width = w + 'px'; stage.style.height = h + 'px';
+  await new Promise((res) => {
+    stage.onload = res;
+    stage.src = url;
+  });
+  const win = stage.contentWindow, doc = stage.contentDocument;
+
+  /* The runtime latches its outcome onto the documentElement. Waiting for that
+     rather than a fixed delay is what makes this repeatable on a slow machine. */
+  const deadline = performance.now() + 6000;
+  while (!doc.documentElement.getAttribute('data-composition-ready')
+         && performance.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  /* The in-block fitAll() runs again at 400ms; measuring before it has settled
+     reports overflow the block was about to fix by itself. */
+  await new Promise((r) => setTimeout(r, 650));
+
+  const root = doc.getElementById('root');
+  if (!root) return { fatal: 'no #root' };
+  const rr = root.getBoundingClientRect();
+  const faults = [];
+
+  /* 1. Content past the frame edge.
+     NOT root.scrollWidth/scrollHeight: the wash is bled to inset:-12% on purpose
+     and overflow:hidden clips it visually while scrollWidth still reports it, so
+     that check flagged all 58 cases with the same two numbers and said nothing
+     about any of them. What matters is whether real content left the padding
+     box, which is what the blocks' own fit guard now measures too. */
+  {
+    const cs = win.getComputedStyle(root);
+    const top = rr.top + (parseFloat(cs.paddingTop) || 0);
+    const bottom = rr.bottom - (parseFloat(cs.paddingBottom) || 0);
+    const left = rr.left + (parseFloat(cs.paddingLeft) || 0);
+    const right = rr.right - (parseFloat(cs.paddingRight) || 0);
+    for (const el of Array.from(root.children)) {
+      if (el.classList.contains('wash') || el.classList.contains('rule')) continue;
+      if (win.getComputedStyle(el).display === 'none') continue;
+      const b = el.getBoundingClientRect();
+      if (!b.width && !b.height) continue;
+      const out = Math.max(top - b.top, b.bottom - bottom, left - b.left, b.right - right);
+      if (out > 2) faults.push('.' + (el.className || el.tagName) + ' is ' + Math.round(out) + 'px past the frame');
+    }
+  }
+
+  const all = Array.from(doc.querySelectorAll('#root *'));
+  const visible = all.filter((el) => {
+    const cs = win.getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+    if (parseFloat(cs.opacity) < 0.02) return false;
+    return true;
+  });
+
+  // 2. Type outside the frame. The wash is deliberately bled past the edges.
+  for (const el of visible) {
+    if (el.classList.contains('wash')) continue;
+    const t = (el.textContent || '').trim();
+    if (!t) continue;
+    if (el.children.length) continue;         // measure leaves, not wrappers
+    const r = el.getBoundingClientRect();
+    if (!IN(r) || r.width === 0) continue;
+    const out = Math.max(rr.left - r.left, rr.top - r.top, r.right - rr.right, r.bottom - rr.bottom);
+    if (out > 3) faults.push('"' + t.slice(0, 26) + '" escapes the frame by ' + Math.round(out) + 'px');
+  }
+
+  /* 2b. Text silently CLIPPED. This is the original complaint — a headline that
+     rendered as "HAT NEVER CLOCKS OF" — and it is invisible to the escape check
+     above, because a clipped element's rect is perfectly inside the frame. Any
+     leaf whose content is taller or wider than its own box is losing words. */
+  for (const el of visible) {
+    const t = (el.textContent || '').trim();
+    if (!t || el.children.length) continue;
+    const cs = win.getComputedStyle(el);
+    if (cs.overflow === 'visible' && cs.overflowY === 'visible' && cs.overflowX === 'visible') continue;
+    if (el.scrollHeight > el.clientHeight + 2 || el.scrollWidth > el.clientWidth + 2) {
+      faults.push('"' + t.slice(0, 26) + '" is clipped by its own box');
+    }
+  }
+  /* An ancestor with overflow:hidden clips just as silently. */
+  for (const el of visible) {
+    const t = (el.textContent || '').trim();
+    if (!t || el.children.length) continue;
+    const r = el.getBoundingClientRect();
+    for (let a = el.parentElement; a && a !== root.parentNode; a = a.parentElement) {
+      const cs = win.getComputedStyle(a);
+      if (cs.overflow === 'visible' && cs.overflowY === 'visible') continue;
+      const ar = a.getBoundingClientRect();
+      if (r.bottom > ar.bottom + 2 || r.top < ar.top - 2) {
+        faults.push('"' + t.slice(0, 22) + '" is cut off by .' + (a.className || a.tagName));
+        break;
+      }
+    }
+  }
+
+  // 3. Text still invisible after the pose — an entrance animation that never
+  //    resolved is a blank slide, and it is the exact bug seekCss() addresses.
+  for (const el of all) {
+    const t = (el.textContent || '').trim();
+    if (!t || el.children.length) continue;
+    const cs = win.getComputedStyle(el);
+    if (cs.display === 'none') continue;
+    if (parseFloat(cs.opacity) < 0.02) faults.push('"' + t.slice(0, 26) + '" is still invisible after posing');
+  }
+
+  // 4. Two pieces of type on top of each other.
+  const leaves = visible.filter((el) => !el.children.length && (el.textContent || '').trim());
+  for (let i = 0; i < leaves.length; i++) {
+    for (let j = i + 1; j < leaves.length; j++) {
+      const a = leaves[i].getBoundingClientRect(), b = leaves[j].getBoundingClientRect();
+      const ox = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+      const oy = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+      if (ox > 6 && oy > 6) {
+        faults.push('"' + leaves[i].textContent.trim().slice(0, 14) + '" overlaps "'
+          + leaves[j].textContent.trim().slice(0, 14) + '"');
+      }
+    }
+  }
+
+  // 5. How much of the frame the design actually uses. A slide that draws in a
+  //    third of its own frame is the dead-frame failure this family exists to
+  //    prevent — reported as a number rather than judged here.
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, inked = 0;
+  for (const el of visible) {
+    if (el.classList.contains('wash') || el.classList.contains('grid')) continue;
+    const r = el.getBoundingClientRect();
+    if (!IN(r) || r.width < 1 || r.height < 1) continue;
+    if (r.width * r.height > rr.width * rr.height * 0.9) continue;  // full-bleed wrappers
+    const cs = win.getComputedStyle(el);
+    const paints = (el.textContent || '').trim()
+      || cs.backgroundImage !== 'none'
+      || (cs.backgroundColor && cs.backgroundColor !== 'rgba(0, 0, 0, 0)');
+    if (!paints) continue;
+    inked++;
+    x0 = Math.min(x0, r.left); y0 = Math.min(y0, r.top);
+    x1 = Math.max(x1, r.right); y1 = Math.max(y1, r.bottom);
+  }
+  const cover = inked ? ((x1 - x0) * (y1 - y0)) / (rr.width * rr.height) : 0;
+
+  return { faults, cover: Math.round(cover * 100), inked };
+}
+
+window.__run = async function () {
+  let index = await (await fetch('cases/index.json')).json();
+  /* 136 blocks is a ten-minute sweep. ?filter=deck- scopes it to what you are
+     working on; no filter audits the whole library. */
+  const filter = new URLSearchParams(location.search).get('filter');
+  if (filter) index = index.filter((r) => r.block.startsWith(filter));
+  const out = [];
+  for (const row of index) {
+    let r;
+    try { r = await measure('cases/' + row.file, row.w, row.h); }
+    catch (e) { r = { fatal: String(e && e.message || e) }; }
+    out.push({ block: row.block, case: row.case, size: row.w + 'x' + row.h, ...r });
+    document.getElementById('log').textContent += row.block + ' ' + row.case + ' -> '
+      + (r.fatal ? 'FATAL ' + r.fatal : (r.faults.length ? r.faults.join(' | ') : 'ok')) + '\n';
+  }
+  return out;
+};
+</script>
+</body>
+</html>
