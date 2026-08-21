@@ -34,9 +34,39 @@ async function measure(url, w, h) {
          && performance.now() < deadline) {
     await new Promise((r) => setTimeout(r, 50));
   }
-  /* The in-block fitAll() runs again at 400ms; measuring before it has settled
-     reports overflow the block was about to fix by itself. */
-  await new Promise((r) => setTimeout(r, 650));
+  /* WAIT FOR THE LAYOUT TO STOP MOVING, not for a fixed delay.
+     A block re-fits at 400ms, again at 1200ms, and on every resize. A fixed wait
+     is a race with those: it passed on an idle machine and, on a busy one,
+     reported `deck-compare` overflowing by 166px — a block that fits perfectly
+     once its last pass has run. A sweep that depends on how loaded the machine
+     is cannot be used to judge anything. */
+  {
+    const signature = () => {
+      let s = '';
+      for (const el of doc.querySelectorAll('#root *')) {
+        if (el.children.length) continue;
+        const r = el.getBoundingClientRect();
+        s += `${Math.round(r.top)},${Math.round(r.left)},${Math.round(r.width)}|`;
+      }
+      return s;
+    };
+    /* Two identical reads are NOT enough on their own: a block that has not
+       started fitting yet looks exactly as still as one that has finished, and
+       sampling twice inside that window measures the unfitted layout. Blocks
+       re-fit at 400ms and again at 1200ms, so nothing counts as settled before
+       that has had a chance to run. Without the floor this reported four blocks
+       overflowing that were correct by the time anyone looked. */
+    let prev = '';
+    const notBefore = performance.now() + 1500;
+    const settleBy = performance.now() + 8000;
+    for (;;) {
+      const now = signature();
+      if (now === prev && performance.now() > notBefore) break;
+      prev = now;
+      if (performance.now() > settleBy) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
 
   const root = doc.getElementById('root');
   if (!root) return { fatal: 'no #root' };
