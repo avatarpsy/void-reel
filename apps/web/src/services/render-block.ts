@@ -138,8 +138,17 @@ export async function renderBlock(args: RenderBlockArgs): Promise<RenderedBlock>
     );
   }
   if (json?.deviceUnavailable) {
+    /**
+     * NAME THE FIX, not just the fault.
+     *
+     * Browsing the library works for everybody — the designs ship with the
+     * server — so somebody can reach this having seen a full, working library
+     * and no reason to suspect a missing prerequisite. "Not connected" reads as
+     * a glitch to wait out; "install the desktop app" is a thing to go and do.
+     */
     throw new RenderBlockError(
-      "The desktop app is not connected — graphics render on your computer.",
+      "Blocks render on your computer. Install the Voidspace desktop app (or open it, "
+      + "if it is already installed) and drag this again.",
     );
   }
   if (!json?.url) {

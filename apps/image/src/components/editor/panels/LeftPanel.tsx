@@ -57,6 +57,7 @@ import {
   SCOPE_LABEL, KIND_LABEL, gridColumns, setAssetFavourite, uploadToLibrary,
   loadBlockCatalogue, refreshBlockCatalogue, blockCatalogueError,
   searchBlocks, searchPlaceholder, lazyBlockPreview, ensureBlockPreviewStyles,
+  desktopRendersBlocks,
   type BlockInfo,
 } from '@openreel/asset-browser';
 import {
@@ -408,9 +409,25 @@ function AssetsPanel() {
       );
     }
     return (
-      <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${gridColumns('grid')}, minmax(0, 1fr))` }}>
-        {shown.map((b) => <BlockTile key={b.name} block={b} onPlace={handlePlaceBlock} />)}
-      </div>
+      <>
+        {/* Browsing works without the desktop app — the designs ship with the
+            server — but a placed block's pixels come from a render on the user's
+            own machine. Saying so before they place one is the difference
+            between a missing prerequisite and a broken feature. Same words as
+            the video editor. */}
+        {!desktopRendersBlocks() && (
+          <div className="mb-2 px-2 py-1.5 rounded-md border border-warning/40 bg-warning/10">
+            <p className="text-[10px] text-foreground leading-snug">
+              <span className="font-medium">Blocks render on your computer.</span>{' '}
+              Install the Voidspace desktop app to use these — browsing works without it, but a
+              placed block has nowhere to render.
+            </p>
+          </div>
+        )}
+        <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${gridColumns('grid')}, minmax(0, 1fr))` }}>
+          {shown.map((b) => <BlockTile key={b.name} block={b} onPlace={handlePlaceBlock} />)}
+        </div>
+      </>
     );
   };
 

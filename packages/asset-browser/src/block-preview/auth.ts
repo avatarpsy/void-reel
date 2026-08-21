@@ -85,6 +85,18 @@ import { normalizeBlocks, type BlockInfo } from '../blocks';
 let catalogue: BlockInfo[] | null = null;
 let inFlight: Promise<BlockInfo[]> | null = null;
 let lastError = '';
+/**
+ * WHERE THE LAST LISTING CAME FROM — 'device', 'disk', 'shipped', or
+ * 'device+shipped'. The route reports it, and it is the only signal a browser
+ * gets about whether the user's own machine is answering.
+ *
+ * That matters because the two halves of this feature have different
+ * requirements: BROWSING works for everybody now (the starters ship with the
+ * server), but RENDERING a block into a video happens on the user's computer.
+ * Without this the library looks complete to someone who cannot place anything
+ * from it, and the first thing they learn is a failed drop.
+ */
+let lastSource = '';
 
 /** Why the catalogue is empty, in a sentence a user can act on. */
 export function blockCatalogueError(): string {
@@ -113,6 +125,7 @@ async function fetchCatalogue(): Promise<BlockInfo[]> {
   if (!res.ok) { lastError = `Could not read the block library (${res.status}).`; return []; }
 
   const json = await res.json().catch(() => null);
+  lastSource = String(json?.source ?? '');
   const blocks = normalizeBlocks(Array.isArray(json?.blocks) ? json.blocks : []);
   if (!blocks.length) {
     lastError = 'No blocks found — open the Voidspace desktop app to reach your library.';
@@ -136,4 +149,21 @@ export function refreshBlockCatalogue(): Promise<BlockInfo[]> {
   catalogue = null;
   inFlight = null;
   return loadBlockCatalogue();
+}
+
+/**
+ * Is the user's desktop app answering?
+ *
+ * Read off the last listing's `source` rather than probed separately: the route
+ * asks the device first and says so, and one signal that is already arriving
+ * cannot disagree with itself. `false` before anything has been listed, which is
+ * the safe direction — it under-promises rather than claiming a machine is there.
+ */
+export function desktopRendersBlocks(): boolean {
+  return lastSource.includes('device');
+}
+
+/** Diagnostics: 'device' | 'disk' | 'shipped' | 'device+shipped' | ''. */
+export function blockLibrarySource(): string {
+  return lastSource;
 }

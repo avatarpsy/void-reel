@@ -9,6 +9,7 @@ import { usePlayableVideo } from "../../services/video-playback";
 import { loadBlocks, refreshBlocks, blockLoadError, cachedBlocks, type BlockInfo } from "../../services/blocks";
 import {
   searchBlocks, blocksForScope, lazyBlockPreview, ensureBlockPreviewStyles,
+  desktopRendersBlocks,
 } from "@openreel/asset-browser";
 // The SHARED asset-browser rules. Recency bucketing, page size and page merging
 // live in @openreel/asset-browser so this panel, the image editor and the board
@@ -981,6 +982,30 @@ export const LibraryPanel: React.FC = () => {
   }, [type, blocks.length, blocksLoading]);
 
   /**
+   * LAND ON A SCOPE THAT ACTUALLY HOLDS BLOCKS.
+   *
+   * "Generated" is honestly empty for blocks — one is authored or installed,
+   * never generated — so a user who was on that tab and picks Blocks is shown an
+   * empty panel and concludes they have none.
+   *
+   * This runs on the CATALOGUE too, not only on the click, and that is the whole
+   * point: the first time anyone opens the tab the library has not arrived yet,
+   * so at click time every scope is empty and there is nothing to switch to.
+   * Observed exactly that way — 138 blocks available, and the panel saying
+   * "Blocks aren't generated".
+   *
+   * Only ever moves AWAY from a scope with nothing in it, so it cannot fight a
+   * user who deliberately picked one that does.
+   */
+  useEffect(() => {
+    if (type !== "block" || !blocks.length) return;
+    if (blocksInScope(scope).length > 0) return;
+    const found = (["myfiles", "shared", "device"] as const)
+      .find((sc) => blocksInScope(sc).length > 0);
+    if (found && found !== scope) setScope(found);
+  }, [type, blocks, scope, blocksInScope]);
+
+  /**
    * Star / un-star an asset.
    *
    * Optimistic: the star fills immediately and reverts only if the write fails.
@@ -1679,10 +1704,33 @@ export const LibraryPanel: React.FC = () => {
     }
     return (
       <>
-        <p className="text-[10px] text-text-muted mb-2 px-0.5">
-          Drag one onto the timeline. It renders on your computer and lands as a clip you can
-          trim, move and edit like any other.
-        </p>
+        {desktopRendersBlocks() ? (
+          <p className="text-[10px] text-text-muted mb-2 px-0.5">
+            Drag one onto the timeline. It renders on your computer and lands as a clip you can
+            trim, move and edit like any other.
+          </p>
+        ) : (
+          /**
+           * BROWSING WORKS WITHOUT THE DESKTOP APP; PLACING DOES NOT.
+           *
+           * The designs ship with the server, so this library is full for
+           * everybody — which is exactly why this has to be said out loud. A
+           * user without the desktop app sees 124 blocks, drags one, and the
+           * render has nowhere to run. Being told that BEFORE the drag is the
+           * difference between a missing prerequisite and a broken feature.
+           *
+           * Not disabled, deliberately: the app may be starting, or on another
+           * machine they are about to wake, and a library they cannot even open
+           * would be a worse answer than one that explains itself.
+           */
+          <div className="mb-2 px-2 py-1.5 rounded-md border border-warning/40 bg-warning/10">
+            <p className="text-[10px] text-text-primary leading-snug">
+              <span className="font-medium">Blocks render on your computer.</span>{" "}
+              Install the Voidspace desktop app to place these in your video — browsing works
+              without it, but a drag has nowhere to render.
+            </p>
+          </div>
+        )}
         <div className="grid gap-2" style={gridStyle}>
           {shown.map(renderBlockTile)}
         </div>
@@ -1917,23 +1965,7 @@ export const LibraryPanel: React.FC = () => {
         {TYPE_PILLS.map(({ id, label, Icon }) => (
           <button
             key={id}
-            onClick={() => {
-              setType(id);
-              setMood("");
-              /**
-               * Land on a scope that actually holds blocks.
-               *
-               * The same move the board makes. "Generated" is honestly empty for
-               * blocks — a block is authored or installed, never generated — so
-               * a user who was on that tab and picks Blocks would otherwise be
-               * shown an empty panel and conclude they have none.
-               */
-              if (id === "block" && blocksInScope(scope).length === 0) {
-                const found = (["myfiles", "shared"] as const)
-                  .find((sc) => blocksInScope(sc).length > 0);
-                if (found) setScope(found);
-              }
-            }}
+            onClick={() => { setType(id); setMood(""); }}
             className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-medium border transition-colors ${
               type === id
                 ? "bg-primary/15 border-primary text-primary"
