@@ -54,6 +54,31 @@ describe('the settle protocol', () => {
   it('carries a bounded timeout, so a missing font cannot hang a render', () => {
     expect(src({ timeoutMs: 1234 })).toMatch(/TIMEOUT = 1234/);
   });
+
+  it('poses CSS animations too, not only GSAP timelines', () => {
+    // A block is allowed to animate without GSAP — a fifth of the shipped
+    // library does, and every deck block does. Those animations follow the wall
+    // clock, so without this a still catches the entrance mid-flight and two
+    // stills of the same document disagree.
+    expect(src()).toMatch(/document\.getAnimations\(\)/);
+  });
+
+  it('converts the pose time to milliseconds for the Web Animations API', () => {
+    // GSAP seeks in seconds and the WAAPI in milliseconds. Passing 2.5 straight
+    // through poses the CSS layer at 2.5ms — visually the unplayed state, while
+    // the GSAP layer sits correctly at 2.5s, so the two halves of one block
+    // disagree with each other.
+    expect(src({ poseTime: 2.5 })).toMatch(/POSE \* 1000/);
+  });
+
+  it('does not send an endlessly-looping animation back to its start', () => {
+    // A drifting background wash has no end to seek to. Reading its endTime gives
+    // Infinity, and the tempting fallback — zero — is the unplayed state this
+    // whole function exists to avoid.
+    const s = src();
+    expect(s).toMatch(/isFinite\(t\.endTime\)/);
+    expect(s).toMatch(/isFinite\(t\.duration\)/);
+  });
 });
 
 describe('answering a host that asked late', () => {

@@ -109,6 +109,48 @@ export function frameRuntimeSource(o: FrameRuntimeOptions): string {
     reply(settled);
   }
 
+  /* CSS animations are invisible to window.__timelines, and a block is perfectly
+     entitled to animate without GSAP — a fifth of the shipped library does, and
+     every deck block does. Left alone they follow the wall clock, which means a
+     still taken at mount catches the entrance mid-flight and two stills of the
+     same document disagree. Posing them is what makes a CSS-animated block
+     render the same way twice.
+
+     An infinite animation (a drifting background wash) has no end to seek to, so
+     "end" holds it at the close of its FIRST iteration: a defined phase, which is
+     all determinism needs, and a more sensible one than an arbitrary clock
+     reading. */
+  function seekCss() {
+    if (typeof document.getAnimations !== 'function') return 0;
+    var posed = 0;
+    var list;
+    try { list = document.getAnimations(); } catch (e) { return 0; }
+    for (var i = 0; i < list.length; i++) {
+      var anim = list[i];
+      try {
+        if (POSE !== 'end') {
+          /* GSAP seeks in seconds, the Web Animations API in milliseconds. */
+          anim.currentTime = POSE * 1000;
+        } else {
+          var endMs = null;
+          if (anim.effect && typeof anim.effect.getComputedTiming === 'function') {
+            var t = anim.effect.getComputedTiming() || {};
+            if (isFinite(t.endTime)) endMs = t.endTime;
+            else if (isFinite(t.duration)) endMs = (t.delay || 0) + t.duration;
+          }
+          if (endMs !== null) anim.currentTime = endMs;
+          /* Nothing to compute an end from: finish() is the API's own answer,
+             and if it refuses (an infinite animation) leaving the clock where it
+             is beats jumping to zero and showing the unplayed state. */
+          else { try { anim.finish(); } catch (e) {} }
+        }
+        anim.pause();
+        posed++;
+      } catch (e) {}
+    }
+    return posed;
+  }
+
   function seek() {
     var seeked = 0;
     var reg = window.__timelines || {};
@@ -123,7 +165,7 @@ export function frameRuntimeSource(o: FrameRuntimeOptions): string {
         seeked++;
       } catch (e) {}
     }
-    return seeked;
+    return seeked + seekCss();
   }
 
   function images() {
