@@ -22,6 +22,7 @@
 import type { Project } from '../types/project';
 import { exportArtboard } from './export-service';
 import { getVoidspaceIdToken } from './voidspace-storage';
+import { projectDisplayName } from './project-name';
 
 const COVER_MAX = 384; // px, longest side — for the list tile
 const PAGE_MAX = 768; // px, longest side — for the cross-device flattened fallback
@@ -161,7 +162,10 @@ export async function syncProjectToCloud(project: Project | null): Promise<void>
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         projectId: project.id,
-        name: project.name || 'Untitled',
+        // The library shows this. A project keeps the format it was born with
+        // as its name forever unless somebody renames it, which made a hundred
+        // decks share one card — see `projectDisplayName`.
+        name: projectDisplayName(project),
         aspectRatio: aspectRatioString(first.size.width, first.size.height),
         pageCount: project.artboards.length,
         cover,

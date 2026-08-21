@@ -35,6 +35,7 @@ import {
   Spline,
   SquareStack,
   Send,
+  Play,
 } from 'lucide-react';
 import { AllPanelsButton } from '@openreel/ui';
 import { useUIStore, Tool } from '../../../stores/ui-store';
@@ -245,6 +246,7 @@ export function Toolbar() {
     openExportDialog,
     toggleShortcutsPanel,
     setPublishCarouselOpen,
+    setPresenting,
   } = useUIStore();
   // "Any open" rather than "all open" — the button clears the screen while
   // anything is still on it, and only then restores. Matches the video editor.
@@ -383,6 +385,19 @@ export function Toolbar() {
       >
         <Save size={18} />
       </button>
+
+      {/* Only for a multi-page project: presenting one image is not a thing
+          anybody wants, and a toolbar stays readable by not offering it. */}
+      {(project?.artboards.length ?? 0) > 1 && (
+        <button
+          onClick={() => setPresenting(true)}
+          className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+          title="Present full screen"
+        >
+          <Play size={16} />
+          Present
+        </button>
+      )}
 
       <button
         onClick={() => setPublishCarouselOpen(true)}

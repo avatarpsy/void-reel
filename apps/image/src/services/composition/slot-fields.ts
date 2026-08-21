@@ -32,6 +32,8 @@ export interface SlotField {
    * made, and seeing it is how anybody works that out.
    */
   undeclared: boolean;
+  /** When the slot declares a fixed set of values, the values. Drawn as a menu. */
+  values?: string[];
 }
 
 /** `key-text` and `keyText` both become "Key text". */
@@ -80,6 +82,7 @@ export function slotFields(
       value: filled(values?.[key]) ? String(values[key]) : '',
       placeholder: spec.sample ?? '',
       undeclared: false,
+      ...(Array.isArray(spec.values) && spec.values.length ? { values: spec.values.slice() } : {}),
     });
   }
 

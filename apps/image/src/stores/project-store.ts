@@ -19,6 +19,7 @@ import {
   RemoveArtboardCommand,
   RemoveAssetCommand,
   RemoveLayerCommand,
+  ReorderArtboardsCommand,
   ReorderLayerCommand,
   SetProjectNameCommand,
   UngroupLayersCommand,
@@ -115,6 +116,8 @@ interface ProjectActions {
 
   addArtboard: (name: string, size: CanvasSize, position?: { x: number; y: number }) => string;
   removeArtboard: (artboardId: string) => void;
+  /** Move a page to another position. Indices are into `project.artboards`. */
+  reorderArtboards: (from: number, to: number) => void;
   updateArtboard: (artboardId: string, updates: Partial<Artboard>) => void;
   selectArtboard: (artboardId: string | null) => void;
 
@@ -408,6 +411,15 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
         const newProject = execCmd(project, cmd);
         set({ project: newProject, isDirty: true });
         return id;
+      },
+
+      reorderArtboards: (from, to) => {
+        const { project } = get();
+        if (!project) return;
+        const count = project.artboards.length;
+        if (from === to || from < 0 || from >= count || to < 0 || to >= count) return;
+        const cmd = new ReorderArtboardsCommand(from, to);
+        set({ project: execCmd(project, cmd), isDirty: true });
       },
 
       removeArtboard: (artboardId) => {

@@ -972,6 +972,28 @@ registerImageMutation('voidspace:img-page', 'Edit pages', (msg: any) => {
       return { pageId: id, name: msg?.name };
     }
 
+    /**
+     * MOVE TAKES A HUMAN POSITION, NOT AN INDEX.
+     *
+     * "Put the pricing slide third" is the request; `toIndex: 2` is a
+     * translation the model gets wrong often enough to matter, and getting it
+     * wrong silently reorders somebody's deck. `position` is 1-based, the same
+     * number printed under the thumbnail and the same one the user says out loud.
+     */
+    case 'move': {
+      const id = String(msg?.pageId || store.selectedArtboardId || '');
+      const from = project.artboards.findIndex((a) => a.id === id);
+      if (from < 0) throw new Error(`no page with id ${id}`);
+      const count = project.artboards.length;
+      const asked = Number(msg?.position);
+      if (!Number.isFinite(asked)) throw new Error('move needs `position` — a 1-based slide number');
+      // Clamp rather than refuse: "move it to the end" is often sent as a
+      // number past the end, and doing what was meant beats an error.
+      const to = Math.min(count - 1, Math.max(0, Math.round(asked) - 1));
+      useProjectStore.getState().reorderArtboards(from, to);
+      return { pageId: id, from: from + 1, position: to + 1, pageCount: count };
+    }
+
     case 'set_background': {
       const id = String(msg?.pageId || store.selectedArtboardId || '');
       if (!project.artboards.some((a) => a.id === id)) throw new Error(`no page with id ${id}`);

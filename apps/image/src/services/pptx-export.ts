@@ -70,6 +70,7 @@ const MAX_SLIDE_IN = 56;
 
 export type PptxMode = 'editable' | 'picture';
 
+
 export interface PptxExportOptions {
   /**
    * 'editable' maps what it safely can and rasterises the rest (the default —

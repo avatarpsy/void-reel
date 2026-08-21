@@ -60,7 +60,22 @@ export interface CompositionMessage {
 }
 
 export interface FrameRuntimeOptions {
-  poseTime: number | 'end';
+  /**
+   * Where to hold the animation.
+   *
+   * A number or 'end' POSES the document — every animation is seeked there and
+   * paused — which is what makes a still repeatable: a capture taken at mount
+   * otherwise catches the entrance mid-flight and two stills of the same
+   * document disagree.
+   *
+   * 'live' is the opposite and exists for watching rather than capturing. The
+   * entrance animation was, until this, a control with no playback surface
+   * anywhere in the product: the canvas overlay poses to the end, the page
+   * thumbnails are baked stills, and every export is static. You could set an
+   * animation and never once see it. Present mode mounts frames 'live', so the
+   * slide plays exactly as it will when the deck is shown.
+   */
+  poseTime: number | 'end' | 'live';
   timeoutMs: number;
   expectsTimeline: boolean;
 }
@@ -81,7 +96,9 @@ export interface FrameRuntimeOptions {
  *   and then answered nothing at all. Both are pinned by tests.
  */
 export function frameRuntimeSource(o: FrameRuntimeOptions): string {
-  const pose = o.poseTime === 'end' ? '"end"' : String(o.poseTime);
+  const pose = o.poseTime === 'end' || o.poseTime === 'live'
+    ? `"${o.poseTime}"`
+    : String(o.poseTime);
   return `
 (function () {
   var POSE = ${pose};
@@ -152,6 +169,9 @@ export function frameRuntimeSource(o: FrameRuntimeOptions): string {
   }
 
   function seek() {
+    /* 'live' means LET IT RUN: no seeking, no pausing. The frame is being
+       watched rather than captured, so the entrance is the point of it. */
+    if (POSE === 'live') return 0;
     var seeked = 0;
     var reg = window.__timelines || {};
     for (var id in reg) {

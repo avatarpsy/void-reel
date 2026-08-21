@@ -3,6 +3,9 @@ import { Download, FileImage, Loader2, Link2, Link2Off, Printer, Instagram, Yout
 import { Dialog, DialogFooter } from '../ui/Dialog';
 import { useProjectStore } from '../../stores/project-store';
 import { useUIStore } from '../../stores/ui-store';
+// Its own tiny module on purpose: pptx-export drags in pptxgenjs and pdf-lib,
+// which are loaded only when somebody actually exports.
+import { pptxTextNote } from '../../services/pptx-text-note';
 import {
   exportProject,
   exportArtboard,
@@ -37,7 +40,10 @@ const FORMATS: FormatInfo[] = [
   {
     id: 'pptx',
     name: 'PowerPoint',
-    description: 'Every page a slide, still editable',
+    // Deliberately does not promise editable text. Whether the text survives as
+    // text depends on what the slide is made of, so the honest version of that
+    // claim cannot be a constant — see `pptxTextNote`.
+    description: 'Every page a slide',
     supportsTransparency: false,
     supportsQuality: false,
     document: true,
@@ -164,6 +170,10 @@ type SizeMode = 'scale' | 'custom' | 'dpi';
 export function ExportDialog({ open, onClose }: ExportDialogProps) {
   const { project, selectedArtboardId } = useProjectStore();
   const { showNotification, editSource } = useUIStore();
+
+  // Computed from the document, because whether PowerPoint text survives as
+  // text depends entirely on what the slides are made of.
+  const pptxNote = useMemo(() => pptxTextNote(project), [project]);
 
   const [format, setFormat] = useState<ExportFormat>('png');
   const [quality, setQuality] = useState<ExportQuality>('high');
@@ -502,6 +512,14 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
               </button>
             ))}
           </div>
+
+          {/* Says what will actually happen to this deck's text, rather than
+              promising something that depends on how the slides were made. */}
+          {format === 'pptx' && pptxNote && (
+            <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+              {pptxNote}
+            </p>
+          )}
         </div>
 
         {currentFormat.supportsQuality && (

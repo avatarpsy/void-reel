@@ -16,6 +16,7 @@ import { History, Ruler, SlidersHorizontal } from 'lucide-react';
 
 const ExportDialog = lazy(() => import('./ExportDialog').then(m => ({ default: m.ExportDialog })));
 const PublishCarouselModal = lazy(() => import('./PublishCarouselModal').then(m => ({ default: m.PublishCarouselModal })));
+const PresentMode = lazy(() => import('./present/PresentMode').then(m => ({ default: m.PresentMode })));
 
 // Layers live in the LEFT panel (full height — Figma-style). The right column is
 // a single tab strip: the selected-layer/artboard properties, guides, and edit
@@ -39,7 +40,9 @@ export function EditorInterface() {
   } = useUIStore();
   const publishCarouselOpen = useUIStore((s) => s.publishCarouselOpen);
   const setPublishCarouselOpen = useUIStore((s) => s.setPublishCarouselOpen);
-  const { project } = useProjectStore();
+  const isPresenting = useUIStore((s) => s.isPresenting);
+  const setPresenting = useUIStore((s) => s.setPresenting);
+  const { project, selectedArtboardId } = useProjectStore();
   const [rightTab, setRightTab] = useState<RightTab>('design');
   const [leftWidth, setLeftWidth] = useState(288); // w-72 = 18rem
   // The right column used to be a hard `w-72`, so it was the one editor column
@@ -198,6 +201,17 @@ export function EditorInterface() {
       {publishCarouselOpen && (
         <Suspense fallback={null}>
           <PublishCarouselModal open={publishCarouselOpen} onClose={() => setPublishCarouselOpen(false)} />
+        </Suspense>
+      )}
+
+      {/* Lazy, and only mounted while presenting: it holds a live frame per
+          slide, which must not exist behind the editor. */}
+      {isPresenting && (
+        <Suspense fallback={null}>
+          <PresentMode
+            startArtboardId={selectedArtboardId}
+            onClose={() => setPresenting(false)}
+          />
         </Suspense>
       )}
     </div>

@@ -146,6 +146,43 @@ function SlotInput({ field, onChange }: { field: SlotField; onChange: (value: st
     </label>
   );
 
+  /**
+   * A FIXED SET OF VALUES IS A MENU, whatever kind the slot is.
+   *
+   * Checked before `kind`, because an enum's kind describes what it stores and
+   * the menu describes what you may store. The entrance animation is a text
+   * slot with six legal answers; as a text box it showed one of them as a
+   * placeholder and hid the rest, so the only way to find "fadeIn" was to ask
+   * the agent for it.
+   */
+  if (field.values?.length) {
+    return (
+      <div>
+        {label}
+        <select
+          value={field.value}
+          onChange={(e) => onChange(e.target.value)}
+          className={INPUT}
+        >
+          {/* An empty option is what "leave it alone" looks like, and without
+              it a slot nobody has set would silently adopt the first value the
+              moment the panel drew it. */}
+          <option value="">
+            {field.placeholder ? `Default (${field.placeholder})` : 'Default'}
+          </option>
+          {field.values.map((v) => (
+            <option key={v} value={v}>{v}</option>
+          ))}
+          {/* A value set before the block declared its options would otherwise
+              vanish from the menu and be lost on the next change. */}
+          {field.value && !field.values.includes(field.value) && (
+            <option value={field.value}>{field.value}</option>
+          )}
+        </select>
+      </div>
+    );
+  }
+
   if (field.kind === 'color') {
     // A colour slot with nothing in it has no colour to show, and a swatch
     // defaulting to black would read as "black is set" when nothing is.

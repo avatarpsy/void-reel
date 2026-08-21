@@ -40,6 +40,7 @@ export function PagesBar() {
     addArtboard,
     removeArtboard,
     updateArtboard,
+    reorderArtboards,
   } = useProjectStore();
 
   const setGenerateImageOpen = useUIStore((s) => s.setGenerateImageOpen);
@@ -55,6 +56,28 @@ export function PagesBar() {
   const thumbsRef = useRef<Record<string, { url: string; sig: string }>>({});
   thumbsRef.current = thumbs;
   const inputRef = useRef<HTMLInputElement>(null);
+
+  /**
+   * Which page is being dragged, and where it would land.
+   *
+   * Reordering slides is the commonest edit anybody makes to a deck, and it had
+   * no surface at all — the only way to move slide 5 above slide 3 was to delete
+   * one and rebuild it, losing its artwork. Dragging the thumbnail is where a
+   * person already expects to find it.
+   *
+   * `overIndex` drives an insertion line rather than swapping thumbnails as the
+   * pointer moves: a strip that rearranges under the cursor makes it impossible
+   * to aim, because the target moves while you reach for it.
+   */
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [overIndex, setOverIndex] = useState<number | null>(null);
+
+  const endDrag = () => { setDragIndex(null); setOverIndex(null); };
+
+  const dropOn = (index: number) => {
+    if (dragIndex !== null && dragIndex !== index) reorderArtboards(dragIndex, index);
+    endDrag();
+  };
 
   const artboardIds = project?.artboards.map((a) => a.id).join(',') ?? '';
   const projectRev = project?.updatedAt ?? 0;
@@ -183,20 +206,38 @@ export function PagesBar() {
       {isExpanded && (
         <div className="px-3 pb-3 overflow-x-auto">
           <div className="flex gap-2">
-            {artboards.map((artboard) => {
+            {artboards.map((artboard, index) => {
               const isSelected = artboard.id === selectedArtboardId;
               const aspectRatio = artboard.size.width / artboard.size.height;
               const thumbHeight = 64;
               const thumbWidth = Math.min(thumbHeight * aspectRatio, 100);
+              const isDragging = dragIndex === index;
+              // The line sits on the side the page would come to rest on, so it
+              // reads as "it goes here" rather than "this one is highlighted".
+              const dropBefore = overIndex === index && dragIndex !== null && dragIndex > index;
+              const dropAfter = overIndex === index && dragIndex !== null && dragIndex < index;
 
               return (
                 <div
                   key={artboard.id}
+                  draggable={!editingId}
+                  onDragStart={(e) => {
+                    setDragIndex(index);
+                    e.dataTransfer.effectAllowed = 'move';
+                    // Firefox refuses to start a drag without payload.
+                    e.dataTransfer.setData('text/plain', artboard.id);
+                  }}
+                  onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setOverIndex(index); }}
+                  onDrop={(e) => { e.preventDefault(); dropOn(index); }}
+                  onDragEnd={endDrag}
+                  title={`${artboard.name} — drag to reorder`}
                   className={`group relative flex-shrink-0 rounded-lg border-2 transition-all cursor-pointer ${
                     isSelected
                       ? 'border-primary ring-2 ring-primary/20'
                       : 'border-border hover:border-muted-foreground'
-                  }`}
+                  } ${isDragging ? 'opacity-40' : ''} ${
+                    dropBefore ? 'shadow-[-3px_0_0_0_hsl(var(--primary))]' : ''
+                  } ${dropAfter ? 'shadow-[3px_0_0_0_hsl(var(--primary))]' : ''}`}
                   onClick={() => selectArtboard(artboard.id)}
                 >
                   <div

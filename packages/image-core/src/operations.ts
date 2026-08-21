@@ -105,7 +105,12 @@ export function createProjectDocument({
     artboards: [
       {
         id: artboardId,
-        name: 'Artboard 1',
+        // "Page 1", not "Artboard 1". Every page added afterwards — by the Add
+        // Page button and by the agent alike — is called "Page N", so the old
+        // name made a deck read "Artboard 1, Page 2, Page 3" in the strip and
+        // the layers panel. It was also the first words on screen in a brand new
+        // project, in the vocabulary of the drawing tool rather than the user's.
+        name: 'Page 1',
         size,
         background: background ?? { type: 'color', color: '#ffffff' },
         layerIds: [],

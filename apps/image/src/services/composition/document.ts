@@ -40,6 +40,16 @@ export interface SlotSpec {
   var?: string;
   /** The designer's placeholder. Kept in `preview`, removed in `render`. */
   sample?: string;
+  /**
+   * The only values this slot accepts, when it is a fixed set.
+   *
+   * Without this, a slot that is really an enum arrives as a free text box. The
+   * entrance animation is the case that forced it: six legal values, a
+   * placeholder showing one of them, and no way for anybody to discover the
+   * other five except by asking the agent. A slot that knows its own options can
+   * be drawn as a menu and is then impossible to get wrong.
+   */
+  values?: string[];
 }
 
 export type FillMode = 'preview' | 'render';
@@ -60,8 +70,13 @@ export interface PrepareOptions {
   /**
    * Where to freeze the timeline, in seconds. `'end'` is the settled state and
    * the right default for a still: it is what the design resolves to.
+   *
+   * `'live'` does not freeze it at all, and is for a frame being WATCHED rather
+   * than captured — present mode, and the panel's replay. Never use it for a
+   * render: an unposed capture catches the entrance mid-flight, and two stills
+   * of the same document then disagree.
    */
-  poseTime?: number | 'end';
+  poseTime?: number | 'end' | 'live';
   /**
    * Local GSAP. 113 of the 128 shipped blocks fetch it from cdn.jsdelivr.net at
    * render time, so offline, on a locked-down network, or inside a frame with a
@@ -340,13 +355,19 @@ export function prepareFromSource(
   html: string,
   source: CompositionSource,
   manifest: Record<string, SlotSpec> = {},
-  opts: Pick<PrepareOptions, 'runtimeUrl' | 'readyTimeoutMs'> = {},
+  opts: Pick<PrepareOptions, 'runtimeUrl' | 'readyTimeoutMs' | 'poseTime'> = {},
 ): PreparedComposition {
   return prepareComposition(html, {
     slots: manifest,
     values: source.slots,
     fillMode: source.fillMode,
-    poseTime: source.poseTime,
+    /**
+     * An override rather than a stored value, because "play it" is a property
+     * of how the frame is being LOOKED AT, not of the slide. Writing 'live'
+     * onto the source would change the render cache key and make presenting a
+     * deck re-render every slide in it.
+     */
+    poseTime: opts.poseTime ?? source.poseTime,
     frameWidth: source.frameWidth,
     frameHeight: source.frameHeight,
     runtimeUrl: opts.runtimeUrl,

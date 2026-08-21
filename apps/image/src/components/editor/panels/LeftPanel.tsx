@@ -1,9 +1,10 @@
-import { useState, useEffect, memo } from 'react';
+import { useState, useEffect, useRef, memo } from 'react';
 import {
   Layers,
   Image,
   Type,
   Shapes,
+  LayoutTemplate,
   Upload,
   RefreshCw,
   Search,
@@ -48,10 +49,16 @@ import {
   Loader2,
 } from 'lucide-react';
 import { PanelHeader } from '@openreel/ui';
+import { TemplatesPanel } from './TemplatesPanel';
 import { useUIStore, Panel } from '../../../stores/ui-store';
 import { useProjectStore } from '../../../stores/project-store';
 import { LayerPanel } from '../layers/LayerPanel';
-import { SCOPE_LABEL, gridColumns, setAssetFavourite, uploadToLibrary } from '@openreel/asset-browser';
+import {
+  SCOPE_LABEL, KIND_LABEL, gridColumns, setAssetFavourite, uploadToLibrary,
+  loadBlockCatalogue, refreshBlockCatalogue, blockCatalogueError,
+  searchBlocks, searchPlaceholder, lazyBlockPreview, ensureBlockPreviewStyles,
+  type BlockInfo,
+} from '@openreel/asset-browser';
 import {
   fetchVoidspaceLibrary,
   libraryImageToAsset,
@@ -63,6 +70,7 @@ import {
 const panels: { id: Panel; icon: React.ElementType; label: string }[] = [
   { id: 'layers', icon: Layers, label: 'Layers' },
   { id: 'elements', icon: Sparkles, label: 'Elements' },
+  { id: 'templates', icon: LayoutTemplate, label: 'Templates' },
   { id: 'assets', icon: Image, label: 'Assets' },
   { id: 'text', icon: Type, label: 'Text' },
   { id: 'shapes', icon: Shapes, label: 'Shapes' },
@@ -112,6 +120,7 @@ export const LeftPanel = memo(function LeftPanel() {
         <div className="flex-1 overflow-hidden">
           {activePanel === 'layers' && <LayerPanel />}
           {activePanel === 'elements' && <ElementsPanel />}
+          {activePanel === 'templates' && <TemplatesPanel />}
           {activePanel === 'assets' && <AssetsPanel />}
           {activePanel === 'text' && <TextPanel />}
           {activePanel === 'shapes' && <ShapesPanel />}
@@ -132,12 +141,85 @@ export const LeftPanel = memo(function LeftPanel() {
  * the shared package, and all three editors now say the same word for the same
  * thing.
  */
-type AssetTab = 'project' | 'library';
+type AssetTab = 'project' | 'library' | 'blocks';
+
+/**
+ * A BLOCK TILE — the same one the board and the video editor show.
+ *
+ * Zero preview images exist on disk and a block is layout, typography AND
+ * MOTION, so the honest thumbnail is to run it. `lazyBlockPreview` is shared
+ * (`@openreel/asset-browser`) — the sandboxed iframe, the `__hyperframes` shim
+ * every block calls on its first line, and the budget that stops 124 tiles
+ * running 124 live documents. Hover replays the motion.
+ *
+ * Clicking places it as a composition layer on the open page, which is this
+ * editor's equivalent of dropping one on a timeline: the layer holds the block
+ * and its slot values, and the pixels arrive when the render does.
+ */
+const BlockTile: React.FC<{ block: BlockInfo; onPlace: (b: BlockInfo) => void }> = ({ block: b, onPlace }) => {
+  const host = useRef<HTMLDivElement | null>(null);
+  const preview = useRef<ReturnType<typeof lazyBlockPreview> | null>(null);
+
+  useEffect(() => {
+    if (!host.current) return;
+    ensureBlockPreviewStyles();
+    const lazy = lazyBlockPreview(host.current, { priority: 'tile' });
+    lazy.set(b.name);
+    preview.current = lazy;
+    return () => { preview.current = null; lazy.destroy(); };
+  }, [b.name]);
+
+  const credit = b.tier === 'starter' ? 'Voidspace' : b.credit;
+  const detail = [
+    b.category,
+    b.slots.length ? `${b.slots.length} slot${b.slots.length === 1 ? '' : 's'}` : 'no slots',
+    b.fill === 'adapt' ? 'needs adapting' : '',
+    b.overlay ? 'overlay' : '',
+    ...b.tags.slice(0, 3),
+  ].filter(Boolean).join(' · ');
+
+  return (
+    <button
+      type="button"
+      onClick={() => onPlace(b)}
+      onPointerEnter={() => preview.current?.setLoop(true)}
+      onPointerLeave={() => preview.current?.setLoop(false)}
+      title={`${b.name}${b.description ? ` — ${b.description}` : ''} — click to place on this page`}
+      className="group flex flex-col rounded-lg border border-border bg-secondary overflow-hidden
+                 hover:border-primary/50 transition-colors text-left"
+    >
+      <div
+        ref={host}
+        data-block-preview
+        className="relative w-full aspect-video bg-black/40 overflow-hidden
+                   flex items-center justify-center text-muted-foreground/40 text-lg"
+      >
+        ◫
+      </div>
+      <div className="px-2 py-1.5 min-w-0">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span className="text-[11px] font-medium text-foreground truncate">{b.name}</span>
+          {b.tier !== 'starter' && (
+            <span className="shrink-0 px-1 py-px rounded text-[9px] uppercase tracking-wide
+                             bg-primary/15 text-primary">
+              {b.tier}
+            </span>
+          )}
+        </div>
+        <p className="text-[10px] text-muted-foreground/80 truncate">{detail}</p>
+        {credit && <p className="text-[10px] text-muted-foreground/60 truncate">by {credit}</p>}
+      </div>
+    </button>
+  );
+};
 
 function AssetsPanel() {
   const { project, addAsset, addImageLayer } = useProjectStore();
   const [tab, setTab] = useState<AssetTab>('project');
   const [searchQuery, setSearchQuery] = useState('');
+  /** The block library — metadata only, held whole and searched in memory. */
+  const [blocks, setBlocks] = useState<BlockInfo[]>([]);
+  const [blocksLoading, setBlocksLoading] = useState(false);
   const assets = project ? Object.values(project.assets) : [];
 
   // Shared Voidspace Library (same store video generations use). Loaded lazily
@@ -226,6 +308,89 @@ function AssetsPanel() {
     ? visibleAssets.filter((a) => a.name.toLowerCase().includes(searchQuery.toLowerCase()))
     : visibleAssets;
 
+  /**
+   * Fetch the block library the first time the tab is opened — not on mount,
+   * because most sessions never open it and the request reaches the user's
+   * machine.
+   */
+  useEffect(() => {
+    if (tab !== 'blocks' || blocks.length || blocksLoading) return;
+    setBlocksLoading(true);
+    void loadBlockCatalogue()
+      .then(setBlocks)
+      .finally(() => setBlocksLoading(false));
+  }, [tab, blocks.length, blocksLoading]);
+
+  /**
+   * Place a block as a composition layer on the open page.
+   *
+   * The same shape `img_place_composition` writes, because it is the same
+   * thing: the layer carries the block and its (empty, for now) slots, and its
+   * pixels come from a render that happens after. `fillMode: 'preview'` so an
+   * unfilled block shows the designer's own content rather than an empty
+   * rectangle — the user picked it for how it looks, and fills it in next.
+   */
+  const handlePlaceBlock = (b: BlockInfo) => {
+    const layerId = addImageLayer('');
+    if (!layerId) return;
+    useProjectStore.getState().updateLayer(layerId, {
+      name: b.name,
+      composition: {
+        block: b.name,
+        tier: b.tier,
+        slots: {},
+        fillMode: 'preview',
+        poseTime: 'end',
+        renderHash: '',
+      },
+    } as never);
+  };
+
+  /** The Blocks tab's grid, searched by the same box as the other tabs. */
+  const renderBlocks = () => {
+    const shown = searchBlocks(blocks, searchQuery);
+    if (blocksLoading && !blocks.length) {
+      return (
+        <div className="flex items-center justify-center py-10 text-muted-foreground gap-2 text-xs">
+          <Loader2 className="w-4 h-4 animate-spin" /> Reading your block library…
+        </div>
+      );
+    }
+    if (!blocks.length) {
+      return (
+        <div className="text-center py-10 text-muted-foreground">
+          <p className="text-sm">No blocks available</p>
+          <p className="text-[11px] mt-1 leading-relaxed px-4">
+            {blockCatalogueError() || 'Blocks are designs you can place straight onto a page.'}
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              setBlocksLoading(true);
+              void refreshBlockCatalogue().then(setBlocks).finally(() => setBlocksLoading(false));
+            }}
+            className="mt-3 px-3 py-1.5 text-[11px] rounded-md border border-input
+                       text-muted-foreground hover:text-foreground transition-colors"
+          >
+            Try again
+          </button>
+        </div>
+      );
+    }
+    if (!shown.length) {
+      return (
+        <p className="text-center py-10 text-xs text-muted-foreground">
+          No blocks match “{searchQuery}”.
+        </p>
+      );
+    }
+    return (
+      <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${gridColumns('grid')}, minmax(0, 1fr))` }}>
+        {shown.map((b) => <BlockTile key={b.name} block={b} onPlace={handlePlaceBlock} />)}
+      </div>
+    );
+  };
+
   const handleAddProjectAsset = (assetId: string) => addImageLayer(assetId);
 
   const handleAddLibraryImage = async (item: VoidspaceLibraryItem) => {
@@ -251,7 +416,7 @@ function AssetsPanel() {
           committed action (a button you pressed) rather than as "you are
           looking at this one of four". */}
       <div className="flex gap-0.5 mb-3 p-0.5 bg-secondary rounded-lg">
-        {(['project', 'library'] as AssetTab[]).map((t) => (
+        {(['project', 'library', 'blocks'] as AssetTab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -259,7 +424,11 @@ function AssetsPanel() {
               tab === t ? 'bg-primary/15 text-primary' : 'text-muted-foreground hover:text-foreground'
             }`}
           >
-            {t === 'project' ? SCOPE_LABEL.project : SCOPE_LABEL.generated}
+            {t === 'project' ? SCOPE_LABEL.project
+              : t === 'library' ? SCOPE_LABEL.generated
+              /* The same word the board and the video editor use for the same
+                 library — one vocabulary across the editors. */
+              : KIND_LABEL.block}
           </button>
         ))}
       </div>
@@ -295,7 +464,13 @@ function AssetsPanel() {
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
           <input
             type="text"
-            placeholder={tab === 'library' ? 'Search your images…' : 'Search assets...'}
+            placeholder={
+              tab === 'blocks'
+                /* The same sentence the board and the video editor show, so the
+                   box promises the same thing everywhere. */
+                ? searchPlaceholder('mine', { kind: 'block' })
+                : tab === 'library' ? 'Search your images…' : 'Search assets...'
+            }
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="w-full h-9 pl-9 pr-3 text-xs bg-secondary border border-input rounded-md focus:outline-none focus:border-primary"
@@ -303,7 +478,9 @@ function AssetsPanel() {
         </div>
       </div>
 
-      {tab === 'project' ? (
+      {tab === 'blocks' ? (
+        renderBlocks()
+      ) : tab === 'project' ? (
         visibleAssets.length === 0 ? (
           <div className="text-center py-8">
             <Folder size={32} className="mx-auto text-muted-foreground mb-2" />

@@ -110,6 +110,55 @@ export class AddArtboardCommand implements Command {
   }
 }
 
+/**
+ * Move one page to another position.
+ *
+ * ── WHY A MOVE AND NOT A NEW ORDER ───────────────────────────────────────────
+ * Reordering slides is the commonest edit anybody makes to a deck, and until
+ * this existed there was no way to do it at all — not by dragging, not from a
+ * menu, not through the agent. The only route was deleting a slide and building
+ * it again, which throws its artwork away.
+ *
+ * It carries a FROM and a TO rather than a whole array of ids because that is
+ * what makes the inverse exact: moving 4→1 is undone by moving 1→4, with no
+ * dependence on what the rest of the deck looked like at the time. Handing in a
+ * full order would also silently accept an array that dropped a page.
+ */
+export class ReorderArtboardsCommand implements Command {
+  readonly type = 'ReorderArtboards';
+
+  constructor(
+    private readonly from: number,
+    private readonly to: number,
+  ) {}
+
+  get description(): string {
+    return `Move page ${this.from + 1} to ${this.to + 1}`;
+  }
+
+  apply(project: Project): Project {
+    const next = cloneProject(project);
+    const count = next.artboards.length;
+    if (
+      this.from === this.to
+      || this.from < 0 || this.from >= count
+      || this.to < 0 || this.to >= count
+    ) {
+      // Out of range or a no-op: return the project untouched rather than
+      // throwing, so a stale drag cannot break a document.
+      return next;
+    }
+    const [moved] = next.artboards.splice(this.from, 1);
+    next.artboards.splice(this.to, 0, moved);
+    next.updatedAt = Date.now();
+    return next;
+  }
+
+  invert(): Command {
+    return new ReorderArtboardsCommand(this.to, this.from);
+  }
+}
+
 export class RemoveArtboardCommand implements Command {
   readonly type = 'RemoveArtboard';
 
