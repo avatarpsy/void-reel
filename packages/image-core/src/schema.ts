@@ -240,12 +240,37 @@ const BaseLayerSchema = z.object({
 
 // ── Layer variants ────────────────────────────────────────────────────────────
 
+/**
+ * The source a composition layer's pixels were rendered FROM, mirroring
+ * `CompositionSource` in project.ts.
+ *
+ * This schema is load-bearing in a way that is easy to miss: zod strips unknown
+ * keys, so a field the interface declares and this schema omits is dropped
+ * silently on every load, .orimg import and cloud open. The pixels survive and
+ * the source does not, so the layer comes back as a plain image and draws the
+ * placeholder. Anything added to `CompositionSource` must be added here too.
+ */
+const CompositionSourceSchema = z.object({
+  block: z.string().optional(),
+  tier: z.enum(['user', 'shared', 'starter']).optional(),
+  inlineHtml: z.string().optional(),
+  slots: z.record(z.string(), z.string()),
+  fillMode: z.enum(['preview', 'render']),
+  poseTime: z.union([z.number(), z.literal('end')]),
+  frameWidth: z.number(),
+  frameHeight: z.number(),
+  renderHash: z.string(),
+});
+
 const ImageLayerSchema = BaseLayerSchema.extend({
   type: z.literal('image'),
   sourceId: z.string(),
   cropRect: z
     .object({ x: z.number(), y: z.number(), width: z.number(), height: z.number() })
     .nullable(),
+  /** Present when these pixels were rendered from a composition. Optional
+   *  because every image layer made before compositions existed lacks it. */
+  composition: CompositionSourceSchema.optional(),
 });
 
 const GradientStopSchema = z.object({ offset: z.number(), color: z.string() });

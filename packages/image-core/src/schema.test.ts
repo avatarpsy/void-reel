@@ -212,4 +212,82 @@ describe('ProjectSchema', () => {
 
     expect(result.success).toBe(false);
   });
+  // A composition is the SOURCE a slide was rendered from — losing it turns a
+  // re-slottable, re-themable layer back into a flat bitmap. zod strips unknown
+  // keys, so an omission in ImageLayerSchema deletes it on every load rather
+  // than failing loudly. These pin it.
+  const projectWithComposition = (composition: unknown) => ({
+    id: 'project-1',
+    name: 'Composition Project',
+    createdAt: 1,
+    updatedAt: 1,
+    version: 1,
+    artboards: [
+      {
+        id: 'artboard-1',
+        name: 'Artboard 1',
+        size: { width: 1920, height: 1080 },
+        background: { type: 'transparent' },
+        layerIds: ['layer-1'],
+        position: { x: 0, y: 0 },
+      },
+    ],
+    layers: {
+      'layer-1': { ...baseLayer, type: 'image', sourceId: 'asset-1', cropRect: null, composition },
+    },
+    assets: {},
+    exportPresets: [],
+    activeArtboardId: 'artboard-1',
+  });
+
+  const composition = {
+    block: 'stat-punch',
+    tier: 'starter' as const,
+    slots: { Stat: '91%', Eyebrow: 'RESULTS' },
+    fillMode: 'render' as const,
+    poseTime: 'end' as const,
+    frameWidth: 1920,
+    frameHeight: 1080,
+    renderHash: 'sha256-abc',
+  };
+
+  it('keeps a composition on an image layer instead of stripping it', () => {
+    const result = parseProject(projectWithComposition(composition));
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    const layer = result.data.layers['layer-1'];
+    expect(layer.type).toBe('image');
+    if (layer.type !== 'image') return;
+    // Field-by-field, not a shape check: a partial schema would satisfy a mere
+    // presence assertion while having quietly dropped the slots the feature edits.
+    expect(layer.composition).toEqual(composition);
+  });
+
+  it('accepts a numeric poseTime as well as the settled end state', () => {
+    const result = parseProject(projectWithComposition({ ...composition, poseTime: 1.5 }));
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    const layer = result.data.layers['layer-1'];
+    if (layer.type !== 'image') return;
+    expect(layer.composition?.poseTime).toBe(1.5);
+  });
+
+  it('still accepts an image layer that has no composition', () => {
+    const result = parseProject(projectWithComposition(undefined));
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    const layer = result.data.layers['layer-1'];
+    if (layer.type !== 'image') return;
+    expect(layer.composition).toBeUndefined();
+  });
+
+  it('rejects a composition missing the slots it exists to carry', () => {
+    const { slots: _slots, ...withoutSlots } = composition;
+    const result = parseProject(projectWithComposition(withoutSlots));
+
+    expect(result.success).toBe(false);
+  });
 });
