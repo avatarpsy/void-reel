@@ -331,9 +331,28 @@ function AssetsPanel() {
    * rectangle — the user picked it for how it looks, and fills it in next.
    */
   const handlePlaceBlock = (b: BlockInfo) => {
-    const layerId = addImageLayer('');
+    const store = useProjectStore.getState();
+    const proj = store.project;
+    if (!proj) return;
+    /**
+     * FULL PAGE, not a default box.
+     *
+     * A block is a whole design — its type scale, its margins and its
+     * `clamp()`s all resolve against the frame it is given. Dropped into the
+     * layer default (200x200) a full-bleed headline arrives as an unreadable
+     * postage stamp in the corner, which reads as the block being broken rather
+     * than as the placement being wrong. `img_place_composition` already
+     * defaults to the page for exactly this reason; this is the same decision
+     * reached by clicking instead of by asking.
+     */
+    const page = proj.artboards.find((a) => a.id === store.selectedArtboardId)
+      ?? proj.artboards[0];
+    if (!page) return;
+    const layerId = addImageLayer('', {
+      x: 0, y: 0, width: page.size.width, height: page.size.height,
+    } as never);
     if (!layerId) return;
-    useProjectStore.getState().updateLayer(layerId, {
+    store.updateLayer(layerId, {
       name: b.name,
       composition: {
         block: b.name,
@@ -341,6 +360,10 @@ function AssetsPanel() {
         slots: {},
         fillMode: 'preview',
         poseTime: 'end',
+        // The frame the block LAYS OUT in — laying out is not scaling, so this
+        // is the page, not whatever box the layer is later resized to.
+        frameWidth: page.size.width,
+        frameHeight: page.size.height,
         renderHash: '',
       },
     } as never);
