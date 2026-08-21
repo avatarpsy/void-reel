@@ -351,7 +351,20 @@ function InspectorContent() {
           </div>
         </div>
 
-        <Accordion defaultOpen={['transform', 'appearance', 'quick-filters', 'basic-adjustments']}>
+        {/**
+          * THE CONTENT OPENS; THE ADJUSTMENTS DO NOT.
+          *
+          * `composition` and `text` are what the layer SAYS — the headline, the
+          * bullets, the words somebody came here to change. They were collapsed
+          * behind a disclosure triangle while Transform and Quick Filters were
+          * open, so selecting a slide showed X/Y/rotation and a row of photo
+          * presets, and the sentence you wanted to fix was hidden one click
+          * deeper than the things almost nobody touches on a slide.
+          */}
+        <Accordion defaultOpen={[
+          'composition', 'text-settings', 'shape-settings',
+          'transform', 'appearance', 'quick-filters', 'basic-adjustments',
+        ]}>
           <AccordionItem id="transform" icon={Sliders} title="Transform & Position">
             <div className="px-4 space-y-4">
               <TransformSection layer={singleLayer} />

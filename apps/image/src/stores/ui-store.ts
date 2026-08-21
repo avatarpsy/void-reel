@@ -210,6 +210,14 @@ interface UIState {
   publishCarouselOpen: boolean;
   /** Presenting full-screen — see PresentMode. */
   isPresenting: boolean;
+  /**
+   * Bumped when the user asks to EDIT what they just double-clicked.
+   *
+   * A counter rather than a boolean: the request is an event, and two
+   * double-clicks on the same layer must both land. Whoever draws that layer's
+   * primary field watches this and takes focus.
+   */
+  editFocusNonce: number;
   /** AI "Separate into layers" (Seedream 5 Pro) modal open. */
   layerSeparationOpen: boolean;
   zoom: number;
@@ -264,6 +272,7 @@ interface UIActions {
   setGenerateImageOpen: (open: boolean, asPage?: boolean) => void;
   setPublishCarouselOpen: (open: boolean) => void;
   setPresenting: (presenting: boolean) => void;
+  requestEditFocus: () => void;
   setLayerSeparationOpen: (open: boolean) => void;
   setZoom: (zoom: number) => void;
   setPan: (x: number, y: number) => void;
@@ -332,6 +341,7 @@ export const useUIStore = create<UIState & UIActions>()(
     generateImageAsPage: false,
     publishCarouselOpen: false,
     isPresenting: false,
+    editFocusNonce: 0,
     layerSeparationOpen: false,
     zoom: 1,
     panX: 0,
@@ -523,6 +533,7 @@ export const useUIStore = create<UIState & UIActions>()(
     setGenerateImageOpen: (open: boolean, asPage = false) => set({ generateImageOpen: open, generateImageAsPage: open ? asPage : false }),
     setPublishCarouselOpen: (open: boolean) => set({ publishCarouselOpen: open }),
     setPresenting: (presenting: boolean) => set({ isPresenting: presenting }),
+    requestEditFocus: () => set((st) => ({ editFocusNonce: st.editFocusNonce + 1 })),
     setLayerSeparationOpen: (open: boolean) => set({ layerSeparationOpen: open }),
 
     setZoom: (zoom) => set({ zoom: Math.max(0.1, Math.min(8, zoom)) }),

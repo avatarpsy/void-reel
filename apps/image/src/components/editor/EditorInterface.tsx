@@ -1,4 +1,4 @@
-import { useState, useRef, lazy, Suspense } from 'react';
+import { useState, useRef, useEffect, lazy, Suspense } from 'react';
 import { Toolbar } from './toolbar/Toolbar';
 import { LeftPanel } from './panels/LeftPanel';
 import { Canvas } from './canvas/Canvas';
@@ -42,8 +42,21 @@ export function EditorInterface() {
   const setPublishCarouselOpen = useUIStore((s) => s.setPublishCarouselOpen);
   const isPresenting = useUIStore((s) => s.isPresenting);
   const setPresenting = useUIStore((s) => s.setPresenting);
+  const editFocusNonce = useUIStore((s) => s.editFocusNonce);
   const { project, selectedArtboardId } = useProjectStore();
   const [rightTab, setRightTab] = useState<RightTab>('design');
+
+  /**
+   * Double-clicking a layer asks to edit it, and the field lives in Design. If
+   * the user was last looking at Guides or History — or had collapsed the
+   * column entirely — sending them to a focused input they cannot see would be
+   * worse than doing nothing.
+   */
+  useEffect(() => {
+    if (!editFocusNonce) return;
+    setRightTab('design');
+    if (useUIStore.getState().isInspectorCollapsed) toggleInspectorCollapsed();
+  }, [editFocusNonce]);
   const [leftWidth, setLeftWidth] = useState(288); // w-72 = 18rem
   // The right column used to be a hard `w-72`, so it was the one editor column
   // in the product you could not widen — a Curves or a Levels panel had to

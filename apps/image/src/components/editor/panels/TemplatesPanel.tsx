@@ -399,6 +399,17 @@ export function TemplatesPanel() {
               <button
                 key={c || 'all'}
                 type="button"
+                /**
+                 * Scroll the ACTIVE chip into view. The strip scrolls sideways
+                 * and a 16:9 page opens on "deck", which sits sixth — so the
+                 * one chip that says what you are looking at was the one chip
+                 * off the edge of the panel.
+                 */
+                ref={(el) => {
+                  if (el && category === c) {
+                    el.scrollIntoView({ block: 'nearest', inline: 'center' });
+                  }
+                }}
                 onClick={() => chooseCategory(c)}
                 className={`shrink-0 px-2 py-0.5 rounded-full text-[10px] capitalize transition-colors ${
                   category === c

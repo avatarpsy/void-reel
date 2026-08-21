@@ -509,7 +509,7 @@ export function Canvas() {
     addAsset,
     addImageLayer,
   } = useProjectStore();
-  const { zoom, panX, panY, setPan, setZoom, activeTool, showGrid, showRulers, toggleGrid, toggleRulers, gridSize, crop, snapToObjects, snapToGuides, snapToGrid, penSettings, brushSettings, eraserSettings, drawing, startDrawing, addDrawingPoint, finishDrawing, startCrop, updateCropRect, setBrushSettings, gradientSettings, paintBucketSettings, smudgeSettings, blurSharpenSettings, dodgeBurnSettings, spongeSettings, cloneStampSettings, healingBrushSettings, spotHealingSettings, maskEditLayerId, setMaskEditLayerId, setGenerativeFillOpen } = useUIStore();
+  const { zoom, panX, panY, setPan, setZoom, activeTool, showGrid, showRulers, toggleGrid, toggleRulers, gridSize, crop, snapToObjects, snapToGuides, snapToGrid, penSettings, brushSettings, eraserSettings, drawing, startDrawing, addDrawingPoint, finishDrawing, startCrop, updateCropRect, setBrushSettings, gradientSettings, paintBucketSettings, smudgeSettings, blurSharpenSettings, dodgeBurnSettings, spongeSettings, cloneStampSettings, healingBrushSettings, spotHealingSettings, maskEditLayerId, setMaskEditLayerId, setGenerativeFillOpen, requestEditFocus } = useUIStore();
   const { setCanvasRef, setContainerRef, startDrag, updateDrag, endDrag, isDragging, dragMode, dragStartX, dragStartY, dragCurrentX, dragCurrentY, guides, smartGuides, setSmartGuides, clearSmartGuides, isMarqueeSelecting, marqueeRect, startMarqueeSelect, updateMarqueeSelect, endMarqueeSelect, activeResizeHandle, setActiveResizeHandle } = useCanvasStore();
   const [cursorStyle, setCursorStyle] = useState('default');
   const initialTransformRef = useRef<{ x: number; y: number; width: number; height: number; rotation: number } | null>(null);
@@ -2095,19 +2095,53 @@ export function Canvas() {
           }
         }
 
-        // Photoshop "Auto-Select: OFF" (the default). A PLAIN click never
-        // switches the selected layer — that caused accidental selection swaps
-        // when clicking near a layer's edge. Change the selection from the Layers
-        // panel, by double-clicking the canvas (see onDoubleClick), or with
-        // Ctrl/Cmd+click (the PS auto-select modifier).
+        /**
+         * ── CLICKING A THING SELECTS THAT THING ─────────────────────────────
+         *
+         * This was Photoshop's "Auto-Select: OFF": a plain click never changed
+         * the selection, and you were expected to pick layers from the Layers
+         * panel or hold Ctrl/Cmd. That is the right default for compositing a
+         * photograph out of forty layers, where an accidental swap costs real
+         * work — and it is the wrong one for the thing most people open this
+         * editor to do, which is fix a line on a slide or nudge a headline.
+         *
+         * Watched from a standing start, the failure is immediate and total: you
+         * click the headline, nothing happens, and there is no feedback saying
+         * why. Nothing on screen mentions the Layers panel or a modifier key.
+         *
+         * The original reason is kept rather than thrown away — a near-miss
+         * click must not swap the selection out from under a drag. So the rule
+         * is now: click an UNSELECTED layer to select it, but a click that lands
+         * while something is already selected still goes to the move handler
+         * below, which is what stops the edge-of-layer swap.
+         */
+        const hit = findLayerAtPoint(x, y);
+
         if (e.metaKey || e.ctrlKey) {
-          const layerId = findLayerAtPoint(x, y);
-          if (layerId) {
-            selectLayer(layerId, e.shiftKey); // shift → add to the selection
+          if (hit) {
+            selectLayer(hit, e.shiftKey); // shift → add to the selection
             startDrag('move', e.clientX, e.clientY);
           } else if (!e.shiftKey) {
             deselectAllLayers();
           }
+          return;
+        }
+
+        // Nothing selected yet, and there is something under the cursor: select
+        // it and let the same gesture move it, exactly as a person expects.
+        if (hit && selectedLayerIds.length === 0) {
+          selectLayer(hit);
+          startDrag('move', e.clientX, e.clientY);
+          return;
+        }
+
+        // Clicking a DIFFERENT layer than the selected one, on empty space of
+        // the current selection's box, still switches — but only when the click
+        // is not on the selection itself, so dragging what you already picked is
+        // never interrupted.
+        if (hit && !selectedLayerIds.includes(hit)) {
+          selectLayer(hit);
+          startDrag('move', e.clientX, e.clientY);
           return;
         }
 
@@ -2910,10 +2944,26 @@ export function Canvas() {
       if (activeTool !== 'select' && activeTool !== 'free-transform') return;
       const { x, y } = screenToCanvas(e.clientX, e.clientY);
       const layerId = findLayerAtPoint(x, y);
-      if (layerId) selectLayer(layerId);
-      else deselectAllLayers();
+      if (!layerId) { deselectAllLayers(); return; }
+      selectLayer(layerId);
+      /**
+       * DOUBLE-CLICK MEANS "LET ME CHANGE THE WORDS".
+       *
+       * It used to mean "select", which a single click now does — leaving
+       * double-click as a gesture that did nothing new. Everywhere else in
+       * software double-clicking a piece of text is how you get to edit it, so
+       * a person who wants to fix a typo double-clicks the headline and then
+       * has to go looking for the panel that holds it.
+       *
+       * The text does not live on the canvas — a slide is one designed document
+       * and its words are slots — so this cannot open an inline caret without
+       * inventing a second editing model. What it does instead is take them
+       * straight to the field: the right column opens on Design and the layer's
+       * primary field takes focus, ready to type into.
+       */
+      requestEditFocus();
     },
-    [activeTool, screenToCanvas, findLayerAtPoint, selectLayer, deselectAllLayers]
+    [activeTool, screenToCanvas, findLayerAtPoint, selectLayer, deselectAllLayers, requestEditFocus]
   );
 
   const handleContextMenu = useCallback(

@@ -1,4 +1,6 @@
+import { useEffect, useRef } from 'react';
 import { useProjectStore } from '../../../stores/project-store';
+import { useUIStore } from '../../../stores/ui-store';
 import type { TextLayer, TextStyle, TextFillType, Gradient } from '../../../types/project';
 import { AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, CaseUpper, CaseLower, CaseSensitive, Strikethrough, Type } from 'lucide-react';
 import { FontPicker } from '../../ui/FontPicker';
@@ -62,6 +64,21 @@ const TEXT_PRESETS: TextPreset[] = [
 
 export function TextSection({ layer }: Props) {
   const { updateLayer } = useProjectStore();
+
+  /**
+   * Double-clicking the text on the canvas asks to edit it, and this is the
+   * field that holds it — so take focus and select what is there, which is what
+   * makes "double-click, type" replace the line rather than append to it.
+   */
+  const contentRef = useRef<HTMLTextAreaElement>(null);
+  const editFocusNonce = useUIStore((s) => s.editFocusNonce);
+  useEffect(() => {
+    if (!editFocusNonce) return;
+    const el = contentRef.current;
+    if (!el) return;
+    el.focus();
+    el.select();
+  }, [editFocusNonce]);
 
   const handleContentChange = (content: string) => {
     updateLayer<TextLayer>(layer.id, { content });
@@ -143,6 +160,7 @@ export function TextSection({ layer }: Props) {
       <div>
         <label className="block text-[10px] text-muted-foreground mb-1">Content</label>
         <textarea
+          ref={contentRef}
           value={layer.content}
           onChange={(e) => handleContentChange(e.target.value)}
           className="w-full px-2 py-1.5 text-xs bg-background border border-input rounded-md focus:outline-none focus:ring-1 focus:ring-primary min-h-[60px] resize-none"

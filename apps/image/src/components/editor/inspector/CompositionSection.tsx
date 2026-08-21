@@ -1,7 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useProjectStore } from '../../../stores/project-store';
+import { useUIStore } from '../../../stores/ui-store';
 import { resolveComposition } from '../../../services/composition/block-source';
 import { slotFields, withSlotValue, type SlotField } from '../../../services/composition/slot-fields';
+import { isMultilineSlot } from '../../../services/composition/slot-input-kind';
 import type { SlotSpec } from '../../../services/composition/document';
 import type { CompositionSource, ImageLayer } from '../../../types/project';
 
@@ -73,10 +75,44 @@ export function CompositionSection({ layer }: Props) {
     });
   };
 
+  const rootRef = useRef<HTMLDivElement>(null);
   const fields = slotFields(manifest, source.slots ?? {});
 
+  /**
+   * Double-clicking the slide asks to edit its words.
+   *
+   * A slide built from a block has no text layer to put a caret in — the words
+   * are slots — so the honest equivalent is to put the cursor in the field that
+   * holds the words.
+   *
+   * The HEADLINE, specifically, and not merely the first text slot. Manifests
+   * list the eyebrow first, so "first text slot" landed on the small kicker
+   * above the headline — a real field, and not the one anybody double-clicked
+   * the slide to change. Falls back to the first plain text slot for a block
+   * that names its main line something else.
+   */
+  const namedHeadline = fields.find(
+    (f) => f.kind === 'text' && /^(headline|title|heading)$/i.test(f.key),
+  )?.key;
+  const firstTextSlot =
+    namedHeadline ?? fields.find((f) => f.kind === 'text' && !f.values?.length)?.key ?? '';
+  const editFocusNonce = useUIStore((s) => s.editFocusNonce);
+  useEffect(() => {
+    if (!editFocusNonce || !firstTextSlot) return;
+    // After the panel has drawn its rows — the section may have only just been
+    // switched to by the same double-click.
+    const t = setTimeout(() => {
+      const el = rootRef.current?.querySelector<HTMLInputElement>(
+        `[data-slot-key="${CSS.escape(firstTextSlot)}"]`,
+      );
+      el?.focus();
+      el?.select();
+    }, 60);
+    return () => clearTimeout(t);
+  }, [editFocusNonce, firstTextSlot]);
+
   return (
-    <div className="space-y-4">
+    <div className="space-y-4" ref={rootRef}>
       <div className="p-3 bg-secondary/30 rounded-lg space-y-1">
         <div className="text-[11px] text-foreground">
           {source.block ? source.block : 'Authored composition'}
@@ -229,11 +265,31 @@ function SlotInput({ field, onChange }: { field: SlotField; onChange: (value: st
     );
   }
 
+  // See  for why an input is not safe for every text slot.
+  const multiline = isMultilineSlot(field.value, field.placeholder);
+
+  if (multiline) {
+    return (
+      <div>
+        {label}
+        <textarea
+          data-slot-key={field.key}
+          value={field.value}
+          placeholder={field.placeholder}
+          onChange={(e) => onChange(e.target.value)}
+          rows={2}
+          className={`${INPUT} resize-y min-h-[46px] leading-snug`}
+        />
+      </div>
+    );
+  }
+
   return (
     <div>
       {label}
       <input
         type="text"
+        data-slot-key={field.key}
         value={field.value}
         placeholder={field.placeholder}
         onChange={(e) => onChange(e.target.value)}
