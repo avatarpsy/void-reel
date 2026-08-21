@@ -3,7 +3,34 @@ import { Plus, Trash2, Copy, MoreHorizontal, ChevronUp, ChevronDown, Sparkles } 
 import { useProjectStore } from '../../../stores/project-store';
 import { useUIStore } from '../../../stores/ui-store';
 import { exportArtboard } from '../../../services/export-service';
+import type { Project, Artboard } from '../../../types/project';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@openreel/ui';
+
+/**
+ * A cheap description of everything on a page that a thumbnail would show.
+ *
+ * Not a hash of the pixels — that would mean rendering to find out whether to
+ * render. It is the fields that change what gets drawn, in order, so two pages
+ * with the same signature genuinely look the same. `sourceId` earns its place
+ * here: a composition layer keeps its identity and gains an asset when its
+ * render lands, and that swap is exactly the change the old cache could not see.
+ */
+function pageSignature(project: Project, ab: Artboard): string {
+  const parts: string[] = [`${Math.round(ab.size.width)}x${Math.round(ab.size.height)}`,
+    String((ab.background as any)?.color ?? '')];
+  for (const id of ab.layerIds) {
+    const l = project.layers[id] as any;
+    if (!l) { parts.push(`${id}:gone`); continue; }
+    const t = l.transform ?? {};
+    parts.push([
+      id, l.type, l.visible === false ? 'h' : 'v', l.opacity ?? 1,
+      l.sourceId ?? '', l.content ?? '',
+      Math.round(t.x ?? 0), Math.round(t.y ?? 0),
+      Math.round(t.width ?? 0), Math.round(t.height ?? 0), Math.round(t.rotation ?? 0),
+    ].join(','));
+  }
+  return parts.join('|');
+}
 
 export function PagesBar() {
   const {
@@ -19,14 +46,13 @@ export function PagesBar() {
 
   const [isExpanded, setIsExpanded] = useState(true);
   const [editingId, setEditingId] = useState<string | null>(null);
-  // Real rendered previews per page (artboardId → dataUrl). To avoid thrashing
-  // the browser's image decoder (which was starving the canvas's own image
-  // loads → pages stuck on "Loading"), we regenerate ONLY the page that
-  // actually changed — the currently-selected/edited one — plus any page that
-  // doesn't have a thumbnail yet. Other pages don't change when you edit a
-  // different page, so their thumbnails are reused untouched.
-  const [thumbs, setThumbs] = useState<Record<string, string>>({});
-  const thumbsRef = useRef<Record<string, string>>({});
+  // Real rendered previews per page, each kept with the SIGNATURE of the page it
+  // was drawn from. Rendering every page on every change starves the canvas's own
+  // image loads (pages stuck on "Loading"), so a thumbnail is reused while it is
+  // still true — and the signature is what makes "still true" a question that can
+  // be answered. Reusing on "do I have one", as this did, keeps a blank forever.
+  const [thumbs, setThumbs] = useState<Record<string, { url: string; sig: string }>>({});
+  const thumbsRef = useRef<Record<string, { url: string; sig: string }>>({});
   thumbsRef.current = thumbs;
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -37,7 +63,23 @@ export function PagesBar() {
     let cancelled = false;
     const t = setTimeout(async () => {
       const have = thumbsRef.current;
-      const targets = project.artboards.filter((ab) => !have[ab.id] || ab.id === selectedArtboardId);
+      /**
+       * Regenerate a page whose CONTENT changed, not only the selected one.
+       *
+       * This used to keep any thumbnail it already had and refresh only the
+       * page being edited, on the reasoning that other pages do not change while
+       * you work on this one. They do. The agent edits pages it has not selected,
+       * and a composition's pixels arrive from a render tens of seconds AFTER
+       * the layer was placed — so a deck built by the agent kept the blank
+       * swatches taken before any slide had pixels, and the strip disagreed with
+       * the canvas for the rest of the session.
+       *
+       * Comparing a cheap signature costs one string per page and makes "is this
+       * thumbnail still true" answerable, which "do I have one" never was.
+       */
+      const targets = project.artboards.filter(
+        (ab) => have[ab.id]?.sig !== pageSignature(project, ab) || ab.id === selectedArtboardId,
+      );
       for (const ab of targets) {
         try {
           const scale = Math.min(1, 160 / Math.max(ab.size.width, ab.size.height));
@@ -50,7 +92,11 @@ export function PagesBar() {
             fr.readAsDataURL(blob);
           });
           if (cancelled || !dataUrl) continue;
-          setThumbs((prev) => ({ ...prev, [ab.id]: dataUrl }));
+          // Stamp what was DRAWN. Recomputing the signature here rather than
+          // reusing the one from the filter is deliberate: the page may have
+          // changed again while this render was running, and recording the older
+          // signature would mark a stale thumbnail as current.
+          setThumbs((prev) => ({ ...prev, [ab.id]: { url: dataUrl, sig: pageSignature(project, ab) } }));
         } catch { /* leave this page's swatch fallback */ }
       }
       // Drop thumbnails for pages that no longer exist.
@@ -157,10 +203,10 @@ export function PagesBar() {
                     className="bg-muted rounded-md overflow-hidden"
                     style={{ width: thumbWidth, height: thumbHeight }}
                   >
-                    {thumbs[artboard.id] ? (
+                    {thumbs[artboard.id]?.url ? (
                       // Real rendered preview of the page's composited content.
                       <img
-                        src={thumbs[artboard.id]}
+                        src={thumbs[artboard.id].url}
                         alt={artboard.name}
                         className="w-full h-full object-cover"
                         style={{
