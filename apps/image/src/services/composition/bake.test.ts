@@ -8,7 +8,7 @@
  * pure function with tests rather than a condition inside a fetch.
  */
 import { describe, it, expect } from 'vitest';
-import { shouldBake } from './bake';
+import { shouldBake, backgroundFor } from './bake';
 import { compositionHash } from './hash';
 import type { CompositionSource, ImageLayer } from '../../types/project';
 
@@ -69,5 +69,39 @@ describe('deciding to render a composition', () => {
   it('leaves ordinary pictures alone', () => {
     expect(shouldBake(layer({ sourceId: 'photo-1' }))).toBe(false);
     expect(shouldBake(undefined)).toBe(false);
+  });
+});
+
+/**
+ * The renderer strips a composition's own background — measured: a root carrying
+ * `background: var(--bg,#0A0A12)` comes back rgba(0,0,0,0) while a plain child
+ * with a literal colour comes back opaque. Correct for a lower third that has to
+ * composite over footage; wrong for a slide, which is then drawn over whatever
+ * the artboard happens to be. A dark deck came out as white thumbnails with a few
+ * pale words, while the canvas looked right because the canvas shows the live
+ * frame rather than the pixels.
+ */
+describe('restoring the background the renderer removed', () => {
+  it('uses the themed bg slot when the deck has one', () => {
+    expect(backgroundFor({ bg: '#07070E' }, 'irrelevant')).toBe('#07070E');
+  });
+
+  it('falls back to the colour the block itself declares', () => {
+    // The designer's own answer to "what is behind this".
+    const css = '#root{background:var(--bg, #0A0A12);color:var(--ink,#fff)}';
+    expect(backgroundFor(undefined, css)).toBe('#0A0A12');
+    expect(backgroundFor({ headline: 'hi' }, css)).toBe('#0A0A12');
+  });
+
+  it('prefers the slot over the declaration, because the deck was themed', () => {
+    const css = '#root{background:var(--bg,#0A0A12)}';
+    expect(backgroundFor({ bg: '#ffffff' }, css)).toBe('#ffffff');
+  });
+
+  it('says nothing rather than inventing a colour', () => {
+    // A block with no declared background is one we cannot guess for: leaving the
+    // render transparent is honest, and still better than no pixels at all.
+    expect(backgroundFor(undefined, '#root{color:red}')).toBeNull();
+    expect(backgroundFor({ bg: 'not-a-colour' }, '#root{color:red}')).toBeNull();
   });
 });

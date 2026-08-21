@@ -26,6 +26,7 @@
 import { useProjectStore } from '../../stores/project-store';
 import { getVoidspaceIdToken, libraryImageToAsset } from '../voidspace-storage';
 import { compositionHash, needsRerender } from './hash';
+import { resolveComposition } from './block-source';
 import type { ImageLayer } from '../../types/project';
 
 /** One bake per layer at a time. The agent places, reads and re-reads in quick
@@ -51,6 +52,76 @@ const failedKeys = new Set<string>();
 /** A still is an IMAGE. Anything else came back from a renderer that did not
  *  understand the request. */
 const IMAGE_URL = /\.(png|jpe?g|webp)(\?|$)/i;
+
+/**
+ * THE RENDERER STRIPS THE COMPOSITION'S OWN BACKGROUND, SO WE PUT IT BACK.
+ *
+ * Measured against the real renderer: a block whose root carries
+ * `background: var(--bg, #0A0A12)` comes back with that area at rgba(0,0,0,0),
+ * while a plain child with a literal colour comes back opaque. It is deliberate
+ * — a composition is built to composite OVER footage, so its root background is
+ * removed and the frame is written RGBA.
+ *
+ * That is right for a lower third and wrong for a slide. Left transparent, the
+ * still is drawn over whatever the artboard happens to be — white, by default —
+ * so a dark deck came out as white thumbnails with a few pale words on them,
+ * while the canvas looked correct because the canvas shows the LIVE frame.
+ *
+ * The colour to restore is the block's own: the `bg` slot when the deck was
+ * themed, otherwise the fallback the block's own CSS declares.
+ */
+export function backgroundFor(slots: Record<string, string> | undefined, html: string): string | null {
+  const fromSlot = String(slots?.bg ?? '').trim();
+  if (/^#[0-9a-f]{3,8}$/i.test(fromSlot)) return fromSlot;
+  // `var(--bg, #0A0A12)` — the designer's own answer to "what is behind this".
+  const declared = /var\(\s*--bg\s*,\s*(#[0-9a-f]{3,8})\s*\)/i.exec(html);
+  return declared ? declared[1] : null;
+}
+
+/**
+ * Draw the render onto an opaque ground and hand back a data URL.
+ *
+ * The bytes are FETCHED rather than handed to `new Image(src)`. The render lives
+ * behind `/api/studio/local-asset`, which wants an Authorization header — and an
+ * `<img>` cannot send one. Worse, `crossOrigin = 'anonymous'` also suppresses
+ * cookies, so the load simply failed and every still quietly took the unflattened
+ * fallback path instead. A fetch carries the token and a blob URL is same-origin,
+ * so the canvas stays untainted.
+ */
+async function flatten(url: string, background: string, token: string | null): Promise<{ dataUrl: string; width: number; height: number } | null> {
+  let blobUrl = '';
+  try {
+    const res = await fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+    if (!res.ok) return null;
+    blobUrl = URL.createObjectURL(await res.blob());
+  } catch {
+    return null;
+  }
+  try {
+    return await drawOnto(blobUrl, background);
+  } finally {
+    URL.revokeObjectURL(blobUrl);
+  }
+}
+
+async function drawOnto(src: string, background: string): Promise<{ dataUrl: string; width: number; height: number } | null> {
+  const img = await new Promise<HTMLImageElement | null>((resolve) => {
+    const el = new Image();
+    el.onload = () => resolve(el);
+    el.onerror = () => resolve(null);
+    el.src = src;
+  });
+  if (!img || !img.naturalWidth) return null;
+  const canvas = document.createElement('canvas');
+  canvas.width = img.naturalWidth;
+  canvas.height = img.naturalHeight;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+  ctx.fillStyle = background;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(img, 0, 0);
+  return { dataUrl: canvas.toDataURL('image/png'), width: canvas.width, height: canvas.height };
+}
 
 export interface BakeResult {
   ok: boolean;
@@ -153,10 +224,30 @@ export async function bakeComposition(layerId: string): Promise<BakeResult> {
       return failed('This version of the Voidspace desktop app cannot render a slide to an image yet — update it.');
     }
 
-    let asset: Awaited<ReturnType<typeof libraryImageToAsset>> | null = null;
+    let asset: any = null;
     try {
+      // Put the background back before this becomes pixels anybody looks at.
       const token = await getVoidspaceIdToken().catch(() => null);
-      asset = await libraryImageToAsset({ url, name: layer.name } as any, token);
+      const resolved = await resolveComposition(source).catch(() => null);
+      const background = backgroundFor(source.slots, resolved?.html ?? '');
+      const flat = background ? await flatten(url, background, token) : null;
+      if (flat) {
+        asset = {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          name: layer.name || 'Composition',
+          type: 'image' as const,
+          mimeType: 'image/png',
+          size: flat.dataUrl.length,
+          width: flat.width,
+          height: flat.height,
+          thumbnailUrl: flat.dataUrl,
+          dataUrl: flat.dataUrl,
+        };
+      } else {
+        // No colour to restore, or the flatten failed: the transparent render is
+        // still better than no pixels at all.
+        asset = await libraryImageToAsset({ url, name: layer.name } as any, token);
+      }
     } catch (e: any) {
       return failed(`could not load the render: ${e?.message ?? e}`);
     }
