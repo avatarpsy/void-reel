@@ -28,62 +28,21 @@
  */
 
 /**
- * WHAT A BLOCK ASKS FOR. Measured across the shipped kit: text ×371, colour
- * ×48, image ×25, video ×1 — so most of a block's surface is words, and the
- * media it wants is specific and named ("screenshot", not "background").
+ * THE SHAPE AND THE PARSER MOVED TO `@openreel/asset-browser`.
+ *
+ * They were only ever here because the board was the only surface that browsed
+ * blocks. The video editor browses them now too — a block can be dragged
+ * straight onto the timeline — and the two declaration styles in the library
+ * (`slots{}` with a selector vs bare `variables[]`) are exactly the kind of
+ * detail that gets implemented once and forgotten the second time. One parser,
+ * shared, is the same decision this file's asset panel already makes.
+ *
+ * Re-exported so every board module keeps importing block types from here.
  */
-export type SlotKind = 'text' | 'image' | 'video' | 'color';
+import { normalizeBlocks, mediaSlots, valueSlots, type BlockInfo } from '@openreel/asset-browser';
 
-export interface BlockSlot {
-  key: string;
-  kind: SlotKind;
-  /** The block's own example value. The best possible placeholder: it is what
-   *  the designer put there, so it shows the shape AND the tone expected. */
-  sample?: string;
-  /**
-   * HOW THE HOST FILLS IT, and the reason a preview can show a shot's own
-   * content at all.
-   *
-   * There are two mechanisms in the library and they are easy to miss. Three
-   * blocks declare `variables[]` and read `getVariables()` THEMSELVES. The
-   * other 102 declare `slots{}` with a `sel` (a selector to patch) or a `var`
-   * (a CSS custom property to set) and expect the HOST to do it — the block's
-   * own code never looks at the values. A preview that only implements the
-   * first mechanism renders 102 blocks with their authored placeholder content
-   * no matter what the user typed.
-   */
-  sel?: string;
-  cssVar?: string;
-}
-
-/** The slots a shot fills with MEDIA — these become drop wells on the card. */
-export function mediaSlots(block: BlockInfo | null): BlockSlot[] {
-  return (block?.slots ?? []).filter(s => s.kind === 'image' || s.kind === 'video');
-}
-
-/** The slots a shot fills by TYPING — words and colours. */
-export function valueSlots(block: BlockInfo | null): BlockSlot[] {
-  return (block?.slots ?? []).filter(s => s.kind === 'text' || s.kind === 'color');
-}
-
-export interface BlockInfo {
-  name: string;
-  description?: string;
-  category?: string;
-  tags: string[];
-  /**
-   * `shared` is a block ADOPTED from another creator's published one. It was
-   * added when sharing gained its read half — before that a block could only be
-   * yours or shipped, and anything adopted had nowhere to live.
-   */
-  tier: 'user' | 'shared' | 'starter';
-  /** Who published it, for an adopted block. A handle, never a uid. */
-  credit?: string;
-  fill: 'slots' | 'adapt';
-  overlay: boolean;
-  aspects: string[];
-  slots: BlockSlot[];
-}
+export type { SlotKind, BlockSlot, BlockInfo } from '@openreel/asset-browser';
+export { mediaSlots, valueSlots } from '@openreel/asset-browser';
 
 let catalogue: BlockInfo[] = [];
 const listeners = new Set<() => void>();
@@ -104,56 +63,7 @@ export function onBlockCatalogue(fn: () => void): () => void {
  * chances to support one and silently ignore the other.
  */
 export function setBlockCatalogue(raw: unknown[]): void {
-  catalogue = (Array.isArray(raw) ? raw : [])
-    .map((b): BlockInfo | null => {
-      const o = b as Record<string, any>;
-      const name = String(o?.name ?? '').trim();
-      if (!name) return null;
-
-      const asKind = (raw: unknown): SlotKind => {
-        const k = String(raw ?? 'text').toLowerCase();
-        return k === 'image' || k === 'video' || k === 'color' ? k : 'text';
-      };
-      const fromSlots: BlockSlot[] = o.slots && typeof o.slots === 'object'
-        ? Object.entries(o.slots as Record<string, any>).map(([key, v]) => ({
-            key,
-            kind: asKind(v?.kind),
-            sample: typeof v?.sample === 'string' ? v.sample : undefined,
-            // Kept VERBATIM — these are how the value reaches the composition.
-            sel: typeof v?.sel === 'string' ? v.sel : undefined,
-            cssVar: typeof v?.var === 'string' ? v.var : undefined,
-          }))
-        : [];
-      const fromVars: BlockSlot[] = Array.isArray(o.variables)
-        ? o.variables.map((v: unknown) => ({ key: String(v), kind: 'text' as SlotKind }))
-        : [];
-      // Slots win on key collision: they carry a selector and a sample, which
-      // a bare variable name does not.
-      const seen = new Set(fromSlots.map(s => s.key));
-
-      return {
-        name,
-        description: typeof o.description === 'string' ? o.description : undefined,
-        category: typeof o.category === 'string' ? o.category : undefined,
-        tags: Array.isArray(o.tags) ? o.tags.map(String) : [],
-        tier: o.tier === 'user' ? 'user' : 'starter',
-        fill: o.fill === 'adapt' ? 'adapt' : 'slots',
-        overlay: !!o.overlay,
-        aspects: Array.isArray(o.aspects) ? o.aspects.map(String) : [],
-        slots: [...fromSlots, ...fromVars.filter(v => !seen.has(v.key))],
-      };
-    })
-    .filter((b): b is BlockInfo => b !== null)
-    /**
-     * USER BLOCKS FIRST, and a user block SHADOWS a starter of the same name.
-     * That is the rule the server already applies when reading a block
-     * (`get_block` walks `['user', 'starter']` and takes the first hit), so a
-     * library listing that showed both — or preferred the starter — would offer
-     * the user a block that is not the one they would get.
-     */
-    .sort((a, b) => (a.tier === b.tier ? a.name.localeCompare(b.name) : a.tier === 'user' ? -1 : 1))
-    .filter((b, i, all) => all.findIndex(x => x.name === b.name) === i);
-
+  catalogue = normalizeBlocks(raw);
   listeners.forEach(fn => {
     try { fn(); } catch { /* one bad listener must not stop the rest */ }
   });

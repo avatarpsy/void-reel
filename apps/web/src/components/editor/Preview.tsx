@@ -4801,6 +4801,14 @@ export const Preview: React.FC = () => {
             it. This wrapper cancels that, clamped so the stage can never be
             pushed out of the area. No transition: the whole point is that
             nothing animates, because nothing should appear to move. */}
+        {/* BACKGROUND WORK, OUTSIDE THE PICTURE.
+            Mounted on the stage AREA rather than inside the frame, so the card
+            sits in the letterboxing and never covers the shot. It used to be a
+            full-screen scrim in the middle of the frame that told the user to
+            wait — for work that blocks nothing and that they can keep cutting
+            through. See ProcessingOverlay's own note. */}
+        <ProcessingOverlay />
+
         <div
           ref={stageWrapRef}
           className="shrink-0"
@@ -4854,9 +4862,6 @@ export const Preview: React.FC = () => {
               (framed to the project aspect) while recording, so the user sees
               exactly what the take will look like on the timeline. */}
           <InlineRecordingPreview />
-
-          {/* Processing Overlay */}
-          <ProcessingOverlay />
 
           {/* Motion Path Overlay */}
           {motionPathMode && motionPathConfig && motionPathClip && (

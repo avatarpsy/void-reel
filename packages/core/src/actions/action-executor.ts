@@ -511,6 +511,20 @@ export class ActionExecutor {
           trackType: string;
           position?: number;
           trackId?: string;
+          /**
+           * WHAT TO CALL IT, when "Video 3" would not tell the user anything.
+           *
+           * A track holding a lower third is a graphics layer, and a timeline
+           * where the graphics are called Video 3 and Video 4 is one the user
+           * has to decode every time they come back to it. The board already
+           * names them "Graphic N" on the way in; a graphic added live had no
+           * way to say the same thing.
+           *
+           * Naming only — the track is still an ordinary video track, and
+           * everything that saves, loads, composites and exports one is
+           * untouched. Nothing reads this except the label.
+           */
+          name?: string;
         };
         const trackNames: Record<string, string> = {
           video: "Video",
@@ -526,7 +540,8 @@ export class ActionExecutor {
         const newTrack: MutableTrack = {
           id: this.mintAddId("track", action.params as Record<string, unknown>, "trackId"),
           type: params.trackType as Track["type"],
-          name: `${trackNames[params.trackType] || params.trackType} ${trackCount}`,
+          name: params.name?.trim()
+            || `${trackNames[params.trackType] || params.trackType} ${trackCount}`,
           clips: [],
           transitions: [],
           locked: false,
@@ -725,7 +740,42 @@ export class ActionExecutor {
             transform,
             volume: 1,
             keyframes: params.keyframes ? [...params.keyframes] : [],
-            ...(params.blendMode ? { blendMode: params.blendMode } : {}),
+            /**
+             * A GRAPHIC ARRIVES ON `screen`, WHEREVER IT WAS PLACED FROM.
+             *
+             * ── WHY IT IS DECIDED HERE ───────────────────────────────────────
+             * A HyperFrames render has a TRANSPARENT background, and every
+             * transparent pixel reaches this compositor as BLACK — so under the
+             * default blend the graphic does not sit on the picture, it replaces
+             * it. `screen` makes black contribute nothing, which is the answer
+             * `adobe-import` already ships for exactly this shape of asset.
+             *
+             * Every route that puts one on a timeline needs it: the board
+             * handoff, the agent's `add_overlay`, a drag from the block library,
+             * and a copy/paste or duplicate of a clip that is already there. Set
+             * at each call site it would be four chances to forget, and forgetting
+             * is invisible until someone plays the frame. This is the one place
+             * a clip is born, so it is the one place the rule can be complete.
+             *
+             * An explicit `blendMode` still wins — the caller knows something
+             * this rule does not, and the inspector must be able to set
+             * `normal` on a graphic and have it stay.
+             */
+            ...(params.blendMode
+              ? { blendMode: params.blendMode }
+              : mediaItem?.metadata.graphic
+                ? { blendMode: "screen" as const }
+                : {}),
+            /**
+             * WHAT BLOCK THIS IS A RENDER OF, copied from the media.
+             *
+             * Carried onto the clip so a surface holding only a clip — the
+             * inspector, an agent reading the timeline — can name the block and
+             * offer its slots without going to look the media item up.
+             */
+            ...(mediaItem?.metadata.graphic
+              ? { metadata: { graphic: mediaItem.metadata.graphic } }
+              : {}),
             ...(params.audioTrackIndex !== undefined
               ? { audioTrackIndex: params.audioTrackIndex }
               : {}),

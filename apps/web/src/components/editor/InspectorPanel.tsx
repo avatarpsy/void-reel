@@ -28,6 +28,7 @@ import {
   SVGSection,
   KeyframesSection,
   BlendingSection,
+  GraphicSection,
   Transform3DSection,
   MotionTrackingSection,
   AudioDuckingSection,
@@ -700,6 +701,24 @@ export const InspectorPanel: React.FC = () => {
   }, [selectedClip, project.timeline.tracks, project.mediaLibrary.items]);
 
   /**
+   * Is the selected clip a rendered block? Decided HERE rather than inside the
+   * section, because an empty collapsible headed "Graphic" on every ordinary
+   * clip is its own kind of wrong — the panel is already long.
+   *
+   * Either copy answers: the clip's own (what this instance was made with) or
+   * the media's (the file's identity). A clip placed before the copy existed
+   * still has the media's.
+   */
+  const showGraphic = useMemo(() => {
+    if (!selectedClip) return false;
+    if ((selectedClip as any).metadata?.graphic) return true;
+    const mediaItem = project.mediaLibrary.items.find(
+      (item) => item.id === selectedClip.mediaId,
+    );
+    return !!(mediaItem?.metadata as any)?.graphic;
+  }, [selectedClip, project.mediaLibrary.items]);
+
+  /**
    * Determine which sections to show based on clip type
    */
   const showVideoEffects = clipType === "video" || clipType === "image";
@@ -1074,6 +1093,16 @@ export const InspectorPanel: React.FC = () => {
             )}
 
             {/* Blending - Layer compositing blend modes */}
+            {/* A rendered block: what it SAYS, before how it blends. Open by
+                default because a graphic that was just dropped is showing the
+                designer's sample words, and changing them is the next thing the
+                user came here to do. Renders nothing for an ordinary clip. */}
+            {showGraphic && (
+              <Section title="Graphic" sectionId="graphic" defaultOpen>
+                <GraphicSection clipId={clipId} />
+              </Section>
+            )}
+
             {(clipType === "video" ||
               clipType === "image" ||
               clipType === "text" ||

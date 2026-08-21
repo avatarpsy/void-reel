@@ -13,9 +13,15 @@
 import { mountBlockPreview, type PreviewHandle, type SlotFill } from './block-render';
 
 export {
-  blockSrcdoc, loadBlock, mountBlockPreview, onBlockReport,
+  blockSrcdoc, loadBlock, forgetBlockDoc, mountBlockPreview, onBlockReport,
   type BlockDoc, type BlockReport, type PreviewHandle, type SlotFill,
 } from './block-render';
+/**
+ * The runtime shim, re-exported here because a host that renders a block
+ * OUTSIDE a preview — the board's draft card builds its own srcdoc — needs the
+ * same GSAP/`__hyperframes` bootstrap. One entry point for the whole feature.
+ */
+export { ensureBlockRuntime, blockRuntimeScript, dropRedundantGsapTag } from './block-runtime';
 
 /* ────────────────────────────────────────────────────────────────────────────
  * LAZY PREVIEWS — ONE RECONCILER FOR EVERY SURFACE
@@ -295,4 +301,45 @@ export function openBlockLightbox(
   });
 
   return close;
+}
+
+/**
+ * The few rules a preview HOST must have, injected once, for hosts that do not
+ * already carry them.
+ *
+ * ── WHY THIS IS NOT A .css FILE ─────────────────────────────────────────────
+ * The frame runs at the composition's NATIVE size and is scaled by transform
+ * (see `fit()` in block-render) — so it must be absolutely positioned inside a
+ * relative host, and the host must clip. That is a CONTRACT of mounting a
+ * preview, not decoration, and shipping it as a stylesheet would mean every new
+ * host has to remember to import it and would otherwise show a 1080x1920 iframe
+ * bursting out of a 200px tile.
+ *
+ * The board already states these rules in its own theme against its own class
+ * names, so it does not call this and nothing here can disturb it: everything
+ * is scoped to `[data-block-preview]`, which only a caller opts into.
+ */
+let stylesInjected = false;
+
+export function ensureBlockPreviewStyles(): void {
+  if (stylesInjected || typeof document === 'undefined') return;
+  stylesInjected = true;
+  const style = document.createElement('style');
+  style.dataset.blockPreview = 'styles';
+  style.textContent = `
+[data-block-preview] { position: relative; overflow: hidden; }
+[data-block-preview] > .vs-blockprev__frame {
+  position: absolute; top: 50%; left: 50%;
+  transform-origin: center center;
+  border: 0; background: transparent;
+  /* A tile is a drag handle, not a page. Without this the block's own links and
+     buttons would swallow the pointer and the tile could not be dragged. */
+  pointer-events: none;
+}
+[data-block-preview] > .vs-blockprev__note {
+  padding: 8px; text-align: center;
+  font-size: 10px; line-height: 1.4;
+  color: currentColor; opacity: 0.7;
+}`;
+  document.head.append(style);
 }

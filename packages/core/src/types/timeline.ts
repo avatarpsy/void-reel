@@ -55,6 +55,16 @@ export interface ClipMetadata {
    * rendered. See `Project.compoundClips`.
    */
   readonly compoundClipId?: string;
+  /**
+   * THIS CLIP IS A RENDERED HYPERFRAMES BLOCK — which one, filled with what.
+   *
+   * A copy of the media's own `GraphicRef`, minted when the clip is added. It is
+   * duplicated deliberately: the inspector, the agent's clip reads and the
+   * board→editor handoff all hold a CLIP and would otherwise have to go and
+   * find the media item to answer "what block is this?". Nothing about playback
+   * or rendering reads it — a graphic clip is an ordinary video clip.
+   */
+  readonly graphic?: import("./project").GraphicRef;
   readonly [key: string]: unknown;
 }
 

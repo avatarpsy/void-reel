@@ -1777,7 +1777,23 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
            * track and conclude the feature is broken. The page writes this
            * sentence onto the layer, where the person who set it can read it.
            */
-          const playing = mode === 'bake' ? chosenTake(s.takes, s.chosenTakeId) : null;
+          /**
+           * THE SHOT'S SLOT IS WHATEVER THE CHOSEN TAKE MEASURES.
+           *
+           * Resolved for BOTH modes, not just bake. `plannedSeconds` is what the
+           * user ASKED for before anything existed; once a take is picked, the
+           * slot on the timeline is that take's real length, and an overlay set
+           * to "the whole shot" has to be rendered to fill it.
+           *
+           * Found by running the flow: a 10.04s take under a whole-shot lower
+           * third rendered the graphic at 6s — the model's snapped minimum, from
+           * a shot nobody had typed a length into — so it stopped four seconds
+           * before the picture did.
+           */
+          const playing = chosenTake(s.takes, s.chosenTakeId);
+          const slotSec = Number(playing?.durationSec) > 0
+            ? Number(playing!.durationSec)
+            : plannedSeconds(s);
           const blocked = mode === 'bake' && !playing
             ? 'Baking needs a picture to bake onto — generate this shot first, or '
               + 'switch the layer to Over.'
@@ -1802,7 +1818,7 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
            * A slot the user has already filled is NOT overwritten — they put
            * something specific there on purpose.
            */
-          const videoSlot = playing
+          const videoSlot = mode === 'bake' && playing
             ? (findBlock(g.block)?.slots ?? [])
               .find(sl => sl.kind === 'video' && !slots[sl.key])
             : undefined;
@@ -1823,15 +1839,38 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
              * cut the shot short. An overlay is the opposite: it costs only its
              * own seconds, which is the whole reason it is the default.
              */
+            /**
+             * HOW LONG TO RENDER IT FOR — and 0 means "do not force a length".
+             *
+             * ── A BAKE IS THE LENGTH OF THE FOOTAGE ──────────────────────────
+             * It IS the shot's picture once rendered, so cutting it short would
+             * cut the shot short. Always forced to the slot.
+             *
+             * ── AN OVERLAY IS THE LENGTH THE DESIGNER GAVE IT ────────────────
+             * Measured, not assumed: `lt-clean-bar` animates in, holds and
+             * animates OUT over 4.8s (144 frames). Forcing it to cover a 10.04s
+             * shot rendered 302 frames, took twice as long, and produced FIVE
+             * SECONDS OF NOTHING after the bar had left — a graphic that behaves
+             * differently from the way it was drawn.
+             *
+             * So an overlay with no explicit hold is rendered unforced and the
+             * timeline places it for its own length (`asked = hold || file ||
+             * slot` in the loader). A user who genuinely wants it held longer
+             * types a number, and the renderer's hold extends it.
+             *
+             * This is the opposite of the rule for a SCENE, deliberately: a
+             * full-frame beat that ends early leaves a hole with narration
+             * playing over it, where an overlay that ends early just stops.
+             */
             durationSec: mode === 'bake'
-              ? (Number(playing?.durationSec) > 0
-                ? Number(playing!.durationSec)
-                : plannedSeconds(s))
-              : (Number(g.durationSec) > 0 ? Number(g.durationSec) : plannedSeconds(s)),
+              ? slotSec
+              : Math.max(0, Number(g.durationSec) || 0),
             // FULL QUALITY, and only when the block has nowhere better to put
             // it. `src` is the card's thumbnail; baking from it would blow a
             // poster frame up to fill the frame.
-            ...(playing && !videoSlot ? { backdropUrl: playing.url || playing.src } : {}),
+            ...(mode === 'bake' && playing && !videoSlot
+              ? { backdropUrl: playing.url || playing.src }
+              : {}),
             ...(blocked ? { blocked } : {}),
           });
         }

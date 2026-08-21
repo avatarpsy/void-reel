@@ -45,7 +45,7 @@ import {
 import { onTakeProgress, setTakeProgress, takeProgress } from './take-progress';
 import { resolveLayerSlots, resolveSlots, slotFills } from './slots';
 import { readParsed } from './screenplay-doc';
-import { lazyBlockPreview, openBlockLightbox, type LazyPreview } from '../ui/block-preview';
+import { lazyBlockPreview, openBlockLightbox, type LazyPreview } from '@openreel/asset-browser';
 import {
   allModels, aspectFor, capChips, checkShot, effectiveModel, estimateShotCredits,
   formatCredits, onModelCatalogue, referenceTag, resolutionFor, slotSupport, snapDuration,
@@ -162,11 +162,17 @@ function timingLabel(g: Pick<ShotGraphic, 'offsetSec' | 'durationSec' | 'anchor'
   const dur = Math.max(0, Number(g.durationSec) || 0);
   const n = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
   if (g.anchor === 'end') {
-    if (!dur) return off ? `to ${n(off)}s before the end` : 'whole shot';
+    if (!dur) return off ? `ends ${n(off)}s early` : 'as designed, at the end';
     return off ? `${n(dur)}s, ending ${n(off)}s early` : `last ${n(dur)}s`;
   }
-  if (!off && !dur) return 'whole shot';
-  if (!dur) return `from ${n(off)}s`;
+  // NO LENGTH MEANS THE BLOCK'S OWN, not the shot's.
+  //
+  // It said "whole shot", which read as a promise the render does not keep: a
+  // lower third animates in, holds and animates OUT in about five seconds, and
+  // stretching it across a ten-second shot renders five seconds of nothing
+  // after the bar has left. Unforced, the block runs the way it was drawn.
+  if (!off && !dur) return 'as designed';
+  if (!dur) return `from ${n(off)}s, as designed`;
   return `${n(off)}s → ${n(off + dur)}s`;
 }
 
@@ -925,6 +931,20 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
        whose aspect disagrees with the tile must letterbox rather than lose its
        edges. With the width taken from the picture the two agree anyway, so
        this only bites while the tile is at its min or max. */
+    /* A TAKE WITH NO PICTURE STILL HAS TO LOOK LIKE A TILE.
+       The tile takes its HEIGHT from the row and its WIDTH from the thumbnail
+       inside it — so a take with no poster (a running one, an imported clip, one
+       whose still never landed) renders no img, has nothing to get width from,
+       and collapses to the 34px floor: a tall thin sliver that reads as a broken
+       card rather than as a take. A min-width cannot fix it without also
+       pillarboxing every real 9:16 thumbnail, which is what that floor is for.
+       An aspect ratio gives the empty tile a shape derived from the same row
+       height every other tile uses, so it sits in the strip at the size its
+       picture would have taken. */
+    .take--nothumb {
+      aspect-ratio: 16 / 9;
+      min-width: 0;
+    }
     .take__thumb {
       display: block;
       height: 100%;
@@ -3838,7 +3858,8 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
            */
           const thumb = takeThumb(t);
           return html`<button
-            class="take ${on ? 'is-on' : ''} ${t.status === 'failed' ? 'take--failed' : ''}"
+            class="take ${on ? 'is-on' : ''} ${t.status === 'failed' ? 'take--failed' : ''} ${
+              thumb ? '' : 'take--nothumb'}"
             data-drag-take=${t.id}
             title=${t.status === 'failed'
               ? `Take ${i + 1} failed — ${t.error || 'no reason given'}`

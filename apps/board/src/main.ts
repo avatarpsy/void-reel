@@ -19,13 +19,13 @@ import './theme/screenplay-focus.css';
 import { IndexeddbPersistence } from 'y-indexeddb';
 import * as Y from 'yjs';
 
-import { defaultApiBase } from '@openreel/asset-browser';
+import { defaultApiBase, setBlockTokenProvider } from '@openreel/asset-browser';
 
 import { mountBoard, type MountedBoard } from './blocksuite/editor';
 import * as shots from './shot/shots';
 import * as boardMeta from './board/board-meta';
 import { installCloudSync } from './board/cloud-sync';
-import { installParentAuth } from './board/parent-auth';
+import { installParentAuth, getParentToken } from './board/parent-auth';
 import { installBoardRpc, getBoardRev } from './agent/rpc';
 import { installScreenplayFocus } from './ui/screenplay-focus';
 import { installBoardUi } from './ui/board-ui';
@@ -92,6 +92,15 @@ async function boot(): Promise<void> {
   // a token. Starting the listener here also catches the token the parent PUSHES
   // on iframe load, which is what closes the startup race for good.
   installParentAuth();
+  /**
+   * Tell the shared block preview how THIS app gets a token.
+   *
+   * The renderer moved into `@openreel/asset-browser` so the video editor could
+   * use it too, and the one thing it cannot know is where the credentials live.
+   * The board has none of its own — it asks the parent page. See the package's
+   * `auth.ts`.
+   */
+  setBlockTokenProvider(() => getParentToken());
 
   const ydoc = new Y.Doc({ guid: boardId });
   const persistence = new IndexeddbPersistence(`voidspace-board-${boardId}`, ydoc);

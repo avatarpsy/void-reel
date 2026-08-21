@@ -32,17 +32,22 @@
  * `BLOCK_SHARING_BUILD_PLAN.md` §3. Adding it here would break the feature today
  * to defend against a threat that does not exist yet.
  */
-import { getParentToken } from '../board/parent-auth';
+import { blockApiUrl, blockToken } from './auth';
 import { blockRuntimeScript, dropRedundantGsapTag, ensureBlockRuntime } from './block-runtime';
 
 /** One block's source, as the preview needs it. */
 export interface BlockDoc {
   name: string;
-  tier: 'user' | 'starter';
+  tier: 'user' | 'shared' | 'starter';
   html: string;
   /** Native composition size, from the root element's data attributes. */
   width: number;
   height: number;
+  /** What the block declares it can be filled with — `key → {sel|var, kind,
+   *  sample}`, exactly as the library stores it. See the note where it is read. */
+  slots: Record<string, unknown>;
+  /** The older declaration style: bare names the block reads itself. */
+  variables: unknown[];
 }
 
 /**
@@ -57,6 +62,22 @@ export interface BlockDoc {
  * must share one request rather than race two.
  */
 const cache = new Map<string, Promise<BlockDoc | null>>();
+
+/**
+ * FORGET ONE BLOCK, so a re-save is picked up without a reload.
+ *
+ * The cache is keyed by name and lives for the page, which is right for
+ * browsing and wrong the moment somebody EDITS a block — `compose_block` and
+ * `save_block` both rewrite a document under a name that is already cached.
+ *
+ * This has to be here rather than in each host: hosts used to keep their own
+ * cache and their own invalidator, and once the fetch became shared a host
+ * clearing only its own map would have gone on serving the stale document
+ * forever, which is the worst kind of stale — it looks like the save failed.
+ */
+export function forgetBlockDoc(name: string): void {
+  cache.delete(String(name ?? '').trim());
+}
 
 /** `data-width="1080"` on the root. Absent on a hand-written block; 9:16 then. */
 function sizeOf(html: string): { width: number; height: number } {
@@ -75,8 +96,8 @@ export async function loadBlock(name: string): Promise<BlockDoc | null> {
   if (hit) return hit;
 
   const req = (async (): Promise<BlockDoc | null> => {
-    const token = await getParentToken().catch(() => null);
-    const res = await fetch('/api/studio/blocks', {
+    const token = await blockToken();
+    const res = await fetch(blockApiUrl(), {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -89,8 +110,20 @@ export async function loadBlock(name: string): Promise<BlockDoc | null> {
     if (!j?.ok || typeof j.html !== 'string' || !j.html) return null;
     return {
       name: j.name ?? key,
-      tier: j.tier === 'user' ? 'user' : 'starter',
+      tier: j.tier === 'user' ? 'user' : j.tier === 'shared' ? 'shared' : 'starter',
       html: j.html,
+      /**
+       * The MANIFEST, carried verbatim.
+       *
+       * The preview itself does not need it — it merges whatever values it is
+       * handed. It is here because this is the one fetch of a block in the
+       * product, and the surfaces that place a block (the image editor's
+       * composition layer, the video editor's inspector) all need to know which
+       * slots it declares. Two fetches of the same document, one of them only
+       * for the manifest, is what this replaced.
+       */
+      slots: (j.slots && typeof j.slots === 'object') ? j.slots as Record<string, unknown> : {},
+      variables: Array.isArray(j.variables) ? j.variables : [],
       ...sizeOf(j.html),
     };
   })();

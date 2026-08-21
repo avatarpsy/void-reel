@@ -4,7 +4,11 @@ export type ProcessingType =
   | "background-removal"
   | "auto-reframe"
   | "color-grading"
-  | "effects";
+  | "effects"
+  /** A HyperFrames block being rendered into a video — a drag from the block
+   *  library, or a graphic re-rendered after its words changed. It runs on the
+   *  user's own machine and takes real seconds, so it needs to be visible. */
+  | "graphic-render";
 
 export interface ProcessingTask {
   id: string;
@@ -216,4 +220,5 @@ export const PROCESSING_TYPE_LABELS: Record<ProcessingType, string> = {
   "auto-reframe": "Auto Reframe",
   "color-grading": "Color Grading",
   effects: "Video Effects",
+  "graphic-render": "Rendering Graphic",
 };

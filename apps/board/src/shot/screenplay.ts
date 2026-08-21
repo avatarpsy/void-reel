@@ -217,6 +217,19 @@ export interface CompiledGraphic {
   mediaId?: string;
   /** Names the track it lands on. */
   label: string;
+  /**
+   * WHAT WAS TYPED INTO THE BLOCK.
+   *
+   * Carried so the graphic stays EDITABLE after it crosses into the editor: the
+   * clip it becomes is tagged with the block and these values, and the
+   * inspector's Graphic section offers them for a re-render. Without it a
+   * board-made overlay arrives as an anonymous video — the same block dragged
+   * straight onto the timeline could be edited and this one could not, which is
+   * the kind of inconsistency nobody can explain to a user.
+   *
+   * Text and colours only; a media slot's value is a URL and travels as one.
+   */
+  slots?: Record<string, string>;
 }
 
 /** One generated attempt, as compile hands it over. */
@@ -448,6 +461,7 @@ export function compileBoard(
         anchor: g.anchor === 'end' ? 'end' as const : 'start' as const,
         ...(g.mediaId ? { mediaId: g.mediaId } : {}),
         label: g.block || `Graphic ${gi + 1}`,
+        ...(g.slots && Object.keys(g.slots).length ? { slots: { ...g.slots } } : {}),
       }));
 
     return {

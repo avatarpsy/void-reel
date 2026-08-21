@@ -1369,7 +1369,7 @@ describe('board graphic layers: over or baked', () => {
     expect(res.pending[0].durationSec).toBe(7);
   });
 
-  it('an overlay is rendered at the GRAPHIC\u2019s length, not the footage\u2019s', async () => {
+  it('an overlay with its OWN length keeps it, however long the take is', async () => {
     // The whole economic argument for overlays. A 3s lower third over a
     // ten-minute take is three seconds of rendering.
     const shotId = await newShot();
@@ -1382,5 +1382,38 @@ describe('board graphic layers: over or baked', () => {
 
     expect(res.pending[0].durationSec).toBe(3);
     expect(res.pending[0].backdropUrl).toBeUndefined();
+  });
+
+  it('an OVERLAY with no length is rendered UNFORCED, so the block runs as designed', async () => {
+    // FOUND BY RUNNING THE FLOW AND MEASURING THE FILE. `lt-clean-bar` animates
+    // in, holds and animates OUT over 4.8s (144 frames). Forcing it to cover a
+    // 10.04s shot rendered 302 frames, took twice as long, and appended FIVE
+    // SECONDS OF NOTHING after the bar had left. 0 means "do not force"; the
+    // timeline then places it for the file's own length.
+    const shotId = await newShot();
+    await call('voidspace:board-add-take', {
+      shotId, status: 'ready', url: 'https://example.test/a.mp4', kind: 'video', durationSec: 10.04,
+    });
+    await call('voidspace:board-add-graphic', { shotId, block: 'stat-card', durationSec: 0 });
+
+    const res = await call('voidspace:board-graphic-fills');
+
+    expect(res.pending[0].durationSec).toBe(0);
+  });
+
+  it('a BAKE is always forced to the shot, because it IS the picture', async () => {
+    // The opposite rule, and it has to be: a bake that ended early would cut the
+    // shot short rather than merely stopping.
+    const shotId = await newShot();
+    await call('voidspace:board-add-take', {
+      shotId, status: 'ready', url: 'https://example.test/a.mp4', kind: 'video', durationSec: 10.04,
+    });
+    await call('voidspace:board-add-graphic', {
+      shotId, block: 'stat-card', mode: 'bake', durationSec: 0,
+    });
+
+    const res = await call('voidspace:board-graphic-fills');
+
+    expect(res.pending[0].durationSec).toBe(10.04);
   });
 });

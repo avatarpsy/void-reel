@@ -15,3 +15,15 @@ export * from './cache';
 export * from './thumbs';
 export * from './view-model';
 export * from './panel-chrome';
+export * from './blocks';
+/**
+ * The LIVE block preview — the renderer, its runtime shim and the visibility
+ * scheduler that decides which of 128 tiles may actually run.
+ *
+ * It lived in the board until the video editor needed the same thing. A block is
+ * layout, typography AND MOTION, and zero previews exist on disk, so the honest
+ * thumbnail is to run the block — which is a whole sandboxed-iframe, CSP and
+ * budget problem that nobody should solve twice.
+ */
+export * from './block-preview/auth';
+export * from './block-preview/block-preview';

@@ -148,6 +148,38 @@ export interface FilmstripThumbnail {
   readonly url: string;
 }
 
+/**
+ * A MEDIA FILE THAT IS A RENDERED HYPERFRAMES BLOCK.
+ *
+ * ── WHY THE MEDIA CARRIES IT, NOT JUST THE CLIP ──────────────────────────────
+ * A rendered graphic is an ordinary video file and must stay one: it trims,
+ * moves, splits and exports through every path the timeline already has, and
+ * nothing about playback reads this. What the file cannot say on its own is
+ * what it is a render OF — which block, filled with which words — and without
+ * that a user who drops a lower third can never change the name in it, and the
+ * agent cannot answer "make that title say something else" except by starting
+ * over.
+ *
+ * It lives on the MEDIA rather than only on the clip because the identity
+ * belongs to the file. Copy the clip, split it, place a second instance: all of
+ * them are the same render of the same block. The clip carries a copy for the
+ * surfaces that only hold a clip (see `ClipMetadata.graphic`), minted from this
+ * one at `clip/add`.
+ *
+ * `mode` is how it was MADE, and the two are genuinely different files: an
+ * overlay is alpha (transparent background, composited over the picture) and a
+ * bake already has the footage inside it.
+ */
+export interface GraphicRef {
+  /** Block name in the library, e.g. `lt-clean-bar`. */
+  readonly block: string;
+  /** The values that were put in its slots — key → text/colour/url. */
+  readonly slots?: Readonly<Record<string, string>>;
+  readonly mode?: "overlay" | "bake";
+  /** What it was rendered at, so a re-render matches ("16:9", "9:16", "1:1"). */
+  readonly aspect?: string;
+}
+
 export interface MediaMetadata {
   readonly duration: number; // In seconds
   readonly width: number; // For video/image
@@ -159,4 +191,6 @@ export interface MediaMetadata {
   readonly fileSize: number;
   /** Number of audio tracks in the file (may be > 1 for multi-track video/audio files) */
   readonly audioTrackCount?: number;
+  /** Set when this file is a rendered HyperFrames block. See `GraphicRef`. */
+  readonly graphic?: GraphicRef;
 }

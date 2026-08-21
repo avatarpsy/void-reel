@@ -133,6 +133,8 @@ export interface ProjectState {
   addTrack: (
     trackType: "video" | "audio" | "image" | "text" | "graphics",
     position?: number,
+    /** Override the generated "Video 3" label. See the executor's note. */
+    name?: string,
   ) => Promise<ActionResult>;
   removeTrack: (trackId: string) => Promise<ActionResult>;
   reorderTrack: (trackId: string, newPosition: number) => Promise<ActionResult>;
@@ -1248,6 +1250,7 @@ export const useProjectStore = create<ProjectState>()(
       addTrack: async (
         trackType: "video" | "audio" | "image" | "text" | "graphics",
         position?: number,
+        name?: string,
       ) => {
         const { project, actionExecutor } = get();
 
@@ -1258,7 +1261,7 @@ export const useProjectStore = create<ProjectState>()(
           type: "track/add",
           id: uuidv4(),
           timestamp: Date.now(),
-          params: { trackType, position },
+          params: { trackType, position, ...(name ? { name } : {}) },
         };
         const result = await actionExecutor.execute(action, project);
         if (result.success) {
@@ -1460,7 +1463,21 @@ export const useProjectStore = create<ProjectState>()(
             ? startTime
             : calculateTimelineDuration(project);
 
-        const trackResult = await addTrack(trackType);
+        /**
+         * A GRAPHIC GETS A GRAPHIC'S NAME.
+         *
+         * The same label the board handoff uses, so a timeline built from the
+         * board and one built by dragging blocks in read identically. Counted
+         * over the tracks that are already named this way rather than over all
+         * video tracks — otherwise the first graphic on a two-camera edit would
+         * come out as "Graphic 3".
+         */
+        const isGraphic = !!(mediaItem?.metadata as { graphic?: unknown } | undefined)?.graphic;
+        const graphicName = isGraphic
+          ? `Graphic ${project.timeline.tracks.filter((t) => /^Graphic \d+$/.test(t.name)).length + 1}`
+          : undefined;
+
+        const trackResult = await addTrack(trackType, undefined, graphicName);
         if (!trackResult.success) {
           return trackResult;
         }

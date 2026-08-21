@@ -880,6 +880,30 @@ function App() {
             } catch (e) {
               console.warn("[Voidspace] media-id migration on recovery failed:", e);
             }
+            /**
+             * AND THE SAME TREATMENT FOR A GRAPHIC OVERLAY'S BLEND.
+             *
+             * The loader heals this too, but healing it THERE is not enough and
+             * the reason is this branch: a local copy is recovered FIRST, and
+             * the Firestore load that follows is additive-only — so the healed
+             * clip loses to the IndexedDB one that has been here all along
+             * ("merged: no-op (already up-to-date)"). The user's symptom was
+             * exact: a lower third that stayed black over the shot until they
+             * opened the inspector and set `screen` by hand, and re-sending the
+             * board never fixed it.
+             *
+             * Undefined only, never an explicit value — see `healGraphicBlend`.
+             */
+            try {
+              const { healGraphicBlends } = await import("./services/voidspace-loader");
+              const beforeBlend = useProjectStore.getState().project;
+              const blended = healGraphicBlends(beforeBlend);
+              if (blended !== beforeBlend) {
+                useProjectStore.setState({ project: blended });
+              }
+            } catch (e) {
+              console.warn("[Voidspace] graphic-blend heal on recovery failed:", e);
+            }
             const titleEngine = useEngineStore.getState().getTitleEngine();
             try {
               const cur = useProjectStore.getState().project;
@@ -1494,8 +1518,13 @@ function App() {
             // all key off taskId+audioId, and read_tracks was the only place
             // the agent could have learned them.
             const mediaSunoIndex = new Map<string, { taskId: string; audioId: string }>();
+            /** Which media files are rendered blocks. Read for clips placed
+             *  before the clip-level copy existed — the identity has always
+             *  been on the file. */
+            const mediaGraphicIndex = new Map<string, unknown>();
             for (const m of (proj.mediaLibrary?.items ?? [])) {
               if (m.id && m.originalUrl) mediaIndex.set(m.id, m.originalUrl);
+              if (m.id && (m.metadata as any)?.graphic) mediaGraphicIndex.set(m.id, (m.metadata as any).graphic);
               if (m.id && (m as any).name) mediaNameIndex.set(m.id, String((m as any).name));
               if (m.id && (m as any).type) mediaTypeIndex.set(m.id, String((m as any).type));
               const st = (m as any).sunoTaskId, sa = (m as any).sunoAudioId;
@@ -1549,6 +1578,37 @@ function App() {
                   startTime: c.startTime, duration: c.duration,
                   inPoint: c.inPoint, outPoint: c.outPoint,
                   volume: c.volume, muted: c.muted,
+                  /**
+                   * HOW THIS CLIP MEETS THE ONE BELOW IT.
+                   *
+                   * A graphic overlay arrives on `screen` — its transparent
+                   * background reaches the compositor as black, and screen is
+                   * what makes that black disappear instead of covering the
+                   * shot. An agent that cannot SEE the blend cannot answer "why
+                   * is my overlay hiding the video", and would set it a second
+                   * time or talk the user out of a clip that is already right.
+                   *
+                   * Omitted when normal, so an ordinary clip stays the shape it
+                   * has always been in this payload.
+                   */
+                  ...(c.blendMode && c.blendMode !== "normal"
+                    ? { blendMode: c.blendMode }
+                    : {}),
+                  /**
+                   * WHICH DESIGNED BLOCK THIS IS, AND WHAT IS IN IT.
+                   *
+                   * A rendered graphic is an ordinary video file, so without
+                   * this the agent reads "a 4.8s clip called lt-clean-bar.webm"
+                   * and has no way to answer "change that name to Priya" except
+                   * by rendering a new one from scratch and leaving the old one
+                   * on the timeline. With it, editing a graphic is a lookup: the
+                   * block is named and its current values are right here.
+                   */
+                  ...(c.metadata?.graphic
+                    ? { graphic: c.metadata.graphic }
+                    : mediaGraphicIndex.get(c.mediaId)
+                      ? { graphic: mediaGraphicIndex.get(c.mediaId) }
+                      : {}),
                   // Expose fades + volume automation so the agent can
                   // read current values before adjusting them.
                   fade: c.fade ?? null,
@@ -1733,11 +1793,35 @@ function App() {
             // (the embedded project_state blob can't carry the raw blob).
             // Library-only: we do NOT auto-place it on the timeline — the
             // user drags it in, exactly like an uploaded file.
-            const { url, name } = msg as { url?: string; name?: string };
+            /**
+             * `graphic` — this URL is a rendered HyperFrames block.
+             *
+             * Stamped onto the media item below, and that single tag is what
+             * makes an agent-placed graphic behave exactly like a dragged one:
+             * `clip/add` reads it and gives every clip made from this file its
+             * `screen` blend, and the inspector reads it to offer the block's
+             * slots for editing. Without it the agent's overlay would arrive as
+             * an anonymous video that covers the picture and can never be
+             * edited — which is what it used to do.
+             */
+            const { url, name, graphic } = msg as {
+              url?: string;
+              name?: string;
+              graphic?: { block?: string; slots?: Record<string, string>; mode?: string; aspect?: string };
+            };
             if (!url || typeof url !== "string") {
               reply({ type: "voidspace:error", requestId: msg.requestId, error: "url required" });
               break;
             }
+            const graphicTag =
+              graphic && typeof graphic.block === "string" && graphic.block
+                ? {
+                    block: graphic.block,
+                    slots: graphic.slots && typeof graphic.slots === "object" ? graphic.slots : {},
+                    mode: graphic.mode === "bake" ? ("bake" as const) : ("overlay" as const),
+                    ...(graphic.aspect ? { aspect: String(graphic.aspect) } : {}),
+                  }
+                : null;
             try {
               const { fetchMediaBlob } = await import("./services/voidspace-loader");
               const blob = await fetchMediaBlob(url);
@@ -1761,7 +1845,14 @@ function App() {
                       ...s.project.mediaLibrary,
                       items: (s.project.mediaLibrary?.items ?? []).map((m: any) =>
                         m.id === result.actionId
-                          ? { ...m, originalUrl: m.originalUrl ?? url, category: m.category ?? "Imported" }
+                          ? {
+                              ...m,
+                              originalUrl: m.originalUrl ?? url,
+                              category: m.category ?? (graphicTag ? "Graphics" : "Imported"),
+                              ...(graphicTag
+                                ? { metadata: { ...m.metadata, graphic: graphicTag } }
+                                : {}),
+                            }
                           : m,
                       ),
                     },

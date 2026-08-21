@@ -579,16 +579,48 @@ export const Timeline: React.FC = () => {
       const target = trackId
         ? store.project.timeline.tracks.find((t) => t.id === trackId)
         : undefined;
-      if (target && target.type !== targetType) {
-        const estDur = media?.metadata?.duration && media.metadata.duration > 0
-          ? media.metadata.duration
-          : 5;
+      const estDur = media?.metadata?.duration && media.metadata.duration > 0
+        ? media.metadata.duration
+        : 5;
+      const occupied = (t: { clips: readonly { startTime: number; duration: number }[] }) =>
+        t.clips.some(
+          (c) => c.startTime < startTime + estDur && c.startTime + c.duration > startTime,
+        );
+      /**
+       * A GRAPHIC LANDS OVER THE PICTURE, NEVER INSIDE IT.
+       *
+       * A rendered block is an overlay — it is meant to sit on top of whatever
+       * is playing. Dropped onto a lane that is already occupied at that moment
+       * it would be placed INTO the footage: overlapping it, or displacing it,
+       * neither of which is ever what the drag meant. So an occupied lane sends
+       * it up a layer, the same way a type mismatch already sends media to a
+       * lane that can hold it.
+       *
+       * An EMPTY spot on the lane the user aimed at is respected as-is. They
+       * pointed at a gap; putting the clip somewhere else because of a rule
+       * would be the surprising half of this behaviour.
+       */
+      const isGraphic = !!media?.metadata?.graphic;
+      const mustRelocate =
+        (target && target.type !== targetType) ||
+        (target && isGraphic && occupied(target));
+      if (mustRelocate) {
+        /**
+         * A GRAPHIC RELOCATES ONTO A GRAPHICS LAYER, OR ONTO A NEW ONE.
+         *
+         * The generic rule — "any free track of the right type" — is wrong for
+         * an overlay: the first free video track is usually the FOOTAGE track
+         * with a gap in it, and a lower third dropped into a gap plays INSTEAD
+         * of the picture rather than over it. That is the opposite of what the
+         * drag meant, and it looks like the graphic ate a shot.
+         *
+         * So a graphic only reuses a lane that is already a graphics layer;
+         * anything else gets a fresh one, which stacks above the picture.
+         */
+        const isGraphicLane = (t: { id: string; name: string }) =>
+          t.id.startsWith("track-graphic-") || /^Graphic \d+$/.test(t.name);
         const free = store.project.timeline.tracks.find(
-          (t) =>
-            t.type === targetType &&
-            !t.clips.some(
-              (c) => c.startTime < startTime + estDur && c.startTime + c.duration > startTime,
-            ),
+          (t) => t.type === targetType && !occupied(t) && (!isGraphic || isGraphicLane(t)),
         );
         if (free) {
           await addClip(free.id, mediaId, startTime);

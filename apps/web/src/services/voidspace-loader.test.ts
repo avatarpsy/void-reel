@@ -606,3 +606,112 @@ describe("resolveGraphicWindow", () => {
       .toEqual({ startTime: 0, duration: 6 });
   });
 });
+
+/**
+ * A GRAPHIC CLIP'S BLEND SURVIVES THE ADDITIVE MERGE.
+ *
+ * The merge keeps the SAVED cut and only appends what is new — right for
+ * position and trim, wrong for `blendMode`, which is not an arrangement the user
+ * chose but a property of what a graphic clip IS. A transparent overlay without
+ * `screen` covers the shot, and a project saved before the loader set it would
+ * stay broken through every re-send.
+ */
+describe("graphic clips keep their blend through a merge", () => {
+  const clip = (over: Record<string, unknown> = {}) => ({
+    id: "clip-graphic-a", mediaId: "m1", trackId: "track-graphic-1",
+    startTime: 0, duration: 4, inPoint: 0, outPoint: 4,
+    effects: [], audioEffects: [], transform: {} as any, volume: 1, keyframes: [],
+    ...over,
+  }) as any;
+  const track = (over: Record<string, unknown> = {}) => ({
+    id: "track-graphic-1", type: "video", name: "Graphic 1",
+    clips: [clip()], transitions: [], locked: false, hidden: false, muted: false, solo: false,
+    ...over,
+  }) as any;
+  const project = (tracks: any[]) => ({
+    id: "p", name: "p", createdAt: 0, modifiedAt: 0,
+    settings: { width: 1080, height: 1920, frameRate: 30, sampleRate: 48000, channels: 2 },
+    mediaLibrary: { items: [] },
+    timeline: { tracks, duration: 10 },
+  }) as any;
+
+  it("heals a saved graphic clip that predates the blend", () => {
+    const saved = project([track()]);
+    const merged = mergeSavedArrangement(project([track()]), saved);
+    const gt = merged.timeline.tracks.find((t: any) => t.id === "track-graphic-1")!;
+    expect(gt.clips[0].blendMode).toBe("screen");
+  });
+
+  it("NEVER overwrites a blend the user chose — including normal", () => {
+    // Any actual value means somebody picked it in the inspector. Healing over
+    // that would fight them every time the project opened.
+    const saved = project([track({ clips: [clip({ blendMode: "normal" })] })]);
+    const merged = mergeSavedArrangement(project([track()]), saved);
+    const gt = merged.timeline.tracks.find((t: any) => t.id === "track-graphic-1")!;
+    expect(gt.clips[0].blendMode).toBe("normal");
+  });
+
+  it("leaves clips on every OTHER track completely alone", () => {
+    // Nothing else on the timeline has a blend it did not ask for.
+    const video = track({ id: "track-video", name: "Video",
+      clips: [clip({ id: "clip-video-a", trackId: "track-video" })] });
+    const saved = project([video]);
+    const merged = mergeSavedArrangement(project([video]), saved);
+    const vt = merged.timeline.tracks.find((t: any) => t.id === "track-video")!;
+    expect(vt.clips[0].blendMode).toBeUndefined();
+  });
+});
+
+/**
+ * A FRESHLY BUILT GRAPHIC CLIP CARRIES THE BLEND FROM BIRTH.
+ *
+ * The heal above is a safety net for blobs saved before this existed. The clip
+ * construction itself lives inside the async scene loop, so it is pinned by
+ * source rather than called: what matters is that the field is there at all,
+ * because without it the very first send of a new overlay is already wrong and
+ * the user is left setting it by hand in the inspector.
+ */
+describe("new graphic clips are born with the blend", () => {
+  it("sets screen where the graphic clip is constructed", async () => {
+    const [{ readFileSync }, { join }] = await Promise.all([
+      import("node:fs"), import("node:path"),
+    ]);
+    const src = readFileSync(
+      join(process.cwd(), "src/services/voidspace-loader.ts"), "utf8",
+    );
+    // The clip literal that carries a graphic render — identified by the
+    // transform + blend pair the surrounding comment documents.
+    expect(src).toContain('blendMode: "screen"');
+    // And the heal must agree with it, or an old project and a new one would
+    // composite differently.
+    expect(src).toContain('c.blendMode === undefined ? { ...c, blendMode: "screen" as const } : c');
+  });
+});
+
+/**
+ * THE HEAL HAS TO RUN ON THE LOCALLY RECOVERED COPY TOO.
+ *
+ * This is the one that actually bit. Healing inside the loader looked complete
+ * and was not: App.tsx recovers an IndexedDB auto-save FIRST and then installs
+ * the Firestore load in additive-only mode, so the healed project loses to the
+ * local copy that has been there all along — the console says it plainly,
+ * "merged: no-op (already up-to-date)". The user's overlay stayed black until
+ * they set `screen` by hand, and re-sending the board never reached it.
+ *
+ * Pinned by source because the branch is inside a long async boot effect, and
+ * what has to stay true is simply that the recovery path calls the heal at all.
+ */
+describe("local auto-save recovery heals the blend as well", () => {
+  it("App.tsx heals the recovered project, not just the loader's", async () => {
+    const [{ readFileSync }, { join }] = await Promise.all([
+      import("node:fs"), import("node:path"),
+    ]);
+    const app = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
+    expect(app).toContain("healGraphicBlends");
+    // And it must act on what is IN THE STORE after recovery — healing a
+    // freshly loaded project here would be healing the copy that loses.
+    const block = /healGraphicBlends[\s\S]{0,600}/.exec(app)![0];
+    expect(block).toContain("useProjectStore.getState().project");
+    expect(block).toContain("useProjectStore.setState");
+  });
+});

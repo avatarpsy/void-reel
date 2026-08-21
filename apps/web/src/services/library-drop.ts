@@ -1,5 +1,7 @@
 import { useProjectStore } from "../stores/project-store";
 import { saveMediaBlob } from "./media-storage";
+import { renderBlock, RenderBlockError } from "./render-block";
+import { useProcessingStore } from "./processing-manager";
 
 /**
  * Shared bridge that lets a card from the cross-project Library tab be dragged
@@ -62,9 +64,39 @@ export async function fetchLibraryBlob(url: string): Promise<Blob | null> {
   return null;
 }
 
-/** Read a timeline drop payload that may be a native media item OR a Library
- *  item. Returns the project mediaId to place, importing the Library asset
- *  first if needed. Returns null if the payload is neither / import failed. */
+/**
+ * A BLOCK dragged out of the library.
+ *
+ * Unlike every other droppable, this one has no file yet — a block is a design,
+ * and the video only exists once it has been rendered on the user's machine.
+ * The drop therefore RENDERS first and then behaves exactly like any other
+ * import, which is what lets it land through the timeline's normal path with
+ * its snapping, its track routing and its undo intact.
+ */
+export interface DroppedBlockItem {
+  /** Block name in the library, e.g. `lt-clean-bar`. */
+  name: string;
+  /** Values for its slots. A plain drag has none and gets the design as drawn. */
+  slots?: Record<string, string>;
+  mode?: "overlay" | "bake";
+  /** For a bake: the picture to burn the graphic into. */
+  backdropUrl?: string;
+  durationSec?: number;
+  aspect?: string;
+}
+
+/** What a failed block drop failed WITH, for the UI to show. The drop handler
+ *  can only return a mediaId or null, and "nothing happened" is the one outcome
+ *  a user cannot act on — "the desktop app is not connected" they can. */
+let lastBlockDropError = "";
+export function lastBlockDropFailure(): string {
+  return lastBlockDropError;
+}
+
+/** Read a timeline drop payload that may be a native media item, a Library
+ *  item, OR a block from the block library. Returns the project mediaId to
+ *  place, importing (and for a block, rendering) it first if needed. Returns
+ *  null if the payload is none of those / the import failed. */
 export async function resolveDroppedMediaId(rawJson: string): Promise<string | null> {
   if (!rawJson) return null;
   let data: any;
@@ -72,9 +104,134 @@ export async function resolveDroppedMediaId(rawJson: string): Promise<string | n
   if (data && typeof data.mediaId === "string" && data.mediaId.trim()) {
     return data.mediaId; // native media item — already in the project
   }
+  const bi: DroppedBlockItem | undefined = data?.blockItem;
+  if (bi && typeof bi.name === "string" && bi.name.trim()) {
+    return importBlockToProject(bi);
+  }
   const li: DroppedLibraryItem | undefined = data?.libraryItem;
   if (!li || typeof li.url !== "string") return null;
   return importLibraryItemToProject(li);
+}
+
+/** Does this media item already hold exactly this render? */
+function sameGraphic(a: any, b: DroppedBlockItem): boolean {
+  const g = a?.metadata?.graphic;
+  if (!g || g.block !== b.name) return false;
+  if ((g.mode ?? "overlay") !== (b.mode ?? "overlay")) return false;
+  return JSON.stringify(g.slots ?? {}) === JSON.stringify(b.slots ?? {});
+}
+
+/**
+ * Render a block and import the result as project media.
+ *
+ * Returns the new mediaId, which then drops onto the track through the normal
+ * path. The clip it becomes gets its `screen` blend and its `graphic` metadata
+ * automatically, because the MEDIA is tagged here and `clip/add` reads the tag —
+ * see the note there. Nothing about this drop is special by the time it reaches
+ * the timeline, and that is the point.
+ */
+export async function importBlockToProject(bi: DroppedBlockItem): Promise<string | null> {
+  lastBlockDropError = "";
+  const store = useProjectStore.getState();
+
+  /**
+   * ALREADY RENDERED ONCE. The same block with the same words IS the same file,
+   * and these renders cost the user seconds on their own machine. The server
+   * has an idempotency key for the same reason; this skips the round trip
+   * entirely, which is what makes dragging the same lower third onto four shots
+   * feel instant after the first.
+   */
+  const existing = store.project.mediaLibrary.items.find((m: any) => sameGraphic(m, bi));
+  if (existing) return existing.id;
+
+  const proc = useProcessingStore.getState();
+  const taskId = proc.addTask(`block:${bi.name}`, "graphic-render");
+  proc.updateTaskProgress(taskId, 10, `Rendering ${bi.name} on your computer...`);
+  try {
+    const rendered = await renderBlock({
+      block: bi.name,
+      slots: bi.slots,
+      mode: bi.mode ?? "overlay",
+      durationSec: bi.durationSec,
+      backdropUrl: bi.backdropUrl,
+      aspect: bi.aspect,
+      /**
+       * THE DESIGNER'S OWN CONTENT, when the user has typed nothing yet.
+       *
+       * A bare drag carries no values. Asking for `render` would draw nothing
+       * into every slot and hand back an empty rectangle, which reads as the
+       * feature being broken. Showing the block AS DESIGNED and letting them
+       * edit the words afterwards is the only version of this that explains
+       * itself.
+       */
+      useSampleContent: !bi.slots || Object.keys(bi.slots).length === 0,
+    });
+    proc.updateTaskProgress(taskId, 70, "Importing...");
+
+    const blob = await fetchLibraryBlob(rendered.url);
+    if (!blob) throw new RenderBlockError("Rendered, but the file could not be read back.");
+    const ext = (bi.mode ?? "overlay") === "bake" ? "mp4" : "webm";
+    const safe = bi.name.replace(/[^a-z0-9._-]+/gi, "-").slice(0, 48) || "graphic";
+    const file = new File([blob], `${safe}.${ext}`, { type: blob.type || "video/webm" });
+    const before = new Set(store.project.mediaLibrary.items.map((i: any) => i.id));
+    const result = await useProjectStore.getState().importMedia(file);
+    if (!result.success) throw new RenderBlockError("Rendered, but could not be imported.");
+    const newItem = useProjectStore.getState().project.mediaLibrary.items.find(
+      (i: any) => !before.has(i.id),
+    );
+    if (!newItem) throw new RenderBlockError("Imported, but the media item could not be found.");
+
+    /**
+     * TAG IT AS A GRAPHIC. This is the whole reason the rest of the system
+     * treats it correctly: `clip/add` reads `metadata.graphic` and gives every
+     * clip made from this file its `screen` blend, and the inspector reads it to
+     * offer the block's slots for editing.
+     */
+    useProjectStore.setState((s: any) => ({
+      project: {
+        ...s.project,
+        mediaLibrary: {
+          ...s.project.mediaLibrary,
+          items: s.project.mediaLibrary.items.map((m: any) =>
+            m.id === newItem.id
+              ? {
+                  ...m,
+                  originalUrl: m.originalUrl ?? rendered.url,
+                  category: m.category ?? "Graphics",
+                  metadata: {
+                    ...m.metadata,
+                    // The device measured it; a graphic trimmed to a guess cuts
+                    // its own animation off.
+                    ...(rendered.durationSec > 0 && !(m.metadata?.duration > 0)
+                      ? { duration: rendered.durationSec }
+                      : {}),
+                    graphic: {
+                      block: bi.name,
+                      slots: bi.slots ?? {},
+                      mode: bi.mode ?? "overlay",
+                      ...(bi.aspect ? { aspect: bi.aspect } : {}),
+                    },
+                  },
+                }
+              : m,
+          ),
+        },
+        modifiedAt: Date.now(),
+      },
+    }));
+    saveMediaBlob(
+      useProjectStore.getState().project.id,
+      newItem.id,
+      blob,
+      (newItem as any).metadata ?? {},
+    ).catch(() => {});
+    proc.completeTask(taskId);
+    return newItem.id;
+  } catch (e: any) {
+    lastBlockDropError = String(e?.message ?? e).slice(0, 200);
+    proc.failTask(taskId, lastBlockDropError);
+    return null;
+  }
 }
 
 /** Import a Library asset into the current project (IndexedDB + MediaItem) and

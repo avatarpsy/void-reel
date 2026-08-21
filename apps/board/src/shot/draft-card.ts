@@ -26,8 +26,7 @@ import { GfxBlockComponent } from '@blocksuite/std';
 import { css, html, nothing } from 'lit';
 import { state } from 'lit/decorators.js';
 
-import { blockSrcdoc } from '../ui/block-render';
-import { ensureBlockRuntime } from '../ui/block-runtime';
+import { blockSrcdoc, ensureBlockRuntime } from '@openreel/asset-browser';
 import { claimFieldClipboard } from '../ui/field-caret';
 import { blockScrollWheel } from '../ui/wheel';
 import { draftMeta, type DraftBlockModel } from './draft-block';

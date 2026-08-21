@@ -126,7 +126,13 @@ export function sceneIdKey(scene: { _docId: string; source_shot_id?: string }): 
  * moves work they have already placed. Appending is predictable, never
  * destructive, and one drag away from wherever they actually want it.
  */
-export function mergeSavedArrangement(rebuilt: Project, saved: Project): Project {
+export function mergeSavedArrangement(rebuilt: Project, savedIn: Project): Project {
+  // Before anything else, and deliberately ahead of the "nothing new" early
+  // return below — a project that opens with no new material is the ONE case
+  // that most needs this, because re-sending the board is exactly what does not
+  // reach it. See `healGraphicBlend`.
+  const saved = healGraphicBlends(savedIn);
+
   const savedClipIds = new Set<string>();
   for (const t of saved.timeline.tracks) for (const c of t.clips) savedClipIds.add(c.id);
   for (const t of (saved.textClips ?? [])) savedClipIds.add(t.id);
@@ -329,6 +335,62 @@ export function buildTakeTracks(clipsBySlot: Map<number, Clip[]>): Track[] {
  * Highest layer number FIRST, so Graphic 2 ends up above Graphic 1 above the
  * picture — matching the card, where the last layer in the list is on top.
  */
+/**
+ * GIVE AN OLDER SAVED GRAPHIC CLIP ITS BLEND BACK.
+ *
+ * ── WHY THE MERGE CANNOT JUST BE LEFT ALONE ──────────────────────────────────
+ * `mergeSavedArrangement` is deliberately additive: the saved cut wins for
+ * everything it has, and only unseen clips are appended. That is exactly right
+ * for the things the USER decided — where a clip sits, how it is trimmed.
+ *
+ * `blendMode` on a graphic clip is not one of those. It is a property of what
+ * the clip IS: a HyperFrames overlay is rendered on a transparent background,
+ * every transparent pixel reaches the compositor as BLACK, and without `screen`
+ * it covers the shot rather than sitting on it. A project saved before the
+ * loader started setting it would keep a broken clip forever, and re-sending the
+ * board would never fix it — the saved blob wins every time.
+ *
+ * ── UNDEFINED ONLY, NEVER AN EXPLICIT VALUE ──────────────────────────────────
+ * `undefined` means "written before this existed". Any actual value — including
+ * `"normal"` — means somebody chose it in the inspector, and healing over that
+ * would fight the user every time they opened the project. So this fills a hole
+ * and never overwrites an answer.
+ *
+ * Scoped to graphic tracks by id for the same reason: these are the clips the
+ * loader owns and rebuilds, and nothing else on the timeline has a blend it did
+ * not ask for.
+ */
+export function healGraphicBlends(project: Project): Project {
+  const tracks = (project.timeline?.tracks ?? []).map(healGraphicBlend);
+  if (tracks.every((t, i) => t === project.timeline.tracks[i])) return project;
+  // Only the ones actually filled in — a track that already carried the blend
+  // is not news, and an inflated number in the console is a false lead the next
+  // time somebody debugs an overlay.
+  const n = project.timeline.tracks.reduce(
+    (sum, t) => sum + (t.id.startsWith("track-graphic-")
+      ? t.clips.filter((c) => c.blendMode === undefined).length
+      : 0),
+    0,
+  );
+  console.warn(
+    `[voidspace-loader] Healed ${n} graphic clip(s) with no blend → "screen" `
+    + `(saved before overlays carried one; without it the overlay's transparent `
+    + `background paints black over the shot).`,
+  );
+  return { ...project, timeline: { ...project.timeline, tracks } };
+}
+
+function healGraphicBlend(track: Track): Track {
+  if (!track.id.startsWith("track-graphic-")) return track;
+  if (!track.clips.some((c) => c.blendMode === undefined)) return track;
+  return {
+    ...track,
+    clips: track.clips.map((c) =>
+      c.blendMode === undefined ? { ...c, blendMode: "screen" as const } : c,
+    ),
+  };
+}
+
 /**
  * WHERE A GRAPHIC LAYER SITS INSIDE ITS SHOT.
  *
@@ -1808,10 +1870,18 @@ export async function loadSceneListAsProject(
             console.warn("[voidspace-loader] stale-media-URL heal skipped (non-blocking):", e);
           }
 
+          // ── Graphic-layer blend heal ──
+          // A blob saved before the loader started stamping `screen` on graphic
+          // clips holds an overlay that COVERS the shot instead of sitting on
+          // it, and because this branch is the load SSOT no amount of
+          // re-sending the board would ever reach it. Same shape as the heals
+          // above; see `healGraphicBlend`.
+          const blended = healGraphicBlends(parsed);
+
           console.log(`[voidspace-loader] Using project_state blob (${projectStateRaw.json.length} bytes${projectStateRaw.history ? `, +${projectStateRaw.history.length}b history` : ""})`);
           // Heal legacy '-fallback' media ids (cross-project IndexedDB
           // blob collisions) before the blob enters the store.
-          return migrateLegacyFallbackMediaIds(parsed);
+          return migrateLegacyFallbackMediaIds(blended);
         }
       } else {
         console.warn("[voidspace-loader] project_state blob malformed, falling back to per-scene bootstrap");
@@ -2193,6 +2263,22 @@ export async function loadSceneListAsProject(
       videoEndMsRaw != null &&
       videoEndMsRaw > videoStartMsRaw;
 
+    /**
+     * The measured length of the take that PLAYS, when compile sent one.
+     *
+     * `primary` marks it — compile puts the chosen take first and flags exactly
+     * one. Read by flag rather than by position so nothing here re-derives which
+     * take is playing.
+     */
+    const playingTakeSec = (() => {
+      const list = Array.isArray((scene as any).take_list)
+        ? ((scene as any).take_list as any[])
+        : [];
+      const primary = list.find((t) => t?.primary === true) ?? list[0];
+      const sec = Number(primary?.duration_sec);
+      return Number.isFinite(sec) && sec > 0 ? sec : 0;
+    })();
+
     // Compute scene duration from available timing data
     let sceneDuration = DEFAULT_SCENE_DURATION;
     if (hasVideoTrim) {
@@ -2203,6 +2289,26 @@ export async function loadSceneListAsProject(
       sceneDuration = (videoEndMsRaw! - videoStartMsRaw!) / 1000;
     } else if (primaryVideo?.duration_ms) {
       sceneDuration = primaryVideo.duration_ms / 1000;
+    } else if (playingTakeSec > 0) {
+      /**
+       * A BOARD-COMPILED SHOT: THE PLAYING TAKE'S MEASURED LENGTH.
+       *
+       * Compile writes the take's url into `video_url` and its real, measured
+       * duration into `take_list` — but it creates no ASSET row, so
+       * `primaryVideo` is null and every board shot fell through to the 6s
+       * default below. Measured on a real compile: a 10.04s take arrived as a
+       * 6s clip and FOUR SECONDS OF THE USER'S FOOTAGE WERE SILENTLY CUT.
+       *
+       * The scene's planned `duration_seconds` is deliberately NOT used here.
+       * It is what somebody asked for before anything existed; once a take is
+       * chosen the shot IS that take's length, and a model that snaps 7s to 8s
+       * would otherwise trim a second off its own output.
+       *
+       * It matters twice over now that graphics exist: a layer is placed against
+       * this slot, so an end-anchored end card would land four seconds before
+       * the picture actually ends.
+       */
+      sceneDuration = playingTakeSec;
     } else if (musicStartSec != null && musicEndSec != null) {
       sceneDuration = musicEndSec - musicStartSec;
     } else if (
@@ -2497,6 +2603,28 @@ export async function loadSceneListAsProject(
       const gId = String(g?.id ?? "");
       const gMediaId = `media-graphic-${idKey}-${gId || layerSlot}`;
 
+      /**
+       * WHICH BLOCK THIS IS, AND WHAT THE BOARD PUT IN IT.
+       *
+       * The same tag a block dragged straight onto the timeline gets. It is what
+       * makes a board-made graphic an EDITABLE graphic in the editor rather than
+       * an anonymous video: the inspector reads it to offer the block's slots,
+       * and the agent reads it to answer "change that name". Two ways in, one
+       * kind of object at the end — otherwise the same lower third would be
+       * editable or not depending on where the user happened to add it.
+       */
+      const gBlock = String(g?.block ?? "").trim();
+      const gSlots = (g?.slots && typeof g.slots === "object")
+        ? (g.slots as Record<string, string>)
+        : undefined;
+      const graphicTag = gBlock
+        ? {
+            block: gBlock,
+            ...(gSlots && Object.keys(gSlots).length ? { slots: { ...gSlots } } : {}),
+            mode: "overlay" as const,
+          }
+        : null;
+
       mediaItems.push({
         id: gMediaId,
         name: `Scene ${scene.scene_number} · ${String(g?.label || g?.block || `Graphic ${layerSlot}`)}`,
@@ -2506,7 +2634,10 @@ export async function loadSceneListAsProject(
         // the editor fetches on demand. A film with a lower third on every shot
         // would otherwise pre-fetch one render per shot just to open.
         blob: null,
-        metadata: mediaMeta({ duration: fileDur || duration, fileSize: 0 }),
+        metadata: {
+          ...mediaMeta({ duration: fileDur || duration, fileSize: 0 }),
+          ...(graphicTag ? { graphic: graphicTag } : {}),
+        },
         thumbnailUrl: null,
         waveformData: null,
         originalUrl: resolvedG,
@@ -2532,6 +2663,43 @@ export async function loadSceneListAsProject(
         effects: [],
         audioEffects: [],
         transform: makeDefaultTransform(),
+        // The clip's own copy of the tag above — surfaces that hold only a clip
+        // (the inspector, the agent's timeline reads) do not have to go and find
+        // the media item to name the block.
+        ...(graphicTag ? { metadata: { graphic: graphicTag } } : {}),
+        /**
+         * SCREEN, WHICH IS HOW THIS COMPOSITOR PUTS A GRAPHIC OVER FOOTAGE.
+         *
+         * ── THE PROBLEM, IN THE CODEBASE'S OWN WORDS ─────────────────────────
+         * `adobe-import` already documents it: "Our compositor draws NORMAL
+         * blend, so placing a mostly-black overlay on top paints the frame
+         * black." A HyperFrames overlay is rendered with a TRANSPARENT
+         * background, and every transparent pixel arrives at the compositor as
+         * black — so under normal blend the graphic does not sit on the shot, it
+         * replaces it. Measured in the running editor before this: the frame
+         * went to 3,3,3 with 1% lit, and hiding this one track brought the
+         * footage back at 55,39,32.
+         *
+         * `screen` is the same answer that path already ships for exactly this
+         * shape of asset (light leaks, particles, anything AE additively
+         * blends): black contributes nothing, so the transparent field
+         * disappears and the graphic's own pixels lay over the picture.
+         *
+         * ── AND IT IS AN ORDINARY CLIP FIELD, NOT A NEW MECHANISM ────────────
+         * A rendered graphic IS a video clip, so it uses the blend mode every
+         * clip already has. Nothing new was added to the timeline, the preview
+         * painter or the exporter to support this — only the export path had to
+         * start READING the field, which it had never done.
+         *
+         * ── THE ONE CASE IT APPROXIMATES ─────────────────────────────────────
+         * Screen brightens rather than replaces, so a graphic whose own design
+         * is DARK (a charcoal lower-third bar under white text) will read
+         * lighter over bright footage than it does in the block preview. Bright
+         * type, rules and stat callouts — what these overlays overwhelmingly
+         * are — land exactly right. The user can change it per clip in the
+         * inspector like any other blend.
+         */
+        blendMode: "screen",
         // These renders carry no audio. 1 rather than 0 so the clip behaves like
         // any other if the user later replaces its media with something that
         // does — a silent-by-flag clip is a trap nobody remembers setting.

@@ -1041,8 +1041,21 @@ export const SHOT_W = 640;
  * user the first time a generation landed, moving every card to its right. A
  * strip of equal cards that is occasionally roomier is a better trade than one
  * that reflows while you are working in it.
+ *
+ * ── 1020, RAISED FROM 845 WHEN GRAPHIC LAYERS ARRIVED ────────────────────────
+ * The GRAPHICS row is on EVERY shot, and it is last in the body because a layer
+ * is the last decision anybody makes about a shot. Measured on a real card at
+ * 845: the section began 582px down a 734px card with ~170px of body hidden
+ * below the fold — so the whole feature, including its empty state, sat off the
+ * bottom edge of a box that does not advertise itself as scrollable.
+ *
+ * Ordering it earlier would have put a section most shots never use above the
+ * shot's own inputs. A section nobody can find is not "correctly ordered", it is
+ * absent — so the box grew instead. The body still scrolls, which is what keeps
+ * three layers and nine references from being a problem; what this buys is that
+ * the FIRST layer, and the invitation to add one, are visible without scrolling.
  */
-export const SHOT_H = 845;
+export const SHOT_H = 1020;
 export const SHOT_GAP = 56;
 
 export const ShotBlockSchema = defineBlockSchema({

@@ -55,6 +55,7 @@ export { SunoAudioPanel } from "./SunoAudioPanel";
 export { ClipTransitionSection } from "./ClipTransitionSection";
 export { KeyframesSection } from "./KeyframesSection";
 export { BlendingSection } from "./BlendingSection";
+export { GraphicSection } from "./GraphicSection";
 export { Transform3DSection } from "./Transform3DSection";
 
 // Motion Presets

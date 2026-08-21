@@ -9,6 +9,26 @@ import {
   registerServiceWorker,
 } from "./services/service-worker";
 import { auth } from "./config/firebase-config";
+import { setBlockTokenProvider } from "@openreel/asset-browser";
+
+/**
+ * Tell the shared block preview how THIS app gets a token.
+ *
+ * The block library is read over an authenticated route, and the renderer that
+ * paints a live preview lives in `@openreel/asset-browser` — shared with the
+ * board, which has no Firebase of its own and asks its parent instead. The one
+ * thing it cannot know is where the credentials are, so each app answers here.
+ * Set at module scope, before React mounts, so the first tile to become visible
+ * already has one.
+ */
+setBlockTokenProvider(async () => {
+  try {
+    const u = auth.currentUser;
+    return u ? await u.getIdToken(false) : null;
+  } catch {
+    return null;
+  }
+});
 
 // Auth-stamp every fetch that targets `/api/studio/local-asset`. The
 // endpoint requires a Firebase ID token (via Authorization: Bearer …

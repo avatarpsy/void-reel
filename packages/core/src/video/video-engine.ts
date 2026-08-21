@@ -801,6 +801,7 @@ export class VideoEngine {
               finalTransform.opacity,
               width,
               height,
+              clip.blendMode,
             );
 
             if (processedBitmap !== bitmap) {
@@ -879,8 +880,28 @@ export class VideoEngine {
     opacity: number,
     canvasWidth: number,
     canvasHeight: number,
+    /**
+     * HOW THIS CLIP MEETS WHAT IS ALREADY ON THE CANVAS.
+     *
+     * ── WHY EXPORT HAD TO LEARN THIS ─────────────────────────────────────────
+     * `Clip.blendMode` has existed on the type for a long time and the PREVIEW
+     * has always honoured it (`drawFrameWithTransform` in canvas-renderers).
+     * This path — the one that writes the actual MP4 — did not read it at all,
+     * so a clip set to `screen` composited correctly on screen and painted
+     * NORMAL in the render. That is the "captions show in preview but not in
+     * export" class of bug that `compositeTracksToCtx` was written to end, and
+     * a blend mode is the one place it bites hardest: an overlay whose
+     * transparent areas arrive as black looks right while you edit and covers
+     * the picture in the file you ship.
+     *
+     * Reuses `getCanvasBlendMode`, which already maps the whole `BlendMode`
+     * vocabulary and already falls back to `source-over`. Undefined stays
+     * `normal`, so every existing clip draws exactly as it did.
+     */
+    blendMode?: BlendMode,
   ): void {
     ctx.save();
+    ctx.globalCompositeOperation = this.getCanvasBlendMode(blendMode ?? "normal");
     ctx.globalAlpha = opacity;
     const centerX = canvasWidth / 2;
     const centerY = canvasHeight / 2;

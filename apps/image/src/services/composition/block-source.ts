@@ -25,9 +25,9 @@
  * app may simply be starting up — and remembering it as "this block is broken"
  * would keep it broken for the life of the page.
  */
+import { loadBlock as sharedLoadBlock, forgetBlockDoc } from '@openreel/asset-browser';
 import type { SlotSpec } from './document';
 import type { CompositionSource } from '../../types/project';
-import { getVoidspaceIdToken } from '../voidspace-storage';
 
 /** A block's document and the holes it declares. */
 export interface BlockDocument {
@@ -86,6 +86,13 @@ function readManifest(raw: unknown): Record<string, SlotSpec> {
     if (typeof v.sel === 'string' && v.sel) spec.sel = v.sel;
     if (typeof v.var === 'string' && v.var) spec.var = v.var;
     if (typeof v.sample === 'string') spec.sample = v.sample;
+    // A slot with a fixed set of answers is drawn as a menu rather than a text
+    // box — see `SlotSpec.values`. Strings only, and blanks dropped, because an
+    // empty option already exists and means "leave it alone".
+    if (Array.isArray(v.values)) {
+      const values = v.values.filter((x): x is string => typeof x === 'string' && !!x.trim());
+      if (values.length) spec.values = values;
+    }
     out[key] = spec;
   }
   return out;
@@ -94,10 +101,17 @@ function readManifest(raw: unknown): Record<string, SlotSpec> {
 /**
  * Fetch one block by name.
  *
- * `POST /api/studio/blocks { action: 'get' }` is the same route the board's
- * preview uses, and it reads the library off the user's Voidspace folder
- * server-side rather than through the desktop app — so a block loads whether or
- * not the desktop happens to be running.
+ * THE FETCH ITSELF IS SHARED — `@openreel/asset-browser`.
+ *
+ * There were three copies of "read a block from `POST /api/studio/blocks`" in
+ * this repo: the board's live preview, the video editor's, and this one. They
+ * agreed today and would not have agreed for long; the manifest half in
+ * particular is easy to get subtly wrong, and a block that renders its
+ * designer's sample content instead of the user's words looks like it works.
+ *
+ * So the network call, its cache and its retry rule live in one place. What
+ * stays HERE is the part only this editor needs: the manifest shaped into
+ * `SlotSpec`s and the native size named the way the canvas names it.
  */
 export async function loadBlock(name: string): Promise<BlockDocument | null> {
   const key = String(name ?? '').trim();
@@ -106,24 +120,24 @@ export async function loadBlock(name: string): Promise<BlockDocument | null> {
   if (hit) return hit;
 
   const req = (async (): Promise<BlockDocument | null> => {
-    const token = await getVoidspaceIdToken().catch(() => null);
-    const res = await fetch('/api/studio/blocks', {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      body: JSON.stringify({ action: 'get', name: key }),
-    }).catch(() => null);
-    if (!res?.ok) return null;
-    const j = await res.json().catch(() => null);
-    if (!j?.ok || typeof j.html !== 'string' || !j.html) return null;
-    const size = sizeOf(j.html);
+    const doc = await sharedLoadBlock(key);
+    if (!doc) return null;
+    /**
+     * THE SIZE IS RE-DERIVED HERE, and that is not redundancy.
+     *
+     * A block that declares `data-width`/`data-height` gets the same answer
+     * either way. One that declares NEITHER — a hand-written composition — is a
+     * host decision: this editor's pages are landscape frames, so it assumes
+     * 1920x1080, while the board (which the shared loader defaults for) is
+     * making 1080x1920 video. Taking the shared default would silently turn
+     * every hand-written slide portrait.
+     */
+    const size = sizeOf(doc.html);
     return {
-      name: typeof j.name === 'string' && j.name ? j.name : key,
-      tier: j.tier === 'user' || j.tier === 'shared' ? j.tier : 'starter',
-      html: j.html,
-      slots: readManifest(j.slots),
+      name: doc.name,
+      tier: doc.tier,
+      html: doc.html,
+      slots: readManifest(doc.slots),
       nativeWidth: size.width,
       nativeHeight: size.height,
     };
@@ -134,9 +148,17 @@ export async function loadBlock(name: string): Promise<BlockDocument | null> {
   return req;
 }
 
-/** Forget a cached block, so a re-save is picked up without a reload. */
+/**
+ * Forget a cached block, so a re-save is picked up without a reload.
+ *
+ * BOTH caches. The fetch is shared now (`@openreel/asset-browser`), so clearing
+ * only this map would leave the shared one serving the old document — which
+ * reads as the save having failed.
+ */
 export function forgetBlock(name: string): void {
-  cache.delete(String(name ?? '').trim());
+  const key = String(name ?? '').trim();
+  cache.delete(key);
+  forgetBlockDoc(key);
 }
 
 /**

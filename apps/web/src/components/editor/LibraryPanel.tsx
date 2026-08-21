@@ -6,6 +6,10 @@ import { saveMediaBlob, loadMediaBlob } from "../../services/media-storage";
 import { checkForRecovery, recoverProject } from "../../services/auto-save";
 import { MediaPreviewOverlay, type PreviewKind } from "./MediaPreviewOverlay";
 import { usePlayableVideo } from "../../services/video-playback";
+import { loadBlocks, refreshBlocks, blockLoadError, cachedBlocks, type BlockInfo } from "../../services/blocks";
+import {
+  searchBlocks, blocksForScope, lazyBlockPreview, ensureBlockPreviewStyles,
+} from "@openreel/asset-browser";
 // The SHARED asset-browser rules. Recency bucketing, page size and page merging
 // live in @openreel/asset-browser so this panel, the image editor and the board
 // cannot drift apart — a change there lands in all three at once. The local
@@ -57,7 +61,116 @@ import {
  * MediaItem), deduped by source URL; dragging places it on the timeline.
  */
 
-type LibType = "all" | "video" | "image" | "music" | "sfx" | "voice";
+/**
+ * `block` is here for the same reason the pill is: a HyperFrames composition is
+ * something this panel can now show and place. It is not a media file — it has
+ * no bytes until it is rendered — so the media paths below check for it rather
+ * than assuming every kind has a url.
+ */
+type LibType = "all" | "video" | "image" | "music" | "sfx" | "voice" | "block";
+
+/**
+ * A BLOCK TILE — and it RENDERS THE BLOCK.
+ *
+ * ── WHY A LIVE RENDER AND NOT A THUMBNAIL ───────────────────────────────────
+ * Zero preview images exist on disk for the shipped library, and a block is
+ * layout, typography AND MOTION — a still of a kinetic title slam is the least
+ * informative frame it has. A composition is a self-contained document that
+ * paints in milliseconds, so the honest thumbnail is to run it, which is also
+ * exactly what the finished clip will do.
+ *
+ * The alternative — what this panel shipped first — is a wall of names, and a
+ * wall of names is not a library you can browse.
+ *
+ * ── THE SAME MACHINERY THE BOARD USES ───────────────────────────────────────
+ * `lazyBlockPreview` came out of the board and into `@openreel/asset-browser`
+ * so both panels run one implementation: the sandboxed iframe, the
+ * `__hyperframes` shim every block calls on its first line, the CSP, and the
+ * budget that keeps 128 tiles from running 128 live documents. Only tiles
+ * actually on screen hold a slot; scrolling hands them back.
+ *
+ * ── HOVER TO PLAY ───────────────────────────────────────────────────────────
+ * It settles on its finished frame — the most useful single frame — and
+ * replays while pointed at. That keeps a grid of templates to one animation at
+ * a time instead of twenty running forever.
+ *
+ * List view keeps the glyph on purpose: at 38x28 a composition is a smudge.
+ */
+const BlockTile: React.FC<{ block: BlockInfo; listView: boolean }> = ({ block: b, listView }) => {
+  const host = useRef<HTMLDivElement | null>(null);
+  const preview = useRef<ReturnType<typeof lazyBlockPreview> | null>(null);
+
+  useEffect(() => {
+    if (listView || !host.current) return;
+    // The positioning contract for a preview host — see the package's note.
+    ensureBlockPreviewStyles();
+    const lazy = lazyBlockPreview(host.current, { priority: "tile" });
+    lazy.set(b.name);
+    preview.current = lazy;
+    return () => { preview.current = null; lazy.destroy(); };
+  }, [b.name, listView]);
+
+  // Who made it — the only thing separating a Voidspace design from one
+  // somebody published, now that both sit under the same pill.
+  const credit = b.tier === "starter" ? "Voidspace" : b.credit;
+  // The same detail line the board composes, in the same order, so one block
+  // reads identically in both panels.
+  const detail = [
+    b.category,
+    b.slots.length ? `${b.slots.length} slot${b.slots.length === 1 ? "" : "s"}` : "no slots",
+    b.fill === "adapt" ? "needs adapting" : "",
+    b.overlay ? "overlay" : "",
+    ...b.tags.slice(0, 3),
+  ].filter(Boolean).join(" · ");
+
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData("application/json", JSON.stringify({ blockItem: { name: b.name } }));
+        e.dataTransfer.effectAllowed = "copy";
+      }}
+      onPointerEnter={() => preview.current?.setLoop(true)}
+      onPointerLeave={() => preview.current?.setLoop(false)}
+      title={`${b.name}${b.description ? ` — ${b.description}` : ""} — drag onto the timeline`}
+      className="group flex flex-col rounded-lg border border-border bg-background-tertiary
+                 overflow-hidden hover:border-primary/50 cursor-grab active:cursor-grabbing
+                 transition-colors text-left"
+    >
+      {!listView && (
+        <div
+          ref={host}
+          /* 16:9 so a grid of tiles is one clean rhythm regardless of what each
+             block was designed at; the preview letterboxes itself inside. */
+          data-block-preview
+          className="relative w-full aspect-video bg-black/40 overflow-hidden
+                     flex items-center justify-center text-text-muted/40 text-lg"
+        >
+          {/* Replaced by the live render once it is on screen and gets a slot;
+              put back when it scrolls away. */}
+          ◫
+        </div>
+      )}
+      <div className="px-2 py-1.5 min-w-0">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span className="text-[11px] font-medium text-text-primary truncate">{b.name}</span>
+          {b.tier !== "starter" && (
+            <span className="shrink-0 px-1 py-px rounded text-[9px] uppercase tracking-wide
+                             bg-primary/15 text-primary">
+              {b.tier}
+            </span>
+          )}
+        </div>
+        <p className="text-[10px] text-text-muted/80 truncate">{detail}</p>
+        {credit && <p className="text-[10px] text-text-muted/60 truncate">by {credit}</p>}
+      </div>
+    </div>
+  );
+};
+
+
 
 /**
  * WHERE the assets come from. A SCOPE, deliberately not a tab.
@@ -214,16 +327,23 @@ interface DeviceItem {
   objectUrl?: string;      // lazily-created blob URL (preview/drag)
 }
 
-/** Icons are React and stay here; the LABELS and their ORDER come from the core
- *  so the board's pills and these cannot drift apart again. Blocks are filtered
- *  out — the video editor has no composition blocks to browse. */
+/**
+ * Icons are React and stay here; the LABELS and their ORDER come from the core
+ * so the board's pills and these cannot drift apart again.
+ *
+ * `block` used to be filtered out with the note "the video editor has no
+ * composition blocks to browse". It has them now — a block drags onto the
+ * timeline, renders on the user's machine and lands as a clip — so the pill is
+ * offered here exactly as the board offers it, in the same place in the same
+ * order, under the same word. Two panels that show the same library must show
+ * it the same way, or "where are my blocks" has two answers.
+ */
 const TYPE_ICON: Record<LibType, typeof Film> = {
   all: Plus, video: Film, image: ImageIcon, music: Music2, sfx: AudioLines, voice: Mic,
+  block: LayoutGrid,
 };
 const TYPE_PILLS: { id: LibType; label: string; Icon: typeof Film }[] =
-  KIND_ORDER
-    .filter((id): id is LibType => id !== "block")
-    .map((id) => ({ id, label: KIND_LABEL[id], Icon: TYPE_ICON[id] }));
+  KIND_ORDER.map((id) => ({ id: id as LibType, label: KIND_LABEL[id], Icon: TYPE_ICON[id as LibType] }));
 
 /** Type pill → media-library `kind` group. The stock library uses richer kinds
  *  (`audio-sfx`, `visual-vfx`, …) and accepts a group prefix, so this keeps ONE
@@ -235,6 +355,9 @@ const LIB_KIND_FOR_TYPE: Record<LibType, string> = {
   music: "audio-music",
   sfx: "audio-sfx",
   voice: "audio-voice",
+  // Never queried — blocks do not come from the media library at all. Present
+  // so the map stays total and a new kind cannot be forgotten here.
+  block: "all",
 };
 
 /**
@@ -253,6 +376,9 @@ const LIB_KINDS_FOR_TYPE: Record<LibType, string[]> = {
   music: ["audio-music"],
   sfx: ["audio-sfx", "audio-ambience"],
   voice: ["audio-voice"],
+  // See above — blocks are read from the user's own Voidspace folder, not from
+  // any media scope, so this is never sent.
+  block: [],
 };
 
 /** Stock `kind` → the coarse type the rest of this panel (icons, drag payloads,
@@ -401,6 +527,27 @@ const CachedThumb: React.FC<{ src: string; alt: string; rev: number; className?:
 };
 
 export const LibraryPanel: React.FC = () => {
+  /**
+   * THE BLOCK CATALOGUE. Metadata only — ~130 rows, no bytes — so it is held
+   * whole and searched in memory rather than paged like media.
+   *
+   * Seeded from the module cache so reopening the panel does not flash empty.
+   */
+  const [blocks, setBlocks] = useState<BlockInfo[]>(() => cachedBlocks());
+  const [blocksLoading, setBlocksLoading] = useState(false);
+  const [blocksError, setBlocksError] = useState("");
+
+  /**
+   * What a scope pill means for a block. The RULE is shared with the board
+   * (`blocksForScope`) so the same five words cannot come to mean two things;
+   * this only maps this panel's own scope id onto it.
+   */
+  const blocksInScope = useCallback(
+    (sc: LibScope): BlockInfo[] =>
+      blocksForScope(blocks, sc === "myfiles" ? "mine" : sc),
+    [blocks],
+  );
+
   // Persisted: the scope a user works in is a preference, and losing it on every
   // reload is the kind of small friction that makes a tool feel unfinished.
   const [scope, setScopeRaw] = useState<LibScope>(() => {
@@ -596,6 +743,13 @@ export const LibraryPanel: React.FC = () => {
   }, [scope, semanticReady]);
 
   const load = useCallback(async (offset = 0, force = false) => {
+    /**
+     * Blocks are not media and are not in any media scope. Querying the library
+     * for them would spend a request to be told nothing, and — worse — leave the
+     * panel's `total`/load-more state describing a set the user is not looking
+     * at. The block catalogue has its own fetch; see the effect below.
+     */
+    if (type === "block") return;
     const seq = ++reqSeq.current;
     // Scope is part of the cache key. Without it, switching Mine↔Stock would
     // show the other scope's tiles from cache — the exact "wrong stuff flashes
@@ -810,6 +964,21 @@ export const LibraryPanel: React.FC = () => {
       if (seq === reqSeq.current) { setLoading(false); setLoadingMore(false); }
     }
   }, [scope, type, debounced, mood, quick, facetSel, semanticReady]);
+
+  /**
+   * Fetch the block library the first time the tab is opened.
+   *
+   * Not on mount: most sessions never open it, and the request reaches the
+   * user's desktop app. Not cached-empty either — see `loadBlocks` — so opening
+   * the desktop app and coming back recovers without a reload.
+   */
+  useEffect(() => {
+    if (type !== "block" || blocks.length || blocksLoading) return;
+    setBlocksLoading(true);
+    void loadBlocks()
+      .then((b) => { setBlocks(b); setBlocksError(b.length ? "" : blockLoadError()); })
+      .finally(() => setBlocksLoading(false));
+  }, [type, blocks.length, blocksLoading]);
 
   /**
    * Star / un-star an asset.
@@ -1438,6 +1607,89 @@ export const LibraryPanel: React.FC = () => {
     );
   };
 
+  const renderBlockTile = (b: BlockInfo) => (
+    <BlockTile key={b.name} block={b} listView={viewMode === "list"} />
+  );
+
+  /**
+   * The Blocks pill's grid. Searched in memory against the same box the rest of
+   * the panel uses, so the control the user already knows keeps working.
+   */
+  const renderBlocks = () => {
+    const inScope = blocksInScope(scope);
+    const shown = searchBlocks(inScope, debounced);
+
+    if (blocksLoading && !blocks.length) {
+      return (
+        <div className="flex items-center justify-center py-12 text-text-muted gap-2 text-xs">
+          <Loader2 size={16} className="animate-spin" /> Reading your block library…
+        </div>
+      );
+    }
+    if (!blocks.length) {
+      return (
+        <div className="text-center py-12 text-text-muted">
+          <LayoutGrid size={28} className="mx-auto mb-2 opacity-40" />
+          <p className="text-sm">No blocks available</p>
+          <p className="text-[11px] mt-1 leading-relaxed px-6">
+            {blocksError || "Blocks are designs you can drop straight onto the timeline."}
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              setBlocksLoading(true);
+              void refreshBlocks()
+                .then((b) => { setBlocks(b); setBlocksError(b.length ? "" : blockLoadError()); })
+                .finally(() => setBlocksLoading(false));
+            }}
+            className="mt-3 px-3 py-1.5 text-[11px] rounded-md border border-border
+                       text-text-secondary hover:text-text-primary hover:border-text-muted
+                       transition-colors inline-flex items-center gap-1.5"
+          >
+            <RefreshCw size={12} /> Try again
+          </button>
+        </div>
+      );
+    }
+    if (!inScope.length) {
+      // The library IS here, this tab just has none of it. Say which tab does,
+      // rather than showing the same wall as a missing library.
+      return (
+        <div className="text-center py-12 text-text-muted">
+          <LayoutGrid size={28} className="mx-auto mb-2 opacity-40" />
+          <p className="text-sm">
+            {scope === "generated" ? "Blocks aren't generated" : "No blocks in this tab"}
+          </p>
+          <p className="text-[11px] mt-1 leading-relaxed px-6">
+            {scope === "generated"
+              ? "A block is a design you authored or installed, so nothing generated shows here."
+              : "Your own blocks are under My files; the designs that ship with Voidspace are under Shared."}
+          </p>
+        </div>
+      );
+    }
+    if (!shown.length) {
+      return (
+        <div className="text-center py-12 text-text-muted">
+          <LayoutGrid size={28} className="mx-auto mb-2 opacity-40" />
+          <p className="text-sm">No blocks match “{debounced}”</p>
+          <p className="text-[11px] mt-1">Try a shorter word — names, tags and descriptions are searched.</p>
+        </div>
+      );
+    }
+    return (
+      <>
+        <p className="text-[10px] text-text-muted mb-2 px-0.5">
+          Drag one onto the timeline. It renders on your computer and lands as a clip you can
+          trim, move and edit like any other.
+        </p>
+        <div className="grid gap-2" style={gridStyle}>
+          {shown.map(renderBlockTile)}
+        </div>
+      </>
+    );
+  };
+
   const renderDeviceTile = (d: DeviceItem) => {
     const dedupeUrl = d.originalUrl || `device:${d.mediaId}`;
     const added = importedUrls.has(dedupeUrl);
@@ -1579,7 +1831,9 @@ export const LibraryPanel: React.FC = () => {
             // products. `semantic` gates that promise on the lane being live.
             placeholder={searchPlaceholder(
               scope === "myfiles" ? "mine" : scope === "device" ? "device" : "generated",
-              { semantic: semanticReady },
+              // `kind` so Blocks gets its own wording — "Find a block — 'lower
+              // third', 'stat'…" — which is the same sentence the board shows.
+              { semantic: semanticReady, kind: type },
             )}
             className={`w-full pl-9 text-xs bg-background-tertiary border border-border rounded-md text-text-primary h-9 focus:outline-none focus:border-primary ${
               semanticActive && debounced ? "pr-20" : "pr-3"
@@ -1663,7 +1917,23 @@ export const LibraryPanel: React.FC = () => {
         {TYPE_PILLS.map(({ id, label, Icon }) => (
           <button
             key={id}
-            onClick={() => { setType(id); setMood(""); }}
+            onClick={() => {
+              setType(id);
+              setMood("");
+              /**
+               * Land on a scope that actually holds blocks.
+               *
+               * The same move the board makes. "Generated" is honestly empty for
+               * blocks — a block is authored or installed, never generated — so
+               * a user who was on that tab and picks Blocks would otherwise be
+               * shown an empty panel and conclude they have none.
+               */
+              if (id === "block" && blocksInScope(scope).length === 0) {
+                const found = (["myfiles", "shared"] as const)
+                  .find((sc) => blocksInScope(sc).length > 0);
+                if (found) setScope(found);
+              }
+            }}
             className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-medium border transition-colors ${
               type === id
                 ? "bg-primary/15 border-primary text-primary"
@@ -1882,7 +2152,9 @@ export const LibraryPanel: React.FC = () => {
             <p className="text-xs text-primary font-medium">Drop to add to your library</p>
           </div>
         )}
-        {loading && items.length === 0 ? (
+        {type === "block" ? (
+          renderBlocks()
+        ) : loading && items.length === 0 ? (
           <div className="flex items-center justify-center py-12 text-text-muted gap-2 text-xs">
             <Loader2 size={16} className="animate-spin" /> Loading your library…
           </div>

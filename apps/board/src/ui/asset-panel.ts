@@ -18,6 +18,7 @@ import {
   loadPanelWidth, loadThumbInto, loadViewMode, mergePage,
   mediaSrc, nextOffset, savePanelWidth, saveViewMode, tileSrc, videoPreviewSrc,
   PANEL_GLYPH, isTypingTarget, loadPanelCollapsed, panelToggleTitle, savePanelCollapsed,
+  blocksForScope,
   type AssetBrowserHost, type AssetItem, type AssetKind, type AssetPage, type AssetScope,
   type PersonalCounts, type QuickFilter, type ViewMode,
 } from '@openreel/asset-browser';
@@ -35,7 +36,7 @@ import {
   ASSET_DRAG_TYPE, BLOCK_DRAG_TYPE, dropZoneAt, handleAssetDrop, handleBlockDrop,
   type AssetDragEntity, type BlockDragEntity,
 } from '../shot/drop';
-import { lazyBlockPreview, mountBlockPreview, type PreviewHandle } from './block-preview';
+import { lazyBlockPreview, mountBlockPreview, type PreviewHandle } from '@openreel/asset-browser';
 import { pendingToast, toast } from './toast';
 import type { MountedBoard } from '../blocksuite/editor';
 
@@ -336,31 +337,22 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
      * quietly showing 128 starters under "My files" is a false one.
      */
     blockSource: {
+      /**
+       * The rule itself now lives in `@openreel/asset-browser` — see
+       * `blocksForScope`. It moved because the video editor shows the same
+       * library under the same five pills, and two panels deciding separately
+       * what "My files" means for a block is exactly the drift this package
+       * exists to prevent. What stays here is the part only the board knows:
+       * which blocks this document is already using.
+       */
       list: (q) => {
         const used = new Set(
           readShots(board.std)
             .filter(sh => sh.kind === 'hyperframes' && sh.composition)
             .map(sh => sh.composition),
         );
-        const wanted = allBlocks().filter(b => {
-          if (q.scope === 'project') return used.has(b.name);
-          // A block is never a GENERATION — it is authored or installed, so that
-          // scope is honestly empty rather than quietly showing everything.
-          if (q.scope === 'generated') return false;
-          if (q.scope === 'mine') return b.tier === 'user';
-          /**
-           * "Shared" for blocks means EVERY DESIGN YOU DID NOT AUTHOR — the 128
-           * that ship with Voidspace and the ones adopted from other creators.
-           *
-           * Splitting them would need a fourth pill that exists for one kind, and
-           * the distinction people actually care about — who made this — is on the
-           * tile as a credit line. Mixing them under "My files" would be the real
-           * lie: it would claim authorship of 128 designs the user never touched.
-           */
-          if (q.scope === 'shared') return b.tier === 'starter' || b.tier === 'shared';
-          return true; // 'device' has no block meaning; show everything
-        });
-        return wanted.map(b => blockAsset(b, q.scope));
+        return blocksForScope(allBlocks(), q.scope, used)
+          .map(b => blockAsset(b, q.scope));
       },
     },
   };
