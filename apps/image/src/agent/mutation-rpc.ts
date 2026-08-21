@@ -652,78 +652,180 @@ registerImageAsyncMutation(
 
 // ── Generic layer edit ──────────────────────────────────────────────────────
 
-registerImageMutation('voidspace:img-edit-layer', 'Edit layer', (msg: any) => {
-  const store = useProjectStore.getState();
-  const project = store.project!;
-  const ids: string[] = Array.isArray(msg?.layerIds)
-    ? msg.layerIds
-    : (msg?.layerId ? [msg.layerId] : []);
-  if (!ids.length) throw new Error('layerId or layerIds is required');
+/**
+ * ── WHY EDITING A PLACED BLOCK LIVES HERE ────────────────────────────────────
+ * Changing one slot on a slide used to mean calling img_place_composition
+ * again, and re-placing is not editing: every OTHER slot has to be retyped from
+ * memory, anything forgotten silently reverts to the block's sample or vanishes,
+ * and the slide arrives as a new layer — new id, new bake, and the old one still
+ * on the page. Asking for "the same deck but it fades in" therefore cost a full
+ * re-type of every slide and risked losing words on each one.
+ *
+ * A slot patch is the honest shape of that edit: merge over what is already
+ * there, leave the rest alone.
+ */
+registerImageAsyncMutation(
+  'voidspace:img-edit-layer',
+  'Edit layer',
+  async (msg: any) => {
+    const project = useProjectStore.getState().project!;
+    const ids: string[] = Array.isArray(msg?.layerIds)
+      ? msg.layerIds
+      : (msg?.layerId ? [msg.layerId] : []);
+    if (!ids.length) return fail('bad_request', 'layerId or layerIds is required');
 
-  const missing = ids.filter((id) => !project.layers[id]);
-  if (missing.length) throw new Error(`unknown layerIds: ${missing.join(', ')}`);
+    const missing = ids.filter((id) => !project.layers[id]);
+    if (missing.length) return fail('unknown_layer', `unknown layerIds: ${missing.join(', ')}`);
 
-  const touched: string[] = [];
-  const warnings: string[] = [];
-  for (const id of ids) {
-    // Read FRESH each iteration. `project` was captured before the loop, and a
-    // previous iteration may already have changed this layer — merging a style
-    // onto a stale copy would silently drop the earlier change.
-    const layer = useProjectStore.getState().project!.layers[id] as Layer;
+    // Nothing to look up unless slots are being patched — the common edit
+    // (move, recolour, retype) must not pay for a block fetch.
+    if (msg?.slots === undefined) return { manifests: {} as Record<string, Record<string, SlotSpec>> };
 
-    const transform = defined({
-      x: msg?.x, y: msg?.y, width: msg?.width, height: msg?.height,
-      rotation: msg?.rotation, opacity: msg?.opacity,
-    });
-    if (Object.keys(transform).length) {
-      useProjectStore.getState().updateLayerTransform(id, transform as any);
+    if (typeof msg.slots !== 'object' || Array.isArray(msg.slots) || msg.slots === null) {
+      return fail('bad_request', 'slots must be an object of slot name to value.');
     }
 
-    const base = defined({
-      name: msg?.name,
-      visible: msg?.visible,
-      locked: msg?.locked,
-    });
-    if (msg?.blendMode !== undefined) {
-      (base as any).blendMode = { ...(layer.blendMode as any), mode: msg.blendMode };
-    }
-    if (Object.keys(base).length) useProjectStore.getState().updateLayer(id, base as any);
-
-    if (layer.type === 'text') {
-      const tl = useProjectStore.getState().project!.layers[id] as TextLayer;
-      const patch: Partial<TextLayer> = {};
-      if (typeof msg?.text === 'string') (patch as any).content = msg.text;
-      const style = defined({
-        fontFamily: msg?.fontFamily, fontSize: msg?.fontSize, fontWeight: msg?.fontWeight,
-        fontStyle: msg?.fontStyle, textAlign: msg?.textAlign, verticalAlign: msg?.verticalAlign,
-        lineHeight: msg?.lineHeight, letterSpacing: msg?.letterSpacing, color: msg?.color,
-        strokeColor: msg?.strokeColor, strokeWidth: msg?.strokeWidth,
-        backgroundColor: msg?.backgroundColor, backgroundPadding: msg?.backgroundPadding,
-        backgroundRadius: msg?.backgroundRadius, textDecoration: msg?.textDecoration,
-      });
-      if (Object.keys(style).length) patch.style = { ...tl.style, ...style } as TextLayer['style'];
-      if (Object.keys(patch).length) useProjectStore.getState().updateLayer<TextLayer>(id, patch);
-      const w = requestFont(msg?.fontFamily);
-      if (w) warnings.push(w);
+    const notBlocks = ids.filter((id) => !(project.layers[id] as ImageLayer)?.composition);
+    if (notBlocks.length) {
+      return fail(
+        'bad_request',
+        `slots only apply to a placed block; ${notBlocks.join(', ')} `
+        + `${notBlocks.length > 1 ? 'are not' : 'is not'} one. `
+        + 'For a text layer use `text`, and for its styling the font and colour fields.',
+      );
     }
 
-    if (layer.type === 'shape') {
-      const sl = useProjectStore.getState().project!.layers[id] as ShapeLayer;
-      const shapeStyle = defined({
-        fill: msg?.fill, fillOpacity: msg?.fillOpacity, stroke: msg?.stroke,
-        strokeWidth: msg?.strokeWidth, cornerRadius: msg?.cornerRadius,
-      });
-      if (Object.keys(shapeStyle).length) {
-        useProjectStore.getState().updateLayer<ShapeLayer>(id, {
-          shapeStyle: { ...sl.shapeStyle, ...shapeStyle } as ShapeLayer['shapeStyle'],
-        });
+    /**
+     * A SLOT THE BLOCK DOES NOT DECLARE IS REFUSED, exactly as at placement.
+     * An accepted-but-ignored slot is the worst outcome: the agent is told the
+     * edit landed, and the slide it describes is not the slide on screen.
+     */
+    const manifests: Record<string, Record<string, SlotSpec>> = {};
+    for (const id of ids) {
+      const source = (project.layers[id] as ImageLayer).composition!;
+      // Authored html declares nothing, so there is nothing to check it against.
+      if (!source.block) continue;
+      const doc = await loadBlock(source.block);
+      if (!doc) continue;
+      manifests[id] = doc.slots;
+      const declared = Object.keys(doc.slots);
+      if (!declared.length) continue;
+      const unknown = Object.keys(msg.slots).filter((k) => !doc.slots[k]);
+      if (unknown.length) {
+        return fail(
+          'unknown_slot',
+          `"${source.block}" does not declare ${unknown.map((k) => `"${k}"`).join(', ')}. `
+          + `Its slots are: ${declared.join(', ')}.`,
+        );
       }
     }
+    return { manifests };
+  },
+  (msg: any, _prepared) => {
+    // Ids and existence were settled in `prepare`; re-deriving the list is
+    // cheaper than threading it through, and the store is read fresh below.
+    const ids: string[] = Array.isArray(msg?.layerIds)
+      ? msg.layerIds
+      : (msg?.layerId ? [msg.layerId] : []);
 
-    touched.push(id);
-  }
-  return { layerIds: touched, ...(warnings.length ? { warning: warnings[0] } : {}) };
-});
+    const touched: string[] = [];
+    const warnings: string[] = [];
+    const recomposed: string[] = [];
+    for (const id of ids) {
+      // Read FRESH each iteration. `project` was captured before the loop, and a
+      // previous iteration may already have changed this layer — merging a style
+      // onto a stale copy would silently drop the earlier change.
+      const layer = useProjectStore.getState().project!.layers[id] as Layer;
+
+      const transform = defined({
+        x: msg?.x, y: msg?.y, width: msg?.width, height: msg?.height,
+        rotation: msg?.rotation, opacity: msg?.opacity,
+      });
+      if (Object.keys(transform).length) {
+        useProjectStore.getState().updateLayerTransform(id, transform as any);
+      }
+
+      const base = defined({
+        name: msg?.name,
+        visible: msg?.visible,
+        locked: msg?.locked,
+      });
+      if (msg?.blendMode !== undefined) {
+        (base as any).blendMode = { ...(layer.blendMode as any), mode: msg.blendMode };
+      }
+      if (Object.keys(base).length) useProjectStore.getState().updateLayer(id, base as any);
+
+      if (layer.type === 'text') {
+        const tl = useProjectStore.getState().project!.layers[id] as TextLayer;
+        const patch: Partial<TextLayer> = {};
+        if (typeof msg?.text === 'string') (patch as any).content = msg.text;
+        const style = defined({
+          fontFamily: msg?.fontFamily, fontSize: msg?.fontSize, fontWeight: msg?.fontWeight,
+          fontStyle: msg?.fontStyle, textAlign: msg?.textAlign, verticalAlign: msg?.verticalAlign,
+          lineHeight: msg?.lineHeight, letterSpacing: msg?.letterSpacing, color: msg?.color,
+          strokeColor: msg?.strokeColor, strokeWidth: msg?.strokeWidth,
+          backgroundColor: msg?.backgroundColor, backgroundPadding: msg?.backgroundPadding,
+          backgroundRadius: msg?.backgroundRadius, textDecoration: msg?.textDecoration,
+        });
+        if (Object.keys(style).length) patch.style = { ...tl.style, ...style } as TextLayer['style'];
+        if (Object.keys(patch).length) useProjectStore.getState().updateLayer<TextLayer>(id, patch);
+        const w = requestFont(msg?.fontFamily);
+        if (w) warnings.push(w);
+      }
+
+      if (layer.type === 'shape') {
+        const sl = useProjectStore.getState().project!.layers[id] as ShapeLayer;
+        const shapeStyle = defined({
+          fill: msg?.fill, fillOpacity: msg?.fillOpacity, stroke: msg?.stroke,
+          strokeWidth: msg?.strokeWidth, cornerRadius: msg?.cornerRadius,
+        });
+        if (Object.keys(shapeStyle).length) {
+          useProjectStore.getState().updateLayer<ShapeLayer>(id, {
+            shapeStyle: { ...sl.shapeStyle, ...shapeStyle } as ShapeLayer['shapeStyle'],
+          });
+        }
+      }
+
+      const il = useProjectStore.getState().project!.layers[id] as ImageLayer;
+      if (msg?.slots !== undefined && il.composition) {
+        const next: Record<string, string> = { ...(il.composition.slots || {}) };
+        for (const [k, v] of Object.entries(msg.slots as Record<string, unknown>)) {
+          /**
+           * AN EMPTY VALUE CLEARS THE SLOT. At placement a blank means "never
+           * filled" and is dropped; on an edit it is the only way to say "take
+           * this line off the slide". Deleting the key rather than storing "" is
+           * what keeps the cache honest — the fingerprint carries every key it
+           * finds, so a stored blank would give a cleared slide and a slide that
+           * never had the line two different renders of the same picture.
+           */
+          const s = v === null || v === undefined ? '' : String(v);
+          if (s.trim()) next[k] = s;
+          else delete next[k];
+        }
+        useProjectStore.getState().updateLayer<ImageLayer>(id, {
+          composition: { ...il.composition, slots: next },
+        });
+        recomposed.push(id);
+      }
+
+      touched.push(id);
+    }
+
+    /**
+     * The pixels are now out of date — `renderHash` still names the render the
+     * old words produced, which is exactly what `needsRerender` compares. Kicked
+     * off and NOT awaited, like placement: a block render is tens of seconds and
+     * the live frame already shows the change.
+     */
+    for (const id of recomposed) void bakeComposition(id).catch(() => {});
+
+    return {
+      layerIds: touched,
+      ...(recomposed.length ? { recomposed } : {}),
+      ...(warnings.length ? { warning: warnings[0] } : {}),
+    };
+  },
+);
 
 // ── Arrange ─────────────────────────────────────────────────────────────────
 
