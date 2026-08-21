@@ -1128,6 +1128,44 @@ registerImageAsyncMutation(
 // ── New project ─────────────────────────────────────────────────────────────
 
 registerImageRpc('voidspace:img-new-project', (msg: any) => {
+  /**
+   * REFUSE TO THROW AWAY THE OPEN DOCUMENT.
+   *
+   * This used to mint a fresh project unconditionally, which lost work in two
+   * ways at once: the layers on the open canvas went, and the new project got a
+   * NEW id while the address bar still pointed at the old one — so a reload
+   * opened a project nobody had been editing.
+   *
+   * That is not a hypothetical. The presentation method says "img_new_project at
+   * the presentation size, then add a page per slide", and the on-ramp has
+   * ALREADY created a correctly-sized project by the time the agent reads it.
+   * Following the method to the letter therefore discarded the first slide and
+   * orphaned the URL, and the deck came back from a reload with its pages intact
+   * and every layer gone.
+   *
+   * A refusal that says what to do instead costs one turn. Silent loss costs the
+   * work. `replace: true` stays available for "start over", which is a thing a
+   * user does ask for.
+   */
+  const open = useProjectStore.getState().project;
+  const layerCount = open ? Object.keys(open.layers).length : 0;
+  if (open && layerCount > 0 && msg?.replace !== true) {
+    return {
+      ok: false,
+      reason: 'project_open',
+      projectId: open.id,
+      projectName: open.name,
+      pageCount: open.artboards.length,
+      layerCount,
+      size: open.artboards[0]?.size,
+      message:
+        `"${open.name}" is already open with ${layerCount} layer(s) across `
+        + `${open.artboards.length} page(s), and a new project would discard it. `
+        + 'To keep building this one, add slides with img_page {action:"add"}. '
+        + 'Pass replace:true only if the user asked to start over.',
+    };
+  }
+
   const width = Math.max(1, Math.round(Number(msg?.width) || 1080));
   const height = Math.max(1, Math.round(Number(msg?.height) || 1080));
   const name = String(msg?.name || 'Untitled');

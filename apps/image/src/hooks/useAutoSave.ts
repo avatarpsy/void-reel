@@ -14,6 +14,21 @@ import { useProjectStore } from '../stores/project-store';
 // -----------------------------------------------------------------------------
 
 const AUTO_SAVE_DELAY = 2000;
+/**
+ * The longest a dirty project may go unsaved, however busy the editor is.
+ *
+ * A trailing debounce alone STARVES. Its cleanup clears the pending timer on
+ * every change, so while edits keep arriving closer together than the delay, the
+ * save is rescheduled forever and never runs. That is fine for a human typing
+ * and catastrophic for an agent, which mutates the document continuously for
+ * minutes at a time.
+ *
+ * Measured, not theorised: 17 edits 700ms apart over 12 seconds wrote NOTHING —
+ * the last save was 17 seconds old when the burst ended. A five-slide deck built
+ * this way came back from a reload with its pages intact and every layer gone,
+ * because the last quiet moment had been before the slides existed.
+ */
+const MAX_SAVE_INTERVAL = 10_000;
 const LEGACY_PREFIX = 'openreel-image-project-';
 const DB_NAME = 'voidspace-image';
 const STORE = 'projects';
@@ -87,16 +102,44 @@ async function migrateLegacy(): Promise<void> {
   }
 }
 
+/**
+ * How long to wait before writing, given how long it has already been.
+ *
+ * Pure so the starvation rule can be tested without a browser: the whole point
+ * is what happens when edits never stop, which a timer-based test can only
+ * approximate.
+ *
+ * Normally the trailing debounce wins — batch a burst of typing into one write.
+ * But once the project has been dirty for close to [maxWaitMs], the wait
+ * collapses to zero and the very next edit is written, so a continuously-edited
+ * document is never more than that far from disk.
+ */
+export function saveDelay(opts: {
+  now: number;
+  lastSaveAt: number;
+  debounceMs?: number;
+  maxWaitMs?: number;
+}): number {
+  const debounce = opts.debounceMs ?? AUTO_SAVE_DELAY;
+  const maxWait = opts.maxWaitMs ?? MAX_SAVE_INTERVAL;
+  const since = Math.max(0, opts.now - opts.lastSaveAt);
+  return Math.max(0, Math.min(debounce, maxWait - since));
+}
+
 export function useAutoSave() {
   const { project, isDirty, markClean } = useProjectStore();
   const lastSavedRef = useRef<string>('');
+  const lastSaveAtRef = useRef<number>(Date.now());
   const timeoutRef = useRef<number>();
+  /** The newest unsaved document, for the flush below to reach. */
+  const pendingRef = useRef<{ project: unknown; id: string; json: string } | null>(null);
 
   useEffect(() => {
     if (!project || !isDirty) return;
 
     const projectJson = JSON.stringify(project);
     if (projectJson === lastSavedRef.current) return;
+    pendingRef.current = { project, id: project.id, json: projectJson };
 
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
 
@@ -106,15 +149,46 @@ export function useAutoSave() {
       )
         .then(() => {
           lastSavedRef.current = projectJson;
+          lastSaveAtRef.current = Date.now();
+          pendingRef.current = null;
           markClean();
         })
         .catch((error) => console.error('Failed to auto-save:', error));
-    }, AUTO_SAVE_DELAY);
+    }, saveDelay({ now: Date.now(), lastSaveAt: lastSaveAtRef.current }));
 
     return () => {
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
     };
   }, [project, isDirty, markClean]);
+
+  /**
+   * Write whatever is still pending before the page goes away.
+   *
+   * Navigating, closing the tab or switching away can happen inside the debounce
+   * window, and without this that window is simply lost work. `pagehide` and a
+   * hidden `visibilitychange` are the two the browser actually guarantees —
+   * `beforeunload` is not fired for a backgrounded mobile tab.
+   */
+  useEffect(() => {
+    const flush = () => {
+      const p = pendingRef.current;
+      if (!p) return;
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+      // Not awaited: the page is leaving. Starting the transaction is what
+      // matters — IndexedDB completes an in-flight write during unload.
+      void tx('readwrite', (s) =>
+        s.put({ id: p.id, project: p.project, updatedAt: Date.now() } as SavedRecord),
+      ).catch(() => {});
+      pendingRef.current = null;
+    };
+    const onHide = () => { if (document.visibilityState === 'hidden') flush(); };
+    window.addEventListener('pagehide', flush);
+    document.addEventListener('visibilitychange', onHide);
+    return () => {
+      window.removeEventListener('pagehide', flush);
+      document.removeEventListener('visibilitychange', onHide);
+    };
+  }, []);
 }
 
 export async function loadSavedProject(projectId: string): Promise<any | null> {

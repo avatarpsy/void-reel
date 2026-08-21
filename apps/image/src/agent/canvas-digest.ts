@@ -47,6 +47,16 @@ export interface LayerDigest {
   text?: { content: string; fontFamily: string; fontSize: number; color: string; align?: string; weight?: string | number };
   /** Image layers only. */
   image?: { assetId: string; assetName?: string; naturalWidth?: number; naturalHeight?: number };
+  /**
+   * Present when this layer is a placed DESIGN rather than a photograph.
+   *
+   * `img_place_composition` tells the agent that "a placed composition reports
+   * its block back through img_read_canvas" — and it did not. All the agent saw
+   * was an image layer with an empty assetId, which reads as a broken picture,
+   * so it had no way to tell a designed slide from a failed one, to fill a slot
+   * it had left empty, or to avoid placing the same block twice.
+   */
+  composition?: { block?: string; authored?: boolean; slots: string[]; unfilled?: string[] };
   /** Shape layers only. */
   shape?: { shapeType: string; fill?: string };
   /** Group layers only. */
@@ -150,6 +160,16 @@ function digestLayer(project: Project, layer: Layer, depth: number): LayerDigest
       naturalWidth: asset?.width,
       naturalHeight: asset?.height,
     };
+    // A composition layer carries no asset — its pixels come from a render — so
+    // without this it is indistinguishable from an image whose file went missing.
+    if (il.composition) {
+      const slots = Object.keys(il.composition.slots ?? {});
+      d.composition = {
+        ...(il.composition.block ? { block: String(il.composition.block) } : {}),
+        ...(il.composition.inlineHtml ? { authored: true } : {}),
+        slots,
+      };
+    }
   } else if (layer.type === 'shape') {
     const sl = layer as any;
     d.shape = { shapeType: sl.shapeType, fill: sl.style?.fill?.color ?? sl.style?.fillColor };
