@@ -15,18 +15,14 @@
  * as it will when somebody is watching.
  *
  * ── THE RULE FOR WHAT GETS DRAWN ─────────────────────────────────────────────
- * A page whose visible content is a single designed block is mounted as a LIVE
- * frame — that is a deck slide, and it should animate. Anything else is drawn
- * from the same renderer the export uses, because a page with hand-drawn layers
- * on it has no single document to run and a still of it is exactly right.
- *
- * Predictable beats clever: one condition, and you can tell by looking at the
- * page which branch it will take.
+ * EVERY designed block on the slide runs as its own live document; the ordinary
+ * layers between them are drawn with the same renderer the export uses, grouped
+ * into runs so the stacking order survives. See `presentPieces`.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, X, Maximize2, Minimize2 } from 'lucide-react';
 import { useProjectStore } from '../../../stores/project-store';
-import { exportArtboard } from '../../../services/export-service';
+import { renderLayersToDataURL } from '../../../services/export-service';
 import { resolveComposition } from '../../../services/composition/block-source';
 import { prepareFromSource } from '../../../services/composition/document';
 import { CompositionHost } from '../../../services/composition/frame-host';
@@ -39,26 +35,57 @@ interface PresentModeProps {
 }
 
 /**
- * The single block a page is made of, or null.
+ * One drawable piece of a slide, in z-order.
  *
- * "Made of" is strict on purpose — one visible layer, and it is a composition
- * that fills the page. A block with a logo dropped on top is no longer a
- * document that can be run on its own, and running it would drop the logo.
+ * `live` is a block, running as its own document so its entrance plays.
+ * `raster` is a RUN of ordinary layers — text, photos, shapes — drawn together
+ * into one image.
  */
-export function soleComposition(project: Project, artboard: Artboard): ImageLayer | null {
-  const visible = artboard.layerIds
-    .map((id) => project.layers[id])
-    .filter((l) => l && l.visible !== false);
-  if (visible.length !== 1) return null;
-  const only = visible[0] as ImageLayer;
-  if (!only.composition) return null;
-  const { x, y, width, height } = only.transform;
-  const coversPage =
-    Math.abs(x) < 2
-    && Math.abs(y) < 2
-    && Math.abs(width - artboard.size.width) < 2
-    && Math.abs(height - artboard.size.height) < 2;
-  return coversPage ? only : null;
+export type PresentPiece =
+  | { kind: 'live'; layerId: string }
+  | { kind: 'raster'; layerIds: string[] };
+
+/**
+ * How to draw a slide, piece by piece.
+ *
+ * ── WHY THIS REPLACED "IS THIS PAGE ONE BLOCK?" ──────────────────────────────
+ * The first version ran a live frame only when the page was EXACTLY one
+ * full-page composition, and drew a flat still for anything else. That is fine
+ * for a deck the agent built and wrong the moment a person touches it: drop a
+ * logo onto a slide, or add a second block, and the slide silently stopped
+ * animating — with nothing to say why, because a still of a posed block looks
+ * very like the finished frame of an animated one. Reported from a real slide
+ * with a block plus a graphic on it.
+ *
+ * So every composition on the page runs, and the ordinary layers between them
+ * are grouped into runs and rasterised. Splitting into RUNS rather than one
+ * image per layer is what preserves z-order exactly: a logo above the first
+ * block and below the second stays there.
+ *
+ * ── THE ORDER IS TOP-FIRST ───────────────────────────────────────────────────
+ * `artboard.layerIds` holds the TOP layer at index 0 — the canvas reverses it
+ * before painting, and every add inserts at 0 so new work lands on top. Pieces
+ * come out in that same order, so piece 0 is the frontmost and the renderer
+ * gives it the highest z-index. Reading the array as bottom-to-top stacks the
+ * slide upside-down, which is exactly how a block placed onto a slide ended up
+ * hidden behind it.
+ */
+export function presentPieces(project: Project, artboard: Artboard): PresentPiece[] {
+  const pieces: PresentPiece[] = [];
+  for (const id of artboard.layerIds) {
+    const layer = project.layers[id];
+    if (!layer || layer.visible === false) continue;
+
+    if ((layer as ImageLayer).composition) {
+      pieces.push({ kind: 'live', layerId: id });
+      continue;
+    }
+
+    const last = pieces[pieces.length - 1];
+    if (last && last.kind === 'raster') last.layerIds.push(id);
+    else pieces.push({ kind: 'raster', layerIds: [id] });
+  }
+  return pieces;
 }
 
 /** Scale that fits a slide into the viewport, letterboxed, allowed to enlarge. */
@@ -79,17 +106,22 @@ export function PresentMode({ onClose, startArtboardId }: PresentModeProps) {
 
   const startIndex = Math.max(0, artboards.findIndex((a) => a.id === startArtboardId));
   const [index, setIndex] = useState(startIndex);
-  const [stillUrl, setStillUrl] = useState<string>('');
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [chromeVisible, setChromeVisible] = useState(true);
 
   const rootRef = useRef<HTMLDivElement>(null);
-  const frameMountRef = useRef<HTMLDivElement>(null);
-  const hostRef = useRef<CompositionHost | null>(null);
+  /** One live frame per composition layer, and the node each mounts into. */
+  const hostsRef = useRef<Map<string, CompositionHost>>(new Map());
+  const mountsRef = useRef<Map<string, HTMLDivElement>>(new Map());
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const current = artboards[index];
-  const live = project && current ? soleComposition(project, current) : null;
+  const pieces = useMemo(
+    () => (project && current ? presentPieces(project, current) : []),
+    [project, current],
+  );
+  /** Raster pieces, drawn once per slide and keyed by their position in the stack. */
+  const [rasters, setRasters] = useState<Record<number, string>>({});
 
   const [view, setView] = useState({ width: 1, height: 1 });
   useEffect(() => {
@@ -210,50 +242,61 @@ export function PresentMode({ onClose, startArtboardId }: PresentModeProps) {
   }, []);
 
   // ── The slide itself ──────────────────────────────────────────────────────
+  /**
+   * Every composition on the slide runs; the ordinary layers between them are
+   * drawn as images. Both halves are rebuilt whenever the slide changes, and
+   * every frame is torn down on the way out — a live document left mounted
+   * behind the next slide keeps animating and keeps its memory.
+   */
   useEffect(() => {
     let cancelled = false;
-    hostRef.current?.destroy();
-    hostRef.current = null;
-    setStillUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return ''; });
+    for (const h of hostsRef.current.values()) h.destroy();
+    hostsRef.current.clear();
+    setRasters({});
 
     if (!project || !current) return undefined;
 
     void (async () => {
-      if (live?.composition) {
-        const resolved = await resolveComposition(live.composition);
-        if (cancelled || !resolved || !frameMountRef.current) return;
-        const prepared = prepareFromSource(resolved.html, live.composition, resolved.manifest, {
+      for (const [i, piece] of pieces.entries()) {
+        if (cancelled) return;
+
+        if (piece.kind === 'raster') {
+          const url = await renderLayersToDataURL(
+            project, piece.layerIds, current.size.width, current.size.height,
+          ).catch(() => '');
+          if (cancelled || !url) continue;
+          setRasters((prev) => ({ ...prev, [i]: url }));
+          continue;
+        }
+
+        const layer = project.layers[piece.layerId] as ImageLayer | undefined;
+        const source = layer?.composition;
+        const mount = mountsRef.current.get(piece.layerId);
+        if (!source || !mount) continue;
+
+        const resolved = await resolveComposition(source);
+        if (cancelled || !resolved) continue;
+        const prepared = prepareFromSource(resolved.html, source, resolved.manifest, {
           // The whole reason this screen exists: let the entrance play.
           poseTime: 'live',
         });
-        const host = new CompositionHost(frameMountRef.current, {
+        const host = new CompositionHost(mount, {
           html: prepared.html,
           frameWidth: prepared.width,
           frameHeight: prepared.height,
         });
-        hostRef.current = host;
+        hostsRef.current.set(piece.layerId, host);
         void host.mount();
-        if (cancelled) { host.destroy(); hostRef.current = null; }
-        return;
+        if (cancelled) { host.destroy(); hostsRef.current.delete(piece.layerId); }
       }
-
-      // Not a single-block page: draw it exactly as the export would.
-      const blob = await exportArtboard(project, current, {
-        scale: 1, format: 'png', quality: 1, background: true,
-      } as any).catch(() => null);
-      if (cancelled || !blob) return;
-      setStillUrl(URL.createObjectURL(blob));
     })();
 
     return () => {
       cancelled = true;
-      hostRef.current?.destroy();
-      hostRef.current = null;
+      for (const h of hostsRef.current.values()) h.destroy();
+      hostsRef.current.clear();
     };
-    // `live` is derived from project+current, so those two are the real inputs.
-  }, [project, current, live]);
-
-  useEffect(() => () => { if (stillUrl) URL.revokeObjectURL(stillUrl); }, [stillUrl]);
+  }, [project, current, pieces]);
 
   if (!project || !current) return null;
 
@@ -277,19 +320,52 @@ export function PresentMode({ onClose, startArtboardId }: PresentModeProps) {
             current.background.type === 'color' ? current.background.color : '#000000',
         }}
       >
-        {live ? (
-          <div
-            ref={frameMountRef}
-            className="origin-top-left"
-            style={{
-              width: current.size.width,
-              height: current.size.height,
-              transform: `scale(${scale})`,
-            }}
-          />
-        ) : stillUrl ? (
-          <img src={stillUrl} alt={current.name} className="w-full h-full object-contain" />
-        ) : null}
+        {/* The slide's pieces, stacked in the page's own z-order. Absolutely
+            positioned rather than flowed, so a block and the graphic over it
+            land exactly where the canvas puts them. */}
+        {pieces.map((piece, i) => {
+          if (piece.kind === 'raster') {
+            const url = rasters[i];
+            return url ? (
+              <img
+                key={`raster-${i}`}
+                src={url}
+                alt=""
+                className="absolute inset-0 w-full h-full"
+                style={{ zIndex: pieces.length - i }}
+              />
+            ) : null;
+          }
+
+          const layer = project.layers[piece.layerId] as ImageLayer | undefined;
+          if (!layer) return null;
+          const box = layer.transform;
+          const frameW = layer.composition?.frameWidth || box.width || current.size.width;
+          const frameH = layer.composition?.frameHeight || box.height || current.size.height;
+          // The document lays out at its own frame, then scales into the box the
+          // layer occupies — the same two-step the canvas overlay uses, so a
+          // block presents at the size it was designed and placed at.
+          const fit = Math.min(box.width / Math.max(1, frameW), box.height / Math.max(1, frameH));
+          return (
+            <div
+              key={piece.layerId}
+              className="absolute origin-top-left"
+              style={{
+                left: box.x * scale,
+                top: box.y * scale,
+                width: frameW,
+                height: frameH,
+                transform: `scale(${fit * scale})`,
+                opacity: box.opacity ?? 1,
+                zIndex: pieces.length - i,
+              }}
+              ref={(el) => {
+                if (el) mountsRef.current.set(piece.layerId, el);
+                else mountsRef.current.delete(piece.layerId);
+              }}
+            />
+          );
+        })}
       </div>
 
       {/* Click targets: the halves of the screen, which is how every other

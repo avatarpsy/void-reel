@@ -211,7 +211,20 @@ export async function renderLayersToDataURL(
   canvas.width = Math.max(1, Math.round(width));
   canvas.height = Math.max(1, Math.round(height));
   const ctx = canvas.getContext('2d')!;
-  for (const id of layerIds) {
+  /**
+   * TOP-FIRST IN, PAINTER'S ORDER OUT — the same convention as everywhere else.
+   *
+   * `artboard.layerIds` holds the TOP layer at index 0: the canvas and
+   * `exportArtboard` both reverse it before drawing, and every `addLayer`
+   * inserts at 0 so a new layer lands on top. This function did not reverse,
+   * so it drew the stack upside-down.
+   *
+   * It never showed, because the only caller was the PowerPoint exporter
+   * rasterising ONE layer at a time — and a one-element array reverses to
+   * itself. The first multi-layer caller (present mode, drawing the ordinary
+   * layers between two blocks) hit it immediately.
+   */
+  for (const id of [...layerIds].reverse()) {
     const layer = project.layers[id];
     if (!layer || !layer.visible) continue;
     await renderLayerToContext(ctx, layer, project);

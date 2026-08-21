@@ -5,7 +5,7 @@
  * edges: which pages may be run as a live document, and how big to draw one.
  */
 import { describe, it, expect } from 'vitest';
-import { soleComposition, presentScale } from './PresentMode';
+import { presentPieces, presentScale } from './PresentMode';
 import type { Project, Artboard, Layer } from '../../../types/project';
 
 const PAGE: Artboard = {
@@ -39,45 +39,84 @@ const textLayer = (): Layer => ({
   content: 'hello', style: {},
 } as unknown as Layer);
 
-describe('soleComposition', () => {
-  it('runs a page that is exactly one full-page block', () => {
+const imageLayer = (id: string): Layer => ({
+  id, type: 'image', name: 'Photo', visible: true,
+  transform: { x: 0, y: 0, width: 600, height: 400, rotation: 0, opacity: 1 },
+  sourceId: 'asset1',
+} as unknown as Layer);
+
+describe('presentPieces', () => {
+  it('runs a slide that is one block', () => {
     const p = make({ B: blockLayer() }, ['B']);
-    expect(soleComposition(p, p.artboards[0])?.id).toBe('B');
+    expect(presentPieces(p, p.artboards[0])).toEqual([{ kind: 'live', layerId: 'B' }]);
   });
 
-  it('refuses a page with anything else on top', () => {
-    // A logo dropped over the slide means the block is no longer a document
-    // that can be run on its own — running it would drop the logo silently.
+  it('STILL runs the block when a graphic is dropped on the slide', () => {
+    // The reported bug: adding a second layer to a slide silently stopped it
+    // animating, because the old rule ran a frame only for a lone full-page
+    // composition. A still of a posed block looks much like the finished frame
+    // of an animated one, so nothing on screen said why.
     const p = make({ B: blockLayer(), T: textLayer() }, ['B', 'T']);
-    expect(soleComposition(p, p.artboards[0])).toBeNull();
+    expect(presentPieces(p, p.artboards[0])).toEqual([
+      { kind: 'live', layerId: 'B' },
+      { kind: 'raster', layerIds: ['T'] },
+    ]);
   });
 
-  it('ignores hidden layers when deciding', () => {
+  it('runs BOTH blocks when a slide has two', () => {
+    const p = make({ B: blockLayer({ id: 'B' }), C: blockLayer({ id: 'C' }) }, ['B', 'C']);
+    expect(presentPieces(p, p.artboards[0])).toEqual([
+      { kind: 'live', layerId: 'B' },
+      { kind: 'live', layerId: 'C' },
+    ]);
+  });
+
+  it('groups consecutive ordinary layers into ONE image, preserving z-order', () => {
+    // Runs rather than one image per layer: a graphic above the first block and
+    // below the second has to stay between them.
+    const p = make(
+      { A: imageLayer('A'), T: textLayer(), B: blockLayer(), Z: imageLayer('Z') },
+      ['A', 'T', 'B', 'Z'],
+    );
+    expect(presentPieces(p, p.artboards[0])).toEqual([
+      { kind: 'raster', layerIds: ['A', 'T'] },
+      { kind: 'live', layerId: 'B' },
+      { kind: 'raster', layerIds: ['Z'] },
+    ]);
+  });
+
+  it('leaves hidden layers out of the slide entirely', () => {
     const hidden = { ...(textLayer() as any), visible: false } as Layer;
     const p = make({ B: blockLayer(), T: hidden }, ['B', 'T']);
-    expect(soleComposition(p, p.artboards[0])?.id).toBe('B');
+    expect(presentPieces(p, p.artboards[0])).toEqual([{ kind: 'live', layerId: 'B' }]);
   });
 
-  it('refuses a block that does not cover the page', () => {
-    // Half a slide run as a full-bleed document would be drawn at the wrong
-    // size, losing whatever the rest of the page was for.
-    const p = make({ B: blockLayer({ transform: { x: 0, y: 0, width: 960, height: 540, rotation: 0, opacity: 1 } }) }, ['B']);
-    expect(soleComposition(p, p.artboards[0])).toBeNull();
+  it('draws a slide with no blocks at all as one image', () => {
+    const p = make({ A: imageLayer('A'), T: textLayer() }, ['A', 'T']);
+    expect(presentPieces(p, p.artboards[0])).toEqual([{ kind: 'raster', layerIds: ['A', 'T'] }]);
   });
 
-  it('tolerates sub-pixel placement', () => {
-    const p = make({ B: blockLayer({ transform: { x: 0.4, y: -0.3, width: 1919.6, height: 1080.2, rotation: 0, opacity: 1 } }) }, ['B']);
-    expect(soleComposition(p, p.artboards[0])?.id).toBe('B');
-  });
-
-  it('refuses a page with no block at all', () => {
-    const p = make({ T: textLayer() }, ['T']);
-    expect(soleComposition(p, p.artboards[0])).toBeNull();
-  });
-
-  it('refuses an empty page', () => {
+  it('returns nothing for an empty page rather than a blank raster', () => {
     const p = make({}, []);
-    expect(soleComposition(p, p.artboards[0])).toBeNull();
+    expect(presentPieces(p, p.artboards[0])).toEqual([]);
+  });
+
+  it('keeps the project TOP-FIRST order, which is what the canvas paints', () => {
+    /**
+     * `artboard.layerIds` holds the top layer at index 0 — the canvas and
+     * exportArtboard both reverse before drawing, and every add inserts at 0
+     * so new work lands on top. Reading it as bottom-to-top puts a graphic
+     * placed onto a slide BEHIND the slide, which is how a freshly placed
+     * block came to be invisible and silent at the same time.
+     *
+     * So piece 0 is the frontmost, and the renderer gives it the highest
+     * z-index.
+     */
+    const p = make({ Top: imageLayer('Top'), B: blockLayer() }, ['Top', 'B']);
+    expect(presentPieces(p, p.artboards[0])).toEqual([
+      { kind: 'raster', layerIds: ['Top'] },   // index 0 → drawn in front
+      { kind: 'live', layerId: 'B' },
+    ]);
   });
 });
 
