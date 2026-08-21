@@ -8,6 +8,7 @@ import { SettingsDialog } from './components/editor/SettingsDialog';
 import { CosmicField } from './components/CosmicField';
 import { useKeyboardShortcuts } from './services/keyboard-service';
 import { useAutoSave, loadSavedProject } from './hooks/useAutoSave';
+import { bakePendingCompositions } from './services/composition/bake';
 import { useProjectCloudSync } from './hooks/useProjectCloudSync';
 import { readHandoffParams, clearHandoffUrl, loadSrcAsProject, parseLocalAssetSource } from './services/image-handoff';
 import { openCloudCarouselById } from './services/carousel-cloud';
@@ -155,6 +156,13 @@ export default function App() {
         if (local) {
           useProjectStore.getState().loadProject(local);
           setCurrentView('editor');
+          /**
+           * Render any slide whose pixels are missing or out of date.
+           * A composition layer carries no asset, and only the SELECTED one gets
+           * a live frame — so without this a reopened deck shows one slide and
+           * four blanks, and exports as five blanks.
+           */
+          void bakePendingCompositions().catch(() => {});
           return;
         }
         await openCloudImageProject(projectId);

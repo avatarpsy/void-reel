@@ -28,6 +28,7 @@ import { getPopularFonts, loadGoogleFont } from '../services/fonts-service';
 import { libraryImageToAsset, getVoidspaceIdToken } from '../services/voidspace-storage';
 import { createTextDocument, layoutText } from '../tools/text/text-engine';
 import { loadBlock } from '../services/composition/block-source';
+import { bakeComposition } from '../services/composition/bake';
 import type { SlotSpec } from '../services/composition/document';
 import type { Layer, Project, Artboard, MediaAsset, TextLayer, ShapeLayer, ImageLayer, CompositionSource } from '../types/project';
 
@@ -633,6 +634,17 @@ registerImageAsyncMutation(
     // dropped, so the agent can say "this block also takes a subtitle" instead
     // of shipping a slide with a hole in it.
     const unfilled = Object.keys(manifest).filter((k) => !slots[k]);
+
+    /**
+     * Start the render now, and do NOT wait for it.
+     *
+     * A block render is a browser starting on the user's machine — tens of
+     * seconds. Holding the tool call open for it would stall the agent mid-deck,
+     * and the guidance already tells it the pixels arrive a beat later. Failures
+     * are swallowed here on purpose: the live frame still shows the design, and
+     * the sweep on load will try again.
+     */
+    void bakeComposition(layerId).catch(() => {});
 
     return { layerId, pageId: page.id, bounds: box, block, tier, unfilled };
   },
