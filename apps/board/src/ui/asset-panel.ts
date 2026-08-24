@@ -478,7 +478,21 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
 
   function tile(a: AssetItem): string {
     const isBlock = a.kind === 'block';
-    const glyph = isBlock ? '◫' : a.kind === 'video' ? '🎬' : a.kind === 'image' ? '🖼' : '🔊';
+    /**
+     * The tile glyph, by kind — and every kind is NAMED.
+     *
+     * This was a chain ending in `: '🔊'`, so anything the chain did not
+     * recognise was drawn as a speaker. Uploaded PDFs therefore appeared in the
+     * Library as audio files: not a missing icon, a WRONG one, which is worse
+     * because it reads as correct. A default that is a real kind hides a
+     * missing case; an explicit map makes the next kind a compile-time question
+     * rather than a silent mislabel.
+     */
+    const GLYPH: Record<string, string> = {
+      block: '◫', video: '🎬', image: '🖼', doc: '📄',
+      music: '🔊', sfx: '🔊', voice: '🔊',
+    };
+    const glyph = GLYPH[a.kind] ?? '📎';
     // CLICK PREVIEWS, the + ADDS — the same split the video editor uses. Clicking
     // a tile to silently drop it on the canvas made it impossible to check what
     // something was before committing to it.
