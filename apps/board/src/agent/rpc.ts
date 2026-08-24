@@ -33,7 +33,7 @@ import { GfxControllerIdentifier } from '@blocksuite/std/gfx';
 import type { MountedBoard } from '../blocksuite/editor';
 import { placeAsset } from '../board/asset-media';
 import {
-  COLOR_NAMES, drawOnCanvas, editCanvas, mediaUrlOf, readCanvas, readSelection,
+  COLOR_NAMES, canvasDigest, drawOnCanvas, editCanvas, mediaUrlOf, readCanvas, readSelection,
   type EditOp, type ElementSpec,
 } from '../board/canvas';
 import { pendingToast } from '../ui/toast';
@@ -452,6 +452,19 @@ export interface BoardRpcOptions {
     print(): void;
     downloadFountain(): void;
   } | null;
+  /** The board-as-a-page overlay. Lazy for the same reason as `screenplay`. */
+  document?: () => {
+    open(title?: string): void;
+    close(): void;
+    isOpen(): boolean;
+    print(title?: string): void;
+    downloadMarkdown(title?: string): void;
+    markdown(title?: string): string;
+    sections(): Array<{ title: string; chunks: string[] }>;
+    summary(title?: string): {
+      sections: number; words: number; omittedOwned: number; unframed: boolean;
+    };
+  } | null;
 }
 
 export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {}): () => void {
@@ -485,6 +498,39 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
       summary: items.map(i => `${i.kind}${i.text ? `: ${i.text.slice(0, 40)}` : ''}`),
     }, '*');
   });
+
+  /**
+   * TELL THE PARENT WHAT IS ON THE CANVAS, AS IT CHANGES.
+   *
+   * Same channel design as the selection above and for the same reason: the
+   * per-turn context is assembled when the user hits send, and asking the
+   * iframe at that moment would put a round trip on every message.
+   *
+   * DEBOUNCED, AND THAT IS NOT AN OPTIMISATION. `blockUpdated` fires on every
+   * pointermove — a freshly opened empty board already reports a rev in the
+   * hundreds — so an undebounced digest would walk the whole canvas on every
+   * frame of every drag. The trailing edge means it computes ONCE, after the
+   * user stops.
+   */
+  let digestTimer: ReturnType<typeof setTimeout> | null = null;
+  const pushDigest = () => {
+    digestTimer = null;
+    try {
+      window.parent?.postMessage({
+        type: 'voidspace:board-canvas-changed',
+        digest: canvasDigest(board.std),
+      }, '*');
+    } catch { /* the parent went away; the canvas is unaffected */ }
+  };
+  const digestSub = board.store.slots.blockUpdated.subscribe(() => {
+    if (digestTimer) clearTimeout(digestTimer);
+    digestTimer = setTimeout(pushDigest, 800);
+  });
+  // Once at mount, so a board REOPENED with work already on it is described on
+  // the very first turn. Without this the agent is blind until the user touches
+  // something — which is precisely the case where they expect it to already
+  // know what is there.
+  pushDigest();
 
   /** Every mutating handler starts the same way. */
   const guard = (args: Record<string, unknown>) => {
@@ -2092,17 +2138,55 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
        * tiny, so this is the cheap read as well as the right one.
        */
       const selectionOnly = args?.selectionOnly === true;
-      const items = readCanvas(board.std, selectionOnly);
+      const ids = asArray(args?.ids).map(String).filter(Boolean);
+      const full = args?.full === true;
+      const items = readCanvas(board.std, { selectionOnly, ids, full });
       const selection = readSelection(board.std);
+
+      /**
+       * THE TOTAL IS CAPPED, AND THE TRIM IS REPORTED.
+       *
+       * `full` raises the per-element cap 10×, which is right for the two
+       * elements someone wants transcribed and catastrophic for a sixty-note
+       * board — that is one read costing more context than the whole
+       * conversation. So the budget is enforced across the result, in reading
+       * order, and the response SAYS how many elements it dropped.
+       *
+       * Saying so is the point. A silent cap reads as "that is everything on
+       * the board", and an agent writing a document from a silently truncated
+       * read produces a document missing its last third with no sign anything
+       * went wrong.
+       */
+      let kept = items;
+      let dropped = 0;
+      if (full) {
+        const budget = 60_000;
+        let spent = 0;
+        kept = [];
+        for (const item of items) {
+          const cost = item.text.length;
+          if (spent + cost > budget && kept.length) { dropped++; continue; }
+          spent += cost;
+          kept.push(item);
+        }
+      }
+
       return {
         ok: true as const,
         rev,
-        count: items.length,
+        count: kept.length,
         /** The vocabulary `board_draw` takes, so a read teaches the write. */
         colors: COLOR_NAMES,
-        items,
+        items: kept,
         /** What the user is pointing at, always — even on a full read. */
         selectedIds: selection.ids,
+        ...(dropped
+          ? {
+            truncated: dropped,
+            note: `${dropped} element(s) omitted — this read hit its size budget. `
+              + 'Read the rest by naming their ids.',
+          }
+          : {}),
       };
     },
 
@@ -2378,6 +2462,146 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
     },
 
     /**
+     * THE BOARD AS A DOCUMENT — the way out for work that is not a film.
+     *
+     * `compile_to_video` was the board's only exit, so an afternoon of planning,
+     * research or analysis had exactly one destination and everything else ended
+     * as pixels the user retyped somewhere else.
+     *
+     * `markdown` returns the text to the AGENT, which is the action that makes
+     * the rest of the product reachable: it is what gets summarised, rewritten,
+     * pasted into a message, or carried to another surface. `pdf` and `md` act
+     * on the USER'S screen and produce nothing for the model to read.
+     */
+    'voidspace:board-document': args => {
+      const view = opts.document?.();
+      if (!view) return fail('unavailable', 'The document view is not ready yet.');
+
+      const title = typeof args.title === 'string' ? args.title : undefined;
+      const action = String(args.action ?? 'open');
+      const summary = view.summary(title);
+
+      // Answered before anything opens: an empty page shown to the user is a
+      // worse answer than a sentence saying there is nothing to put in it.
+      if (!summary.sections) {
+        return {
+          ok: true as const,
+          rev,
+          empty: true,
+          note: 'There is nothing on the canvas to make a document from yet. Notes, mind maps, '
+            + 'shapes and pictures become the document; a frame around a group becomes a section.',
+        };
+      }
+
+      /** The same sentence on every action, because it is the thing the agent
+       *  most needs to tell the user and most easily forgets. */
+      const shape = summary.unframed
+        ? 'The board has no frames, so everything is in canvas order, top to bottom. '
+          + 'Draw a frame round a group to make it a section.'
+        : `${summary.sections} section(s), from the frames on the board, read top to bottom `
+          + 'then left to right.';
+      const omitted = summary.omittedOwned
+        ? ` ${summary.omittedOwned} storyboard shot(s) are NOT in it — those export as a screenplay.`
+        : '';
+
+      if (action === 'close') { view.close(); return { ok: true as const, rev, open: false }; }
+
+      if (action === 'markdown') {
+        /**
+         * BOUNDED, AND THE TRIM IS REPORTED.
+         *
+         * This is the one action that returns the document TO THE MODEL, so its
+         * size is a context cost that scales with how much work the user has
+         * done — precisely backwards. A 300-note research board is a hundred
+         * thousand characters, which is more than the rest of the conversation.
+         *
+         * Cut at a SECTION boundary rather than mid-sentence, and say which
+         * sections are missing by name: a silently truncated document is one the
+         * agent will summarise as though it had read all of it, and neither it
+         * nor the user will be able to tell.
+         *
+         * The user's own exports (`pdf`, `markdown_file`) are NEVER truncated —
+         * they do not pass through a model, so the limit does not apply to them.
+         */
+        const BUDGET = 40_000;
+        const full = view.markdown(title);
+        let text = full;
+        let droppedSections: string[] = [];
+
+        if (full.length > BUDGET) {
+          const doc = view.sections();
+          const kept: string[] = [];
+          let spent = 0;
+          for (const section of doc) {
+            const chunk = (section.title ? `## ${section.title}\n\n` : '') + section.chunks.join('\n\n');
+            if (spent + chunk.length > BUDGET && kept.length) {
+              droppedSections.push(section.title || '(untitled section)');
+              continue;
+            }
+            spent += chunk.length;
+            kept.push(chunk);
+          }
+          text = (title ? `# ${title}\n\n` : '') + kept.join('\n\n');
+        }
+
+        return {
+          ok: true as const,
+          rev,
+          open: view.isOpen(),
+          words: summary.words,
+          sections: summary.sections,
+          markdown: text,
+          ...(droppedSections.length
+            ? {
+              truncated: droppedSections.length,
+              note: `${shape}${omitted} YOU HAVE NOT SEEN ALL OF IT — ${droppedSections.length} `
+                + `section(s) were omitted for size: ${droppedSections.slice(0, 8).join(', ')}. `
+                + 'Read those with board_canvas_read on their frames, and do NOT describe the '
+                + 'document as complete.',
+            }
+            : { note: `${shape}${omitted}` }),
+        };
+      }
+
+      if (action === 'pdf') {
+        view.print(title);
+        return {
+          ok: true as const,
+          rev,
+          open: true,
+          words: summary.words,
+          sections: summary.sections,
+          // NEVER claim to have saved a file — the browser owns this dialog.
+          note: 'The print dialog is open on the user’s screen — they choose "Save as PDF" and '
+            + `where it goes. Tell them to look at it. ${shape}${omitted}`,
+        };
+      }
+
+      if (action === 'markdown_file') {
+        view.downloadMarkdown(title);
+        return {
+          ok: true as const,
+          rev,
+          open: view.isOpen(),
+          words: summary.words,
+          sections: summary.sections,
+          note: 'Downloaded the .md source — it opens in Word, Notion, Obsidian, Google Docs and '
+            + `anything else that reads markdown. ${shape}${omitted}`,
+        };
+      }
+
+      view.open(title);
+      return {
+        ok: true as const,
+        rev,
+        open: true,
+        words: summary.words,
+        sections: summary.sections,
+        note: `The document is on the user’s screen. ${shape}${omitted}`,
+      };
+    },
+
+    /**
      * Everything compile needs, serialized.
      *
      * THE INVARIANT IS CHECKED ON THE SERVER, not here — deliberately. It is
@@ -2513,6 +2737,9 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
     window.removeEventListener('message', onMessage);
     sub.unsubscribe?.();
     selectionSub.unsubscribe?.();
+    digestSub.unsubscribe?.();
+    // A pending debounce would fire into a torn-down board on the next remount.
+    if (digestTimer) clearTimeout(digestTimer);
     // A remount must not leave a "Generating…" toast on screen forever.
     progress.forEach(close => close());
     progress.clear();

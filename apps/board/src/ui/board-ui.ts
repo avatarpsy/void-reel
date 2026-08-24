@@ -36,6 +36,9 @@ const ICONS = {
   // An arrow INTO a frame: the storyboard going somewhere, not a file being
   // exported. Deliberately not a download glyph — nothing leaves the machine.
   send: '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8h8"/><path d="M7 5l3 3-3 3"/><path d="M11.5 2.5H14v11h-2.5"/></svg>',
+  // A page with lines on it. This is the export for everything that is not a
+  // film, so it must not look like the storyboard's arrow.
+  doc: '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 1.5h5L12.5 5v9.5h-8.5z"/><path d="M9 1.5V5h3.5"/><path d="M6 8.5h4M6 11h3"/></svg>',
 };
 
 function el<T extends HTMLElement>(tag: string, cls?: string, html?: string): T {
@@ -63,26 +66,30 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
   // these little icons does what". So it answers both, in place, once.
   empty.innerHTML = `
     <div class="vs-board-empty__card">
-      <h2>Your board is empty</h2>
+      <h2>Start thinking out loud</h2>
       <p>
-        Describe the video you’re imagining in the chat — I’ll lay the shots out here
-        as a filmstrip you can drag, rename and reorder. Or start one yourself.
+        Tell me what is on your mind in the chat — an idea, a decision, a plan, a mess you
+        cannot name yet. It appears here as notes, diagrams, mind maps and references you can
+        drag around and argue with.
       </p>
-      <button type="button" class="vs-board-btn vs-board-btn--primary" data-act="first-shot">
-        ${ICONS.plus}<span>Add your first shot</span>
-      </button>
 
       <div class="vs-board-guide">
         <p class="vs-board-guide__lead">
-          <strong>Think out loud here first.</strong> Ask for a mind map, a diagram, a mood board or
-          a page of notes and it appears on the canvas where you can drag it around and argue with
-          it. None of that ends up in the video — it is how you work out what the video is.
+          <strong>This canvas is the work, not the scratch paper.</strong> Ask for a mind map of
+          the problem, a flow of the process, the options side by side, or the research pulled off
+          the web and laid out. Say “cluster this” or “what am I missing” and it changes in front
+          of you.
         </p>
         <p class="vs-board-guide__lead">
-          When you know the shape, it becomes <strong>shots</strong>. A shot is one scene. Drop media
-          <strong>onto</strong> a shot and it joins that scene — stills, clips and audio each land in
-          their own row, and you say what each one is for. Anything left on the open canvas stays
-          thinking space.
+          <strong>If what you are making is a video</strong>, say so and the board grows a
+          screenplay panel and a filmstrip of <strong>shots</strong>. A shot is one scene. Drop
+          media <strong>onto</strong> a shot and it joins that scene — stills, clips and audio each
+          land in their own row. Anything left on the open canvas stays thinking space.
+        </p>
+        <p class="vs-board-guide__lead">
+          <button type="button" class="vs-board-btn" data-act="first-shot">
+            ${ICONS.plus}<span>Start a storyboard</span>
+          </button>
         </p>
         <p class="vs-board-guide__lead">
           A shot is either a <strong>video clip</strong> a model generates, or a
@@ -91,10 +98,10 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
           words on screen exactly as you wrote them.
         </p>
         <ul class="vs-board-guide__keys">
-          <li><b>Drop on a shot</b><span>adds it to that scene · drop on a slot to set its role</span></li>
           <li><b>Toolbar below</b><span>notes, pen, shapes, text, mind maps, images, arrows, links</span></li>
           <li><b>Type <kbd>/</kbd> in a note</b><span>headings, lists, tables, callouts, dividers</span></li>
           <li><b>▶ on a clip</b><span>plays it right there — nothing streams until you ask</span></li>
+          <li><b>Drop on a shot</b><span>adds it to that scene · drop on a slot to set its role</span></li>
           <li><b>Double-click</b><span>a card title to rename · the script to edit it where you clicked</span></li>
           <li><b>Scroll</b><span>pan · over a row it scrolls the row · ⌘/Ctrl + scroll to zoom</span></li>
           <li><b>Ctrl + Z</b><span>undo — including anything the agent did, in one step</span></li>
@@ -119,6 +126,22 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
       ${ICONS.fit}<span>Fit</span>
     </button>
     <button type="button" class="vs-board-btn vs-board-icon" data-act="focus" title="Focus mode — fill the screen (Esc to leave)">${ICONS.expand}</button>
+    <!--
+      THE WAY OUT FOR WORK THAT IS NOT A FILM.
+
+      "Send to editor" is the exit for a storyboard and it appears only when
+      shots exist — so for everything else the board had NO exit at all, and an
+      afternoon of planning or research ended as pixels the user had to retype
+      somewhere else. This one is always here, because thinking is what the
+      board is always doing.
+
+      It opens the page rather than downloading anything: the order comes from
+      where things sit on an infinite canvas, so the first thing anybody wants
+      is to check it read their board the way they meant it.
+    -->
+    <button type="button" class="vs-board-btn" data-act="document" title="Read the board as a document — export PDF or .md">
+      ${ICONS.doc}<span>Document</span>
+    </button>
     <span class="vs-board-sep"></span>
     <div class="vs-board-total" data-total hidden></div>
     <!--
@@ -303,6 +326,11 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
       case 'redo': board.store.redo(); break;
       case 'fit': fitBoard(); break;
       case 'focus': void fullscreen.toggle(); break;
+      // The overlay owns itself; the bar only raises the intent — same
+      // arrangement the screenplay card's Focus button uses.
+      case 'document':
+        container.dispatchEvent(new CustomEvent('voidspace-open-document', { bubbles: true }));
+        break;
       /**
        * The card raises intent; the PAGE owns the network.
        *

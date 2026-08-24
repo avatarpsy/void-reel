@@ -35,9 +35,9 @@
 
 /* The board underneath is hidden rather than merely covered: its chrome sits in
    the same host and would otherwise still take clicks along the edges. */
-[data-focus-mode='screenplay'] .vs-board-bar,
-[data-focus-mode='screenplay'] .vs-assets,
-[data-focus-mode='screenplay'] .vs-board-empty { display: none; }
+[data-focus-mode] .vs-board-bar,
+[data-focus-mode] .vs-assets,
+[data-focus-mode] .vs-board-empty { display: none; }
 
 .vs-focus__bar {
   flex: none;
@@ -267,22 +267,22 @@
    * would normally do, rather than printing an empty sheet where a hidden
    * overlay used to be.
    */
-  [data-focus-mode='screenplay'] .vs-focus__bar,
-  [data-focus-mode='screenplay'] .vs-focus__foot,
-  [data-focus-mode='screenplay'] .vs-focus__editor,
-  [data-focus-mode='screenplay'] .affine-edgeless-viewport,
-  [data-focus-mode='screenplay'] .vs-board-bar,
-  [data-focus-mode='screenplay'] .vs-assets,
-  [data-focus-mode='screenplay'] .vs-board-empty,
-  [data-focus-mode='screenplay'] .vs-toasts,
-  [data-focus-mode='screenplay'] .vs-inspect { display: none !important; }
+  [data-focus-mode] .vs-focus__bar,
+  [data-focus-mode] .vs-focus__foot,
+  [data-focus-mode] .vs-focus__editor,
+  [data-focus-mode] .affine-edgeless-viewport,
+  [data-focus-mode] .vs-board-bar,
+  [data-focus-mode] .vs-assets,
+  [data-focus-mode] .vs-board-empty,
+  [data-focus-mode] .vs-toasts,
+  [data-focus-mode] .vs-inspect { display: none !important; }
 
   /* The app shell is a fixed-height, overflow-hidden box on screen. For print
      it has to become an ordinary flowing document, or the browser paginates one
      screenful and stops. */
-  [data-focus-mode='screenplay'],
-  [data-focus-mode='screenplay'] body,
-  [data-focus-mode='screenplay'] #board-root {
+  [data-focus-mode],
+  [data-focus-mode] body,
+  [data-focus-mode] #board-root {
     position: static !important;
     height: auto !important;
     min-height: 0 !important;
@@ -291,7 +291,7 @@
     background: #fff !important;
   }
 
-  [data-focus-mode='screenplay'] .vs-focus {
+  [data-focus-mode] .vs-focus {
     position: static !important;
     display: block !important;
     height: auto !important;

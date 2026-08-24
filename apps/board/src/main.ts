@@ -15,6 +15,9 @@ import './theme/voidspace.css';
 // that has to be read as one piece to be maintainable, and it is the only place
 // in the app that reasons in inches.
 import './theme/screenplay-focus.css';
+// AFTER the screenplay's, and dependent on it: the overlay shell and the whole
+// print unwrapping are shared, and only the typography differs.
+import './theme/document-view.css';
 
 import { IndexeddbPersistence } from 'y-indexeddb';
 import * as Y from 'yjs';
@@ -28,6 +31,7 @@ import { installCloudSync } from './board/cloud-sync';
 import { installParentAuth, getParentToken } from './board/parent-auth';
 import { installBoardRpc, getBoardRev } from './agent/rpc';
 import { installScreenplayFocus } from './ui/screenplay-focus';
+import { installDocumentView } from './ui/document-view';
 import { installBoardUi } from './ui/board-ui';
 import { installAssetPanel } from './ui/asset-panel';
 import { installMediaInspector } from './ui/media-inspector';
@@ -187,10 +191,13 @@ async function boot(): Promise<void> {
   /** Assigned by the chrome install below; read lazily by the RPC — see the
    *  note on `BoardRpcOptions.screenplay`. */
   let screenplay: ReturnType<typeof installScreenplayFocus> | null = null;
+  /** Same lazy-getter arrangement, and for the same reason. */
+  let documentView: ReturnType<typeof installDocumentView> | null = null;
 
   installBoardRpc(board, {
     flushCloud: () => cloud.flush(),
     screenplay: () => screenplay,
+    document: () => documentView,
     pending: () => pending,
   });
 
@@ -270,6 +277,9 @@ async function boot(): Promise<void> {
   // The screenplay at page size. Installed after the panel so its overlay sits
   // above it in paint order without needing a higher z-index than the toasts.
   screenplay = installScreenplayFocus(board, chromeHost);
+  // The board as a page. Same host and the same shell class, so the two focus
+  // modes cannot drift apart in look or in Esc behaviour.
+  documentView = installDocumentView(board, chromeHost);
 
   // Theme is pushed, never re-navigated — an iframe reload would throw away the
   // in-memory editor state and the user's viewport. Same rule apps/web follows.

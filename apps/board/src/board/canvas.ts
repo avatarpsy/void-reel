@@ -377,10 +377,48 @@ export function mediaUrlOf(std: BlockStdScope, id: string): string | null {
  * scene 3 because as far as it could tell that space was empty, and it could not
  * draw an arrow from an idea to the shot the idea was about.
  */
-export function readCanvas(std: BlockStdScope, selectionOnly = false): CanvasItem[] {
+/**
+ * How much of an element's text a read carries.
+ *
+ * Two caps, because a canvas read answers two different questions. The default
+ * is RECOGNITION — "what is on this board, and where" — over a board that may
+ * hold two hundred items, so 400 characters is plenty and anything more is
+ * context spent on notes nobody asked about. The full cap is TRANSCRIPTION —
+ * "turn what I wrote into a document" — which is unanswerable from a preview,
+ * because the note the user spent ten minutes on is exactly the one that runs
+ * past 400 characters.
+ *
+ * `full` is still capped, and the caller caps the TOTAL as well: an uncapped
+ * read of a big board is a context bomb with a reasonable-looking name.
+ */
+const PREVIEW_CHARS = 400;
+const FULL_CHARS = 4_000;
+
+/** What subset of the canvas to read, and how much of each element's text. */
+export interface CanvasRead {
+  /** Only what the user has selected right now. */
+  selectionOnly?: boolean;
+  /** Only these ids. Wins over `selectionOnly` when both are given. */
+  ids?: string[];
+  /** Untruncated text, up to `FULL_CHARS` per element. */
+  full?: boolean;
+}
+
+/**
+ * @param where `true` is shorthand for `{ selectionOnly: true }` — kept because
+ *   the selection push and a dozen tests call it that way, and widening a
+ *   signature is cheaper than rewriting call sites that were already correct.
+ */
+export function readCanvas(std: BlockStdScope, where: boolean | CanvasRead = false): CanvasItem[] {
   const gfx = std.get(GfxControllerIdentifier);
   const out: CanvasItem[] = [];
-  const wanted = selectionOnly ? new Set(gfx.selection.selectedIds) : null;
+  const opt: CanvasRead = typeof where === 'boolean' ? { selectionOnly: where } : where;
+  const cap = opt.full ? FULL_CHARS : PREVIEW_CHARS;
+  const wanted = opt.ids?.length
+    ? new Set(opt.ids)
+    : opt.selectionOnly
+    ? new Set(gfx.selection.selectedIds)
+    : null;
 
   for (const model of gfx.gfxElements as GfxModel[]) {
     if (wanted && !wanted.has((model as unknown as { id: string }).id)) continue;
@@ -395,7 +433,7 @@ export function readCanvas(std: BlockStdScope, selectionOnly = false): CanvasIte
     out.push({
       id: m.id,
       kind: kindOf(m),
-      text: textOf(std, model).slice(0, 400),
+      text: textOf(std, model).slice(0, cap),
       x: Math.round(bound.x),
       y: Math.round(bound.y),
       w: Math.round(bound.w),
@@ -407,6 +445,78 @@ export function readCanvas(std: BlockStdScope, selectionOnly = false): CanvasIte
     });
   }
   return out.sort((a, b) => a.y - b.y || a.x - b.x);
+}
+
+/**
+ * A one-paragraph summary of the open canvas, small enough to ride on EVERY
+ * turn.
+ *
+ * ── WHAT IT FIXES ────────────────────────────────────────────────────────────
+ * The agent's per-turn context was storyboard-shaped: shots, screenplay,
+ * compiles, selection. It said NOTHING about the canvas. So on a board holding
+ * forty notes and three mind maps the agent's view every turn was "0 shots, no
+ * screenplay" — it was blind to the entire body of work until it happened to
+ * call `board_canvas_read`, and an agent that believes a surface is empty does
+ * not go looking. Every "it ignored what I already put on the board" complaint
+ * is downstream of this.
+ *
+ * ── WHY IT IS THIS SMALL ─────────────────────────────────────────────────────
+ * Same discipline as the screenplay map: one line per scene rides every turn,
+ * the TEXT is pulled on demand. Here that means counts, frame titles and the
+ * opening words of the notes — enough for the agent to know what is there and
+ * what to ask for, never enough to be the read itself. A digest that grew with
+ * the board would make a big board expensive on every message, which is the
+ * exact cost the map pattern exists to avoid.
+ *
+ * `owned` blocks are EXCLUDED. Shots and the screenplay are already reported in
+ * full alongside this, and counting them twice makes a board look like it holds
+ * more than it does — the kind of small lie that shows up as an agent
+ * confidently describing work that is not there.
+ */
+export interface CanvasDigest {
+  /** Loose items on the canvas, excluding shots and the screenplay. */
+  total: number;
+  /** How many of each kind — `{ note: 12, shape: 4, connector: 3 }`. */
+  kinds: Record<string, number>;
+  /** Frame titles, in reading order. Frames are how people group on a canvas,
+   *  so these are the section headings of whatever they are building. */
+  frames: string[];
+  /** The opening words of each text-bearing element, in reading order. */
+  notes: string[];
+}
+
+/** Frames and notes are capped: a digest must not grow with the board. */
+const DIGEST_FRAMES = 16;
+const DIGEST_NOTES = 24;
+const DIGEST_NOTE_CHARS = 90;
+
+export function canvasDigest(std: BlockStdScope): CanvasDigest {
+  const kinds: Record<string, number> = {};
+  const frames: string[] = [];
+  const notes: string[] = [];
+  let total = 0;
+
+  // `readCanvas` already sorts into reading order (y, then x) and already
+  // resolves kind and text — so the digest is a projection of the read rather
+  // than a second walk that could disagree with it.
+  for (const item of readCanvas(std)) {
+    if (item.owned) continue;
+    total++;
+    kinds[item.kind] = (kinds[item.kind] ?? 0) + 1;
+
+    const text = item.text.trim();
+    if (!text) continue;
+    // The first line is the title of a note and the label of a frame; the rest
+    // is body, which belongs in a read and not in a summary.
+    const head = text.split('\n', 1)[0]!.slice(0, DIGEST_NOTE_CHARS);
+    if (item.kind === 'frame') {
+      if (frames.length < DIGEST_FRAMES) frames.push(head);
+    } else if (notes.length < DIGEST_NOTES) {
+      notes.push(head);
+    }
+  }
+
+  return { total, kinds, frames, notes };
 }
 
 // ── Writing ──────────────────────────────────────────────────────────────────

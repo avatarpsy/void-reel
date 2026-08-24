@@ -19,6 +19,8 @@ import { encodeMediaRef } from '../board/media-ref';
 import { setBlockCatalogue } from '../shot/blocks';
 import { setModelCatalogue, type ModelCaps } from '../shot/models';
 import { installScreenplayFocus, type ScreenplayFocus } from '../ui/screenplay-focus';
+import { installDocumentView, type DocumentView } from '../ui/document-view';
+import { drawOnCanvas } from '../board/canvas';
 import { installBoardRpc } from './rpc';
 
 const SEEDANCE: ModelCaps = {
@@ -61,6 +63,7 @@ let dispose: () => void;
  *  rather than against a stub that cannot disagree with them. */
 let focus: ScreenplayFocus | null = null;
 let focusHost: HTMLElement | null = null;
+let documentView: DocumentView | null = null;
 
 /**
  * One RPC round trip, exactly as the page performs it.
@@ -91,6 +94,7 @@ function call(type: string, args: Record<string, unknown> = {}): Promise<any> {
 beforeEach(() => {
   dispose?.();
   focus?.destroy();
+  documentView?.destroy();
   focusHost?.remove();
   board = makeTestBoard();
   setModelCatalogue([SEEDANCE], SEEDANCE.id);
@@ -104,10 +108,20 @@ beforeEach(() => {
     surfaceId: board.surfaceId,
     pageId: board.pageId,
     destroy: () => {},
-  }, { screenplay: () => focus });
+  }, { screenplay: () => focus, document: () => documentView });
 
   focusHost = document.createElement('div');
   document.body.append(focusHost);
+  documentView = installDocumentView({
+    workspace: board.workspace,
+    store: board.store,
+    std: board.std,
+    doc: board.doc,
+    host: board.std.host as unknown as HTMLElement,
+    surfaceId: board.surfaceId,
+    pageId: board.pageId,
+    destroy: () => {},
+  }, focusHost);
   focus = installScreenplayFocus({
     workspace: board.workspace,
     store: board.store,
@@ -1415,5 +1429,85 @@ describe('board graphic layers: over or baked', () => {
     const res = await call('voidspace:board-graphic-fills');
 
     expect(res.pending[0].durationSec).toBe(10.04);
+  });
+});
+
+/**
+ * The board's SECOND exit. Until this shipped, `compile_to_video` was the only
+ * way anything left a board — so planning, research and analysis all ended as
+ * pixels the user retyped somewhere else.
+ */
+describe('board_document', () => {
+  it('refuses honestly, and without opening anything, when there is nothing to export', async () => {
+    const res = await call('voidspace:board-document', { action: 'markdown' });
+
+    expect(res.ok).toBe(true);
+    expect(res.empty).toBe(true);
+    expect(res.markdown).toBeUndefined();
+    // The sentence has to say what WOULD become a document, or the user is left
+    // guessing why an apparently full board produced nothing.
+    expect(res.note).toContain('frame');
+  });
+
+  it('returns the canvas as markdown, titled, with the frame as a heading', async () => {
+    drawOnCanvas(board.std, [
+      { kind: 'frame', title: 'Risks', x: 0, y: 0, w: 900, h: 700 },
+      { kind: 'note', text: '- runway\n- hiring', x: 60, y: 80 },
+    ]);
+
+    const res = await call('voidspace:board-document', {
+      action: 'markdown', title: 'Q3 planning',
+    });
+
+    expect(res.ok).toBe(true);
+    expect(res.markdown).toContain('# Q3 planning');
+    expect(res.markdown).toContain('## Risks');
+    expect(res.markdown).toContain('- runway');
+    expect(res.sections).toBe(1);
+    expect(res.words).toBeGreaterThan(0);
+  });
+
+  /**
+   * The order comes from where things sit on an infinite canvas, so "why are my
+   * sections in this order" is the question this feature will be asked most.
+   * Every action answers it up front rather than waiting to be asked.
+   */
+  it('always says where the order came from', async () => {
+    drawOnCanvas(board.std, [{ kind: 'note', text: 'a thought', x: 0, y: 0 }]);
+
+    const res = await call('voidspace:board-document', { action: 'markdown' });
+    expect(res.note).toContain('no frames');
+
+    drawOnCanvas(board.std, [
+      { kind: 'frame', title: 'Options', x: 0, y: 900, w: 900, h: 700 },
+      { kind: 'note', text: 'one', x: 60, y: 980 },
+    ]);
+    const framed = await call('voidspace:board-document', { action: 'markdown' });
+    expect(framed.note).toContain('top to bottom');
+  });
+
+  /**
+   * A silent omission reads as a broken export: the user sees their storyboard
+   * missing and assumes the whole thing is unreliable.
+   */
+  it('names the storyboard it left out', async () => {
+    await call('voidspace:board-add-shots', { titles: ['Cold open'] });
+    drawOnCanvas(board.std, [{ kind: 'note', text: 'a thought', x: 0, y: 3000 }]);
+
+    const res = await call('voidspace:board-document', { action: 'markdown' });
+    expect(res.note).toContain('storyboard shot');
+    expect(res.markdown).not.toContain('Cold open');
+  });
+
+  it('opens and closes the page without touching the document', async () => {
+    drawOnCanvas(board.std, [{ kind: 'note', text: 'a thought', x: 0, y: 0 }]);
+
+    const opened = await call('voidspace:board-document', { action: 'open' });
+    expect(opened.open).toBe(true);
+    expect(documentView!.isOpen()).toBe(true);
+
+    const closed = await call('voidspace:board-document', { action: 'close' });
+    expect(closed.open).toBe(false);
+    expect(documentView!.isOpen()).toBe(false);
   });
 });

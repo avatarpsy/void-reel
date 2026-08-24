@@ -12,7 +12,7 @@ import { describe, expect, it } from 'vitest';
 
 import { makeTestBoard } from '../blocksuite/test-board';
 import { createShots } from '../shot/shots';
-import { drawOnCanvas, editCanvas, readCanvas, relaxOverlaps } from './canvas';
+import { canvasDigest, drawOnCanvas, editCanvas, readCanvas, relaxOverlaps } from './canvas';
 
 describe('drawing on the open canvas', () => {
   it('creates a sticky note carrying its text', () => {
@@ -197,6 +197,88 @@ describe('reading the canvas', () => {
     ]);
     expect(r.problems).toEqual([]);
     expect(r.ids[1]).toBeTruthy();
+  });
+
+  /**
+   * The 400-character preview is right for "what is on this board" and wrong for
+   * "turn what I wrote into a document" — the note somebody spent ten minutes on
+   * is exactly the one that runs past it. Both halves are asserted because
+   * dropping either loses something: without the cap a big board is a context
+   * bomb, without `full` the user's own words are unreachable.
+   */
+  it('previews text by default and returns it whole on request', () => {
+    const board = makeTestBoard();
+    const long = 'x'.repeat(1200);
+    drawOnCanvas(board.std, [{ kind: 'note', text: long }]);
+
+    const preview = readCanvas(board.std).find(i => i.kind === 'note');
+    expect(preview!.text.length).toBe(400);
+
+    const full = readCanvas(board.std, { full: true }).find(i => i.kind === 'note');
+    expect(full!.text.length).toBe(1200);
+  });
+
+  it('reads only the elements it is given ids for', () => {
+    const board = makeTestBoard();
+    const r = drawOnCanvas(board.std, [
+      { kind: 'note', text: 'keep me', x: 0, y: 0 },
+      { kind: 'note', text: 'not me', x: 400, y: 0 },
+    ]);
+
+    const only = readCanvas(board.std, { ids: [r.ids[0]!] });
+    expect(only).toHaveLength(1);
+    expect(only[0]!.text).toContain('keep me');
+  });
+});
+
+describe('the canvas digest', () => {
+  /**
+   * This is what rides in the agent's context on EVERY turn, so the two things
+   * that matter are that it describes the thinking work and that it stays small.
+   */
+  it('counts loose items by kind and lists frame titles and note openings', () => {
+    const board = makeTestBoard();
+    drawOnCanvas(board.std, [
+      { kind: 'frame', title: 'Options', x: 0, y: 0, w: 800, h: 600 },
+      { kind: 'note', text: 'Hire someone\nand the rest of the body', x: 40, y: 900 },
+      { kind: 'note', text: 'Do it myself', x: 400, y: 900 },
+      { kind: 'shape', text: 'cost', x: 40, y: 1400 },
+    ]);
+
+    const d = canvasDigest(board.std);
+    expect(d.total).toBe(4);
+    expect(d.kinds.note).toBe(2);
+    expect(d.kinds.shape).toBe(1);
+    expect(d.frames).toEqual(['Options']);
+    // First LINE only — the body belongs in a read, not in a per-turn summary.
+    expect(d.notes).toContain('Hire someone');
+    expect(d.notes.some(n => n.includes('rest of the body'))).toBe(false);
+  });
+
+  /**
+   * Shots and the screenplay are reported in full alongside this. Counting them
+   * here too makes a board look like it holds more than it does — a small lie
+   * that surfaces as the agent describing work that is not there.
+   */
+  it('leaves the board\'s own blocks out of the count', () => {
+    const board = makeTestBoard();
+    createShots(board.std, board.surfaceId, ['Cold open', 'The turn']);
+    drawOnCanvas(board.std, [{ kind: 'note', text: 'a thought', x: 0, y: 2000 }]);
+
+    const d = canvasDigest(board.std);
+    expect(d.total).toBe(1);
+    expect(d.kinds.shot).toBeUndefined();
+  });
+
+  it('stays bounded as the board grows', () => {
+    const board = makeTestBoard();
+    drawOnCanvas(board.std, Array.from({ length: 60 }, (_, i) => ({
+      kind: 'note' as const, text: `thought ${i}`, x: (i % 10) * 300, y: Math.floor(i / 10) * 300,
+    })));
+
+    const d = canvasDigest(board.std);
+    expect(d.total).toBe(60);
+    expect(d.notes.length).toBeLessThanOrEqual(24);
   });
 });
 
