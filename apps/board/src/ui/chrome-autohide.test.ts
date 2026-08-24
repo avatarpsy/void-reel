@@ -85,7 +85,7 @@ describe('installChromeAutohide', () => {
   });
 
   it('holds both open while the empty state is up', () => {
-    // Discovering "Add shot" must not require guessing that a hover exists.
+    // Discovering the toolbar must not require guessing that a hover exists.
     const c = installChromeAutohide(el);
     stop = c.destroy;
     c.setPinned(true);

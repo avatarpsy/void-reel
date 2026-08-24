@@ -307,6 +307,15 @@ editor-host {
   box-shadow: 0 4px 18px rgba(15, 23, 42, 0.1);
 }
 
+/* A BUTTON THAT SAYS IT IS HIDDEN MUST BE HIDDEN.
+   `display: inline-flex` below is a CLASS rule, so it outranks the UA's
+   `[hidden] { display: none }` — which is a specificity trap this file already
+   documents twice (see `.vs-board-sel[hidden]` and `.vs-board-total[hidden]`)
+   and which the send button was nonetheless caught by: `syncSend` set
+   `hidden` correctly on an empty board and "Send to editor" stayed on screen,
+   offering to compile a storyboard that did not exist. Stated once, here, for
+   every button in the bar rather than per control. */
+.vs-board-btn[hidden] { display: none; }
 .vs-board-btn {
   display: inline-flex;
   align-items: center;

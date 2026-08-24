@@ -9,13 +9,14 @@
  *
  * AFFiNE's native toolbar is now registered (`extensions.view.ts`) and owns the
  * creative tools; its zoom control owns zoom. What survives here is only what is
- * specific to a STORYBOARD and has no native equivalent — adding a shot to the
- * filmstrip, and framing the whole strip.
+ * specific to a BOARD and has no native equivalent — framing the work, reading
+ * it as a document, and sending a storyboard on to the editor.
  *
  * THE EMPTY STATE IS THE MOST IMPORTANT PART. A blank infinite canvas tells a
  * first-time user nothing — not what it is for, not that the agent can fill it,
- * not that they can add a shot themselves. It is the difference between "this is
- * broken" and "oh, I talk to it".
+ * not that a storyboard is one of the things it can become. It is the difference
+ * between "this is broken" and "oh, I talk to it". It also holds the only
+ * hand-operated way to a first shot, now that the toolbar has none.
  */
 import { GfxControllerIdentifier } from '@blocksuite/std/gfx';
 
@@ -115,10 +116,19 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
   // carries only what is specific to a STORYBOARD and has no native equivalent.
   const bar = el<HTMLDivElement>('div', 'vs-board-bar');
   bar.innerHTML = `
-    <button type="button" class="vs-board-btn vs-board-btn--primary" data-act="add" title="Add a shot to the end of the filmstrip">
-      ${ICONS.plus}<span>Add shot</span>
-    </button>
-    <span class="vs-board-sep"></span>
+    <!--
+      NO "ADD SHOT" HERE.
+
+      A shot is not the board's default act. Most boards are thinking — notes,
+      diagrams, research — and a primary button minting scene cards put the one
+      thing SOME boards want at the front of every board, before the user has
+      said they are making a film.
+
+      There are still two ways to a first shot, and both are in context: the
+      empty state's "Start a storyboard" (data-act="first-shot", the same
+      handler), and asking the agent. Once a filmstrip exists the row itself is
+      where a shot gets added, which is where the hand already is.
+    -->
     <button type="button" class="vs-board-btn vs-board-icon" data-act="undo" title="Undo (Ctrl+Z)">${ICONS.undo}</button>
     <button type="button" class="vs-board-btn vs-board-icon" data-act="redo" title="Redo (Ctrl+Shift+Z)">${ICONS.redo}</button>
     <span class="vs-board-sep"></span>
@@ -320,7 +330,7 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
     const act = (e.target as HTMLElement).closest<HTMLElement>('[data-act]')?.dataset.act;
     if (!act) return;
     switch (act) {
-      case 'add':
+      // Only the empty state raises this now — the toolbar button is gone.
       case 'first-shot': addShot(); break;
       case 'undo': board.store.undo(); break;
       case 'redo': board.store.redo(); break;
@@ -387,7 +397,7 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
     hidden = has;
     empty.classList.toggle('is-hidden', has);
     // An empty board has nothing to look at, so there is nothing for the
-    // chrome to be in the way OF — and hiding "Add shot" behind a hover is
+    // chrome to be in the way OF — and hiding the toolbar behind a hover is
     // how a first-time user concludes the board cannot do anything.
     chrome.setPinned(!has);
   }

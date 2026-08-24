@@ -29,7 +29,7 @@
  *   • anything inside one has keyboard focus, so Tab reaches the buttons at all;
  *   • a mouse button is down — you are using it;
  *   • the board is EMPTY, because a first-time user should not have to discover
- *     a hover to find "Add shot".
+ *     a hover to find the toolbar at all.
  *
  * ── AND WHERE IT DOES NOT APPLY ──────────────────────────────────────────────
  * Coarse pointers. "Reveal on hover" on a touch screen means "reveal never", so
