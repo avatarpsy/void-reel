@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   ArrowRight, FolderOpen, Layout, Square, Smartphone, Image as ImageIcon, Plus,
+  Presentation as PresentationIcon, Frame,
 } from 'lucide-react';
 import { useProjectStore } from '../../stores/project-store';
 import { useUIStore } from '../../stores/ui-store';
@@ -14,8 +15,19 @@ const LOGO_SRC = `${import.meta.env.BASE_URL}images/logo.png`;
 type Category = 'all' | 'Social Media' | 'Presentation' | 'Print' | 'Desktop' | 'Mobile' | 'Logo';
 type ViewMode = 'home' | 'formats';
 
-// The three primary on-ramp formats — real image use-cases (not video
-// orientations). The full preset list is one click away under "Browse all".
+/**
+ * The formats on the front door.
+ *
+ * This offered Post, Story and Thumbnail, under a line that said the editor was
+ * for "images, graphics, and thumbnails". Presentations and posters were both
+ * fully supported and neither was named anywhere on this screen — reaching
+ * either meant knowing to click "Browse all formats" and then to filter by a
+ * category. Somebody arriving to make a deck had to already believe the image
+ * editor made decks.
+ *
+ * Six tiles in two rows: the social three that most sessions start with, then
+ * the three long-form ones. The full preset list is still one click away.
+ */
 interface FormatOption {
   id: string;
   label: string;
@@ -42,6 +54,21 @@ const FORMAT_OPTIONS: FormatOption[] = [
     id: 'thumbnail', label: 'Thumbnail', description: 'YouTube, blog covers',
     width: 1280, height: 720, dimensions: '1280 × 720',
     icon: ImageIcon, gradient: 'from-blue-500/20 to-cyan-500/20',
+  },
+  {
+    id: 'presentation', label: 'Presentation', description: 'Slides for a talk',
+    width: 1920, height: 1080, dimensions: '1920 × 1080',
+    icon: PresentationIcon, gradient: 'from-emerald-500/20 to-teal-500/20',
+  },
+  {
+    id: 'poster', label: 'Poster', description: 'Print, 18 × 24 at 300 DPI',
+    width: 5400, height: 7200, dimensions: '5400 × 7200',
+    icon: Frame, gradient: 'from-amber-500/20 to-orange-500/20',
+  },
+  {
+    id: 'document', label: 'Document', description: 'A4, print or PDF',
+    width: 2480, height: 3508, dimensions: '2480 × 3508',
+    icon: Layout, gradient: 'from-slate-500/20 to-zinc-500/20',
   },
 ];
 
@@ -210,11 +237,11 @@ export function WelcomeScreen() {
             </h1>
             <p className="text-xl text-text-secondary mb-8">In your browser.</p>
             <p className="text-base text-text-muted max-w-md">
-              Pick a format and start designing — images, graphics, and thumbnails.
+              Pick a format and start designing — posts, slides, posters and thumbnails.
             </p>
           </div>
 
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
             {FORMAT_OPTIONS.map((option) => {
               const Icon = option.icon;
               const isHovered = hoveredFormat === option.id;
@@ -223,14 +250,14 @@ export function WelcomeScreen() {
                   onClick={() => create(option.label, option.width, option.height)}
                   onMouseEnter={() => setHoveredFormat(option.id)}
                   onMouseLeave={() => setHoveredFormat(null)}
-                  className={`group relative flex flex-col items-center p-6 rounded-2xl bg-background-secondary border border-border hover:border-primary/40 hover:bg-background-tertiary transition-all duration-200 ${isHovered ? 'scale-[1.02] shadow-lg shadow-primary/5' : ''}`}>
+                  className={`group relative flex flex-col items-center p-5 rounded-2xl bg-background-secondary border border-border hover:border-primary/40 hover:bg-background-tertiary transition-all duration-200 ${isHovered ? 'scale-[1.02] shadow-lg shadow-primary/5' : ''}`}>
                   <div className={`absolute inset-0 rounded-2xl bg-gradient-to-br ${option.gradient} opacity-0 group-hover:opacity-100 transition-opacity duration-300`} />
                   <div className="relative z-10 flex flex-col items-center">
-                    <div className="w-16 h-16 mb-4 rounded-xl flex items-center justify-center bg-background-tertiary group-hover:bg-primary/10 transition-colors duration-200">
-                      <Icon size={28} className="text-text-muted group-hover:text-primary transition-colors" />
+                    <div className="w-12 h-12 mb-3 rounded-xl flex items-center justify-center bg-background-tertiary group-hover:bg-primary/10 transition-colors duration-200">
+                      <Icon size={22} className="text-text-muted group-hover:text-primary transition-colors" />
                     </div>
-                    <h3 className="text-lg font-semibold text-text-primary mb-1">{option.label}</h3>
-                    <p className="text-sm text-text-muted mb-3">{option.description}</p>
+                    <h3 className="text-base font-semibold text-text-primary mb-1">{option.label}</h3>
+                    <p className="text-sm text-text-muted mb-3 text-center">{option.description}</p>
                     <span className="text-xs font-mono text-text-muted/70 bg-background-tertiary px-2 py-1 rounded">
                       {option.dimensions}
                     </span>
