@@ -50,6 +50,19 @@ export function normaliseKind(raw: unknown): AssetKind {
   if (s.includes('voice') || s.includes('narration') || s.includes('tts')) return 'voice';
   if (s.includes('sfx') || s.includes('sound')) return 'sfx';
   if (s.includes('music') || s.includes('song') || s.includes('audio')) return 'music';
+  /**
+   * Documents, BEFORE the image fallback.
+   *
+   * The server calls this kind `document`; the pill is `doc`. Without this line
+   * every uploaded PDF fell through to the default and was catalogued as an
+   * IMAGE — it appeared in the Images filter, with a broken thumbnail, and the
+   * Docs filter was permanently empty.
+   *
+   * The extensions are here as well as the word because a row whose type was
+   * never set still has a filename, and calling a `.pdf` an image is worse than
+   * calling it unknown.
+   */
+  if (s.includes('doc') || s.includes('pdf') || /\.(pdf|docx|txt|md|csv|json)$/.test(s)) return 'doc';
   return 'image';
 }
 

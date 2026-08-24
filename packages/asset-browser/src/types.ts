@@ -40,7 +40,15 @@
  * mean "mine vs everyone's", which for blocks maps cleanly onto user vs starter
  * tier. Making it a tab would repeat the mistake the removed Cloud tab made.
  */
-export type AssetKind = 'video' | 'image' | 'music' | 'sfx' | 'voice' | 'block';
+/**
+ * `doc` is a file the user gave us — a PDF, a Word file, notes.
+ *
+ * It is a first-class kind rather than a bucket beside the Library because it
+ * IS library material: uploads are catalogued in the same ledger as images and
+ * clips, and the agent finds them the same way. Without a pill it would only
+ * ever be reachable under "All", which on a busy account means not reachable.
+ */
+export type AssetKind = 'video' | 'image' | 'music' | 'sfx' | 'voice' | 'block' | 'doc';
 
 /**
  * Where assets are read from. A SCOPE, deliberately not a tab.
@@ -117,6 +125,7 @@ export const KIND_LABEL: Record<AssetKind | 'all', string> = {
   sfx: 'SFX',
   voice: 'Voice',
   block: 'Blocks',
+  doc: 'Docs',
 };
 
 /**
@@ -127,7 +136,10 @@ export const KIND_LABEL: Record<AssetKind | 'all', string> = {
  * the surface is for assembling stock rather than for their own material.
  */
 export const KIND_ORDER: Array<AssetKind | 'all'> = [
-  'all', 'video', 'image', 'music', 'sfx', 'voice', 'block',
+  // `doc` sits after the media kinds and before blocks: it is content the user
+  // brought, not a thing the editor makes, so it reads with the library rather
+  // than with the templates.
+  'all', 'video', 'image', 'music', 'sfx', 'voice', 'doc', 'block',
 ];
 
 /** One line saying what a scope holds, for a tooltip or an empty state. */

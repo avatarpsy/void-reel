@@ -31,6 +31,28 @@ describe('kind normalisation', () => {
     expect(normaliseKind('song')).toBe('music');
     expect(normaliseKind('still')).toBe('image');
   });
+
+  /**
+   * DOCUMENTS MUST NOT FALL THROUGH TO THE IMAGE DEFAULT.
+   *
+   * The server calls this kind `document`; the pill is `doc`. Before the
+   * mapping existed every uploaded PDF hit the `return 'image'` fallback — it
+   * showed up under Images with a broken thumbnail, and the Docs filter was
+   * permanently empty. A default that is a real kind hides a missing case.
+   */
+  it('maps documents to their own kind, not to the image fallback', () => {
+    expect(normaliseKind('document')).toBe('doc');
+    expect(normaliseKind('doc')).toBe('doc');
+    expect(normaliseKind('application/pdf')).toBe('doc');
+    // A row with no type but a filename is still not an image.
+    expect(normaliseKind('brief.pdf')).toBe('doc');
+    expect(normaliseKind('notes.docx')).toBe('doc');
+  });
+
+  it('still defaults genuinely unknown things to image', () => {
+    expect(normaliseKind('')).toBe('image');
+    expect(normaliseKind('something-odd')).toBe('image');
+  });
 });
 
 describe('generated scope — /api/studio/library', () => {
