@@ -58,6 +58,26 @@ const VIEW_ICON: Record<ViewMode, string> = {
 const esc = (t: string) => String(t ?? '').replace(/"/g, '&quot;');
 
 const ICON_UPLOAD = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>';
+/**
+ * The tile glyph, by kind — and every kind is NAMED.
+ *
+ * This was a chain ending in `: '🔊'`, so anything the chain did not recognise
+ * was drawn as a speaker. Uploaded PDFs therefore appeared in the Library as
+ * audio files: not a missing icon but a WRONG one, which is worse because it
+ * reads as correct. A default that is a real kind hides a missing case; an
+ * explicit map makes the next kind a question rather than a silent mislabel.
+ *
+ * Module scope, not inside `tile()`: the panel draws a hundred-plus tiles and
+ * rebuilds them on every scope and search change, so a literal in there is one
+ * object allocated per asset per keystroke to read seven fixed strings.
+ */
+const GLYPH: Record<string, string> = {
+  block: '◫', video: '🎬', image: '🖼', doc: '📄',
+  music: '🔊', sfx: '🔊', voice: '🔊',
+};
+/** Attached, kind unknown. Deliberately not any real kind. */
+const GLYPH_UNKNOWN = '📎';
+
 const ICON_REFRESH = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>';
 
 const VIEW_TITLE: Record<ViewMode, string> = {
@@ -478,21 +498,7 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
 
   function tile(a: AssetItem): string {
     const isBlock = a.kind === 'block';
-    /**
-     * The tile glyph, by kind — and every kind is NAMED.
-     *
-     * This was a chain ending in `: '🔊'`, so anything the chain did not
-     * recognise was drawn as a speaker. Uploaded PDFs therefore appeared in the
-     * Library as audio files: not a missing icon, a WRONG one, which is worse
-     * because it reads as correct. A default that is a real kind hides a
-     * missing case; an explicit map makes the next kind a compile-time question
-     * rather than a silent mislabel.
-     */
-    const GLYPH: Record<string, string> = {
-      block: '◫', video: '🎬', image: '🖼', doc: '📄',
-      music: '🔊', sfx: '🔊', voice: '🔊',
-    };
-    const glyph = GLYPH[a.kind] ?? '📎';
+    const glyph = GLYPH[a.kind] ?? GLYPH_UNKNOWN;
     // CLICK PREVIEWS, the + ADDS — the same split the video editor uses. Clicking
     // a tile to silently drop it on the canvas made it impossible to check what
     // something was before committing to it.
