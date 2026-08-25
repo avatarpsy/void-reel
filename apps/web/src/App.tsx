@@ -1395,13 +1395,22 @@ function App() {
       const ui = useUIStore.getState();
       if (params.get("mode") === "music") {
         ui.setAppMode("music");
-        // The video canvas is useless for a music project — boot with it
-        // minimized so the timeline owns the screen, and show the audio
-        // mixer in the center column instead of the video player. The user
-        // can swap back to the video player any time via the top-bar
-        // preview/mixer toggle button (centerView) — both views work in
-        // both modes.
-        ui.setPreviewCollapsed(true);
+        // Show the audio mixer in the centre column instead of the video
+        // player — the video canvas is not what a music project is about.
+        //
+        // But do NOT collapse the preview row to do it. That is what this used
+        // to do, reasoning that "the timeline owns the screen"; collapsing sets
+        // timelineHeight to `innerHeight - MIN_CHROME_ABOVE_TIMELINE` (see
+        // EditorInterface), which squeezes the mixer, the assets panel and the
+        // inspector into a strip and hands the rest of the window to an EMPTY
+        // timeline. The editor opened looking broken — everything crushed
+        // against the top edge, acres of nothing below.
+        //
+        // A music project opens with something to look at instead: mixer at a
+        // usable height, assets and inspector at full size, timeline at its
+        // normal 320. Minimising is still one click away on the grip for anyone
+        // who does want the timeline full-height.
+        ui.setPreviewCollapsed(false);
         ui.setCenterView("mixer");
       } else {
         ui.setAppMode("video");

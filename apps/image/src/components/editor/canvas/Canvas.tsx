@@ -1,5 +1,6 @@
 import { useEffect, useRef, useCallback, useState, useMemo } from 'react';
 import { useCenterShift } from '@openreel/ui';
+import { onPaneShift } from '@openreel/asset-browser';
 import { useProjectStore } from '../../../stores/project-store';
 import { fileToImageAsset } from '../../../services/image-import';
 import { useUIStore } from '../../../stores/ui-store';
@@ -1200,6 +1201,22 @@ export function Canvas() {
     s.setPan(s.panX - dx, s.panY - dy);
     render();
   });
+
+  /**
+   * THE OUTER FRAME MOVING, which useCenterShift above cannot see.
+   *
+   * It corrects for the canvas container moving WITHIN this document, which is
+   * right when a panel inside the editor collapses. The studio shell collapsing
+   * the agent chat is the other case: it moves this iframe's LEFT edge, and
+   * from inside the frame the left edge is always 0 — only the width changes —
+   * so the inner measurement reads the movement with the wrong sign. Only the
+   * parent can see it, so the parent posts the delta and this applies it.
+   */
+  useEffect(() => onPaneShift((dx) => {
+    const s = useUIStore.getState();
+    s.setPan(s.panX - dx, s.panY);
+    render();
+  }), [render]);
 
   useEffect(() => {
     if (!project) return;

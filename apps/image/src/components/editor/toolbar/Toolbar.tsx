@@ -40,7 +40,7 @@ import {
 import { AllPanelsButton } from '@openreel/ui';
 import { useUIStore, Tool } from '../../../stores/ui-store';
 import { useProjectStore } from '../../../stores/project-store';
-import { onTopLinkClick } from '../../../services/navigate-top';
+import { onBackLinkClick, projectsUrl } from '@openreel/asset-browser';
 import { ZoomControl } from './ZoomControl';
 
 interface ToolItem {
@@ -275,17 +275,19 @@ export function Toolbar() {
 
   return (
     <div className="h-12 bg-card border-b border-border flex items-center px-3 gap-2">
-      {/* Back to the Voidspace Studio projects hub, landing on the Images tab —
-          same destination as the welcome screen's "My Projects" link. A real
-          <a> (not a view switch) so middle-click / open-in-new-tab work; the
-          current project is safe because useAutoSave persists it to IndexedDB.
-          onTopLinkClick escapes the agent-host iframe — without it this would
-          render the projects hub INSIDE the editor pane, beside the chat. */}
+      {/* BACK MEANS WHERE YOU CAME FROM — the shared rule, identical in all
+          three editors (@openreel/asset-browser/editor-nav). This used to go
+          to the projects hub unconditionally, so arriving from the agent chat
+          or a board and pressing Back dumped you on a list you were never on.
+          Still a real <a> so middle-click / open-in-new-tab work — those skip
+          the handler and use the href, which is the projects tab, the only
+          sensible thing "open Back in a new tab" can mean. The current project
+          is safe either way because useAutoSave persists it to IndexedDB. */}
       <a
-        href="/studio/projects?tab=images"
-        onClick={onTopLinkClick('/studio/projects?tab=images')}
+        href={projectsUrl('images')}
+        onClick={onBackLinkClick(projectsUrl('images'))}
         className="p-1.5 rounded-lg hover:bg-accent transition-colors"
-        title="My Projects"
+        title="Back"
       >
         <img
           src={`${import.meta.env.BASE_URL}images/logo.png`}
@@ -294,17 +296,14 @@ export function Toolbar() {
         />
       </a>
 
-      {/* LABELLED, like the video editor's. The mark alone is only legible to
-          someone who already knows where it goes — the video editor spells the
-          destination out, so this does too, in the same words and the same
-          button shape. */}
+      {/* LABELLED, like the video editor's — same words, same button shape. */}
       <a
-        href="/studio/projects?tab=images"
-        onClick={onTopLinkClick('/studio/projects?tab=images')}
+        href={projectsUrl('images')}
+        onClick={onBackLinkClick(projectsUrl('images'))}
         className="h-9 px-3 rounded-lg border border-border bg-secondary text-sm text-muted-foreground hover:text-foreground transition-colors whitespace-nowrap shrink-0 inline-flex items-center"
-        title="Back to Studio Projects"
+        title="Back"
       >
-        Back to Projects
+        Back
       </a>
 
       <div className="w-px h-6 bg-border mx-1" />

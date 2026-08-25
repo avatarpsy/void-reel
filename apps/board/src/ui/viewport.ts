@@ -19,6 +19,8 @@
  * `asset-panel.ts`. Do not add a chrome-driven caller back.
  */
 
+import { onPaneShift } from '@openreel/asset-browser';
+
 interface BoardViewport {
   centerX: number;
   centerY: number;
@@ -26,6 +28,13 @@ interface BoardViewport {
   width: number;
   setCenter(centerX: number, centerY: number, forceUpdate?: boolean): void;
   onResize(): void;
+  /**
+   * `setRect(left, top, width, height)` — the public way to make the viewport's
+   * box current AND emit `sizeUpdated` in the same call. Optional so a
+   * BlockSuite upgrade that removes it falls back to `onResize` rather than
+   * breaking the build; measured against 0.22.4, where it exists.
+   */
+  setRect?(left: number, top: number, width: number, height: number): void;
   /**
    * BlockSuite CACHES the container's box, and clears the cache in exactly one
    * place: the first line of its own ResizeObserver callback
@@ -94,6 +103,41 @@ function edgelessRoot():
  *
  * Returns a disposer.
  */
+/**
+ * THE OUTER FRAME MOVING — which this file's own anchor cannot see.
+ *
+ * `installViewportAnchor` below corrects for the container's centre moving
+ * WITHIN this document, and that is right when the board's own chrome resizes
+ * it. It is wrong for the studio shell collapsing the agent chat, because from
+ * in here that reads as the centre moving RIGHT (+108) at the moment it moves
+ * LEFT (-108) on screen — measured, it doubled the drift to 216px instead of
+ * cancelling it. Only the parent knows which edge moved, so the parent says so
+ * and this applies it.
+ *
+ * ── THE ARITHMETIC, AND WHY IT ADDS `dx` ────────────────────────────────────
+ * A point at model x sits at `(x - centerX) * zoom + containerCentreOnPage`,
+ * and `containerCentreOnPage = frameLeft + width / 2`. Holding it still means
+ * moving centerX by the container centre's movement ON PAGE, over zoom.
+ *
+ * That movement has two parts, and the two mechanisms split them exactly:
+ *   • the WIDTH growing moves the centre `+Δwidth / 2` — `installViewportAnchor`
+ *     already measures that from inside and applies it;
+ *   • the LEFT EDGE moving contributes `dx`, which is invisible from inside.
+ * So this adds `dx` on top, and the pair land on the true total.
+ *
+ * Measured on a 216px drawer: the anchor contributes +108, this contributes
+ * -216, total -108 — exactly the on-page centre movement, and the board holds
+ * still. Subtracting here instead (the obvious-looking sign) put centerX at
+ * +324 and moved the board 432px, twice as far as doing nothing at all.
+ */
+export function installPaneShift(): () => void {
+  return onPaneShift((dx) => {
+    const vp = edgelessRoot()?.gfx?.viewport;
+    if (!vp || !vp.zoom) return;
+    vp.setCenter(vp.centerX + dx / vp.zoom, vp.centerY, true);
+  });
+}
+
 export function installViewportAnchor(el: HTMLElement): () => void {
   let prev: { cx: number; cy: number } | null = null;
 
@@ -122,14 +166,30 @@ export function installViewportAnchor(el: HTMLElement): () => void {
     // 1. Make the viewport's idea of its own size current — see the interface.
     vp._cachedBoundingClientRect = null;
     vp._cachedOffsetWidth = null;
-    // 2. Open a resize and close it in the same breath. `onResize` is what
-    //    BlockSuite's own observer calls; `forceUpdate` on `setCenter` then
-    //    completes it immediately rather than 200ms later. Completion is the
-    //    step that writes the new size into the viewport and repositions every
-    //    block, so doing both here is what makes the correction land on this
-    //    frame — and it is idempotent, so BlockSuite's own handler arriving
-    //    afterwards finds nothing left to change.
-    vp.onResize();
+    // 2. TELL the viewport its new box rather than asking it to go and look.
+    //
+    //    This used to call `vp.onResize()`, which is what BlockSuite's own
+    //    observer calls — and measured, it left the viewport exactly ONE resize
+    //    behind: with the container at 1442px the viewport still reported 1226,
+    //    so the correction in step 3 was computed against a stale width and the
+    //    board drifted by the full panel width (216px) every time the agent
+    //    chat was collapsed. Clearing the caches above is not enough on its own
+    //    because `onResize` routes through the same debounced pipeline
+    //    (`_setupResizeObserver` → `_completeResize`) that runs 200ms later.
+    //
+    //    `setRect` is the public "this is the size now": it writes the box and
+    //    emits `sizeUpdated` synchronously, so the renderer repositions while we
+    //    are still inside the ResizeObserver callback, before the browser
+    //    paints. It is idempotent, so BlockSuite's own debounced handler
+    //    arriving afterwards finds nothing left to change.
+    //
+    //    (The file's own comment already described using `setRect` for exactly
+    //    this reason; the code called `onResize` instead. They now agree.)
+    if (typeof vp.setRect === 'function') {
+      vp.setRect(r.left, r.top, r.width, r.height);
+    } else {
+      vp.onResize();
+    }
     // 3. Anchor: cancel the container centre's movement, so the point the user
     //    was looking at is under the same pixel it was a frame ago.
     vp.setCenter(cx0 + dx / zoom, cy0 + dy / zoom, true);

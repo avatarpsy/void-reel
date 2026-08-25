@@ -40,7 +40,7 @@ import { installPendingMedia } from './ui/pending-media';
 import { installSpacePan } from './ui/space-pan';
 import { installSpine } from './ui/spine';
 import { installToasts, toast } from './ui/toast';
-import { installViewportAnchor } from './ui/viewport';
+import { installViewportAnchor, installPaneShift } from './ui/viewport';
 
 /** Replace the boot overlay with a message the user can act on. Reachable before
  *  any chrome exists, so it writes into the overlay rather than a toast. */
@@ -274,6 +274,11 @@ async function boot(): Promise<void> {
   // arithmetic. Installed after the editor is mounted, so it baselines against
   // the size the board actually opened at.
   installViewportAnchor(chromeHost);
+  // …and the half of it that cannot be measured from in here: the studio shell
+  // collapsing the agent chat moves this iframe's LEFT edge, which from inside
+  // looks like the opposite of what it is. The parent posts the delta; this
+  // cancels it. See `installPaneShift`.
+  installPaneShift();
   // The screenplay at page size. Installed after the panel so its overlay sits
   // above it in paint order without needing a higher z-index than the toasts.
   screenplay = installScreenplayFocus(board, chromeHost);

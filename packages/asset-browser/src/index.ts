@@ -15,6 +15,17 @@ export * from './cache';
 export * from './thumbs';
 export * from './view-model';
 export * from './panel-chrome';
+/**
+ * How every editor LEAVES itself — back, and escaping the /ai iframe. Here for
+ * the same reason panel-chrome is: this is the only package all three apps
+ * depend on, and the board needs it without React.
+ */
+export * from './editor-nav';
+/**
+ * Holding the canvas still when the STUDIO SHELL moves the pane's left edge —
+ * something no editor can measure from inside its own iframe. See its header.
+ */
+export * from './pane-shift';
 export * from './blocks';
 /**
  * The LIVE block preview — the renderer, its runtime shim and the visibility

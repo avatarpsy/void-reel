@@ -16,6 +16,7 @@ import {
   Gauge,
 } from "lucide-react";
 import { useCenterShift } from "@openreel/ui";
+import { onPaneShift } from "@openreel/asset-browser";
 import type { PreviewQuality } from "../../stores/timeline-store";
 import { useProjectStore } from "../../stores/project-store";
 import { InlineRecordingPreview } from "./InlineRecordingPreview";
@@ -153,7 +154,22 @@ export const Preview: React.FC = () => {
   const stageWrapRef = useRef<HTMLDivElement>(null);
   const stageOffsetRef = useRef(0);
   const [stageOffset, setStageOffset] = useState(0);
-  useCenterShift(stageAreaRef, (dx) => {
+  /**
+   * THE OUTER FRAME MOVING, which useCenterShift below cannot see.
+   *
+   * It corrects for the stage area moving WITHIN this document — right when a
+   * panel inside the editor collapses. The studio shell collapsing the agent
+   * chat is the other case: it moves this iframe's LEFT edge, and from inside
+   * the frame the left edge is always 0 (only the width changes), so the inner
+   * measurement reads that movement with the wrong sign. Only the parent can
+   * see it, so it posts the delta and this applies it — through the very same
+   * correction, so the two paths cannot drift apart.
+   */
+  /**
+   * ONE correction, two things that can cause it. Extracted so the in-frame
+   * path and the parent-notified path cannot drift apart.
+   */
+  const applyCenterShift = useCallback((dx: number) => {
     const area = stageAreaRef.current?.clientWidth ?? 0;
     const stage = overlayRef.current?.getBoundingClientRect().width ?? 0;
     const limit = Math.max(0, (area - stage) / 2);
@@ -174,7 +190,17 @@ export const Preview: React.FC = () => {
       stageWrapRef.current.style.transform = `translateX(${next}px)`;
     }
     setStageOffset(next);
-  });
+  }, []);
+
+  // A panel INSIDE the editor collapsing — the stage area moves within this
+  // document, and the inner measurement is the true one.
+  useCenterShift(stageAreaRef, applyCenterShift);
+
+  // The studio shell collapsing the agent chat — that moves this iframe's LEFT
+  // edge, and from inside the frame the left edge is always 0 (only the width
+  // changes), so the inner measurement reads it with the wrong sign. Only the
+  // parent can see it, so it posts the delta and we apply the same correction.
+  useEffect(() => onPaneShift(applyCenterShift), [applyCenterShift]);
   const animationRef = useRef<number | null>(null);
   const renderBridgeInitialized = useRef<boolean>(false);
   const lastGoodFrameRef = useRef<ImageBitmap | null>(null);

@@ -14,6 +14,7 @@
 import {
   PAGE_SIZE, SCOPE_LABEL as SHARED_SCOPE_LABEL, TILE_GAP_PX, TILE_MIN_PX,
   VIEW_MODES, KIND_LABEL, KIND_ORDER, QUICK_FILTERS, availableScopes, fetchPersonalCounts, searchPlaceholder, setAssetFavourite, uploadToLibrary,
+  goBack, projectsUrl,
   clampPanelWidth, fetchAssetsCached, groupByRecency, hasMore, invalidateAssetCache, isAuthError,
   loadPanelWidth, loadThumbInto, loadViewMode, mergePage,
   mediaSrc, nextOffset, savePanelWidth, saveViewMode, tileSrc, videoPreviewSrc,
@@ -454,7 +455,7 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
     return `
       <div class="vs-assets__bar">
         <img class="vs-assets__logo" src="/images/logo/logo.png" alt="Voidspace" />
-        <a class="vs-assets__back" href="/studio/projects?tab=boards" target="_top">Back to Projects</a>
+        <a class="vs-assets__back" href="/studio/projects?tab=boards" target="_top" data-a="back">Back</a>
       </div>
       <div class="vs-assets__head">
         <span class="vs-assets__title">Assets</span>
@@ -1096,6 +1097,15 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
     if (!t) return;
     const a = t.dataset.a;
     if (a === 'toggle') { setCollapsed(!collapsed); }
+    /**
+     * BACK MEANS WHERE YOU CAME FROM — the shared rule, identical in all three
+     * editors. The anchor keeps `target="_top"` and a real href so middle-click
+     * and open-in-new-tab still reach the boards tab; a plain click is
+     * intercepted here and walks the top window's history instead, so arriving
+     * from the agent chat and pressing Back returns to the chat rather than
+     * dumping the user on a projects list they were never on.
+     */
+    else if (a === 'back') { e.preventDefault(); goBack(projectsUrl('boards')); }
     else if (a === 'scope') { scope = t.dataset.v as AssetScope; render(); }
     else if (a === 'kind') {
       kind = t.dataset.v as AssetKind | 'all';

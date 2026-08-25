@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Search, Loader2, Plus, Check, Film, Music2, Image as ImageIcon, AudioLines, Mic, Pencil, HardDrive, Cloud, Star, Filter, Upload, RefreshCw, LayoutGrid, Grid2x2, List, ChevronDown, ChevronRight, Download, Settings2, X, Globe } from "lucide-react";
+import { Search, Loader2, Plus, Check, Film, Music2, Image as ImageIcon, AudioLines, Mic, Pencil, HardDrive, Cloud, Star, Filter, Upload, RefreshCw, LayoutGrid, Grid2x2, List, ChevronDown, ChevronRight, Download, Settings2, X, Globe, FileText } from "lucide-react";
 import { useVoidspaceStore } from "../../stores/voidspace-store";
 import { useProjectStore } from "../../stores/project-store";
 import { saveMediaBlob, loadMediaBlob } from "../../services/media-storage";
@@ -29,6 +29,7 @@ import {
   loadViewMode,
   saveViewMode,
   type ViewMode,
+  type AssetKind,
 } from "@openreel/asset-browser";
 
 /**
@@ -68,7 +69,21 @@ import {
  * no bytes until it is rendered — so the media paths below check for it rather
  * than assuming every kind has a url.
  */
-type LibType = "all" | "video" | "image" | "music" | "sfx" | "voice" | "block";
+/**
+ * THE SHARED KIND LIST, NOT A COPY OF IT.
+ *
+ * This was hand-written as a union that echoed `AssetKind` in
+ * @openreel/asset-browser. The shared package later gained `doc`; this line did
+ * not. `KIND_ORDER` (shared, 8 kinds) was then mapped through `TYPE_ICON`
+ * (local, 7 keys), so the doc pill got `Icon: undefined` and rendering it threw
+ * React #130 — the whole Assets Panel replaced by an error boundary. Music mode
+ * opens on this tab, so it looked like "music is broken" when in fact the
+ * Library tab was broken in every editor, all the time.
+ *
+ * As an alias, adding a kind to the shared package is now a COMPILE error here
+ * until every map below supplies an entry for it.
+ */
+type LibType = AssetKind | "all";
 
 /**
  * A BLOCK TILE — and it RENDERS THE BLOCK.
@@ -341,16 +356,20 @@ interface DeviceItem {
  */
 const TYPE_ICON: Record<LibType, typeof Film> = {
   all: Plus, video: Film, image: ImageIcon, music: Music2, sfx: AudioLines, voice: Mic,
-  block: LayoutGrid,
+  block: LayoutGrid, doc: FileText,
 };
 const TYPE_PILLS: { id: LibType; label: string; Icon: typeof Film }[] =
-  KIND_ORDER.map((id) => ({ id: id as LibType, label: KIND_LABEL[id], Icon: TYPE_ICON[id as LibType] }));
+  // No `as LibType` cast here any more. The cast is what let a kind exist in
+  // KIND_ORDER with no icon in TYPE_ICON and still typecheck.
+  KIND_ORDER.map((id) => ({ id, label: KIND_LABEL[id], Icon: TYPE_ICON[id] }));
 
 /** Type pill → media-library `kind` group. The stock library uses richer kinds
  *  (`audio-sfx`, `visual-vfx`, …) and accepts a group prefix, so this keeps ONE
  *  type filter driving both scopes instead of showing the user two vocabularies. */
 const LIB_KIND_FOR_TYPE: Record<LibType, string> = {
   all: "all",
+  // Documents live in the user's own library, never in the stock media scopes.
+  doc: "doc",
   video: "visual",
   image: "visual-image",
   music: "audio-music",
@@ -372,6 +391,8 @@ const LIB_KIND_FOR_TYPE: Record<LibType, string> = {
  */
 const LIB_KINDS_FOR_TYPE: Record<LibType, string[]> = {
   all: [],
+  // Never queried — like blocks, docs are the user's own, not a media scope.
+  doc: [],
   video: ["visual-video", "visual-vfx"],
   image: ["visual-image", "visual-hdri", "visual-vector"],
   music: ["audio-music"],
@@ -1972,7 +1993,7 @@ export const LibraryPanel: React.FC = () => {
                 : "bg-background-tertiary border-border text-text-secondary hover:border-text-muted"
             }`}
           >
-            <Icon size={12} />
+            {Icon ? <Icon size={12} /> : null}
             {label}
           </button>
         ))}

@@ -7,7 +7,7 @@ import { useProjectStore } from '../../stores/project-store';
 import { useUIStore } from '../../stores/ui-store';
 import { CANVAS_PRESETS, Project } from '../../types/project';
 import { CosmicField } from '../CosmicField';
-import { onTopLinkClick } from '../../services/navigate-top';
+import { onBackLinkClick, projectsUrl } from '@openreel/asset-browser';
 
 // Voidspace brand mark (the gradient "S"), bundled at /image/images/logo.png.
 const LOGO_SRC = `${import.meta.env.BASE_URL}images/logo.png`;
@@ -217,11 +217,14 @@ export function WelcomeScreen() {
       {/* Voidspace cosmic field — stars + crescent moons, matching the studio. */}
       <CosmicField />
 
-      {/* Back to the Voidspace Studio projects hub, landing on the Images tab. */}
-      <a href="/studio/projects?tab=images"
-        onClick={onTopLinkClick('/studio/projects?tab=images')}
+      {/* BACK MEANS WHERE YOU CAME FROM — shared rule, all three editors.
+          This is a format picker reached from several places (the /ai sidebar,
+          the projects hub, a bookmark), so "My Projects" was wrong for most of
+          them. Falls back to the Images tab when there is no previous page. */}
+      <a href={projectsUrl('images')}
+        onClick={onBackLinkClick(projectsUrl('images'))}
         className="absolute top-5 left-6 z-20 inline-flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary transition-colors">
-        <ArrowRight className="rotate-180" size={14} /> My Projects
+        <ArrowRight className="rotate-180" size={14} /> Back
       </a>
       <button onClick={handleImportProject}
         className="absolute top-5 right-6 z-20 inline-flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary transition-colors">

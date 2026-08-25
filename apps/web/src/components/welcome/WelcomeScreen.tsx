@@ -3,6 +3,8 @@ import {
   ArrowRight,
   AudioWaveform,
   Clock3,
+  FolderOpen,
+  Layout,
   Monitor,
   Music2,
   Smartphone,
@@ -14,6 +16,7 @@ import type { SocialMediaCategory } from "@openreel/core";
 import { VoidspaceTemplateGallery } from "./VoidspaceTemplateGallery";
 import { CosmicField } from "../CosmicField";
 import { useAnalytics, AnalyticsEvents } from "../../hooks/useAnalytics";
+import { goBack as goBackShared, projectsUrl, onTopLinkClick } from "@openreel/asset-browser";
 
 interface FormatOption {
   id: string;
@@ -142,21 +145,16 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
    * referrer means we got here by a link, which is exactly when going back is
    * meaningful — and it also refuses to bounce someone out to another site.
    */
+  // The referrer-aware implementation that used to live here MOVED to
+  // @openreel/asset-browser/editor-nav, because it was the only correct "back"
+  // in the product and the other four call sites could not reach it. The shared
+  // one also fixes what this version got wrong INSIDE THE IFRAME: `window`
+  // there is the frame, so history.back() walked the editor's own view changes
+  // instead of leaving, and location.href rendered the projects hub inside the
+  // editor pane beside the chat.
   const goBack = useCallback(() => {
-    try {
-      if (
-        document.referrer &&
-        new URL(document.referrer).origin === window.location.origin &&
-        window.history.length > 1
-      ) {
-        window.history.back();
-        return;
-      }
-    } catch {
-      /* malformed referrer — fall through to the list */
-    }
-    window.location.href = "/studio/projects";
-  }, []);
+    goBackShared(projectsUrl(mode === "music" ? "music" : "videos"));
+  }, [mode]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -217,6 +215,18 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
         <ArrowRight className="rotate-180" size={14} />
         Back
       </button>
+
+      {/* The counterpart to the image editor's top-right "Open Project". Back
+          goes wherever you CAME FROM (often the chat); this is the explicit
+          way to the project list, which is a different thing and was otherwise
+          unreachable from here. A real <a> so middle-click opens a tab. */}
+      <a
+        href={projectsUrl("videos")}
+        onClick={onTopLinkClick(projectsUrl("videos"))}
+        className="absolute top-5 right-6 z-20 inline-flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary transition-colors"
+      >
+        <FolderOpen size={14} /> My projects
+      </a>
 
       <div className="relative z-10 h-full flex flex-col items-center justify-center px-6">
         <div className="w-full max-w-3xl">
@@ -361,6 +371,42 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
                   </button>
                 );
               })}
+            </div>
+          )}
+
+          {/*
+            THE SECOND ROW — the same shape, and the same words, as the image
+            editor's "Browse all formats / Custom size".
+
+            The template gallery already existed and was UNREACHABLE from this
+            screen: `setViewMode("templates")` was never called from the home
+            view, so the only way in was the parent passing initialTab. Somebody
+            arriving to start from a template had to already know a route that
+            was not on the page. That is exactly the gap the image editor closed
+            when it stopped hiding presentations and posters behind a filter.
+
+            "Custom size" has no honest equivalent here: /ai only mints 16:9,
+            9:16 and 1:1 (see `newVideoAspect` in the studio page), and anything
+            else silently falls back to the chat welcome. So the second slot is
+            the other real way to start — music — rather than a control that
+            would look like it worked.
+          */}
+          {!isMusicMode && (
+            <div className="mt-6 flex items-center justify-center gap-2">
+              <button
+                type="button"
+                onClick={() => setViewMode("templates")}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium text-text-secondary bg-background-secondary border border-border hover:border-primary/40 hover:text-text-primary transition-all"
+              >
+                <Layout size={15} /> Browse templates
+              </button>
+              <button
+                type="button"
+                onClick={handleStartMusic}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium text-text-secondary bg-background-secondary border border-border hover:border-primary/40 hover:text-text-primary transition-all"
+              >
+                <Music2 size={15} /> Start with music
+              </button>
             </div>
           )}
         </div>

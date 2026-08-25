@@ -26,6 +26,7 @@ import {
 } from "lucide-react";
 import { useProjectStore } from "../../stores/project-store";
 import { useUIStore } from "../../stores/ui-store";
+import { goBack, projectsUrl } from "@openreel/asset-browser";
 import { autoSaveManager } from "../../services/auto-save";
 import { saveRecordingToDisk, saveMediaToDisk } from "../../services/recording-save";
 import {
@@ -82,6 +83,22 @@ interface ExportState {
 
 // BUILD MARKER — log on module load so we can confirm which build is running
 console.log("[BUILD] Toolbar.tsx v2-savedebug — Save with ack flow");
+
+/**
+ * BACK MEANS WHERE YOU CAME FROM.
+ *
+ * Both the logo and the Back button used to assign `/studio/projects?tab=…`
+ * unconditionally, so anyone who opened this editor from the agent chat, a
+ * board or a deep link was thrown out to a projects list they had never been
+ * on. `goBack` walks the TOP window's history — the editor sits in an iframe on
+ * /ai, and the iframe's OWN history is just editor view changes, so going back
+ * in it would step around inside the editor rather than leave it — and falls
+ * back to the matching projects tab only when there is genuinely no previous
+ * page, such as a bookmark opened cold.
+ */
+function goBackFromEditor(): void {
+  goBack(projectsUrl(useUIStore.getState().appMode === "music" ? "music" : "videos"));
+}
 
 export const Toolbar: React.FC = () => {
   const { project } = useProjectStore();
@@ -1043,18 +1060,9 @@ export const Toolbar: React.FC = () => {
         <Tooltip>
           <TooltipTrigger asChild>
             <button
-              onClick={() => {
-                // Land on the matching projects tab: music editor → Music,
-                // video editor → Videos (?tab= is read by /studio/projects).
-                const backUrl = `/studio/projects?tab=${useUIStore.getState().appMode === "music" ? "music" : "videos"}`;
-                if (window.top && window.top !== window) {
-                  window.top.location.href = backUrl;
-                  return;
-                }
-                window.location.href = backUrl;
-              }}
+              onClick={goBackFromEditor}
               className="flex items-center gap-3 hover:opacity-80 transition-opacity"
-              title="Back to Studio Projects"
+              title="Back"
             >
               <img
                 src="/studio/images/logo.png"
@@ -1066,25 +1074,18 @@ export const Toolbar: React.FC = () => {
                   ate horizontal space and made the row feel cluttered. */}
             </button>
           </TooltipTrigger>
-          <TooltipContent>Back to Studio Projects</TooltipContent>
+          <TooltipContent>Back</TooltipContent>
         </Tooltip>
         <div className="h-6 w-px bg-border hidden md:block" />
         <button
-          onClick={() => {
-            const backUrl = `/studio/projects?tab=${useUIStore.getState().appMode === "music" ? "music" : "videos"}`;
-            if (window.top && window.top !== window) {
-              window.top.location.href = backUrl;
-              return;
-            }
-            window.location.href = backUrl;
-          }}
+          onClick={goBackFromEditor}
           /* Allow the button to size to its label and never overflow the
              toolbar gutter. The previous fixed height + no min-width let
              the text clip on narrower split-mode panes. */
           className="h-9 px-3 rounded-lg border border-border bg-background-secondary text-sm text-text-secondary hover:text-text-primary hover:bg-background-elevated transition-colors whitespace-nowrap shrink-0 inline-flex items-center"
-          title="Back to Studio Projects"
+          title="Back"
         >
-          Back to Projects
+          Back
         </button>
       </div>
 
