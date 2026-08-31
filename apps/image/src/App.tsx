@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Loader2 } from 'lucide-react';
+import { ImageOff, Loader2 } from 'lucide-react';
 import { useUIStore } from './stores/ui-store';
 import { WelcomeScreen } from './components/welcome/WelcomeScreen';
 import { EditorInterface } from './components/editor/EditorInterface';
@@ -51,6 +51,18 @@ function readBootTarget(): { carouselId?: string; projectId?: string; preset?: N
  * and a deep link resolving through a display string would break the day someone
  * renames a tile. These four are a stable contract with the URL.
  */
+/**
+ * Has the `?src=` handoff already been taken by this page load?
+ *
+ * React 18 StrictMode mounts effects twice in development, and a second import
+ * would stack a duplicate layer. This used to be guarded implicitly by
+ * `clearHandoffUrl()` running synchronously at the top of the effect — but the
+ * param is now kept until the load SUCCEEDS (so a failure stays retryable),
+ * which means the guard has to be its own thing. Reset on failure so "Try
+ * again" can re-enter.
+ */
+let handoffClaimed = false;
+
 type NewPreset = { name: string; width: number; height: number };
 const NEW_PRESETS: Record<string, NewPreset> = {
   presentation: { name: 'Presentation', width: 1920, height: 1080 },
@@ -78,6 +90,10 @@ export default function App() {
   // `booting` is true from the very first render when a deep-link is present,
   // so the welcome screen never flashes before the project opens.
   const [booting, setBooting] = useState(() => readBootTarget() !== null);
+  // Why the "Edit this image" handoff could not open the picture, if it failed.
+  // Rendered instead of the format picker so the tab never looks like a normal
+  // empty editor when it was asked to open something.
+  const [handoffError, setHandoffError] = useState<string | null>(null);
 
   useKeyboardShortcuts();
   useAutoSave();
@@ -210,18 +226,30 @@ export default function App() {
 
   // "Edit this image" handoff: another surface opened us with ?src=…&from=…
   // Load the image as a fresh project; the user saves it from Export when done.
+  //
+  // Two rules here, both learned from "Edit opened an empty editor":
+  //  1. `?src=` is cleared only AFTER the image is on the canvas. Clearing it up
+  //     front destroyed the only record of what the user asked for, so a failure
+  //     left them on the format picker with nothing to retry.
+  //  2. A failure is SAID OUT LOUD. The old catch was a console.warn, so a CORS
+  //     rejection and "you opened the editor normally" looked identical.
   useEffect(() => {
     const h = readHandoffParams();
     if (!h) return;
-    clearHandoffUrl();
+    if (handoffClaimed) return;
+    handoffClaimed = true;
     const source = parseLocalAssetSource(h.src);
     (async () => {
       try {
         await loadSrcAsProject(h.src, h.from);
         setEditSource(source); // overwrite-in-place target (null if not local)
         setCurrentView('editor');
+        setHandoffError(null);
+        clearHandoffUrl(); // consumed — a refresh must not re-import over the work
       } catch (e) {
+        handoffClaimed = false;
         console.warn('[image-handoff] could not open source image:', e);
+        setHandoffError((e as Error)?.message || 'could not open that image');
       } finally {
         setBooting(false);
       }
@@ -234,6 +262,9 @@ export default function App() {
   // While a deep-linked project is loading, show a clean loading screen (never
   // the welcome page) so the transition into the editor is direct.
   const showBootLoading = booting && currentView !== 'editor';
+  // A handoff that failed must not fall through to the format picker — that is
+  // exactly the "editor opened without the image" the user reported.
+  const showHandoffError = !!handoffError && currentView !== 'editor';
 
   return (
     <div className="h-full w-full bg-background">
@@ -243,6 +274,34 @@ export default function App() {
           <div className="relative z-10 flex flex-col items-center gap-3">
             <Loader2 className="w-7 h-7 text-primary animate-spin" />
             <p className="text-sm text-text-secondary">Opening your project…</p>
+          </div>
+        </div>
+      ) : showHandoffError ? (
+        <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-background overflow-hidden">
+          <CosmicField />
+          <div className="relative z-10 flex max-w-sm flex-col items-center gap-3 px-6 text-center">
+            <ImageOff className="w-8 h-8 text-text-secondary" />
+            <p className="text-base font-medium">Couldn’t open that image</p>
+            <p className="text-sm text-text-secondary">{handoffError}</p>
+            <div className="flex gap-2 pt-2">
+              {/* The ?src= param is still in the URL — a reload re-runs the
+                  whole handoff, which is what makes a transient failure
+                  recoverable without going back to the other tab. */}
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-all"
+              >
+                Try again
+              </button>
+              <button
+                type="button"
+                onClick={() => setHandoffError(null)}
+                className="rounded-lg border border-border bg-background-secondary px-4 py-2 text-sm text-text-secondary hover:border-primary/40 hover:text-text-primary transition-all"
+              >
+                Start blank
+              </button>
+            </div>
           </div>
         </div>
       ) : currentView === 'welcome' ? (

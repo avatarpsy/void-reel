@@ -83,14 +83,79 @@ function imageDims(dataUrl: string): Promise<{ width: number; height: number }> 
   });
 }
 
+/** Same-origin `/api/...` asset — auth-gated, so the Bearer header applies.
+ *  Resolved through `URL` rather than string-matched: the src arrives absolute
+ *  (the studio builds it with `new URL(u, origin)`), and a host spelled with an
+ *  explicit `:443`, a trailing dot, or a tunnel name used to miss the prefix
+ *  test and get fetched anonymously — a 401 that reads as "no image". */
+function isSameOriginApi(src: string): boolean {
+  try {
+    const u = new URL(src, window.location.origin);
+    return u.origin === window.location.origin && u.pathname.startsWith('/api/');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A cross-origin http(s) source re-pointed at our own CORS-fronting proxy.
+ *
+ * THIS IS THE FIX for "Edit opened an empty editor". A freshly generated image
+ * lives on the provider's host (Kie tempfile / aiquickdraw / an un-CORSed
+ * bucket), which serves no `Access-Control-Allow-Origin`. An `<img>` shows it
+ * happily — which is why the chat card and the lightbox looked fine — but
+ * `fetch()` cannot read the bytes, so the editor booted with nothing on the
+ * canvas. It started working "after a while" only because the picture had by
+ * then been mirrored to a host that does send the header.
+ *
+ * Every other import path in this app already routes through the proxy
+ * (library, carousel, layer separation, generate panel); the handoff was the
+ * one that didn't.
+ */
+function proxiedUrl(src: string): string | null {
+  try {
+    const u = new URL(src, window.location.origin);
+    if (u.origin === window.location.origin) return null;
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return `/api/studio/media-proxy?url=${encodeURIComponent(u.toString())}`;
+  } catch {
+    return null;
+  }
+}
+
+/** Read the source image's bytes, whatever it takes: authed direct fetch first,
+ *  then the same-origin proxy for anything cross-origin. Throws with a reason
+ *  the user can act on — never resolves empty. */
+async function fetchSourceBytes(src: string): Promise<Blob> {
+  const token = isSameOriginApi(src) ? await getVoidspaceIdToken() : null;
+  let directStatus = 0;
+  try {
+    const res = await fetch(src, token ? { headers: { Authorization: `Bearer ${token}` } } : {});
+    if (res.ok) return await res.blob();
+    directStatus = res.status;
+  } catch {
+    // CORS rejection or a dropped connection — both land here with no status.
+  }
+
+  const viaProxy = proxiedUrl(src);
+  if (viaProxy) {
+    const res = await fetch(viaProxy);
+    if (res.ok) return await res.blob();
+    throw new Error(
+      `could not load image (${res.status}${directStatus ? ` direct ${directStatus}` : ''})`,
+    );
+  }
+  throw new Error(
+    directStatus
+      ? `could not load image (${directStatus})`
+      : 'could not reach that image — it may have expired',
+  );
+}
+
 /** Fetch the source image and open it as a brand-new editor project. */
 export async function loadSrcAsProject(src: string, label: string): Promise<void> {
-  const token = await getVoidspaceIdToken();
-  // Same-origin /api assets are auth-gated; everything else fetches plainly.
-  const sameOriginApi = /^\/api\//.test(src) || src.startsWith(`${window.location.origin}/api/`);
-  const res = await fetch(src, sameOriginApi && token ? { headers: { Authorization: `Bearer ${token}` } } : {});
-  if (!res.ok) throw new Error(`could not load image (${res.status})`);
-  const blob = await res.blob();
+  const blob = await fetchSourceBytes(src);
+  if (!blob.size) throw new Error('the source image was empty');
   const dataUrl = await blobToDataUrl(blob);
   const { width, height } = await imageDims(dataUrl);
   const w = Math.max(1, Math.round(width));
@@ -99,9 +164,14 @@ export async function loadSrcAsProject(src: string, label: string): Promise<void
   const P = useProjectStore.getState();
   P.createProject(label || 'Edit image', { width: w, height: h });
   const assetId = `edit-src-${Date.now()}`;
-  P.addAsset({
-    id: assetId, name: label || 'Image', type: 'image', mimeType: blob.type || 'image/png',
-    size: dataUrl.length, width: w, height: h, thumbnailUrl: dataUrl, dataUrl,
+  // One transaction: register-asset + add-layer is a single "place the image"
+  // step. Split, the freshly-booted document's first Ctrl+Z removed the layer
+  // and left the orphan asset behind — the exact case runTransaction exists for.
+  useProjectStore.getState().runTransaction('Open image', () => {
+    P.addAsset({
+      id: assetId, name: label || 'Image', type: 'image', mimeType: blob.type || 'image/png',
+      size: dataUrl.length, width: w, height: h, thumbnailUrl: dataUrl, dataUrl,
+    });
+    P.addImageLayer(assetId, { x: 0, y: 0, width: w, height: h });
   });
-  P.addImageLayer(assetId, { x: 0, y: 0, width: w, height: h });
 }
