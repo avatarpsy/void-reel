@@ -57,7 +57,7 @@ export interface VoidspaceSceneList {
   content_type?: string;
   aspect_ratio?: string;
   video_url?: string;
-  loop_description?: string;
+  video_description?: string;
   description?: string;
   content?: string;
   caption?: string;
@@ -1389,7 +1389,7 @@ function setSceneListContext(
   slData: Record<string, unknown>,
 ) {
   const caption =
-    (slData.loop_description as string | undefined) ||
+    (slData.video_description as string | undefined) ||
     (slData.description as string | undefined) ||
     (slData.content as string | undefined) ||
     (slData.caption as string | undefined) ||
@@ -1424,7 +1424,7 @@ export async function fetchSceneListContext(
   // If the scene list has a review_id and no caption fields, fetch the review
   // document's description to use as the caption.
   const hasCaption =
-    slData.loop_description || slData.description || slData.content ||
+    slData.video_description || slData.description || slData.content ||
     slData.caption || slData.post_description;
 
   if (!hasCaption && slData.review_id) {
