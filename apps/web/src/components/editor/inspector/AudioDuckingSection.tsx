@@ -116,22 +116,79 @@ export const AudioDuckingSection: React.FC<AudioDuckingSectionProps> = ({
     }
   }, []);
 
-  const handleApplyDucking = useCallback(() => {
-    if (!settings.sourceTrackId) return;
+  /**
+   * ── THIS BUTTON USED TO DO NOTHING ──────────────────────────────────────────
+   * "Apply" set `isApplied` and bumped `project.modifiedAt`. It wrote no
+   * automation, changed no gain and touched no clip — so the panel showed a
+   * green tick over an unchanged mix, and the setting was gone on reload
+   * because it only ever lived in React state.
+   *
+   * It now runs the SAME code as the agent's `auto-duck` surface: speech
+   * ranges are read off the timeline, an envelope with attack/release ramps is
+   * computed, and native volume keyframes are written through
+   * `updateClipKeyframes`. Those render in the preview, render in the export,
+   * show up in the Keyframes panel and on the timeline's volume overlay, are
+   * undoable, and are saved with the project.
+   *
+   * One implementation, two front doors. The alternative — a second ducking
+   * routine behind this button — is how the two paths drift until one of them
+   * is quietly wrong, which is the failure this whole section is an example of.
+   */
+  const [error, setError] = useState<string | null>(null);
 
+  const handleApplyDucking = useCallback(async () => {
+    setError(null);
+    const { surface: autoDuck } = await import("../../../agent/inspector-surfaces/auto-duck");
+    const store = useProjectStore.getState();
+    let target: any = null;
+    let trackId = "";
+    for (const tr of store.project.timeline.tracks) {
+      const found = (tr.clips ?? []).find((c) => c.id === clipId);
+      if (found) { target = found; trackId = tr.id; break; }
+    }
+    if (!target) { setError("clip not found"); return; }
+
+    const res = await autoDuck.apply(
+      { id: clipId, kind: "audio", trackId, raw: target as never },
+      {
+        // The panel speaks in "reduction" (how much to take AWAY); the
+        // envelope speaks in the level it ducks TO. Converting here keeps
+        // both vocabularies honest instead of relabelling the slider.
+        duckTo: Math.max(0, Math.min(1, 1 - settings.reduction)),
+        attackSec: settings.attack,
+        releaseSec: settings.release,
+        tailSec: settings.holdTime,
+        // The picker is an explicit choice; honour it instead of
+        // auto-detecting. Omitted when they have not chosen one.
+        ...(settings.sourceTrackId ? { againstTrackId: settings.sourceTrackId } : {}),
+      },
+      { project: store.project, store: store as unknown as Record<string, unknown> },
+    );
+
+    if (!res.ok) { setError(res.error ?? "could not duck this clip"); setIsApplied(false); return; }
     setIsApplied(true);
-    useProjectStore.setState((state) => ({
-      project: { ...state.project, modifiedAt: Date.now() },
-    }));
-  }, [settings]);
+  }, [settings, clipId]);
 
-  const handleRemoveDucking = useCallback(() => {
+  const handleRemoveDucking = useCallback(async () => {
+    setError(null);
+    const { surface: autoDuck } = await import("../../../agent/inspector-surfaces/auto-duck");
+    const store = useProjectStore.getState();
+    let target: any = null;
+    let trackId = "";
+    for (const tr of store.project.timeline.tracks) {
+      const found = (tr.clips ?? []).find((c) => c.id === clipId);
+      if (found) { target = found; trackId = tr.id; break; }
+    }
+    if (target) {
+      await autoDuck.apply(
+        { id: clipId, kind: "audio", trackId, raw: target as never },
+        { clear: true },
+        { project: store.project, store: store as unknown as Record<string, unknown> },
+      );
+    }
     setSettings(DEFAULT_SETTINGS);
     setIsApplied(false);
-    useProjectStore.setState((state) => ({
-      project: { ...state.project, modifiedAt: Date.now() },
-    }));
-  }, []);
+  }, [clipId]);
 
   return (
     <div className="space-y-3">
@@ -364,6 +421,15 @@ export const AudioDuckingSection: React.FC<AudioDuckingSectionProps> = ({
                       Minimum time to stay ducked between words
                     </p>
                   </div>
+                </div>
+              )}
+
+              {/* Say why nothing happened. The old panel could only report
+                  success, so the one case that actually occurs — no narration
+                  on the timeline yet — looked identical to a working duck. */}
+              {error && (
+                <div className="p-2 bg-red-500/10 border border-red-500/20 rounded-lg">
+                  <span className="text-[10px] text-red-400">{error}</span>
                 </div>
               )}
 

@@ -29,6 +29,7 @@ import type {
 import {
   ActionExecutor,
   ActionHistory,
+  getSpeedEngine,
   textAnimationEngine,
 } from "@openreel/core";
 import { v4 as uuidv4 } from "uuid";
@@ -38,6 +39,7 @@ import type {
   ColorGradingSettings,
 } from "../bridges/effects-bridge";
 import { getEffectsBridge } from "../bridges/effects-bridge";
+import { getBeatSyncBridge } from "../bridges/beat-sync-bridge";
 import {
   autoSaveManager,
   initializeAutoSave,
@@ -304,6 +306,19 @@ export interface ProjectState {
   ) => void;
   getMarker: (markerId: string) => import("@openreel/core").Marker | undefined;
   getMarkers: () => import("@openreel/core").Marker[];
+  /**
+   * Commit a beat analysis to the PROJECT, not just to the bridge.
+   *
+   * `Timeline.beatMarkers` / `beatAnalysis` have been on the type since beat
+   * detection was written, and nothing ever wrote them: the BeatSyncBridge kept
+   * the grid in its own state, so analysing a track drew beats on the ruler and
+   * lost them on reload. Cutting to a grid that disappears is worse than having
+   * no grid, because the cuts stay and the reason for them does not.
+   */
+  setBeatGrid: (
+    beatMarkers: import("@openreel/core").TimelineBeatMarker[],
+    beatAnalysis: import("@openreel/core").TimelineBeatAnalysis | null,
+  ) => void;
 
   // Graphics actions
   createShapeClip: (
@@ -513,6 +528,35 @@ export const useProjectStore = create<ProjectState>()(
           if (effectsState) getEffectsBridge().restoreAllEffects(effectsState);
         } catch (e) {
           console.warn('[loadProject] effects restore failed:', e);
+        }
+
+        // Retiming, same contract. The SpeedEngine is a plain singleton with
+        // no async init, so this needs no buffering — but it DOES need to run
+        // before playback starts, which is why it sits beside the effects
+        // restore rather than in a later effect.
+        try {
+          const speedState = (project as any).speedState;
+          console.log(`[loadProject] speedState: ${speedState ? Object.keys(speedState).length + ' clip(s)' : 'ABSENT'}`);
+          if (speedState) getSpeedEngine().restoreAll(speedState);
+        } catch (e) {
+          console.warn('[loadProject] speed restore failed:', e);
+        }
+
+        // The beat grid lives on the timeline (so it saves) and is CACHED in
+        // the BeatSyncBridge (so the ruler and the snapping can read it without
+        // walking the project). The project is the source of truth; this is the
+        // one place the cache is filled from it.
+        try {
+          const bm = project.timeline?.beatMarkers;
+          if (Array.isArray(bm) && bm.length > 0) {
+            getBeatSyncBridge().setBeatMarkers(
+              bm,
+              project.timeline?.beatAnalysis ?? { bpm: 0, confidence: 0, analyzedAt: Date.now() },
+            );
+            console.log(`[loadProject] beatMarkers: ${bm.length}`);
+          }
+        } catch (e) {
+          console.warn('[loadProject] beat grid restore failed:', e);
         }
 
         if (titleEngine && project.textClips) {
@@ -2968,6 +3012,17 @@ export const useProjectStore = create<ProjectState>()(
               if (Object.keys(all).length > 0) effectsState = all;
             } catch { /* bridge unavailable — save proceeds without */ }
 
+            // Retiming lives in the SpeedEngine's map for exactly the same
+            // reason, and losing it is worse than losing an effect: the
+            // Inspector also shortens `clip.duration`, so a reload that
+            // forgets the speed leaves a 1x clip in a window sized for 2x —
+            // the back half of the shot simply stops existing.
+            let speedState: Record<string, unknown> | undefined;
+            try {
+              const all = getSpeedEngine().serializeAll();
+              if (Object.keys(all).length > 0) speedState = all;
+            } catch { /* engine unavailable — save proceeds without */ }
+
             return {
               ...project,
               textClips: titleEngine?.getAllTextClips() || [],
@@ -2975,6 +3030,7 @@ export const useProjectStore = create<ProjectState>()(
               svgClips: graphicsEngine?.getAllSVGClips() || [],
               stickerClips: graphicsEngine?.getAllStickerClips() || [],
               ...(effectsState ? { effectsState } : {}),
+              ...(speedState ? { speedState } : {}),
             } as Project;
           },
           // Capture serialised ActionHistory alongside every autosave
@@ -3056,6 +3112,9 @@ export const useProjectStore = create<ProjectState>()(
             const effectsState = (recoveredProject as any).effectsState;
             console.log(`[recoverFromAutoSave] effectsState: ${effectsState ? Object.keys(effectsState).length + ' clip(s)' : 'ABSENT'}`);
             if (effectsState) getEffectsBridge().restoreAllEffects(effectsState);
+            const speedState = (recoveredProject as any).speedState;
+            console.log(`[recoverFromAutoSave] speedState: ${speedState ? Object.keys(speedState).length + ' clip(s)' : 'ABSENT'}`);
+            if (speedState) getSpeedEngine().restoreAll(speedState);
           } catch (e) {
             console.warn('[recoverFromAutoSave] effects restore failed:', e);
           }
@@ -3607,6 +3666,28 @@ export const useProjectStore = create<ProjectState>()(
       },
 
       // Marker actions
+
+      /**
+       * The beat grid, written where it survives a reload.
+       *
+       * Bumps `modifiedAt` deliberately: the autosave is hash-gated on it, so
+       * without the bump an analysis would sit in memory until some unrelated
+       * edit happened to trigger a save — the same way a subtitle edit used to
+       * go missing (see `updateSubtitle`).
+       */
+      setBeatGrid: (beatMarkers, beatAnalysis) => {
+        set((state) => ({
+          project: {
+            ...state.project,
+            timeline: {
+              ...state.project.timeline,
+              beatMarkers,
+              ...(beatAnalysis ? { beatAnalysis } : {}),
+            },
+            modifiedAt: Date.now(),
+          },
+        }));
+      },
 
       addMarker: (time, label = "Marker", color = "#3b82f6") => {
         const newMarker: import("@openreel/core").Marker = {

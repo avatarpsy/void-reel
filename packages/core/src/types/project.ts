@@ -71,6 +71,31 @@ export interface Project {
    * is a clip like any other. This is the index, and it is optional.
    */
   readonly nestedInstances?: CompoundClipInstance[];
+  /**
+   * SIDE-CAR ENGINE STATE — the two things a clip does not carry itself.
+   *
+   * ── WHY THESE ARE DECLARED RATHER THAN RIDING AS UNTYPED EXTRAS ────────────
+   * Some per-clip state lives in a singleton engine's Map, not on the Clip:
+   * the effects chain and colour grading in the EffectsBridge, retiming in the
+   * SpeedEngine. Nothing about that is wrong — the engines are what the
+   * renderer reads — but it means the autosave has to go and FETCH them, and a
+   * fetch nobody wrote is a silent loss rather than a compile error.
+   *
+   * `effectsState` was added that way, as an untyped extra on a `as Project`
+   * cast, and the identical gap for retiming then went unnoticed for months:
+   * the Inspector wrote the speed to the engine AND the shortened duration to
+   * the clip, so a reload restored the short window without the speed and the
+   * tail of the shot vanished. Declaring them here is what makes the next
+   * engine-backed feature answer the question "and who saves this?".
+   *
+   * Shapes are deliberately loose — each engine owns its own payload and both
+   * restore paths are defensive. Anything added here needs a serialize on the
+   * autosave callback AND a restore in BOTH `loadProject` and
+   * `recoverFromAutoSave`; local recovery is the common reopen path and skips
+   * `loadProject` entirely.
+   */
+  readonly effectsState?: Record<string, unknown>;
+  readonly speedState?: Record<string, unknown>;
 }
 
 export interface MediaLibrary {

@@ -166,4 +166,25 @@ export const surface: InspectorSurface<TransitionsConfig> = {
       parts.push("(exit skipped — adjacent clip)");
     return { ok: true, note: parts.length ? parts.join(", ") : "cleared" };
   },
+  /**
+   * Entry/exit presets are not stored as a preset name — `apply` compiles them
+   * into opacity/transform KEYFRAMES at the head and tail of the clip. So the
+   * honest read is "what is keyed near each edge", which is what tells the
+   * agent whether it has already faded this clip in.
+   */
+  read: (clip) => {
+    const raw = clip.raw as any;
+    const dur = Number(raw.duration) || 0;
+    const kfs: Array<{ time: number; property: string }> = raw.keyframes ?? [];
+    if (dur <= 0 || kfs.length === 0) return null;
+    const edge = Math.min(1, dur / 2);
+    const entry = kfs.filter((k) => k.time <= edge);
+    const exit = kfs.filter((k) => k.time >= dur - edge);
+    if (entry.length === 0 && exit.length === 0) return null;
+    const props = (list: typeof kfs) => [...new Set(list.map((k) => k.property))].sort();
+    return {
+      entry: entry.length ? { keyedProperties: props(entry), keyframes: entry.length } : null,
+      exit: exit.length ? { keyedProperties: props(exit), keyframes: exit.length } : null,
+    };
+  },
 };

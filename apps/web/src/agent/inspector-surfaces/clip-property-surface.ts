@@ -39,6 +39,15 @@ export interface ClipPropertyDescriptor {
    * Default: pass the whole config object as one argument.
    */
   toStoreArgs?: (config: any, clip: InspectorSurfaceClip) => unknown[];
+  /**
+   * Read the property back off the clip, in the shape `apply` accepts.
+   *
+   * Every direct-property surface CAN be read — the value it writes is a field
+   * on the clip — so this is the cheap half of closing the write-only gap, one
+   * line per row in the table. A row without one still works; it simply
+   * reports itself as not readable rather than reporting a wrong value.
+   */
+  fromClip?: (clip: InspectorSurfaceClip, ctx: ApplyContext) => unknown;
 }
 
 export function makeClipPropertySurface(
@@ -67,5 +76,18 @@ export function makeClipPropertySurface(
         return { ok: false, error: e?.message ?? String(e) };
       }
     },
+    ...(p.fromClip
+      ? {
+          read: (clip: InspectorSurfaceClip, ctx: ApplyContext) => {
+            try {
+              return p.fromClip!(clip, ctx);
+            } catch {
+              // A read that throws must not look like "not set" — say nothing
+              // rather than something false.
+              return null;
+            }
+          },
+        }
+      : {}),
   };
 }

@@ -33,23 +33,12 @@ import { BlobEngine, IndexedDBBlobSource, type BlobSource, type BlobState } from
 import { BehaviorSubject, Observable } from 'rxjs';
 
 import { decodeMediaRef, isMediaRef, type MediaRef } from '../board/media-ref';
-import { awaitParentToken, getParentToken } from '../board/parent-auth';
+import { fetchMediaBlob } from '../board/media-fetch';
 
 /** Parallel media fetches. Six matches what a browser gives one origin anyway. */
 const CONCURRENCY = 6;
 /** Images kept in memory. Bounded because a long session filters through many. */
 const MEM_LIMIT = 240;
-/**
- * How long a media fetch waits for a session that has not arrived yet.
- *
- * Long enough to cover the parent restoring Firebase from IndexedDB (the page's
- * own auth waits allow four seconds, and useAuth's stall recovery fires at
- * 2.5s), short enough that a genuinely signed-out board still settles while the
- * user is looking at it. Ends early the moment a token is pushed, so this is a
- * ceiling on the bad case rather than a cost on the normal one.
- */
-const AUTH_WAIT_MS = 8_000;
-
 /** On-device copy, so reopening a board is instant and works offline. */
 const MEDIA_CACHE = 'voidspace-board-media-v1';
 
@@ -327,51 +316,14 @@ export class VoidspaceBlobSource implements BlobSource {
   }
 
   /**
-   * Fetch with auth, once more once we can do better than the first attempt.
+   * The bytes behind a resolved url.
    *
-   * TWO DIFFERENT FAILURES LOOK IDENTICAL HERE, and treating them the same is
-   * what made images vanish from boards.
-   *
-   *  • WE HAVE A TOKEN AND IT IS STALE. A board open for an hour outlives its
-   *    token, and the first thing to notice is a block scrolling into view.
-   *    Force a refresh and try again.
-   *
-   *  • WE NEVER HAD ONE YET. The parent restores its Firebase session
-   *    asynchronously, and `NO_TOKEN_TTL` then makes "no token" the answer given
-   *    to every consumer for the next thirty seconds. Every image that connects
-   *    in that window used to fetch unauthenticated, take a 401, and return null
-   *    — which `ResourceController.blob()` renders as the permanent card reading
-   *    "Image not found". The asset was fine, the link was fine, and the only
-   *    way back was a gesture that re-asks: double-clicking the block runs
-   *    `refreshUrlWith`, which calls `get` again, which by then succeeds. Hence
-   *    "the images are gone, but they're there when I double-click".
-   *
-   *    So WAIT for the token instead of concluding there is none. The block
-   *    shows its spinner meanwhile, which is the honest state — the picture is
-   *    on its way — and a signed-out board still resolves because the wait is
-   *    bounded.
+   * Every rule about HOW to ask — token for our own origin, plain for a bucket,
+   * the proxy when CORS refuses — lives in `media-fetch.ts`, because the
+   * placement path needs the identical answer and the two used to differ.
    */
   private async download(url: string): Promise<Blob | null> {
-    let token = await getParentToken().catch(() => null);
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const res = await fetch(url, {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        });
-        if (res.ok) return await res.blob();
-        // Not an auth problem: a 404 is a dead link and asking again with a
-        // better token would only turn one honest failure into two.
-        if (res.status !== 401 && res.status !== 403) return null;
-      } catch {
-        return null;
-      }
-      if (attempt > 0) break;
-      token = token
-        ? await getParentToken(true).catch(() => null)
-        : await awaitParentToken(AUTH_WAIT_MS).catch(() => null);
-      if (!token) return null;
-    }
-    return null;
+    return fetchMediaBlob(url);
   }
 }
 

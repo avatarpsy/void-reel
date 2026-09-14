@@ -35,6 +35,8 @@ import {
   NestedSequenceSection,
   AdjustmentLayerSection,
   ClipTransitionSection,
+  ClipToClipTransitionSection,
+  BeatSyncSection,
   BackgroundRemovalSection,
   AutoReframeSection,
   AutoCutSilenceSection,
@@ -1140,6 +1142,33 @@ export const InspectorPanel: React.FC = () => {
             </Section>
 
             {/* Entry/Exit Transitions - For all visual clips */}
+            {/* Cut to the music. On AUDIO clips because the beats come FROM the
+                track — analysing is something you do to the song, and the grid
+                it writes applies to the whole timeline. The machinery for this
+                existed for months with nothing mounted to reach it. */}
+            {clipType === "audio" && (
+              <Section
+                title="Beat Sync"
+                sectionId="beat-sync"
+                defaultOpen={false}
+              >
+                <BeatSyncSection clipId={clipId} />
+              </Section>
+            )}
+
+            {/* BETWEEN two shots — the real dissolve. Listed above Entry/Exit
+                because "add a transition" almost always means this one, and
+                Entry/Exit between two shots dips through black. */}
+            {(clipType === "video" || clipType === "image") && (
+              <Section
+                title="Transition to Neighbour"
+                sectionId="clip-transitions"
+                defaultOpen={false}
+              >
+                <ClipToClipTransitionSection clipId={clipId} />
+              </Section>
+            )}
+
             {(clipType === "video" ||
               clipType === "image" ||
               clipType === "text" ||

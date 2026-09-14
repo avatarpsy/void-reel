@@ -12,7 +12,8 @@ import { describe, expect, it } from 'vitest';
 
 import { makeTestBoard } from '../blocksuite/test-board';
 import { createShots } from '../shot/shots';
-import { canvasDigest, drawOnCanvas, editCanvas, readCanvas, relaxOverlaps } from './canvas';
+import { canvasDigest, clearOfOwned, drawOnCanvas, editCanvas, readCanvas, relaxOverlaps } from './canvas';
+import { THINKING_EDGE, overlaps } from './space';
 
 describe('drawing on the open canvas', () => {
   it('creates a sticky note carrying its text', () => {
@@ -147,6 +148,16 @@ describe('drawing on the open canvas', () => {
     expect(r.problems[0]).toContain('not an http(s) url');
   });
 
+  /**
+   * IT USED TO ASSERT "BELOW EVERY SHOT", and that was the weaker claim.
+   *
+   * Below the strip is not a region, it is a high-water mark: the storyboard grows
+   * DOWN by a row per scene, so the next scene the user writes lands on whatever
+   * was placed underneath it. A coordinate-less batch now goes into the thinking
+   * region — x < 0, the one half-plane the grid (down) and the filmstrip (right)
+   * can never reach. What the test's own name asks for is non-overlap, so that is
+   * what it checks now.
+   */
   it('places a batch clear of the filmstrip when it is given no coordinates', () => {
     const board = makeTestBoard();
     createShots(board.std, board.surfaceId, ['A', 'B']);
@@ -154,8 +165,11 @@ describe('drawing on the open canvas', () => {
 
     const note = readCanvas(board.std).find(i => i.id === r.ids[0])!;
     const shots = readCanvas(board.std).filter(i => i.kind === 'shot');
-    // Below every shot, so it cannot land on top of the strip.
-    expect(note.y).toBeGreaterThan(Math.max(...shots.map(s => s.y + s.h)));
+    for (const shot of shots) {
+      expect(overlaps(note, shot)).toBe(false);
+    }
+    // And out of the grid's way for good, not merely below its current extent.
+    expect(note.x + note.w).toBeLessThanOrEqual(THINKING_EDGE);
   });
 
   /** One gesture in, one gesture out — a diagram must not take nine undos. */
@@ -525,5 +539,83 @@ describe('the layout pass leaves deliberate work alone', () => {
     const note = items.find(i => i.kind === 'note')!;
     expect(shape.y).toBe(0);                          // the fixed thing holds
     expect(note.y).toBeGreaterThanOrEqual(shape.y + shape.h);
+  });
+});
+
+describe('an agent batch never lands on the storyboard', () => {
+  /**
+   * The reported failure: "the agent is overwriting a lot". A batch drawn with
+   * EXPLICIT coordinates — which is every designed layout — ignored the shots,
+   * the screenplay and the spine, because `freeOrigin` only applies when no
+   * coordinates are given and `relaxOverlaps` moves only notes and mind maps.
+   */
+  it('shifts a coordinate-bearing batch clear of the shot cards', () => {
+    const board = makeTestBoard();
+    createShots(board.std, board.surfaceId, ['A', 'B']);
+
+    const shots = readCanvas(board.std).filter(i => i.owned);
+    expect(shots.length).toBeGreaterThan(0);
+    const stripBottom = Math.max(...shots.map(s => (s.y ?? 0) + (s.h ?? 0)));
+
+    // Straight over the filmstrip, the way a landing-page layout arrives.
+    const r = drawOnCanvas(board.std, [
+      { kind: 'text', text: 'VOIDSPACE — NEW LANDING PAGE', x: 0, y: 0, w: 400, h: 40 },
+      { kind: 'frame', title: '01 — THE HERO', x: 0, y: 80, w: 600, h: 400 },
+      { kind: 'frame', title: '02 — THE HOOK', x: 700, y: 80, w: 600, h: 400 },
+    ]);
+    const made = r.ids.filter(Boolean) as string[];
+    clearOfOwned(board.std, made);
+
+    const items = readCanvas(board.std).filter(i => made.includes(i.id));
+    expect(items.length).toBe(3);
+    for (const it of items) expect(it.y!).toBeGreaterThan(stripBottom);
+  });
+
+  it('moves the WHOLE batch by one offset, so the design survives', () => {
+    const board = makeTestBoard();
+    createShots(board.std, board.surfaceId, ['A']);
+
+    const r = drawOnCanvas(board.std, [
+      { kind: 'text', text: 'title', x: 0, y: 0, w: 400, h: 40 },
+      { kind: 'frame', title: 'left', x: 0, y: 80, w: 600, h: 400 },
+      { kind: 'frame', title: 'right', x: 700, y: 80, w: 600, h: 400 },
+    ]);
+    const made = r.ids.filter(Boolean) as string[];
+    const before = readCanvas(board.std).filter(i => made.includes(i.id))
+      .map(i => ({ id: i.id, x: i.x, y: i.y }));
+    clearOfOwned(board.std, made);
+    const after = readCanvas(board.std).filter(i => made.includes(i.id))
+      .map(i => ({ id: i.id, x: i.x, y: i.y }));
+
+    // Every x is untouched — horizontal position carries the meaning.
+    for (const a of after) {
+      const b = before.find(p => p.id === a.id)!;
+      expect(a.x).toBe(b.x);
+    }
+    // And every y moved by the SAME amount, so the layout arrives intact.
+    const deltas = after.map(a => a.y! - before.find(p => p.id === a.id)!.y!);
+    expect(new Set(deltas).size).toBe(1);
+    expect(deltas[0]).toBeGreaterThan(0);
+  });
+
+  it('leaves a batch alone when it was already clear of the strip', () => {
+    const board = makeTestBoard();
+    createShots(board.std, board.surfaceId, ['A']);
+    const r = drawOnCanvas(board.std, [
+      { kind: 'note', text: 'well below', x: 0, y: 6000, w: 300, h: 200 },
+    ]);
+    const made = r.ids.filter(Boolean) as string[];
+    const before = readCanvas(board.std).find(i => i.id === made[0])!.y;
+    const moved = clearOfOwned(board.std, made);
+    const after = readCanvas(board.std).find(i => i.id === made[0])!.y;
+    expect(moved).toBe(0);
+    expect(after).toBe(before);
+  });
+
+  it('does nothing on a board with no storyboard on it', () => {
+    const board = makeTestBoard();
+    const r = drawOnCanvas(board.std, [{ kind: 'note', text: 'anywhere', x: 0, y: 0 }]);
+    const made = r.ids.filter(Boolean) as string[];
+    expect(clearOfOwned(board.std, made)).toBe(0);
   });
 });

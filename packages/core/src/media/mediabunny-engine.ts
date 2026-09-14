@@ -38,8 +38,75 @@ export const SUPPORTED_IMAGE_FORMATS = [
   "image/gif",
 ];
 
-export function isSupportedFormat(mimeType: string): boolean {
-  const baseMimeType = mimeType.split(";")[0].trim();
+/**
+ * MIME types that mean "bytes" and nothing more.
+ *
+ * ── WHY THIS SET EXISTS ─────────────────────────────────────────────────────
+ * Real servers do not reliably label media. `application/octet-stream` is what
+ * S3, GCS and most CDNs send when the object's content-type was never set —
+ * which is the common case for generated media and for anything uploaded by an
+ * API rather than a browser. `application/mp4` is a REGISTERED type for MP4
+ * (RFC 4337) and is what several static servers emit, including the one this
+ * repo's own dev server uses.
+ *
+ * Rejecting these means rejecting a perfectly good file because a header was
+ * vague, and the user gets "Unsupported format: application/octet-stream" for
+ * an ordinary .mp4 they can play in any other app. Worse for the agent, whose
+ * `add_library_media` imports from arbitrary URLs it did not choose the headers
+ * for — a failure it cannot diagnose or route around.
+ *
+ * So an ambiguous type is not a verdict; it is a missing answer, and the
+ * filename is asked next.
+ */
+const AMBIGUOUS_MIME_TYPES = [
+  "",
+  "application/octet-stream",
+  "binary/octet-stream",
+  "application/mp4",
+  "application/x-mp4",
+  "application/vnd.apple.mpegurl",
+];
+
+/** Extension → the type the bytes actually are. */
+const EXTENSION_MIME: Record<string, string> = {
+  mp4: "video/mp4", m4v: "video/mp4", mov: "video/quicktime",
+  webm: "video/webm", mkv: "video/x-matroska",
+  mp3: "audio/mpeg", wav: "audio/wav", m4a: "audio/aac", aac: "audio/aac",
+  ogg: "audio/ogg", oga: "audio/ogg", flac: "audio/flac",
+  jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
+  webp: "image/webp", gif: "image/gif",
+};
+
+function extensionOf(name: string | undefined): string | null {
+  if (!name) return null;
+  // Works on a bare filename and on a URL with a query string or fragment.
+  const clean = name.split(/[?#]/)[0];
+  const m = /\.([A-Za-z0-9]+)$/.exec(clean);
+  return m ? m[1].toLowerCase() : null;
+}
+
+/**
+ * The best MIME we can determine, preferring a specific header and falling back
+ * to the filename when the header says nothing useful.
+ */
+export function resolveMimeType(mimeType: string, name?: string): string {
+  const base = (mimeType || "").split(";")[0].trim().toLowerCase();
+  const known =
+    SUPPORTED_VIDEO_FORMATS.includes(base) ||
+    SUPPORTED_AUDIO_FORMATS.includes(base) ||
+    SUPPORTED_IMAGE_FORMATS.includes(base);
+  if (known) return base;
+  // Only consult the filename when the header is useless — a header that says
+  // "image/tiff" is a real answer, and guessing past it would be worse.
+  if (AMBIGUOUS_MIME_TYPES.includes(base)) {
+    const fromExt = EXTENSION_MIME[extensionOf(name) ?? ""];
+    if (fromExt) return fromExt;
+  }
+  return base;
+}
+
+export function isSupportedFormat(mimeType: string, name?: string): boolean {
+  const baseMimeType = resolveMimeType(mimeType, name);
   return (
     SUPPORTED_VIDEO_FORMATS.includes(baseMimeType) ||
     SUPPORTED_AUDIO_FORMATS.includes(baseMimeType) ||
@@ -49,8 +116,9 @@ export function isSupportedFormat(mimeType: string): boolean {
 
 export function inferMediaType(
   mimeType: string,
+  name?: string,
 ): "video" | "audio" | "image" | null {
-  const baseMimeType = mimeType.split(";")[0].trim();
+  const baseMimeType = resolveMimeType(mimeType, name);
   if (SUPPORTED_VIDEO_FORMATS.includes(baseMimeType)) return "video";
   if (SUPPORTED_AUDIO_FORMATS.includes(baseMimeType)) return "audio";
   if (SUPPORTED_IMAGE_FORMATS.includes(baseMimeType)) return "image";
@@ -244,14 +312,19 @@ export class MediaBunnyEngine {
     format: string | null;
     error?: string;
   }> {
-    const mimeType = file.type;
-    if (!isSupportedFormat(mimeType)) {
+    // SECOND copy of this check — the import service has one too, and this is
+    // the one that actually fires on a URL import. Both must use the same rule,
+    // or a file passes one gate and is refused by the other with a message
+    // about a MIME type the user never chose.
+    const name = (file as File).name;
+    const mimeType = resolveMimeType(file.type, name);
+    if (!isSupportedFormat(file.type, name)) {
       return {
         supported: false,
         format: null,
         error: `Unsupported format: ${
-          mimeType || "unknown"
-        }. Supported formats: MP4, WebM, MOV, MP3, WAV, AAC, JPG, PNG, WebP`,
+          file.type || "unknown"
+        }${name ? ` (${name})` : ""}. Supported formats: MP4, WebM, MOV, MP3, WAV, AAC, JPG, PNG, WebP`,
       };
     }
 

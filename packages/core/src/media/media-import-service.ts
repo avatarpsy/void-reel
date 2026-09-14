@@ -97,7 +97,9 @@ export class MediaImportService {
 
     try {
       const metadata = await this.mediaEngine.extractMetadata(file);
-      const mediaType = inferMediaType(file.type);
+      // The NAME matters: a CDN that serves an mp4 as octet-stream leaves the
+      // header useless, and the extension is the only honest signal left.
+      const mediaType = inferMediaType(file.type, (file as File).name);
 
       if (!mediaType) {
         return {
@@ -258,7 +260,7 @@ export class MediaImportService {
 
     // Now process with MediaBunny
     const metadata = await this.mediaEngine.extractMetadata(compatibleFile);
-    const mediaType = inferMediaType(compatibleFile.type) || "video";
+    const mediaType = inferMediaType(compatibleFile.type, (compatibleFile as File).name) || "video";
 
     let thumbnails: ThumbnailResult[] = [];
     if (opts.generateThumbnails && metadata.hasVideo) {
@@ -307,13 +309,17 @@ export class MediaImportService {
     format: string | null;
     error?: string;
   }> {
-    if (!isSupportedFormat(file.type)) {
+    const name = (file as File).name;
+    if (!isSupportedFormat(file.type, name)) {
       return {
         supported: false,
         format: null,
+        // Name the FILE as well as the header — "Unsupported format:
+        // application/octet-stream" on its own tells the user nothing about
+        // which of their files was refused or why.
         error: `Unsupported format: ${
           file.type || "unknown"
-        }. Supported formats: MP4, WebM, MOV, MP3, WAV, AAC, JPG, PNG, WebP`,
+        }${name ? ` (${name})` : ""}. Supported formats: MP4, WebM, MOV, MP3, WAV, AAC, JPG, PNG, WebP`,
       };
     }
     if (this.mediaEngine.isAvailable()) {

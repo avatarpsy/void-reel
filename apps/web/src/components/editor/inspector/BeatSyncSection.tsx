@@ -27,28 +27,45 @@ export const BeatSyncSection: React.FC<BeatSyncSectionProps> = ({ clipId }) => {
     return unsubscribe;
   }, []);
 
+  /**
+   * Write the grid to the PROJECT, not just the bridge.
+   *
+   * `Timeline.beatMarkers` / `beatAnalysis` have been on the type since beat
+   * detection was written and nothing ever wrote them, so analysing a track
+   * drew beats on the ruler that were gone on reload. Cutting to a grid that
+   * disappears is worse than having no grid — the cuts stay and the reason for
+   * them does not. Every path that changes the grid commits it.
+   */
+  const commitBeatGrid = useCallback(() => {
+    const st = getBeatSyncBridge().getState();
+    (useProjectStore.getState() as any).setBeatGrid?.(st.beatMarkers, st.beatAnalysis);
+  }, []);
+
   const handleAnalyzeBeats = useCallback(async () => {
     if (!mediaItem?.blob) return;
 
     const bridge = getBeatSyncBridge();
     try {
       await bridge.analyzeAudioFromBlob(mediaItem.blob, clipId);
+      commitBeatGrid();
     } catch (error) {
       console.error("Beat analysis failed:", error);
     }
-  }, [mediaItem, clipId]);
+  }, [mediaItem, clipId, commitBeatGrid]);
 
   const handleGenerateManualBeats = useCallback(() => {
     if (!clip) return;
 
     const bridge = getBeatSyncBridge();
     bridge.generateManualBeatMarkers(manualBpm, clip.duration, 0);
-  }, [clip, manualBpm]);
+    commitBeatGrid();
+  }, [clip, manualBpm, commitBeatGrid]);
 
   const handleClearBeats = useCallback(() => {
     const bridge = getBeatSyncBridge();
     bridge.clearBeatMarkers();
-  }, []);
+    commitBeatGrid();
+  }, [commitBeatGrid]);
 
   const handleAutoCutOnBeats = useCallback(async () => {
     if (!clip || beatState.beatMarkers.length === 0) return;

@@ -49,7 +49,7 @@ function readBootTarget(): { carouselId?: string; projectId?: string; preset?: N
  * Sizes are the CANVAS_PRESETS values, restated here rather than looked up by
  * name: the preset list is a UI catalogue that may be re-labelled or reordered,
  * and a deep link resolving through a display string would break the day someone
- * renames a tile. These four are a stable contract with the URL.
+ * renames a tile. These five are a stable contract with the URL.
  */
 /**
  * Has the `?src=` handoff already been taken by this page load?
@@ -68,6 +68,7 @@ const NEW_PRESETS: Record<string, NewPreset> = {
   presentation: { name: 'Presentation', width: 1920, height: 1080 },
   'presentation-4-3': { name: 'Presentation', width: 1024, height: 768 },
   carousel: { name: 'Carousel', width: 1080, height: 1350 },
+  story: { name: 'Vertical story', width: 1080, height: 1920 },
   poster: { name: 'Poster', width: 2480, height: 3508 },
 };
 

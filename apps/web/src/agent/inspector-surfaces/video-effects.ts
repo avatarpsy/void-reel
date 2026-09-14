@@ -69,4 +69,18 @@ export const surface: InspectorSurface<VideoEffectsConfig> = {
     }
     return { ok: false, error: "unhandled op" };
   },
+  /**
+   * The full chain WITH ids and params. `op: "update" | "remove" | "toggle"`
+   * all take an `effectId` — before this there was no way to obtain one, so
+   * two thirds of this surface's own operations were unreachable.
+   */
+  read: (clip, ctx) => {
+    const fn = (ctx.store as any).getVideoEffects;
+    if (typeof fn !== "function") return null;
+    const fx = fn.call(ctx.store, clip.id) ?? [];
+    if (fx.length === 0) return null;
+    return fx.map((e: any) => ({
+      id: e.id, type: e.type, enabled: e.enabled !== false, params: e.params ?? {},
+    }));
+  },
 };

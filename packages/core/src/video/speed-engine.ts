@@ -411,6 +411,68 @@ export class SpeedEngine {
     return this.clipSpeedData.get(clipId);
   }
 
+  /**
+   * Every retime on the timeline, as plain JSON.
+   *
+   * ── WHY THIS HAS TO EXIST ───────────────────────────────────────────────────
+   * Retiming lived ONLY in this map. The Inspector wrote the speed here and
+   * wrote the SHORTENED `clip.duration` to the project — so a reload restored
+   * half the change: the clip kept its new, shorter length while this engine
+   * came back empty and played it at 1x. The result is not "the speed was
+   * forgotten", it is the clip playing the wrong part of its source and the
+   * rest silently cut off, which is worse than either losing or keeping it.
+   *
+   * Clips at exactly default (1x, forward, no keyframes, no freeze frames) are
+   * omitted: `initializeClip` creates a row for every clip that is merely
+   * SELECTED, and saving those would put the whole timeline in the blob to say
+   * nothing. `originalDuration` rides along because effective duration is
+   * derived from it, and re-deriving it after a trim would give a different
+   * answer than the one the user saw.
+   */
+  serializeAll(): Record<string, ClipSpeedData> {
+    const out: Record<string, ClipSpeedData> = {};
+    for (const [clipId, data] of this.clipSpeedData) {
+      // NOTE the polarity: `pitchCorrection` DEFAULTS TO TRUE
+      // (`getOrCreateSpeedData`), so the non-default worth saving is `false`.
+      if (
+        data.baseSpeed === 1 &&
+        !data.reverse &&
+        data.keyframes.length === 0 &&
+        data.freezeFrames.length === 0 &&
+        data.pitchCorrection === true
+      ) continue;
+      out[clipId] = JSON.parse(JSON.stringify(data)) as ClipSpeedData;
+    }
+    return out;
+  }
+
+  /**
+   * Restore a `serializeAll()` payload. Additive on purpose — a load must not
+   * wipe the retime of a clip that is already on the timeline and absent from
+   * the payload (that is how an older save would silently reset newer work).
+   */
+  restoreAll(data: Record<string, ClipSpeedData> | null | undefined): void {
+    if (!data || typeof data !== "object") return;
+    let restored = 0;
+    for (const [clipId, raw] of Object.entries(data)) {
+      if (!raw || typeof raw !== "object") continue;
+      this.clipSpeedData.set(clipId, {
+        clipId,
+        baseSpeed: this.clampSpeed(Number(raw.baseSpeed) || 1),
+        reverse: raw.reverse === true,
+        keyframes: Array.isArray(raw.keyframes) ? raw.keyframes : [],
+        // Default is TRUE — an absent field must not silently turn it off.
+        pitchCorrection: raw.pitchCorrection !== false,
+        freezeFrames: Array.isArray(raw.freezeFrames) ? raw.freezeFrames : [],
+        originalDuration: Number(raw.originalDuration) || 0,
+      });
+      restored++;
+    }
+    if (restored > 0) {
+      console.log(`[SpeedEngine] restored retiming for ${restored} clip(s)`);
+    }
+  }
+
   clear(): void {
     this.clipSpeedData.clear();
   }

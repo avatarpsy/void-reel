@@ -368,8 +368,70 @@ export class AudioEngine {
         .filter((k) => k.property === "volume" && typeof k.value === "number" && Number.isFinite(k.value as number))
         .map((k) => ({ time: k.time, value: k.value as number }))
         .sort((a, b) => a.time - b.time),
+      // The AUDIO chain, which nothing used to read — see AudioClipRenderInfo.
+      // Only ENABLED effects travel: a disabled effect must cost nothing, and
+      // the presence of this array is what decides whether a clip takes the
+      // slower processed path at all.
+      audioEffects: (clip.audioEffects ?? []).filter((e) => e.enabled !== false),
       clipTimeOffset: offsetInClip,
     };
+  }
+
+  /**
+   * Run the clip's audio effect chain over its decoded buffer.
+   *
+   * ── WHY HERE ────────────────────────────────────────────────────────────────
+   * This is the ONE place every clip's audio passes through on its way to both
+   * the preview and the export, so an effect applied here cannot be honoured in
+   * one and missing from the other — the failure mode this codebase has already
+   * been bitten by with captions and with blend modes.
+   *
+   * ── WHY IT IS CACHED ────────────────────────────────────────────────────────
+   * `applyEffectChain` renders the buffer through an OfflineAudioContext, which
+   * is far too expensive to repeat for every scrub and every export chunk of the
+   * same clip. The key includes the effect chain itself, so changing a parameter
+   * invalidates it and nothing has to remember to.
+   *
+   * A clip with no enabled effects returns its buffer untouched and never
+   * allocates — which is almost every clip.
+   */
+  private processedAudioCache: Map<string, AudioBuffer> = new Map();
+
+  private async withAudioEffects(
+    buffer: AudioBuffer,
+    clipInfo: AudioClipRenderInfo,
+  ): Promise<AudioBuffer> {
+    const effects = clipInfo.audioEffects ?? [];
+    if (effects.length === 0) return buffer;
+
+    const key = `${clipInfo.mediaId}:${clipInfo.audioTrackIndex ?? 0}:${JSON.stringify(
+      effects.map((e) => [e.type, e.params]),
+    )}`;
+    const cached = this.processedAudioCache.get(key);
+    if (cached) return cached;
+
+    try {
+      const { getAudioEffectsEngine } = await import("./audio-effects-engine");
+      const engine = getAudioEffectsEngine();
+      if (!engine.isInitialized()) await engine.initialize();
+      const result = await engine.applyEffectChain(buffer, effects as Effect[]);
+      const out = result.buffer ?? buffer;
+      // Bound the cache: a long session must not hold every processed take.
+      if (this.processedAudioCache.size > 24) {
+        const oldest = this.processedAudioCache.keys().next().value;
+        if (oldest !== undefined) this.processedAudioCache.delete(oldest);
+      }
+      this.processedAudioCache.set(key, out);
+      return out;
+    } catch (error) {
+      // Unprocessed audio is far better than silence: a failed reverb should
+      // cost the reverb, not the clip.
+      console.warn(
+        `[AudioEngine] audio effect chain failed for clip ${clipInfo.clipId}:`,
+        error,
+      );
+      return buffer;
+    }
   }
 
   private async getAudioBuffer(
@@ -536,10 +598,11 @@ export class AudioEngine {
       }
     }
 
-    const audioBuffer = await this.getAudioBuffer(mediaItem, context, clipInfo.audioTrackIndex ?? 0);
-    if (!audioBuffer) {
+    const decoded = await this.getAudioBuffer(mediaItem, context, clipInfo.audioTrackIndex ?? 0);
+    if (!decoded) {
       return;
     }
+    const audioBuffer = await this.withAudioEffects(decoded, clipInfo);
 
     const { gainNode } = this.createClipOutputNodes(context, clipInfo);
     const source = context.createBufferSource();
@@ -571,7 +634,13 @@ export class AudioEngine {
     return (
       mediaItem.metadata.duration >= SEGMENTED_AUDIO_DECODE_THRESHOLD_SECONDS &&
       (clipInfo.speed || 1) === 1 &&
-      !clipInfo.reversed
+      !clipInfo.reversed &&
+      // A clip with an effect chain takes the whole-buffer path, because the
+      // chain is applied to a decoded buffer and the segmented path never
+      // produces one. Without this the effect would be honoured on short media
+      // and silently dropped on long media — which is worse than not having it,
+      // since the difference only shows up on the clips people care most about.
+      (clipInfo.audioEffects?.length ?? 0) === 0
     );
   }
 

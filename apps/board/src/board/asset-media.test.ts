@@ -8,8 +8,9 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { makeTestBoard } from '../blocksuite/test-board';
-import { placeAsset, probedClipBox } from './asset-media';
+import { makeTestBoard, placeTestImage } from '../blocksuite/test-board';
+import { SHOT_W } from '../shot/model';
+import { normaliseMediaCard, placeAsset, probedClipBox } from './asset-media';
 
 function boxOf(board: ReturnType<typeof makeTestBoard>, blockId: string): number[] {
   const props = board.store.getBlock(blockId)!.model.props as { xywh: string };
@@ -96,5 +97,73 @@ describe('the box a clip takes once its real shape is known', () => {
     const [x, y, w, h] = box(probedClipBox([100, 100, 360, 203], { w: 1080, h: 1920 }))!;
     expect(x + w / 2).toBe(100 + 360 / 2);
     expect(Math.abs(y + h / 2 - (100 + 203 / 2))).toBeLessThanOrEqual(1);
+  });
+});
+
+/**
+ * THE IMAGE PATH, tested where it can be.
+ *
+ * `addImages` needs a real image decoder to resolve and happy-dom has none, so an
+ * integration test of image placement HANGS rather than failing — which is why
+ * every test above is about a clip. `normaliseMediaCard` is the arithmetic that
+ * was actually wrong, exported for exactly this reason (the same trade
+ * `probedClipBox` makes).
+ */
+describe('normalising a placed image card', () => {
+  const boxProps = (w: number, h: number) => ({ width: w, height: h });
+
+  it('caps the 960 × 1707 still from the bug report', () => {
+    const board = makeTestBoard();
+    // What `addImages(…, { maxWidth: 960 })` left behind for a 1080×1920 source.
+    const id = placeTestImage(board, '[0,0,960,1707]', boxProps(960, 1707));
+
+    const box = normaliseMediaCard(board.std, id, 'image');
+    expect(box).toEqual({ w: 236, h: 420 });
+
+    const [, , w, h] = boxOf(board, id);
+    expect([w, h]).toEqual([236, 420]);
+  });
+
+  it('writes width/height as well as the box, so the pair cannot disagree', () => {
+    const board = makeTestBoard();
+    const id = placeTestImage(board, '[0,0,960,1707]', boxProps(960, 1707));
+    normaliseMediaCard(board.std, id, 'image');
+
+    const props = board.store.getBlock(id)!.model.props as { width: number; height: number };
+    expect([props.width, props.height]).toEqual([236, 420]);
+  });
+
+  it('brings a SMALL source UP to the box, so a mixed row is one row', () => {
+    const board = makeTestBoard();
+    const id = placeTestImage(board, '[0,0,320,180]', boxProps(320, 180));
+    expect(normaliseMediaCard(board.std, id, 'image')).toEqual({ w: 360, h: 203 });
+  });
+
+  it('keeps the aspect of a landscape still', () => {
+    const board = makeTestBoard();
+    const id = placeTestImage(board, '[0,0,960,540]', boxProps(960, 540));
+    const box = normaliseMediaCard(board.std, id, 'image')!;
+    expect(Math.abs(box.w / box.h - 16 / 9)).toBeLessThan(0.02);
+  });
+
+  it('gives a lone generated result the bigger HERO box', () => {
+    const board = makeTestBoard();
+    const id = placeTestImage(board, '[0,0,1024,1024]', boxProps(1024, 1024));
+    const ref = normaliseMediaCard(board.std, id, 'image', 'ref')!;
+
+    const board2 = makeTestBoard();
+    const id2 = placeTestImage(board2, '[0,0,1024,1024]', boxProps(1024, 1024));
+    const hero = normaliseMediaCard(board2.std, id2, 'image', 'hero')!;
+
+    expect(hero.w).toBeGreaterThan(ref.w);
+    expect(hero.w).toBe(SHOT_W);
+  });
+
+  it('writes NOTHING when the card is already right', () => {
+    // A no-op write is an undo step that does nothing and a revision that
+    // invalidates every per-revision cache on the board.
+    const board = makeTestBoard();
+    const id = placeTestImage(board, '[0,0,360,203]', boxProps(360, 203));
+    expect(normaliseMediaCard(board.std, id, 'image')).toBeNull();
   });
 });

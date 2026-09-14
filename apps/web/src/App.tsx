@@ -12,7 +12,8 @@ import { useVoidspaceStore } from "./stores/voidspace-store";
 import { useRouter } from "./hooks/use-router";
 import { useKieAIPoller } from "./hooks/useKieAIPoller";
 import { ensureWhisperModel } from "./services/teleprompter-asr";
-import { SOCIAL_MEDIA_PRESETS, type SocialMediaCategory } from "@openreel/core";
+import { SOCIAL_MEDIA_PRESETS, getSpeedEngine, type SocialMediaCategory } from "@openreel/core";
+import { readClipLooks, readTrackTransitions, readbackSourcesFrom } from "./agent/clip-readback";
 import { TooltipProvider } from "@openreel/ui";
 import {
   waitForAuth,
@@ -1539,6 +1540,19 @@ function App() {
               const st = (m as any).sunoTaskId, sa = (m as any).sunoAudioId;
               if (m.id && st && sa) mediaSunoIndex.set(m.id, { taskId: String(st), audioId: String(sa) });
             }
+            /**
+             * Readback sources, built ONCE for the whole reply.
+             *
+             * The effects live in the EffectsBridge and the retime in the
+             * SpeedEngine, so answering "what is on this clip" is a lookup per
+             * clip against two singletons. Resolving those singletons once and
+             * handing the closures down costs one lookup instead of two per
+             * clip on a timeline that can hold hundreds.
+             */
+            const readbackSrc = readbackSourcesFrom(
+              useProjectStore.getState() as unknown as Record<string, unknown>,
+              getSpeedEngine(),
+            );
             // Media tracks: video, narration, music. The "track-captions"
             // entry in timeline.tracks has empty clips[] (text clips live
             // in the title engine, not here) — skip it so we don't emit
@@ -1626,7 +1640,31 @@ function App() {
                   // unlocks the native-only transform ops for the agent.
                   sunoTaskId: mediaSunoIndex.get(c.mediaId)?.taskId,
                   sunoAudioId: mediaSunoIndex.get(c.mediaId)?.audioId,
+                  /**
+                   * WHAT HAS BEEN DONE TO THIS CLIP.
+                   *
+                   * Effects (with their ids), the grade, the retime, the crop,
+                   * what is keyframed. Until this existed every Inspector
+                   * surface the agent could drive was WRITE-ONLY: it could
+                   * apply a blur and then had no way to see it, remove it
+                   * (removal needs the effect id), confirm it landed, or notice
+                   * it had already applied the same thing last turn.
+                   *
+                   * Absent on an untouched clip — `readClipLooks` returns `{}`
+                   * and the spread contributes nothing — so a plain timeline
+                   * costs exactly what it did before.
+                   */
+                  ...(() => {
+                    const looks = readClipLooks(c as any, readbackSrc);
+                    return Object.keys(looks).length > 0 ? { looks } : {};
+                  })(),
                 })),
+                // How the cuts on this track are made. Same rule: omitted
+                // entirely when the track has no transitions.
+                ...(() => {
+                  const trs = readTrackTransitions(tr as any);
+                  return trs ? { transitions: trs } : {};
+                })(),
               }));
             // Bucket live text clips into a single captions track.
             // All Voidspace caption clips share trackId "track-captions".
@@ -1671,6 +1709,37 @@ function App() {
             const subtitleTracks = subtitleClips.length > 0
               ? [{ id: 'track-subtitles', name: 'Subtitles', kind: 'subtitles' as const, clips: subtitleClips }]
               : [];
+            const allTracksForState = [
+              ...mediaTracks, ...captionTracks, ...graphicsTracks, ...subtitleTracks,
+            ];
+            /**
+             * THE DURATION IS DERIVED, NOT REPORTED.
+             *
+             * ── WHY NOT `timeline.duration` ─────────────────────────────────
+             * That field is a stored scalar, written when a clip is ADDED and
+             * repaired on load only when it is zero. Nothing recomputes it when
+             * a clip is trimmed, retimed, split or deleted — so a project the
+             * agent just shortened still claims its old length. Measured: three
+             * shots joined to 7.00s, the last retimed to 1.5x (a real 6.00s),
+             * and `read_timeline` kept saying 7.00s.
+             *
+             * The agent does arithmetic with this number — "put the outro at the
+             * end", "the cut is 30s over" — so a stale one is not a cosmetic
+             * bug, it is wrong placement and a wrong report to the user. The
+             * exporter has always computed the real thing (max clip end, see
+             * `ExportEngine.calculateTimelineDuration`); this is the same rule
+             * over the very clips being handed back in this reply, so what the
+             * agent is TOLD and what it is SHOWN can never disagree.
+             */
+            const derivedDuration = allTracksForState.reduce((max, tk: any) => {
+              for (const c of tk.clips ?? []) {
+                const end = typeof c.endTime === 'number'
+                  ? c.endTime
+                  : (Number(c.startTime) || 0) + (Number(c.duration) || 0);
+                if (Number.isFinite(end) && end > max) max = end;
+              }
+              return max;
+            }, 0);
             reply({
               type: "voidspace:state",
               requestId: msg.requestId,
@@ -1678,8 +1747,41 @@ function App() {
                 id: proj.id,
                 name: proj.name,
                 settings: proj.settings,
-                duration: proj.timeline?.duration ?? 0,
-                tracks: [...mediaTracks, ...captionTracks, ...graphicsTracks, ...subtitleTracks],
+                duration: derivedDuration,
+                tracks: allTracksForState,
+                /**
+                 * NESTED SEQUENCES ON THIS PROJECT.
+                 *
+                 * A board-compiled film gets one sequence per screenplay
+                 * SEQUENCE ("The chase"), holding that stretch's shots, their
+                 * narration and their alternate takes — so the structure the
+                 * writer intended is on the timeline, not just implied by the
+                 * order of the clips.
+                 *
+                 * The agent could not see any of it. A clip whose picture is a
+                 * whole sub-timeline read as an ordinary clip with an
+                 * unresolvable mediaId, so "what is in the chase sequence?" was
+                 * unanswerable and "trim the chase" meant trimming one shot.
+                 * With this plus each clip's `looks.sequenceId`, an instance on
+                 * the timeline can be matched to what it contains.
+                 *
+                 * Names and durations only — the contents are a whole timeline
+                 * each, and putting them here would put the film in the payload
+                 * twice.
+                 */
+                ...(() => {
+                  const compounds = (proj as any).compoundClips ?? [];
+                  if (!Array.isArray(compounds) || compounds.length === 0) return {};
+                  return {
+                    sequences: compounds.map((c: any) => ({
+                      id: c.id,
+                      name: c.name,
+                      durationSec: c.content?.duration ?? 0,
+                      clipCount: (c.content?.clips ?? []).length,
+                      trackCount: (c.content?.tracks ?? []).length,
+                    })),
+                  };
+                })(),
                 mediaCount: proj.mediaLibrary?.items?.length ?? 0,
                 textClipCount: captionClips.length,
                 // WHERE THIS FILM CAME FROM. Empty for a project that was not
@@ -2118,17 +2220,76 @@ function App() {
           // discovery triplet (list/get-schema/apply); the old single-
           // purpose tool is gone with its bridge-coupled implementation.
           case "voidspace:add-clip": {
-            const { trackId, mediaId, startTime, duration } = msg as any;
-            if (!mediaId || typeof startTime !== "number") {
-              reply({ type: "voidspace:error", requestId: msg.requestId, error: "mediaId, startTime required" });
+            const { trackId, mediaId, duration } = msg as any;
+            /**
+             * `startTime: "end"` — APPEND, and let the editor do the arithmetic.
+             *
+             * ── WHY THIS IS NOT THE CALLER'S JOB ──────────────────────────────
+             * "Merge these three clips" is the single most ordinary request a
+             * video tool gets, and as a numeric API it is three calls where each
+             * one's position depends on the PREVIOUS clip's real decoded
+             * duration — which the caller only learns from the reply it has not
+             * received yet. So the agent either reads the timeline between every
+             * placement, or it guesses and lands clips on top of one another.
+             * Overlapping clips do not look like an error; they look like the
+             * second shot never imported.
+             *
+             * This is the same reasoning that made `trim_silence` a macro rather
+             * than exposing the out-point arithmetic: the editor already knows
+             * the answer, so it should be the one to compute it.
+             *
+             * Appends after the last clip ON THE TRACK IT CHOOSES, so a video
+             * and a music bed appended in the same breath do not stack.
+             */
+            const rawStart = (msg as any).startTime;
+            const isAppend = rawStart === "end" || (msg as any).append === true;
+            if (!mediaId || (!isAppend && typeof rawStart !== "number")) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: "mediaId, and startTime (a number, or \"end\" to append) required" });
               break;
             }
             const store = useProjectStore.getState();
+            let startTime: number = isAppend ? 0 : (rawStart as number);
             // Resolve the target track. Explicit trackId wins; otherwise
             // auto-pick a type-compatible track with a free slot at
             // [startTime, startTime+duration), creating one when none
             // exists — so agents can place media without knowing track ids.
             let targetTrackId: string = typeof trackId === "string" ? trackId : "";
+            /**
+             * For an append we must choose the track BEFORE computing the time,
+             * because "the end" means the end OF THAT TRACK. Doing it the other
+             * way round (the free-slot probe below, run at t=0) would pick the
+             * first track that happens to be empty at zero and append there —
+             * so a second video would land on a fresh track instead of after
+             * the first, and the two would play on top of each other.
+             */
+            if (isAppend && !targetTrackId) {
+              const media: any = store.getMediaItem(mediaId);
+              if (!media) {
+                reply({ type: "voidspace:error", requestId: msg.requestId, error: "no media found for that id" });
+                break;
+              }
+              const wantTypes: string[] = media.type === "audio" ? ["audio"]
+                : media.type === "image" ? ["image"] : ["video"];
+              const tracks = store.project.timeline?.tracks ?? [];
+              // The track of the right kind that already holds the most work is
+              // the one a person means by "after that". A brand-new empty track
+              // of the right type is the fallback.
+              const candidates = tracks.filter((t: any) => wantTypes.includes(t.type));
+              const withClips = candidates.filter((t: any) => (t.clips ?? []).length > 0);
+              const chosen = withClips.length > 0
+                ? withClips.reduce((a: any, b: any) => {
+                    const endOf = (t: any) => Math.max(0, ...(t.clips ?? []).map((c: any) => c.startTime + c.duration));
+                    return endOf(b) > endOf(a) ? b : a;
+                  })
+                : candidates[0];
+              if (chosen) {
+                targetTrackId = chosen.id;
+                startTime = Math.max(0, ...(chosen.clips ?? []).map((c: any) => c.startTime + c.duration), 0);
+              }
+              // No compatible track at all → fall through to the creation path
+              // below with startTime 0, which is the correct end of an empty
+              // timeline anyway.
+            }
             if (!targetTrackId) {
               const media: any = store.getMediaItem(mediaId);
               if (!media) {
@@ -2181,7 +2342,17 @@ function App() {
             if (newClip?.id && typeof blendMode === "string" && blendMode && blendMode !== "normal") {
               try { useProjectStore.getState().updateClipBlendMode(newClip.id, blendMode as any); } catch { /* non-fatal */ }
             }
-            reply({ type: "voidspace:clip-added", requestId: msg.requestId, clip: newClip ?? null, ok: true, trackId: targetTrackId });
+            reply({
+              type: "voidspace:clip-added", requestId: msg.requestId,
+              clip: newClip ?? null, ok: true, trackId: targetTrackId,
+              // Where it landed and how long it is. The caller of an append did
+              // not choose the position, so echoing it back is what lets the
+              // next append (or a transition on the join) be reasoned about
+              // without a second round trip to read the timeline.
+              startTime: newClip?.startTime ?? startTime,
+              endTime: (newClip?.startTime ?? startTime) + (newClip?.duration ?? 0),
+              appended: isAppend,
+            });
             break;
           }
           case "voidspace:add-slide": {
@@ -3034,7 +3205,65 @@ function App() {
               description: s.description,
               appliesTo: s.appliesTo,
               schema: s.schema,
+              readable: typeof s.read === "function",
             });
+            break;
+          }
+          /**
+           * READ one surface's current state on one or more clips.
+           *
+           * The mirror of apply-inspector-tool, and the reason it had to exist:
+           * `video-effects` can update, remove and toggle an effect BY ID, and
+           * before this there was no way for the agent to learn an id. Two of
+           * that surface's five operations were unreachable in practice.
+           *
+           * Read-only by construction — no snapshot, no history entry, no
+           * rollback path, because nothing is mutated. Targets resolve exactly
+           * as they do for apply, so "read what I am about to change" uses the
+           * same selector as the change.
+           */
+          case "voidspace:read-inspector-tool": {
+            const args = msg as any;
+            try {
+              const { getSurface, resolveTargetClips } = await import("./agent/inspector-surfaces");
+              const surface = getSurface(String(args.surface ?? ""));
+              if (!surface) {
+                reply({ type: "voidspace:error", requestId: args.requestId, error: `unknown surface: ${args.surface}` });
+                break;
+              }
+              if (typeof surface.read !== "function") {
+                reply({
+                  type: "voidspace:error",
+                  requestId: args.requestId,
+                  error: `surface "${surface.name}" is not readable — list_inspector_tools reports which are`,
+                });
+                break;
+              }
+              if (!args.clipIds && !args.applyAll) {
+                reply({ type: "voidspace:error", requestId: args.requestId, error: "clipIds or applyAll required" });
+                break;
+              }
+              const project = useProjectStore.getState().project;
+              const targets = resolveTargetClips(project, surface, {
+                clipIds: Array.isArray(args.clipIds) ? args.clipIds : undefined,
+                applyAll: !!args.applyAll,
+              });
+              const ctx = { project, store: useProjectStore.getState() as unknown as Record<string, unknown> };
+              const results: Array<{ clipId: string; state: unknown }> = [];
+              for (const t of targets) {
+                results.push({ clipId: t.id, state: await surface.read(t, ctx) });
+              }
+              reply({
+                type: "voidspace:inspector-tool-read",
+                requestId: args.requestId,
+                ok: true,
+                surface: surface.name,
+                clipsRead: results.length,
+                results,
+              });
+            } catch (err: any) {
+              reply({ type: "voidspace:error", requestId: args.requestId, error: err?.message ?? String(err) });
+            }
             break;
           }
           case "voidspace:apply-inspector-tool": {
@@ -3101,11 +3330,35 @@ function App() {
               const beforeStates = new Map<string, unknown>(
                 targets.map((t: any) => [t.id, JSON.parse(JSON.stringify(t))]),
               );
-              const ctx = { project, store: useProjectStore.getState() as unknown as Record<string, unknown> };
               const results: Array<{ clipId: string; ok: boolean; note?: string; error?: string }> = [];
               let threw: unknown = null;
               try {
                 for (const t of targets) {
+                  // LIVE STATE PER TARGET, NOT ONE SNAPSHOT FOR THE BATCH.
+                  //
+                  // ── WHY THIS COSTS A getState() PER CLIP ──────────────────
+                  // A batch is N sequential mutations, and each one replaces
+                  // `project` with a new object graph. Hoisting `ctx` above the
+                  // loop hands target 2..N the PRE-EDIT project — whose tracks
+                  // and clips the store no longer references. Surfaces that
+                  // write immutably (`{...project, timeline: {...}}`) then
+                  // rebuild the whole project from that stale base and silently
+                  // UNDO target 1; surfaces that write through the
+                  // ActionExecutor (which mutates in place) push their change
+                  // onto an ORPHANED track object that nothing will ever read.
+                  //
+                  // Measured on `clip-transitions` with applyAll over three
+                  // shots: the tool reported "3 ok" — two dissolves and one
+                  // correct "last clip has no neighbour" skip — and the track
+                  // came back carrying ONE transition. The second dissolve went
+                  // onto the old track object, so the second cut exported hard.
+                  //
+                  // getState() is a field read. Correctness is worth it.
+                  const live = useProjectStore.getState();
+                  const ctx = {
+                    project: live.project,
+                    store: live as unknown as Record<string, unknown>,
+                  };
                   const r = await surface.apply(t, args.config, ctx);
                   results.push({ clipId: t.id, ok: r.ok, note: r.note, error: r.error });
                 }
@@ -3206,6 +3459,54 @@ function App() {
               } catch (histErr) {
                 console.warn("[apply-inspector-tool] undo registration failed:", histErr);
               }
+
+              /**
+               * COMMIT THE BATCH — ONCE, HERE, FOR EVERY SURFACE.
+               *
+               * ── WHY THE DISPATCHER AND NOT EACH SURFACE ───────────────────
+               * The autosave is HASH-GATED on
+               * `{id, modifiedAt, trackCount, clipCount, mediaCount}`. An edit
+               * that changes none of them — a transition added, an effect
+               * toggled, a param nudged — is never written, so it survives
+               * until the next reload and then evaporates. And the
+               * ActionExecutor mutates the project IN PLACE (the clone it takes
+               * is only for the inverse), so an executor-backed surface changes
+               * nothing the hash can see.
+               *
+               * That has now shipped as a bug three separate times, each time
+               * caught only by exporting a file and measuring it. Leaving the
+               * fix as "every surface must remember to commit" guarantees a
+               * fourth. One bump here covers all 18 and every surface added
+               * after this line.
+               *
+               * Scope is deliberate: new references for `tracks` and each
+               * track's `transitions`/`clips` ARRAYS, plus `modifiedAt`. Clip
+               * OBJECTS are NOT cloned — engines hold references to them and a
+               * blanket clone would be a much larger change than the durability
+               * problem needs. A surface that mutates a clip in place and needs
+               * React to repaint still owns that part.
+               */
+              if (okCount > 0) {
+                try {
+                  useProjectStore.setState((s: any) => ({
+                    project: {
+                      ...s.project,
+                      timeline: {
+                        ...s.project.timeline,
+                        tracks: (s.project.timeline?.tracks ?? []).map((t: any) => ({
+                          ...t,
+                          clips: [...(t.clips ?? [])],
+                          transitions: [...(t.transitions ?? [])],
+                        })),
+                      },
+                      modifiedAt: Date.now(),
+                    },
+                  }));
+                } catch (commitErr) {
+                  console.warn("[apply-inspector-tool] commit failed:", commitErr);
+                }
+              }
+
               reply({
                 type: "voidspace:inspector-tool-applied",
                 requestId: args.requestId,
@@ -3214,6 +3515,89 @@ function App() {
                 clipsTouched: okCount,
                 clipsAttempted: results.length,
                 results,
+              });
+            } catch (err: any) {
+              reply({ type: "voidspace:error", requestId: args.requestId, error: err?.message ?? String(err) });
+            }
+            break;
+          }
+          /**
+           * RENDER ONE FRAME of the composited timeline, as an image.
+           *
+           * ── WHY THE AGENT NEEDED EYES HERE SPECIFICALLY ────────────────────
+           * `inspect_media` could always look at a SOURCE file or a finished
+           * render. Neither answers the question that matters while editing:
+           * what does the timeline look like right now, with the caption over
+           * the shot, the grade applied, the logo where it was just placed?
+           * The only way to find out was a full export, which the playbook
+           * budgets at two rounds — so in practice the agent verified what it
+           * generated and never what it composed. Captions colliding with a
+           * logo, a transform that pushed a face out of the safe area, a grade
+           * pushed too far: all invisible until a person watched the result.
+           *
+           * This is the same `renderFrame` the preview and the export call, so
+           * what comes back IS the frame — every effect, transition, caption
+           * and nested sequence included, not an approximation of them.
+           *
+           * Returns a JPEG data URL. The caller uploads it and hands the agent
+           * a URL, because the vision path takes URLs.
+           */
+          case "voidspace:render-frame": {
+            const args = msg as any;
+            try {
+              const proj = useProjectStore.getState().project;
+              if (!proj) {
+                reply({ type: "voidspace:error", requestId: args.requestId, error: "no project loaded" });
+                break;
+              }
+              const dur = proj.timeline?.duration ?? 0;
+              const rawTime = Number(args.timeSec);
+              if (!Number.isFinite(rawTime) || rawTime < 0) {
+                reply({ type: "voidspace:error", requestId: args.requestId, error: "timeSec must be a non-negative number" });
+                break;
+              }
+              // Clamp INSIDE the film. A request one frame past the end would
+              // render black and read as "the shot is black", which is a much
+              // worse answer than "that is past the end".
+              const time = dur > 0 ? Math.min(rawTime, Math.max(0, dur - 0.05)) : rawTime;
+
+              const core = await import("@openreel/core");
+              const engine = core.getVideoEngine();
+              if (!engine.isInitialized()) await engine.initialize();
+
+              // A frame for LOOKING at, not for mastering: cap the long edge so
+              // the upload and the vision call stay cheap. 960px is comfortably
+              // enough to read a caption or see a face is cropped.
+              const maxEdge = Math.max(240, Math.min(1920, Number(args.maxEdge) || 960));
+              const sw = proj.settings?.width ?? 1920;
+              const sh = proj.settings?.height ?? 1080;
+              const scale = Math.min(1, maxEdge / Math.max(sw, sh));
+              const w = Math.max(2, Math.round(sw * scale));
+              const h = Math.max(2, Math.round(sh * scale));
+
+              const rendered = await engine.renderFrame(proj, time, w, h);
+              const canvas = new OffscreenCanvas(rendered.width, rendered.height);
+              const cctx = canvas.getContext("2d") as OffscreenCanvasRenderingContext2D;
+              cctx.drawImage(rendered.image, 0, 0);
+              try { rendered.image.close(); } catch { /* already closed */ }
+              const blob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.82 });
+              const dataUrl = await new Promise<string>((resolve, reject) => {
+                const fr = new FileReader();
+                fr.onload = () => resolve(String(fr.result));
+                fr.onerror = () => reject(fr.error);
+                fr.readAsDataURL(blob);
+              });
+
+              reply({
+                type: "voidspace:frame-rendered",
+                requestId: args.requestId,
+                ok: true,
+                dataUrl,
+                timeSec: time,
+                requestedTimeSec: rawTime,
+                width: rendered.width,
+                height: rendered.height,
+                projectDurationSec: dur,
               });
             } catch (err: any) {
               reply({ type: "voidspace:error", requestId: args.requestId, error: err?.message ?? String(err) });

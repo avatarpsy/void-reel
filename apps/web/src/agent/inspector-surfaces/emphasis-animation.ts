@@ -88,4 +88,5 @@ export const surface: InspectorSurface<EmphasisAnimationConfig> = {
     if (!ok) return { ok: false, error: "updateClipEmphasisAnimation failed" };
     return { ok: true, note: `emphasis=${config.type}` };
   },
+  read: (clip) => (clip.raw as any).emphasisAnimation ?? null,
 };

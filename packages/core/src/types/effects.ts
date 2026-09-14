@@ -603,14 +603,41 @@ export type AudioEffectType =
   | "noiseReduction"
   | "fadeIn"
   | "fadeOut";
-export type TransitionType =
-  | "crossfade"
-  | "dipToBlack"
-  | "dipToWhite"
-  | "wipe"
-  | "slide"
-  | "zoom"
-  | "push";
+/**
+ * Every transition the engine can render.
+ *
+ * A CONST ARRAY, not a bare union, because the list is needed at runtime too —
+ * the Inspector builds its picker from it and the agent surface publishes it as
+ * a schema enum. Deriving the type from the array means those can never fall
+ * out of step with what the renderer actually implements.
+ */
+export const TRANSITION_TYPES = [
+  "crossfade",
+  "dipToBlack",
+  "dipToWhite",
+  "wipe",
+  "slide",
+  "zoom",
+  "push",
+  "circleReveal",
+  "blur",
+  "whipPan",
+  "radialWipe",
+  "pixelate",
+  "glitch",
+  "blinds",
+  "diamondReveal",
+  "spin",
+  "flip",
+  "splitReveal",
+  "flash",
+  "filmBurn",
+  "mosaic",
+  "ripple",
+  "pageTurn",
+  "colorSplit",
+] as const;
+export type TransitionType = (typeof TRANSITION_TYPES)[number];
 
 // Curve point for color grading
 export interface CurvePoint {
@@ -780,5 +807,82 @@ export interface TransitionParams {
   push: {
     duration: number;
     direction: "left" | "right" | "up" | "down";
+  };
+  circleReveal: {
+    duration: number;
+    center: { x: number; y: number };
+  };
+  blur: {
+    duration: number;
+    intensity: number;
+  };
+  whipPan: {
+    duration: number;
+    direction: "left" | "right" | "up" | "down";
+    blurIntensity: number;
+  };
+  radialWipe: {
+    duration: number;
+    startAngle: number;
+    clockwise: boolean;
+  };
+  pixelate: {
+    duration: number;
+    maxPixelSize: number;
+  };
+  glitch: {
+    duration: number;
+    intensity: number;
+    slices: number;
+  };
+  blinds: {
+    duration: number;
+    count: number;
+    direction: "vertical" | "horizontal";
+  };
+  diamondReveal: {
+    duration: number;
+    center: { x: number; y: number };
+  };
+  spin: {
+    duration: number;
+    rotations: number;
+  };
+  flip: {
+    duration: number;
+    axis: "horizontal" | "vertical";
+  };
+  splitReveal: {
+    duration: number;
+    orientation: "horizontal" | "vertical";
+  };
+  flash: {
+    duration: number;
+    intensity: number;
+  };
+  filmBurn: {
+    duration: number;
+    intensity: number;
+    warmth: number;
+  };
+  mosaic: {
+    duration: number;
+    tiles: number;
+    randomness: number;
+  };
+  ripple: {
+    duration: number;
+    amplitude: number;
+    waves: number;
+  };
+  pageTurn: {
+    duration: number;
+    direction: "left" | "right";
+    shadow: number;
+  };
+  colorSplit: {
+    duration: number;
+    maxOffset: number;
+    angle: number;
   };
 }

@@ -47,6 +47,36 @@ const SEQ_X = 132;
 const SCENE_X = 232;
 
 /**
+ * Type sizes, mirrored from `voidspace.css`.
+ *
+ * Duplicated on purpose and kept small: the spine has to MEASURE its own labels
+ * to keep them from printing through each other, and the only fallback available
+ * when the platform has no text metrics is an estimate from the font size. These
+ * are the numbers `.vs-spine__scene-h` and `.vs-spine__scene-n` are set to, and
+ * `spine.test.ts` pins them to the stylesheet so the pair cannot drift.
+ */
+const SCENE_H_SIZE = 19;
+const SCENE_N_SIZE = 24;
+const SCENE_N_TRACKING = 0.08;
+/** Air between a label and whatever is drawn after it. */
+const LABEL_PAD = 16;
+
+/**
+ * How far the heading's baseline sits below the scene number's.
+ *
+ * 22px was not enough and the reason is that a glyph box is TALLER THAN ITS FONT
+ * SIZE. Measured in a real browser with `getBBox`: the 24px scene number renders
+ * a 29px box and the 19px heading a 23px box — about 1.22× each, because the box
+ * carries the face's full ascent and descent whether or not the string uses them.
+ * "sc 1" has no descender and still reserves the space for one. So two baselines
+ * 22px apart put a 29px box and a 23px box two pixels into each other.
+ *
+ * 30px clears both with room to spare. This is the number that a test measuring
+ * in font-size units cannot check — see the note in `spine.test.ts`.
+ */
+const SCENE_H_DROP = 24;
+
+/**
  * A repeatable wobble.
  *
  * `Math.random` would make every repaint a different drawing, and the board
@@ -105,6 +135,77 @@ function cutPath(fromRight: number, toLeft: number, y: number, seed: string): st
   return `M ${fromRight + 6} ${midY} `
     + `C ${fromRight + (toLeft - fromRight) * 0.4} ${midY + j(1) * 3}, `
     + `${fromRight + (toLeft - fromRight) * 0.6} ${midY + j(2) * 3}, ${toLeft - 12} ${midY}`;
+}
+
+/**
+ * ── TEXT OVERLAP, WHICH IS NOT THE SAME PROBLEM AS BOX OVERLAP ───────────────
+ *
+ * THE BUG, exactly. The scene heading was trimmed by CHARACTER COUNT — 34 of
+ * them — against a column measured in PIXELS: `GUTTER - SCENE_X` is 128px, and
+ * 34 characters of the 19px label face is about 320px. So a trimmed slugline was
+ * still two and a half times too wide for the space it was trimmed to fit, and
+ * every scene heading ran past `GUTTER` into the band where `no shots yet` is
+ * drawn — on a baseline eleven pixels away. The two printed through each other
+ * on every empty scene, which is what a fresh board is made of.
+ *
+ * A character budget cannot fit proportional text. "MMMMM" and "lllll" are the
+ * same count and nearly three times apart in width, and the board's own sluglines
+ * are the wide kind: capitals, full stops and an em dash.
+ *
+ * So the spine MEASURES. `getComputedTextLength` is exact and is what the browser
+ * itself uses to lay the glyphs out; the estimate below is only for environments
+ * that have no text metrics at all (happy-dom in the tests), where being roughly
+ * right beats pretending 34 characters is a width.
+ *
+ * Cheap enough to do freely: `paint` runs at most once per frame and only on a
+ * document change — panning and zooming go through `place`, which touches one
+ * transform and measures nothing.
+ */
+
+/** Roughly how wide this face draws, for environments with no text metrics. */
+function estimateWidth(text: string, fontSize: number, tracking = 0): number {
+  return text.length * (fontSize * 0.55 + fontSize * tracking);
+}
+
+function measuredWidth(node: SVGElement, fontSize: number, tracking = 0): number {
+  const fn = (node as unknown as { getComputedTextLength?: () => number }).getComputedTextLength;
+  if (typeof fn === 'function') {
+    try {
+      const w = fn.call(node);
+      // happy-dom defines the method and answers 0 for everything; a real zero
+      // only happens for empty text, which we never ask about.
+      if (w > 0) return w;
+    } catch { /* fall through to the estimate */ }
+  }
+  return estimateWidth(node.textContent ?? '', fontSize, tracking);
+}
+
+/**
+ * The longest prefix of `text` that fits `maxWidth`, with an ellipsis when it had
+ * to cut. Pure, and exported, so the trimming is testable without a font.
+ *
+ * Binary search rather than a character-at-a-time walk: `measure` is a layout
+ * read, and a long slugline against a narrow column would otherwise be dozens of
+ * them in a row.
+ */
+export function trimToWidth(
+  text: string,
+  maxWidth: number,
+  measure: (s: string) => number,
+): string {
+  if (maxWidth <= 0) return '';
+  if (measure(text) <= maxWidth) return text;
+
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (measure(`${text.slice(0, mid).trimEnd()}…`) <= maxWidth) lo = mid;
+    else hi = mid - 1;
+  }
+  // Nothing fits, not even one character and the ellipsis: draw nothing rather
+  // than a lone "…", which reads as a rendering fault.
+  return lo > 0 ? `${text.slice(0, lo).trimEnd()}…` : '';
 }
 
 function el(tag: string, attrs: Record<string, string | number>): SVGElement {
@@ -173,6 +274,8 @@ export function installSpine(board: MountedBoard, container: HTMLElement): () =>
     // ── SCENES, and the shots that cover them ───────────────────────────────
     for (const row of plan.rows) {
       const mid = row.y + row.height / 2;
+      /** Where the empty-state may start: past the heading, never under it. */
+      let headingEnd = GUTTER;
 
       if (row.sceneKey) {
         // A tick and the scene's own name, level with its row of shots.
@@ -184,16 +287,37 @@ export function installSpine(board: MountedBoard, container: HTMLElement): () =>
         const n = el('text', { x: SCENE_X, y: mid - 6, class: 'vs-spine__scene-n' });
         n.textContent = `sc ${row.sceneNumber}`;
         svg.append(n);
-        const h = el('text', { x: SCENE_X, y: mid + 16, class: 'vs-spine__scene-h' });
+
+        /**
+         * HOW MUCH ROOM THE HEADING ACTUALLY HAS, and it depends on the row.
+         *
+         * A row WITH shots must keep its heading inside the gutter column: the
+         * spine is drawn ABOVE the editor (the editor paints an opaque background
+         * over everything beneath it), so a slugline that ran past `GUTTER` would
+         * print straight across the first shot card.
+         *
+         * A row with NO shots has that space free, and the whole point of the
+         * label is to be read — so the heading is allowed to use it, and the
+         * empty-state text is moved to wherever the heading really ends instead
+         * of being nailed to `GUTTER` and printed through.
+         */
+        const h = el('text', { x: SCENE_X, y: mid + SCENE_H_DROP, class: 'vs-spine__scene-h' });
+        svg.append(h);
+        const room = row.shotIds.length
+          ? GUTTER - SCENE_X - LABEL_PAD
+          : GUTTER - SCENE_X + SHOT_W;
         // Trimmed rather than wrapped: a slugline is one line by definition, and
         // a wrapped one would push into the cards.
-        h.textContent = row.heading.length > 34
-          ? `${row.heading.slice(0, 33)}…` : row.heading;
-        svg.append(h);
+        h.textContent = trimToWidth(row.heading, room, s => {
+          h.textContent = s;
+          return measuredWidth(h, SCENE_H_SIZE);
+        });
+        headingEnd = SCENE_X + measuredWidth(h, SCENE_H_SIZE) + LABEL_PAD;
       } else {
         const n = el('text', { x: SCENE_X, y: mid, class: 'vs-spine__scene-n' });
         n.textContent = 'not on the script yet';
         svg.append(n);
+        headingEnd = SCENE_X + measuredWidth(n, SCENE_N_SIZE, SCENE_N_TRACKING) + LABEL_PAD;
       }
 
       /**
@@ -213,10 +337,19 @@ export function installSpine(board: MountedBoard, container: HTMLElement): () =>
         }));
       }
 
-      // An empty scene says so, in the space its shots would occupy.
+      /**
+       * An empty scene says so, in the space its shots would occupy — and CLEAR
+       * OF THE HEADING, which is the whole fix.
+       *
+       * It used to be pinned to `GUTTER` on a baseline (mid + 5) that sits
+       * between the scene number's (mid − 6) and the heading's (mid + 16), so it
+       * collided in y with both and in x with any heading longer than the 128px
+       * column. Now it starts after the heading really ends, and drops to its own
+       * baseline so the two never share a line even when the heading is short.
+       */
       if (!row.shotIds.length) {
         const empty = el('text', {
-          x: GUTTER, y: mid + 5, class: 'vs-spine__empty',
+          x: Math.max(GUTTER, headingEnd), y: mid + SCENE_H_DROP, class: 'vs-spine__empty',
         });
         empty.textContent = 'no shots yet';
         svg.append(empty);

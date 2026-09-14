@@ -64,6 +64,33 @@ export interface BlockMeta {
   /** The page a web import came from, and who to credit. */
   sourceUrl?: string;
   credit?: string;
+
+  /**
+   * ── WHAT SCENE THIS IS ABOUT ───────────────────────────────────────────────
+   *
+   * A reference had exactly two homes: INSIDE a shot, where it is used to
+   * generate that shot's picture, or LOOSE on the canvas, where it belongs to
+   * nobody. There was no way to say the thing people actually say — "this is the
+   * look of the kitchen scene" — which is most of what a mood board IS.
+   *
+   * So: a loose canvas block may name the scene it is about. It is still not
+   * compiled (only a shot's own references are), and it is still the user's to
+   * drag anywhere. What it buys is that the scene can be ASKED: `board_canvas_read`
+   * reports it, so "what have we got for scene 3" is answerable, and
+   * `board_arrange { sceneKey }` can gather them back beside that scene's row.
+   *
+   * A SCENE, NOT A SEQUENCE. A scene is the unit shots attach to, the unit that
+   * has a row on the board, and the unit the agent works through one at a time.
+   * Anything coarser is a FRAME with a title — which is how grouping already
+   * works here, and one mechanism beats two.
+   *
+   * DELIBERATELY NOT SNAPPED. `relayoutShots` does not move these when the grid
+   * moves, because a reference the user dragged somewhere is a decision, and
+   * silently putting it back is the behaviour the board already refuses for a
+   * renamed slugline: drift is SURFACED and re-pointed on request, never
+   * re-bound behind the user's back.
+   */
+  sceneKey?: string;
 }
 
 function map(doc: Y.Doc): Y.Map<BlockMeta> {

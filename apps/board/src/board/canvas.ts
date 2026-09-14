@@ -45,17 +45,23 @@ import { DefaultTheme } from '@blocksuite/affine/model';
 import { Text } from '@blocksuite/store';
 import * as Y from 'yjs';
 
-import { SHOT_H } from '../shot/model';
 import { readBlockMeta } from './board-meta';
 import { decodeMediaRef } from './media-ref';
+/**
+ * GEOMETRY LIVES IN `space.ts`, and it moved there for a reason.
+ *
+ * `Box`, `overlaps`, `boundsOf` and `isLayoutInert` were private to this file,
+ * which is exactly why only this file could do layout — `board_place_media` and
+ * `board_generate_media` had no collision handling at all while the prompt told
+ * the agent the board would resolve overlaps for it. Imports go one way:
+ * `canvas.ts` → `space.ts`, never back.
+ */
+import {
+  type Box, OWNED_FLAVOURS, PUSH_GAP, bboxOf, boundsOf, collisionCount, isLayoutInert,
+  moveDown, overlaps, oversizeIds, ownedBand, thinkingOrigin,
+} from './space';
+import { SHOT_H, SHOT_W } from '../shot/model';
 
-/** Blocks the board owns and manages elsewhere. Reported as ANCHORS (so an arrow
- *  can point at a shot) but never as canvas furniture to be restyled or moved. */
-const OWNED_FLAVOURS = new Set([
-  'voidspace:shot',
-  'voidspace:screenplay',
-  'voidspace:blockdraft',
-]);
 
 /**
  * A SMALL NAMED PALETTE, and the reason it is small.
@@ -159,7 +165,13 @@ export type ElementSpec =
       style?: 1 | 2 | 3 | 4;
       layout?: 'right' | 'left' | 'balance';
     })
-  | (Common & { kind: 'frame'; title?: string })
+  | (Common & {
+      kind: 'frame';
+      title?: string;
+      /** What this frame CONTAINS, by `ref` or `id`. Registered as real
+       *  membership, so dragging the frame takes its contents with it. */
+      contains?: Array<{ id: string } | { ref: string }>;
+    })
   | (Common & { kind: 'group'; members: Array<{ id: string } | { ref: string }>; title?: string })
   | (Common & { kind: 'link'; url: string; title?: string; description?: string });
 
@@ -175,38 +187,14 @@ export interface DrawResult {
 // ── Placement ────────────────────────────────────────────────────────────────
 
 /**
- * Somewhere clear to put a batch that did not say where it wanted to go.
+ * Where a batch with no coordinates goes: `thinkingOrigin` in `space.ts`, shared
+ * with the media paths.
  *
- * BELOW the filmstrip, not beside it. The strip grows to the right forever, so
- * anything placed at "the right-hand edge" is in the way of the next shot; the
- * band underneath is empty by construction and is where a person doodles anyway.
+ * A second copy is how the two halves of the board came to disagree about where
+ * "clear space" was — this one scanned the whole canvas while the media path used
+ * a fixed `SHOT_H + 240` that landed on scene 2.
  */
-function freeOrigin(std: BlockStdScope): { x: number; y: number } {
-  const gfx = std.get(GfxControllerIdentifier);
-  let bottom = SHOT_H + 160;
-  let left = 0;
-  let any = false;
 
-  for (const model of gfx.gfxElements as GfxModel[]) {
-    const bound = boundsOf(model);
-    if (!bound) continue;
-    if (!any) { left = bound.x; any = true; }
-    left = Math.min(left, bound.x);
-    bottom = Math.max(bottom, bound.y + bound.h + 160);
-  }
-  return { x: left, y: bottom };
-}
-
-function boundsOf(model: unknown): { x: number; y: number; w: number; h: number } | null {
-  const raw = (model as { xywh?: string })?.xywh;
-  if (typeof raw !== 'string') return null;
-  try {
-    const [x, y, w, h] = JSON.parse(raw) as number[];
-    return { x, y, w, h };
-  } catch {
-    return null;
-  }
-}
 
 /** Default size per kind, so a spec only has to say what it IS. */
 const SIZE: Record<string, { w: number; h: number }> = {
@@ -250,6 +238,14 @@ export interface CanvasItem {
   referenceIds?: string[];
   /** The page a web import came off. */
   sourceUrl?: string;
+  /**
+   * The scene this loose reference is ABOUT, if it says.
+   *
+   * Makes "what have we got for scene 3" answerable without the agent keeping its
+   * own list. Still not compiled — only a shot's own references are — and still
+   * the user's to drag anywhere; see `BlockMeta.sceneKey`.
+   */
+  sceneKey?: string;
 }
 
 /** Text out of anything that carries some, without caring how it stores it. */
@@ -440,6 +436,7 @@ export function readCanvas(std: BlockStdScope, where: boolean | CanvasRead = fal
       h: Math.round(bound.h),
       ...(m.flavour && OWNED_FLAVOURS.has(m.flavour) ? { owned: true as const } : {}),
       ...(meta?.prompt ? { prompt: meta.prompt.slice(0, 160) } : {}),
+      ...(meta?.sceneKey ? { sceneKey: meta.sceneKey } : {}),
       ...(meta?.referenceIds?.length ? { referenceIds: meta.referenceIds } : {}),
       ...(meta?.sourceUrl ? { sourceUrl: meta.sourceUrl } : {}),
     });
@@ -483,6 +480,26 @@ export interface CanvasDigest {
   frames: string[];
   /** The opening words of each text-bearing element, in reading order. */
   notes: string[];
+  /**
+   * IS THE BOARD A MESS? Two numbers, and they are the agent's only way to know.
+   *
+   * Everything above this line is an inventory — counts, titles, openings — with
+   * no geometry in it at all. So the standing per-turn picture of the board could
+   * not express "your references are stacked on top of each other" or "that still
+   * is bigger than the shot it belongs to", which is why the agent was the last
+   * to know about both of the bugs this work was reported for.
+   *
+   * Deliberately NOT a list of boxes. A digest must not grow with the board, and
+   * the agent does not need coordinates to say a sentence about the state of the
+   * canvas or to offer `board_arrange` — it needs to know there is something to
+   * offer. `board_canvas_read` is one call away when it wants the real geometry.
+   */
+  tidy: {
+    /** Pairs of loose elements sitting on each other. 0 is a clean board. */
+    collisions: number;
+    /** Elements drawn larger than a shot card, which a reference never should be. */
+    oversize: number;
+  };
 }
 
 /** Frames and notes are capped: a digest must not grow with the board. */
@@ -516,7 +533,16 @@ export function canvasDigest(std: BlockStdScope): CanvasDigest {
     }
   }
 
-  return { total, kinds, frames, notes };
+  return {
+    total,
+    kinds,
+    frames,
+    notes,
+    tidy: {
+      collisions: collisionCount(std),
+      oversize: oversizeIds(std, SHOT_W, SHOT_H).length,
+    },
+  };
 }
 
 // ── Writing ──────────────────────────────────────────────────────────────────
@@ -622,12 +648,28 @@ export function drawOnCanvas(
   const ids: Array<string | null> = [];
   const refs: Record<string, string> = {};
   const problems: string[] = [];
+  /** Frame membership, resolved after the batch — a member may be a `ref` to
+   *  something declared later in the same array. */
+  const framesToFill: Array<{
+    frameId: string;
+    members: Array<{ id: string } | { ref: string }>;
+  }> = [];
 
   if (!surface || !rootId) {
     return { ids: specs.map(() => null), refs, problems: ['The canvas is not ready yet.'] };
   }
 
-  const origin = freeOrigin(std);
+  /**
+   * The thinking region is RIGHT-ALIGNED, so it needs this batch's width — and
+   * for a draw that is the widest thing being auto-placed, since they stack in
+   * one column. Only the declared widths count: a note's HEIGHT grows to fit its
+   * text, but its width is whatever was asked for.
+   */
+  const autoWidth = specs.reduce((max, spec) => {
+    if (spec.x !== undefined && spec.y !== undefined) return max;
+    return Math.max(max, spec.w ?? SIZE[spec.kind]?.w ?? 200);
+  }, 0);
+  const origin = thinkingOrigin(std, autoWidth);
   /** How far the auto-placed cursor has walked down the free band. */
   let flowY = origin.y;
 
@@ -756,6 +798,22 @@ export function drawOnCanvas(
               },
               surface.id,
             ) ?? null;
+            /**
+             * A FRAME THAT OWNS WHAT IS IN IT, when the caller says what that is.
+             *
+             * Without `childElementIds` a frame is decoration: it looks like a
+             * section and behaves like a rectangle sitting behind some notes, so
+             * the user drags the section and the contents stay where they were.
+             * `FrameBlockModel` has supported membership all along and the board
+             * never set it — invisible, because `board_document` reads sections by
+             * geometric containment and the export kept working.
+             *
+             * Resolved AFTER the batch, since a member may be a `ref` to something
+             * later in the same array — see the adoption pass below.
+             */
+            if (id && spec.contains?.length) {
+              framesToFill.push({ frameId: id, members: spec.contains });
+            }
             break;
           }
 
@@ -822,7 +880,47 @@ export function drawOnCanvas(
       ids.push(id);
       if (id && spec.ref) refs[spec.ref] = id;
     }
+
   });
+
+  /**
+   * FRAME MEMBERSHIP, resolved AFTER the transaction and not inside it.
+   *
+   * `store.getBlock(id)` RETURNS UNDEFINED for a block created in the transaction
+   * that is still open — models are materialised by a store observer, so the id is
+   * real and the model is not there yet. Measured directly: a frame created and
+   * looked up in one `transact` reports `frame? false`, and `addChild` is never
+   * reached.
+   *
+   * The first version of this ran inside the transaction and appeared to work,
+   * because the notes created after the frame flushed the store as a side effect —
+   * so it passed for a frame declared BEFORE its contents and would have failed
+   * silently for one declared after. Running it here does not depend on that.
+   *
+   * NO `captureSync()`, deliberately: these writes merge into the undo unit the
+   * batch already opened, so `board_draw` keeps its one-call-one-undo promise —
+   * the same argument `relaxOverlaps` makes two frames later.
+   */
+  for (const pending of framesToFill) {
+    const memberIds = pending.members
+      .map(m => ('ref' in m ? refs[m.ref] : m.id))
+      .filter((id): id is string => !!id);
+    const missing = pending.members.length - memberIds.length;
+    if (missing > 0) {
+      problems.push(
+        `${missing} member(s) of frame ${pending.frameId} could not be resolved, `
+        + 'so the frame does not contain them.',
+      );
+    }
+    if (!memberIds.length) continue;
+    const adopted = adoptIntoFrame(std, pending.frameId, memberIds);
+    if (adopted < memberIds.length) {
+      problems.push(
+        `Frame ${pending.frameId} took ${adopted} of ${memberIds.length} members, so `
+        + 'dragging it will not move the rest.',
+      );
+    }
+  }
 
   /**
    * RESOLVE OVERLAPS ONCE EVERYTHING HAS SIZED ITSELF.
@@ -856,6 +954,10 @@ export function drawOnCanvas(
       const stillHere = madeIds.every(id =>
         !!surface.getElementById(id) || !!std.store.getBlock(id));
       if (!stillHere) return;
+      // ORDER MATTERS: clear the board's own region FIRST, then resolve the
+      // batch's internal collisions at wherever it ended up. The other way
+      // round tidies a layout and then moves the whole thing anyway.
+      try { clearOfOwned(std, madeIds); } catch { /* never break a draw over layout */ }
       try { relaxOverlaps(std, madeIds); } catch { /* never break a draw over layout */ }
     }));
   }
@@ -889,44 +991,6 @@ export function drawOnCanvas(
  * Earlier specs hold their ground and later ones move, because people write a
  * batch in the order they want it read.
  */
-interface Box { x: number; y: number; w: number; h: number }
-
-/**
- * TRUE GEOMETRIC OVERLAP, with no tolerance — and the tolerance is exactly what
- * made this dangerous.
- *
- * The first version tested with the same 40px padding it used when separating
- * things, so two elements merely CLOSE to each other counted as a collision. On
- * the journal timeline the notes were 150 wide under shapes 130 wide at 168px
- * intervals, leaving 28px between a note and the next month's shape — under the
- * threshold. Every second month was shunted down and a deliberate row became a
- * staircase. Worse than the overlap it replaced, because the overlap was
- * obviously wrong and the staircase looks like a decision.
- *
- * Detect real intersection; add breathing room only when actually moving
- * something. A layout that does not overlap is never touched.
- */
-function overlaps(a: Box, b: Box): boolean {
-  return a.x < b.x + b.w
-    && a.x + a.w > b.x
-    && a.y < b.y + b.h
-    && a.y + a.h > b.y;
-}
-
-/** Elements that must never be moved, and never push anything. */
-function isLayoutInert(model: unknown): boolean {
-  const m = model as { flavour?: string; type?: string; group?: unknown };
-  // A FRAME is a container — it is SUPPOSED to sit under its contents, and
-  // treating that as a collision would launch every framed board into space.
-  if (m.flavour === 'affine:frame') return true;
-  // A CONNECTOR has no position of its own; it follows its endpoints.
-  if (m.type === 'connector') return true;
-  // Anything inside a group (a mind map's nodes) is positioned BY the group.
-  // Moving one node individually would tear the tree apart.
-  if (m.group) return true;
-  return false;
-}
-
 /**
  * ONLY THE ELEMENTS WHOSE SIZE THE AGENT COULD NOT HAVE KNOWN MAY BE MOVED.
  *
@@ -956,9 +1020,6 @@ function isAutoSized(model: unknown): boolean {
   const m = model as { flavour?: string; type?: string };
   return (!!m.flavour && AUTO_SIZED.has(m.flavour)) || m.type === 'mindmap';
 }
-
-/** Breathing room added when something IS moved. Never used for detection. */
-const PUSH_GAP = 32;
 
 export function relaxOverlaps(std: BlockStdScope, createdIds: string[]): number {
   const gfx = std.get(GfxControllerIdentifier);
@@ -1009,32 +1070,115 @@ export function relaxOverlaps(std: BlockStdScope, createdIds: string[]): number 
 }
 
 /**
- * Shift one element down by `dy`.
+ * ── AN AGENT BATCH MAY NOT LAND ON THE STORYBOARD ────────────────────────────
  *
- * A GROUP — which is what a mind map is — CANNOT be moved by writing its `xywh`.
- * `GfxGroupLikeElementModel` defines `set xywh(_) {}`: an empty setter, because
- * a group's bounds are DERIVED from its children every time they are read. So
- * the obvious implementation silently does nothing, and the mind map stays
- * exactly where it was overlapping.
+ * `relaxOverlaps` resolves collisions BETWEEN elements the agent made. It
+ * cannot help with the other kind, and that is the one people report as "it
+ * overwrote my board": a batch drawn straight on top of the filmstrip, the
+ * screenplay, and the spine.
  *
- * BlockSuite's own drag handles this by expanding to `childElements` and moving
- * each one (`mind-map-drag.ts`), and so does this.
+ * Three separate reasons the agent cannot avoid this by itself:
+ *
+ *  • THE SPINE IS NOT ON THE CANVAS. Acts, sequences and scene brackets are an
+ *    SVG overlay drawn in model space (`ui/spine.ts`) — deliberately, since a
+ *    bracket is a statement ABOUT the board rather than a thing on it. So it
+ *    appears in no read, and no layout pass can see it. Its labels sit in the
+ *    gutter around the strip, which is exactly where a batch aimed near the
+ *    strip ends up.
+ *
+ *  • `freeOrigin` ONLY APPLIES WHEN THE AGENT GIVES NO COORDINATES. The moment
+ *    it lays out a designed page — a title, two frames side by side, notes
+ *    inside them — every element carries an explicit x/y, and nothing then keeps
+ *    the batch below the strip.
+ *
+ *  • `relaxOverlaps` MOVES ONLY NOTES AND MIND MAPS, for good reasons recorded
+ *    below. A frame or a text label placed over a shot card is never moved.
+ *
+ * ── WHY THE WHOLE BATCH MOVES, AND NOTHING INSIDE IT ─────────────────────────
+ * The internal geometry of a batch is the design: a title above two columns, a
+ * row read left to right. Nudging individual members to clear the strip would
+ * break exactly what `relaxOverlaps` learned the hard way not to break — so this
+ * translates every element by the SAME dy. The layout arrives intact, just
+ * lower. Nothing is ever moved sideways, and nothing moves up.
  */
-function moveDown(
-  gfx: { updateElement(model: never, props: Record<string, unknown>): void },
-  model: GfxModel,
-  dy: number,
-): void {
-  const kids = (model as unknown as { childElements?: GfxModel[] }).childElements;
-  if (Array.isArray(kids) && kids.length) {
-    for (const kid of kids) {
-      const b = boundsOf(kid);
-      if (b) gfx.updateElement(kid as never, { xywh: `[${b.x},${b.y + dy},${b.w},${b.h}]` });
-    }
-    return;
+export function clearOfOwned(std: BlockStdScope, createdIds: string[]): number {
+  const gfx = std.get(GfxControllerIdentifier);
+  const created = new Set(createdIds);
+
+  const mine: Array<{ model: GfxModel; box: Box }> = [];
+  for (const model of gfx.gfxElements as GfxModel[]) {
+    const box = boundsOf(model);
+    if (!box) continue;
+    if (!created.has((model as unknown as { id: string }).id)) continue;
+    // A group's children are created too; moving both would double the shift.
+    if ((model as unknown as { group?: unknown }).group) continue;
+    mine.push({ model, box });
   }
-  const b = boundsOf(model);
-  if (b) gfx.updateElement(model as never, { xywh: `[${b.x},${b.y + dy},${b.w},${b.h}]` });
+
+  // `ownedBand` already grows the strip by `SPINE_MARGIN`, which is the whole
+  // reason this cannot be done from a read: the brackets and scene labels are an
+  // SVG overlay and appear in no read at all.
+  const band = ownedBand(std);
+  if (!band || !mine.length) return 0;
+
+  const batch = bboxOf(mine.map(m => m.box))!;
+  if (!overlaps(batch, band)) return 0;
+
+  // Down to just below the band. Never up: above the strip is where the user's
+  // own earlier work tends to be, and a batch that jumps backwards past it is
+  // no better than one that lands on the strip.
+  const dy = band.y + band.h - batch.y;
+  if (dy <= 0) return 0;
+
+  for (const m of mine) moveDown(gfx as never, m.model, dy);
+  return mine.length;
+}
+
+/**
+ * Register members on a frame.
+ *
+ * Through the model's own `addChild` when it has one — AFFiNE maintains
+ * `childElementIds` as a plain record and the method is what keeps presentation
+ * order and the surface index in step. The direct write is the fallback for a
+ * model shape that does not expose it, rather than the first choice.
+ */
+export function adoptIntoFrame(
+  std: BlockStdScope,
+  frameId: string,
+  memberIds: string[],
+): number {
+  const frame = std.store.getBlock(frameId)?.model as unknown as {
+    addChild?: (el: unknown) => void;
+    props?: { childElementIds?: Record<string, boolean> };
+  } | undefined;
+  /**
+   * A MISSING FRAME MEANS THE CALLER IS STILL INSIDE THE TRANSACTION THAT MADE IT.
+   *
+   * `store.getBlock` cannot see a block whose transaction has not committed, so
+   * this returned 0 and the frame ended up decorative — with no error anywhere,
+   * which is how the original version shipped looking like it worked. The count is
+   * returned so a caller can say so; see the note at both call sites.
+   */
+  if (!frame) return 0;
+
+  const gfx = std.get(GfxControllerIdentifier);
+  let added = 0;
+
+  for (const id of memberIds) {
+    const el = gfx.surface?.getElementById(id) ?? std.store.getBlock(id)?.model;
+    if (!el) continue;
+    if (typeof frame.addChild === 'function') {
+      // AFFiNE's own door. It refuses a cycle (`canSafeAddToContainer`) and keeps
+      // the surface index in step, neither of which a direct write would do.
+      frame.addChild(el);
+    } else if (frame.props) {
+      frame.props.childElementIds = { ...(frame.props.childElementIds ?? {}), [id]: true };
+    } else {
+      continue;
+    }
+    added++;
+  }
+  return added;
 }
 
 /**

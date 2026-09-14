@@ -53,6 +53,9 @@ export { SunoAudioPanel } from "./SunoAudioPanel";
 
 // Transitions & Keyframes
 export { ClipTransitionSection } from "./ClipTransitionSection";
+// The between-two-shots transition, as opposed to the per-clip entry/exit
+// animation above. Two different edits that both get called "a transition".
+export { ClipToClipTransitionSection } from "./ClipToClipTransitionSection";
 export { KeyframesSection } from "./KeyframesSection";
 export { BlendingSection } from "./BlendingSection";
 export { GraphicSection } from "./GraphicSection";

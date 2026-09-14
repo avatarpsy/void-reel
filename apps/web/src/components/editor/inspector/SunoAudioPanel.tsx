@@ -111,8 +111,22 @@ interface PendingGroup {
  */
 const SOURCE_LED_AUDIO_WEIGHT = 0.78;
 
-const SUNO_MODELS = ["V4_5PLUS", "V5", "V5_5"] as const;
+/**
+ * The Suno models still served upstream. Suno discontinued the entire pre-V6
+ * line (V4 · V4_5 · V4_5PLUS · V4_5ALL · V5 · V5_5), so offering one here would
+ * hand the user a button that 422s. The server normalises any retired id it
+ * receives, which is what keeps an older loaded bundle working mid-deploy.
+ */
+const SUNO_MODELS = ["V6", "V6_MINI", "V6_WILD"] as const;
 type SunoModel = (typeof SUNO_MODELS)[number];
+
+/** Button labels. Spelled out rather than derived: the old string-munging
+ *  (`V`→`v`, `_`→`.`, `PLUS`→`+`) turned "V6_MINI" into "v6.MINI". */
+const SUNO_MODEL_LABELS: Record<SunoModel, string> = {
+  V6: "v6",
+  V6_MINI: "v6 Mini",
+  V6_WILD: "v6 Wild",
+};
 
 interface SunoAudioPanelProps {
   clipId: string;
@@ -353,7 +367,7 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
   }, [playingTakeId]);
 
   // Shared model + per-op fields
-  const [model, setModel] = useState<SunoModel>("V4_5PLUS");
+  const [model, setModel] = useState<SunoModel>("V6");
   const [coverPrompt, setCoverPrompt] = useState("");
   const [coverStyle, setCoverStyle] = useState("");
   const [coverTitle, setCoverTitle] = useState("");
@@ -705,7 +719,7 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
           title: coverTitle.trim() || mediaItem.name || "Cover",
           // We are always supplying real lyrics now, so this is always custom.
           lyricsMode: true,
-          // Without this a V5_5 cover comes back 20 seconds long — that is the
+          // Without this a cover comes back 20 seconds long — that is the
           // upstream default when `duration` is omitted, not the source length.
           sourceDurationSec:
             mediaItem.metadata?.duration || clip?.duration || undefined,
@@ -1172,7 +1186,7 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
                   : "bg-background-tertiary text-text-muted hover:text-text-primary border border-border"
               }`}
             >
-              {m.replace("V", "v").replace("_", ".").replace("PLUS", "+")}
+              {SUNO_MODEL_LABELS[m]}
             </button>
           ))}
         </div>
@@ -1763,7 +1777,7 @@ export const SunoAudioPanel: React.FC<SunoAudioPanelProps> = ({ clipId }) => {
         </div>
         <p className="text-[8px] text-text-muted">
           Learns the sound of a 10–30s window so later tracks can be the same artist.
-          Needs Suno V5 or V5.5 when you use it.
+          Needs a Suno v6 model when you use it.
         </p>
         {personaId && (
           <p className="text-[9px] text-primary break-all">Persona id: {personaId}</p>

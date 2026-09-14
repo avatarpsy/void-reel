@@ -51,6 +51,16 @@ export interface ScreenplayProps extends GfxCommonBlockProps {
 /** A page. 8.5in at ~96dpi is 816px; this is that, minus a comfortable margin. */
 export const SCREENPLAY_W = 640;
 export const SCREENPLAY_H = 860;
+/**
+ * The gap between the screenplay panel and the filmstrip's origin.
+ *
+ * Named because a second thing depends on it: `board/space.ts` puts the THINKING
+ * REGION to the left of this panel and derives its boundary from
+ * `SCREENPLAY_W + SCREENPLAY_GUTTER` rather than repeating the number. While the
+ * 140 was inlined here, the region's boundary was a separate guess — and the
+ * symptom was the agent's thinking landing on top of the script.
+ */
+export const SCREENPLAY_GUTTER = 140;
 
 export const ScreenplayBlockSchema = defineBlockSchema({
   flavour: 'voidspace:screenplay',
@@ -137,7 +147,7 @@ export function ensureScript(std: BlockStdScope, surfaceId: string): ScreenplayB
   if (existing) return existing;
   const id = std.store.addBlock(
     'voidspace:screenplay',
-    { xywh: `[${-(SCREENPLAY_W + 140)},0,${SCREENPLAY_W},${SCREENPLAY_H}]` },
+    { xywh: `[${-(SCREENPLAY_W + SCREENPLAY_GUTTER)},0,${SCREENPLAY_W},${SCREENPLAY_H}]` },
     surfaceId,
   );
   return std.store.getBlock(id)!.model as ScreenplayBlockModel;

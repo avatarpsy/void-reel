@@ -147,4 +147,8 @@ export const surface: InspectorSurface<VolumeAutomationConfig> = {
         .join(" "),
     };
   },
+  read: (clip) => {
+    const pts = (clip.raw as any).automation?.volume ?? [];
+    return Array.isArray(pts) && pts.length > 0 ? { points: pts } : null;
+  },
 };

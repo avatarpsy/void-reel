@@ -51,6 +51,19 @@ export interface AudioClipRenderInfo {
    * preview's volume line.
    */
   readonly automationVolume?: ReadonlyArray<{ time: number; value: number }>;
+  /**
+   * The clip's AUDIO effect chain — EQ, compressor, reverb, delay, noise
+   * reduction — as distinct from `effects`, which is the VISUAL chain (and
+   * which this engine reads only to find a `pan`).
+   *
+   * `Clip.audioEffects` has existed, been written by the Inspector and by the
+   * agent's `audio-effects` surface, and been saved in the project for a long
+   * time. Nothing ever read it: `applyAudioEnhancements` in the web app's
+   * audio bridge is the only code that runs an effect chain, and it had no
+   * callers. So adding reverb to a clip changed the project file and never
+   * changed a single sample — in the preview or in the export.
+   */
+  readonly audioEffects?: ReadonlyArray<Effect>;
   /** How far into the clip the render range starts (clip-local seconds). */
   readonly clipTimeOffset?: number;
 }

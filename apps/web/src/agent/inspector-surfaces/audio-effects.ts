@@ -62,4 +62,13 @@ export const surface: InspectorSurface<AudioEffectsConfig> = {
     if (!ok) return { ok: false, error: `${config.op} failed` };
     return { ok: true, note: `audio-effect ${config.op}` };
   },
+  read: (clip, ctx) => {
+    const fn = (ctx.store as any).getAudioEffects;
+    if (typeof fn !== "function") return null;
+    const fx = fn.call(ctx.store, clip.id) ?? [];
+    if (fx.length === 0) return null;
+    return fx.map((e: any) => ({
+      id: e.id, type: e.type, enabled: e.enabled !== false, params: e.params ?? {},
+    }));
+  },
 };

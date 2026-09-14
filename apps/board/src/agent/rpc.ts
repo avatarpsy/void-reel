@@ -29,6 +29,7 @@
  * without knowing what that image was for, and could not address it to change it.
  */
 import { GfxControllerIdentifier } from '@blocksuite/std/gfx';
+import { captureBoard, type ShotScope } from './screenshot';
 
 import type { MountedBoard } from '../blocksuite/editor';
 import { placeAsset } from '../board/asset-media';
@@ -36,7 +37,10 @@ import {
   COLOR_NAMES, canvasDigest, drawOnCanvas, editCanvas, mediaUrlOf, readCanvas, readSelection,
   type EditOp, type ElementSpec,
 } from '../board/canvas';
+import { reserveFlow } from '../board/space';
+import { arrangeCanvas } from '../board/arrange';
 import { pendingToast } from '../ui/toast';
+import type { PendingMediaApi } from '../ui/pending-media';
 import { renderBoardThumbnail } from '../board/thumbnail';
 import { compileBoard, describeShot } from '../shot/screenplay';
 import {
@@ -429,11 +433,14 @@ export interface BoardRpcOptions {
    * A getter for the same reason `screenplay` is one: the RPC is installed
    * before the chrome, and the readiness handshake must not wait on panels.
    */
-  pending?: () => {
-    show(id: string, kind: 'image' | 'video' | 'audio', referenceIds: string[]): void;
-    hide(id: string): void;
-    fail(id: string, message: string): void;
-  } | null;
+  /**
+   * The layer's OWN type, not a structural copy of it. There was a hand-written
+   * duplicate here and it drifted the moment `show` gained an argument — the
+   * layer accepted the aspect and this signature did not, so the call that
+   * passed it failed to compile with no hint that two declarations of one method
+   * existed.
+   */
+  pending?: () => Pick<PendingMediaApi, 'show' | 'hide' | 'fail'> | null;
   /** Force a cloud snapshot. Compile calls it so the stored document can never
    *  be older than the project built from it. */
   flushCloud?: () => Promise<void>;
@@ -1982,10 +1989,6 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
       const parsedItems = asArray<Record<string, unknown>>(args.items);
       const rows = parsedItems.length ? parsedItems : [args];
 
-      /** A tidy grid in clear space, unless the caller said where. */
-      const COLS = 4;
-      const CELL_W = 340;
-      const CELL_H = 250;
 
       /**
        * PUT IT WHERE THE USER IS LOOKING.
@@ -2002,8 +2005,16 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
        * BELOW their bounding box rather than to the right, since a row of
        * references read left-to-right and the answer reads as the next line.
        *
-       * No references (a plain "add media", or a track) falls back to the old
-       * clear space under the strip — there is nothing to be near.
+       * No references (a plain "add media", or a track) leaves the origin UNSET
+       * and lets the allocator put it in the thinking region — the same place a
+       * coordinate-less `board_draw` goes, and the same function.
+       *
+       * IT USED TO BE A FIXED POINT, and that was the "it overlaps things on the
+       * board" report: `{ x: 0, y: SHOT_H + 240 }` is (0, 1260), and scene row 2
+       * of the storyboard grid occupies y 1076–2096 while x 0–360 is the gutter
+       * the spine draws its brackets into. So every unanchored placement landed
+       * on scene 2 and in the gutter — and, being fixed, on the previous
+       * placement too.
        */
       const anchorIds = rows.flatMap(r => (Array.isArray(r.referenceIds) ? r.referenceIds.map(String) : []));
       const anchors = anchorIds.length
@@ -2015,7 +2026,20 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
             x: Math.min(...boxed.map(a => a.x as number)),
             y: Math.max(...boxed.map(a => (a.y as number) + (typeof a.h === 'number' ? a.h : 240))) + 64,
           }
-        : { x: 0, y: SHOT_H + 240 };
+        // Undefined, not a computed point: `reserveFlow` measures the batch and
+        // right-aligns it in the thinking region, which it cannot do if it is
+        // handed an origin that was decided before the widths were known.
+        : undefined;
+
+      /**
+       * WHICH SCENE THESE ARE ABOUT, per row and falling back to the call.
+       *
+       * A batch of references for one scene should not have to repeat the key on
+       * every item, and a mixed batch should be able to say it per item.
+       */
+      const callScene = typeof args.sceneKey === 'string' ? args.sceneKey : '';
+      const sceneKeyFor = (row: Record<string, unknown>) =>
+        (typeof row.sceneKey === 'string' && row.sceneKey ? row.sceneKey : callScene);
 
       const placedIds: string[] = [];
       const problems: string[] = [];
@@ -2029,20 +2053,15 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
 
         const kind = row.kind === 'video' || row.kind === 'audio' ? row.kind : 'image';
         /**
-         * A LONE ITEM IS PLACED TOO, when there is something to place it near.
+         * WHERE it goes is decided once every card exists — see the arrange step
+         * below, which now runs for EVERY item.
          *
-         * This used to pass `null` for a single row and let `placeAsset` pick,
-         * which is right for "add this from the library" and wrong for the case
-         * that matters most — one generated image, made from references the
-         * user is looking at, appearing somewhere else entirely.
+         * It used to be skipped for a lone item with no references, on the
+         * grounds that `placeAsset`'s own choice is right for "add this from the
+         * library". But that choice is the viewport centre, which is not
+         * guaranteed to be empty — so the one case that opted out of layout was
+         * also the one case that could silently land on the user's work.
          */
-        const at = rows.length > 1 || boxed.length
-          ? {
-              x: origin.x + (i % COLS) * CELL_W,
-              y: origin.y + Math.floor(i / COLS) * CELL_H,
-            }
-          : null;
-
         const placed = await placeAsset(board.std, {
           displayUrl: url,
           originalUrl: typeof row.originalUrl === 'string'
@@ -2055,12 +2074,26 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
           posterUrl: typeof row.posterUrl === 'string' ? row.posterUrl : undefined,
           bytes: typeof row.bytes === 'number' ? row.bytes : undefined,
           createdBy: 'agent',
+          /**
+           * A LONE GENERATION IS A HERO; EVERYTHING ELSE IS A REFERENCE.
+           *
+           * The distinction is not what the media IS, it is what the user is
+           * doing with it. Six library stills are a set being compared and
+           * belong at reference size; one picture the agent has just made from
+           * their references is the answer to a question and is worth a card one
+           * shot wide. `prompt` is the honest marker — only a generation carries
+           * one — and only when it arrives alone.
+           */
+          size: rows.length === 1 && typeof row.prompt === 'string' && row.prompt
+            ? 'hero'
+            : 'ref',
           // Provenance travels with the asset — see `BlockMeta`.
           ...(typeof row.prompt === 'string' ? { prompt: row.prompt } : {}),
           ...(Array.isArray(row.referenceIds) ? { referenceIds: row.referenceIds.map(String) } : {}),
           ...(typeof row.model === 'string' ? { model: row.model } : {}),
           ...(typeof row.sourceUrl === 'string' ? { sourceUrl: row.sourceUrl } : {}),
           ...(typeof row.credit === 'string' ? { credit: row.credit } : {}),
+          ...(sceneKeyFor(row) ? { sceneKey: sceneKeyFor(row) } : {}),
         });
 
         // A DEAD LINK IS NOT A CRASH. The agent needs to be told an asset could
@@ -2068,17 +2101,6 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
         // empty canvas.
         if (!placed.ok) { problems.push(`${row.name ?? url}: ${placed.message}`); continue; }
         placedIds.push(placed.blockId);
-
-        // Arranged AFTER placement: the insert helpers size a card from the real
-        // media, so overriding the box here would undo the aspect they just
-        // worked out. Only the position moves.
-        if (at) {
-          const model = board.store.getBlock(placed.blockId)?.model;
-          const box = model ? bounds(model.props as { xywh?: string }) : null;
-          if (model && box) {
-            board.store.updateBlock(model, { xywh: `[${at.x},${at.y},${box.w},${box.h}]` });
-          }
-        }
       }
 
       if (!placedIds.length) {
@@ -2086,6 +2108,59 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
           'unavailable',
           problems.join(' ') || 'Nothing could be placed on the canvas.',
         );
+      }
+
+
+      /**
+       * ARRANGE ON MEASURED SIZES, once every card exists.
+       *
+       * The old grid used a fixed 340px pitch, decided before anything was
+       * placed. But a card is sized from the real media, so a row of references
+       * was laid out on a pitch smaller than the cards themselves and every one
+       * of them sat on top of its neighbour. Measured: two 780px-wide references
+       * placed at x=0 and x=340, overlapping by 440px.
+       *
+       * That is unfixable before placement — the size is not knowable until the
+       * media has been read — so the positions are decided HERE, from the boxes
+       * the insert helpers actually produced. Same reason `relaxOverlaps` runs
+       * after a draw rather than during one.
+       *
+       * A flow, not a grid: left to right, wrapping when the row would exceed
+       * `ROW_MAX_W`, each row as tall as its tallest card. Reading order is
+       * preserved, which is what makes "these four, in this order" mean
+       * something to the user looking at them.
+       *
+       * `reserveFlow` IS THE SHARED ALLOCATOR, and that is the change. The flow
+       * above was blind to everything outside its own batch, so it cleared its
+       * own members and nothing else — no shot, no note, no earlier mood board.
+       * The batch now clears the storyboard, the spine gutter and the whole
+       * canvas, which is what the prompt has been promising the agent all along.
+       *
+       * `exclude` is load-bearing: these blocks already exist by now (they had
+       * to, in order to be sized from the real files), so without it every card
+       * would be an obstacle to itself and the batch would march down the board
+       * for ever.
+       */
+      {
+        const entries = placedIds.flatMap(id => {
+          const model = board.store.getBlock(id)?.model;
+          const box = model ? bounds(model.props as { xywh?: string }) : null;
+          return model && box ? [{ model, box }] : [];
+        });
+
+        const slots = reserveFlow(board.std, entries.map(e => e.box), {
+          at: origin,
+          exclude: placedIds,
+        });
+
+        entries.forEach((entry, i) => {
+          const slot = slots[i];
+          if (slot) {
+            board.store.updateBlock(entry.model, {
+              xywh: `[${slot.x},${slot.y},${slot.w},${slot.h}]`,
+            });
+          }
+        });
       }
 
       rev++;
@@ -2128,6 +2203,74 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
      * of the board was a lie, so it would place a note straight on top of scene
      * 3 and could not draw an arrow from an idea to the shot it was about.
      */
+    /**
+     * LOOK AT THE BOARD — a real picture, not a list of rectangles.
+     *
+     * The one read that answers a visual question. Returns a URL rather than
+     * bytes: a full-board PNG is megabytes, the bridge carries plain data
+     * between two windows, and a url is the form `inspect_media` takes anyway.
+     *
+     * NOT guarded by `checkRev`: it writes nothing, and refusing to LOOK at a
+     * board because it changed while we were reading it is nonsense.
+     */
+    'voidspace:board-screenshot': async args => {
+      const raw = String(args?.scope ?? 'viewport');
+      const scope: ShotScope =
+        raw === 'all' || raw === 'selection' ? raw : 'viewport';
+      try {
+        return { ok: true as const, ...(await captureBoard(board, scope)) };
+      } catch (e) {
+        // The reasons differ and so do the remedies — nothing selected, nothing
+        // on screen, upload refused. Pass the sentence through.
+        return fail('unavailable', (e as Error)?.message || 'The screenshot could not be taken.');
+      }
+    },
+
+    /**
+     * TIDY UP — the second half of a brainstorm, which had no verb.
+     *
+     * `addGuard`, not `checkRev`: arranging is ADDITIVE in the sense that matters
+     * — it never destroys content, and `rev` counts every `blockUpdated` rather
+     * than the user's edits (a freshly opened empty board already reports rev 444
+     * and moves again while the agent reads). A guard that fires when nothing
+     * happened is a random failure with a reassuring name.
+     */
+    'voidspace:board-arrange': args => {
+      const g = addGuard(args); if (!g.ok) return g;
+
+      const asRaw = String(args.as ?? 'tidy');
+      const as = asRaw === 'row' || asRaw === 'column' || asRaw === 'grid' ? asRaw : 'tidy';
+      const result = arrangeCanvas(board.std, {
+        ids: asArray<string>(args.ids).map(String),
+        as,
+        ...(typeof args.sceneKey === 'string' && args.sceneKey
+          ? { sceneKey: args.sceneKey }
+          : {}),
+        ...(typeof args.frame === 'string' ? { frame: args.frame } : {}),
+        inPlace: args.inPlace === true,
+      });
+
+      // Nothing moved AND nothing framed is a no-op worth reporting as one, so
+      // the agent does not tell the user it tidied a board it did not touch.
+      if (!result.moved && !result.frameId) {
+        return fail(
+          'unavailable',
+          result.problems.join(' ') || 'There was nothing to arrange.',
+        );
+      }
+
+      rev++;
+      const digest = canvasDigest(board.std);
+      return {
+        ok: true as const,
+        rev,
+        moved: result.moved,
+        ...(result.frameId ? { frameId: result.frameId } : {}),
+        ...(result.problems.length ? { problems: result.problems } : {}),
+        digest,
+      };
+    },
+
     'voidspace:board-canvas-read': args => {
       /**
        * SELECTION-ONLY IS THE COMMON CASE, not a filter.
@@ -2235,7 +2378,9 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
       else {
         const kind = args.kind === 'video' || args.kind === 'audio' ? args.kind : 'image';
         const ids = Array.isArray(args.referenceIds) ? args.referenceIds.map(String) : [];
-        layer.show(id, kind, ids);
+        // The aspect the generation ASKED FOR, so the card is the shape of its
+        // own result rather than a fixed portrait guess.
+        layer.show(id, kind, ids, typeof args.aspect === 'string' ? args.aspect : undefined);
       }
       return { ok: true as const, rev };
     },

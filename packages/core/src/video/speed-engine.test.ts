@@ -172,3 +172,67 @@ describe("SpeedEngine - Playback Time vs Media Time", () => {
     }
   });
 });
+
+/**
+ * Retiming has to survive a reload, and the reason is sharper than "settings
+ * should persist": the Inspector writes the speed HERE and the shortened
+ * duration to the CLIP. Restore one without the other and the clip plays at 1x
+ * inside a window sized for 2x, so the back half of the shot is simply gone.
+ */
+describe("SpeedEngine persistence", () => {
+  it("round-trips speed, reverse and freeze frames through a fresh engine", () => {
+    const a = new SpeedEngine();
+    a.setClipSpeed("clip-fast", 2, 60);
+    a.setClipSpeed("clip-slow", 0.5, 30);
+    a.setReverse("clip-slow", true, 30);
+    a.createFreezeFrame("clip-fast", 12, 12, 4);
+
+    const payload = a.serializeAll();
+    const b = new SpeedEngine();
+    b.restoreAll(payload);
+
+    expect(b.getClipSpeed("clip-fast")).toBe(2);
+    expect(b.getClipSpeed("clip-slow")).toBe(0.5);
+    expect(b.isReverse("clip-slow")).toBe(true);
+    expect(b.getFreezeFrames("clip-fast")).toHaveLength(1);
+    // The derived duration is what the timeline drew; it must agree after a load.
+    expect(b.getEffectiveDuration("clip-fast")).toBeCloseTo(30, 5);
+  });
+
+  it("survives a JSON round trip, which is what the blob actually does", () => {
+    const a = new SpeedEngine();
+    a.setClipSpeed("c1", 1.75, 40);
+    const b = new SpeedEngine();
+    b.restoreAll(JSON.parse(JSON.stringify(a.serializeAll())));
+    expect(b.getClipSpeed("c1")).toBeCloseTo(1.75, 5);
+  });
+
+  it("omits clips left at default, so merely selecting a clip does not bloat the save", () => {
+    const e = new SpeedEngine();
+    e.initializeClip("untouched", 10);
+    e.setClipSpeed("retimed", 2, 10);
+    const payload = e.serializeAll();
+    expect(Object.keys(payload)).toEqual(["retimed"]);
+  });
+
+  it("is additive: restoring an older payload leaves newer clips alone", () => {
+    const e = new SpeedEngine();
+    e.setClipSpeed("added-later", 3, 10);
+    e.restoreAll({
+      old: {
+        clipId: "old", baseSpeed: 2, reverse: false, keyframes: [],
+        pitchCorrection: false, freezeFrames: [], originalDuration: 10,
+      },
+    });
+    expect(e.getClipSpeed("added-later")).toBe(3);
+    expect(e.getClipSpeed("old")).toBe(2);
+  });
+
+  it("ignores junk rather than throwing mid-load", () => {
+    const e = new SpeedEngine();
+    expect(() => e.restoreAll(null)).not.toThrow();
+    expect(() => e.restoreAll(undefined)).not.toThrow();
+    expect(() => e.restoreAll({ bad: null as never })).not.toThrow();
+    expect(e.getClipSpeed("bad")).toBe(1);
+  });
+});

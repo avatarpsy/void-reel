@@ -3,6 +3,7 @@ import { RotateCcw } from "lucide-react";
 import type { Clip } from "@openreel/core";
 import { getSpeedEngine } from "@openreel/core";
 import { useProjectStore } from "../../../stores/project-store";
+import { retimeClip } from "../../../services/retime";
 import { Input, Switch, Label } from "@openreel/ui";
 
 interface SpeedSectionProps {
@@ -51,108 +52,39 @@ export const SpeedSection: React.FC<SpeedSectionProps> = ({ clip }) => {
     return !!audioTrack;
   };
 
-  const updateClipDuration = (speed: number) => {
-    const originalDuration = clip.outPoint - clip.inPoint;
-    const newDuration = originalDuration / speed;
-
-    const tracks = project.timeline.tracks.map((track) => {
-      const clipIndex = track.clips.findIndex((c) => c.id === clip.id);
-      if (clipIndex === -1) {
-        if (affectAudio && track.type === "audio") {
-          const audioClipIndex = track.clips.findIndex(
-            (c) => c.mediaId === clip.mediaId,
-          );
-          if (audioClipIndex !== -1) {
-            const audioClip = track.clips[audioClipIndex];
-            const updatedAudioClip = {
-              ...audioClip,
-              duration: newDuration,
-              speed,
-            };
-            const newClips = [...track.clips];
-            newClips[audioClipIndex] = updatedAudioClip;
-            speedEngine.setClipSpeed(audioClip.id, speed, audioClip.duration);
-            return { ...track, clips: newClips };
-          }
-        }
-        return track;
-      }
-
-      const updatedClip = {
-        ...track.clips[clipIndex],
-        duration: newDuration,
-        speed,
-      };
-      const newClips = [...track.clips];
-      newClips[clipIndex] = updatedClip;
-
-      return { ...track, clips: newClips };
-    });
-
-    useProjectStore.setState({
-      project: {
-        ...project,
-        timeline: { ...project.timeline, tracks },
-        modifiedAt: Date.now(),
-      },
-    });
-  };
-
-  const updateClipReverse = (reversed: boolean) => {
-    const tracks = project.timeline.tracks.map((track) => {
-      const clipIndex = track.clips.findIndex((c) => c.id === clip.id);
-      if (clipIndex === -1) {
-        if (affectAudio && track.type === "audio") {
-          const audioClipIndex = track.clips.findIndex(
-            (c) => c.mediaId === clip.mediaId,
-          );
-          if (audioClipIndex !== -1) {
-            const audioClip = track.clips[audioClipIndex];
-            const updatedAudioClip = { ...audioClip, reversed };
-            const newClips = [...track.clips];
-            newClips[audioClipIndex] = updatedAudioClip;
-            speedEngine.setReverse(audioClip.id, reversed, audioClip.duration);
-            return { ...track, clips: newClips };
-          }
-        }
-        return track;
-      }
-
-      const updatedClip = { ...track.clips[clipIndex], reversed };
-      const newClips = [...track.clips];
-      newClips[clipIndex] = updatedClip;
-
-      return { ...track, clips: newClips };
-    });
-
-    useProjectStore.setState({
-      project: {
-        ...project,
-        timeline: { ...project.timeline, tracks },
-        modifiedAt: Date.now(),
-      },
-    });
-  };
-
+  /**
+   * ── ONE RETIME IMPLEMENTATION, SHARED WITH THE AGENT ───────────────────────
+   * These used to call `speedEngine.setClipSpeed(clip.id, speed, clip.duration)`
+   * and then patch the tracks locally. Two problems, both fixed by going
+   * through `services/retime`:
+   *
+   *  • `clip.duration` is the ON-TIMELINE length, but the SpeedEngine's third
+   *    argument is the SOURCE span and it clamps playback to it. The two agree
+   *    only on a clip that has never been retimed — which was every clip, until
+   *    retiming started surviving reloads. The helper passes `outPoint - inPoint`.
+   *  • The agent's `speed` surface needs the identical operation. A second copy
+   *    of a two-writes-must-agree routine is how frame-accuracy bugs are born.
+   *
+   * The local `updateClipDuration` / `updateClipReverse` this section used to
+   * carry are gone: the helper reproduces their linked-audio behaviour, and
+   * leaving them behind would invite the next edit to use the wrong one.
+   */
   const handleSpeedPreset = (speed: number) => {
-    speedEngine.setClipSpeed(clip.id, speed, clip.duration);
-    updateClipDuration(speed);
+    retimeClip({ clipId: clip.id, speed, affectLinkedAudio: affectAudio });
     setCurrentSpeed(speed);
   };
 
   const handleCustomSpeed = () => {
     const speed = parseFloat(customSpeed);
     if (!isNaN(speed) && speed >= 0.1 && speed <= 100) {
-      speedEngine.setClipSpeed(clip.id, speed, clip.duration);
-      updateClipDuration(speed);
+      retimeClip({ clipId: clip.id, speed, affectLinkedAudio: affectAudio });
       setCurrentSpeed(speed);
     }
   };
 
   const handleToggleReverse = () => {
     const newReversed = !isReversed;
-    speedEngine.setReverse(clip.id, newReversed, clip.duration);
-    updateClipReverse(newReversed);
+    retimeClip({ clipId: clip.id, reversed: newReversed, affectLinkedAudio: affectAudio });
     setIsReversed(newReversed);
   };
 

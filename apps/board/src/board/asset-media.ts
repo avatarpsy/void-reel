@@ -42,45 +42,28 @@ import type { AttachmentBlockModel } from '@blocksuite/affine/model';
 import type { BlockStdScope } from '@blocksuite/std';
 import { absoluteUrl } from '@openreel/asset-browser';
 
+// How the board asks for bytes — see media-fetch.ts for why it is not a bare
+// `fetch` with a token on it.
+import { describeFetchFailure, fetchMediaBlob } from './media-fetch';
+
 import type { BoardBlobEngine } from '../blocksuite/blob-source';
 import { writeBlockMeta } from './board-meta';
+import { type CardSize, type Size, cardBox } from './metrics';
 import { topIndex } from '../shot/shots';
 import { encodeMediaRef, guessMime } from './media-ref';
-import { getParentToken, withToken } from './parent-auth';
+import { withToken } from './parent-auth';
 
-/** How wide a placed image may be on the canvas. A storyboard panel is 480px;
- *  anything past this is detail no one will see at board zoom. */
+/**
+ * HOW MUCH OF AN IMAGE TO FETCH — a byte budget, and no longer a box.
+ *
+ * This used to be BOTH: it was handed to `addImages` as `maxWidth`, which caps
+ * width and lets height follow the aspect uncapped, so a 9:16 still landed at
+ * 960 × 1707 — 2.5× the area of the shot card it was a reference for. The box
+ * now comes from `metrics.ts` like every other card's; this stays only as the
+ * resize hint on the download, because a card somebody may open or zoom is worth
+ * more pixels than it draws. See the note at the top of `metrics.ts`.
+ */
 const MAX_CANVAS_IMAGE_WIDTH = 960;
-
-/**
- * How wide a placed CLIP or TRACK lands.
- *
- * `addAttachments` has one size for everything it makes — `cubeThick`, 170×132 —
- * because it was written for file chips, where the card is a name and an icon
- * and 170px is plenty. A clip is a picture, and 170px of picture is a thumbnail
- * with a play button too small to hit and a caption too small to read: "I drag a
- * video out and I can't expand it or play it".
- *
- * 360 is the width of a comfortable reference on a board that also holds 480px
- * storyboard panels — big enough to recognise a shot and press play, small
- * enough that four of them fit side by side.
- */
-const CANVAS_CLIP_WIDTH = 360;
-
-/**
- * And how TALL it may get once the real shape is known.
- *
- * Width alone is the wrong bound for a board that holds both orientations: a
- * 9:16 clip — which is most of what this product makes — at 360 wide is 640
- * tall, a slab three times the height of the storyboard panels beside it and
- * taller than the viewport at any useful zoom. Capping the height lands a
- * portrait clip at 236×420, which reads as a phone-shaped card next to a
- * landscape one rather than as a wall.
- */
-const CANVAS_CLIP_MAX_HEIGHT = 420;
-
-/** Until the real dimensions come back, assume the shape almost every clip is. */
-const DEFAULT_CLIP_RATIO = 9 / 16;
 
 export interface PlaceAssetInput {
   /** What the CANVAS loads. A thumbnail or 720p proxy when the server has one. */
@@ -98,6 +81,16 @@ export interface PlaceAssetInput {
   /** Real byte size, so the card can state it without downloading anything. */
   bytes?: number;
   createdBy?: 'user' | 'agent';
+  /**
+   * HOW BIG THE CARD IS — `ref` (the default) or `hero`.
+   *
+   * A reference is one of several things being compared and is drawn smaller
+   * than a shot card. A hero is ONE result the user is judging on its own, and a
+   * generation is the case that earns it. Never inferred from the kind: the
+   * caller is the only side that knows whether this picture is one of six or the
+   * answer to a question.
+   */
+  size?: CardSize;
   /** Screen coordinates of the drop, when there was one. */
   clientPoint?: [number, number];
   /** Where it came from — see `BlockMeta`. Recorded so "that one, but warmer"
@@ -107,6 +100,9 @@ export interface PlaceAssetInput {
   model?: string;
   sourceUrl?: string;
   credit?: string;
+  /** The scene this reference is ABOUT, when it is about one. Recorded, never
+   *  compiled — see `BlockMeta.sceneKey`. */
+  sceneKey?: string;
 }
 
 export type PlaceResult =
@@ -145,22 +141,6 @@ function probeVideo(src: string): Promise<{ w: number; h: number } | null> {
   });
 }
 
-/** Fetch the display variant with auth, retrying once with a fresh token. */
-async function fetchDisplayBlob(url: string): Promise<Blob | null> {
-  for (const force of [false, true]) {
-    const token = await getParentToken(force).catch(() => null);
-    try {
-      const res = await fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
-      if (res.ok) return await res.blob();
-      if (res.status !== 401 && res.status !== 403) return null;
-      // Nothing to refresh — see the same note in blob-source.
-      if (!token) return null;
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
 
 function engineOf(std: BlockStdScope): BoardBlobEngine {
   return std.store.blobSync as unknown as BoardBlobEngine;
@@ -189,16 +169,21 @@ function engineOf(std: BlockStdScope): BoardBlobEngine {
 export function probedClipBox(
   box: readonly number[],
   dims: { w: number; h: number },
+  size: CardSize = 'ref',
 ): string | null {
   const [x, y, ow, oh] = box;
   if (!dims.w || !dims.h || !ow) return null;
 
-  let w = ow;
-  let h = Math.round((w * dims.h) / dims.w);
-  if (w === CANVAS_CLIP_WIDTH && h > CANVAS_CLIP_MAX_HEIGHT) {
-    h = CANVAS_CLIP_MAX_HEIGHT;
-    w = Math.round((h * dims.w) / dims.h);
-  }
+  // UNTOUCHED means the width is still exactly the one `placeAsset` chose for
+  // this card size — then the whole box is re-derived, height cap included.
+  // Otherwise the user has resized it, and only the ASPECT is honoured, at
+  // whatever width they chose.
+  const placed = cardBox('video', dims, size);
+  const untouched = ow === cardBox('video', null, size).w;
+  const { w, h } = untouched
+    ? placed
+    : { w: ow, h: Math.round((ow * dims.h) / dims.w) };
+
   if (w === ow && h === oh) return null;
 
   // About the CENTRE, like the placement itself: a portrait clip that suddenly
@@ -206,16 +191,84 @@ export function probedClipBox(
   return `[${Math.round(x + (ow - w) / 2)},${Math.round(y + (oh - h) / 2)},${w},${h}]`;
 }
 
-/** Resize a just-placed block about its own centre, so it stays where it was
- *  dropped rather than growing away from the pointer. */
+/**
+ * Resize a just-placed block about its own centre, so it stays where it was
+ * dropped rather than growing away from the pointer.
+ *
+ * `width`/`height` ARE WRITTEN TOO when the block declares them. An
+ * `affine:image` carries both its box and its own `width`/`height` props, set
+ * together by `addImages`; moving one and not the other leaves the pair
+ * disagreeing about the same picture, which is the kind of drift that surfaces
+ * much later in whatever reads the props rather than the box.
+ */
 function resize(std: BlockStdScope, blockId: string, w: number, h: number): void {
   const block = std.store.getBlock(blockId);
   if (!block) return;
-  const box = JSON.parse((block.model.props as { xywh: string }).xywh) as number[];
-  const [x, y, ow, oh] = box;
+  const props = block.model.props as { xywh: string; width?: number; height?: number };
+  const [x, y, ow, oh] = JSON.parse(props.xywh) as number[];
   std.store.updateBlock(block.model, {
     xywh: `[${Math.round(x + (ow - w) / 2)},${Math.round(y + (oh - h) / 2)},${w},${h}]`,
+    ...(typeof props.width === 'number' ? { width: w } : {}),
+    ...(typeof props.height === 'number' ? { height: h } : {}),
   });
+}
+
+/** The natural shape of a just-placed block, read off the box the insert helper
+ *  derived from the real file. Aspect is all that is wanted — the width it chose
+ *  is the thing being replaced. */
+function naturalOf(std: BlockStdScope, blockId: string): Size | null {
+  const block = std.store.getBlock(blockId);
+  if (!block) return null;
+  const props = block.model.props as { xywh?: string; width?: number; height?: number };
+  if (typeof props.width === 'number' && typeof props.height === 'number'
+      && props.width > 0 && props.height > 0) {
+    return { w: props.width, h: props.height };
+  }
+  if (typeof props.xywh !== 'string') return null;
+  try {
+    const [, , w, h] = JSON.parse(props.xywh) as number[];
+    return w > 0 && h > 0 ? { w, h } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * NORMALISE A JUST-PLACED CARD TO ITS BOX.
+ *
+ * Exported, and it is the same reason `probedClipBox` is: the interesting logic
+ * sits behind `addImages`, which needs a real image decoder to resolve — happy-dom
+ * has none, so an integration test of the image path HANGS rather than failing.
+ * (That is why this file's existing tests only cover video.) The tests drive this
+ * against a placed block instead, which exercises exactly the arithmetic that was
+ * wrong.
+ *
+ * What was wrong: `addImages` caps width and lets height follow the aspect
+ * uncapped, so a 9:16 still handed a 960 budget landed at 960 × 1707 — bigger in
+ * both dimensions than the shot card it was a reference for. And `min(natural,
+ * maxWidth)` let a SMALL source land small, so a row of references drawn from
+ * mixed sources came out at mixed widths.
+ *
+ * Returns the box it wrote, or null when the card was already right — a no-op
+ * write is an undo step that does nothing and a document revision that
+ * invalidates every per-revision cache on the board.
+ */
+export function normaliseMediaCard(
+  std: BlockStdScope,
+  blockId: string,
+  kind: 'image' | 'video' | 'audio',
+  size: CardSize = 'ref',
+): Size | null {
+  const natural = naturalOf(std, blockId);
+  const box = cardBox(kind, natural, size);
+  const block = std.store.getBlock(blockId);
+  if (!block) return null;
+
+  const [, , ow, oh] = JSON.parse((block.model.props as { xywh: string }).xywh) as number[];
+  if (ow === box.w && oh === box.h) return null;
+
+  resize(std, blockId, box.w, box.h);
+  return box;
 }
 
 /**
@@ -244,6 +297,7 @@ export async function placeAsset(
     };
   }
 
+  const size: CardSize = input.size === 'hero' ? 'hero' : 'ref';
   const displayUrl = absoluteUrl(input.displayUrl);
   const mime = input.mime || guessMime(displayUrl, input.kind);
   const name = input.name?.trim() || `media.${input.kind === 'image' ? 'png' : 'mp4'}`;
@@ -276,6 +330,7 @@ export async function placeAsset(
       ...(input.model ? { model: input.model } : {}),
       ...(input.sourceUrl ? { sourceUrl: input.sourceUrl } : {}),
       ...(input.credit ? { credit: input.credit } : {}),
+      ...(input.sceneKey ? { sceneKey: input.sceneKey } : {}),
     });
   };
 
@@ -312,7 +367,10 @@ export async function placeAsset(
        * be the last word. Around the same CENTRE, so the card stays where it was
        * dropped rather than growing away from the pointer.
        */
-      resize(std, blockId, CANVAS_CLIP_WIDTH, Math.round(CANVAS_CLIP_WIDTH * DEFAULT_CLIP_RATIO));
+      {
+        const box = cardBox(input.kind, null, size);
+        resize(std, blockId, box.w, box.h);
+      }
       /**
        * AN INDEX, because `addAttachments` does not set one.
        *
@@ -343,7 +401,7 @@ export async function placeAsset(
           const live = std.store.getBlock(blockId);
           if (!live || std.store.readonly) return;
           const box = JSON.parse((live.model.props as { xywh: string }).xywh) as number[];
-          const next = probedClipBox(box, dims);
+          const next = probedClipBox(box, dims, size);
           if (next) std.store.updateBlock(live.model, { xywh: next });
         });
       }
@@ -354,13 +412,15 @@ export async function placeAsset(
   // ── IMAGE ────────────────────────────────────────────────────────────────
   // `addImages` reads real dimensions off the file, so this one genuinely needs
   // bytes — but only the DISPLAY variant's, which the caller sized for a canvas.
-  const blob = await fetchDisplayBlob(displayUrl);
+  /**
+   * MAX_CANVAS_IMAGE_WIDTH is the widest this card will ever be drawn, so it is
+   * also the most detail worth downloading. Passed as the proxy's resize hint:
+   * it only applies when the direct read fails and we go through the proxy, but
+   * that is exactly the path where a master would otherwise be pulled whole.
+   */
+  const blob = await fetchMediaBlob(displayUrl, { width: MAX_CANVAS_IMAGE_WIDTH });
   if (!blob) {
-    return {
-      ok: false,
-      reason: 'unavailable',
-      message: 'That asset could not be loaded — its link may have expired.',
-    };
+    return { ok: false, reason: 'unavailable', message: describeFetchFailure(displayUrl) };
   }
   if (!blob.type.startsWith('image/')) {
     return {
@@ -376,9 +436,21 @@ export async function placeAsset(
   // instead of being re-fetched the instant the block connects.
   await engine.set(refKey, blob);
 
+  /**
+   * `maxWidth` IS THE CARD'S WIDTH, NOT THE DOWNLOAD'S, and that distinction is
+   * the bug this closes.
+   *
+   * `addImages` caps width and lets height follow the aspect UNCAPPED
+   * (`affine-block-image/dist/utils.js`: `width = min(width, maxWidth); height =
+   * width * ratio`). Handed 960 — which is what every `w=1024` proxy variant
+   * resolves to — a 9:16 still landed at 960 × 1707: taller and wider than the
+   * shot card it was a reference for. So the helper is asked for the card's own
+   * width, and the height cap is applied immediately afterwards.
+   */
+  const box = cardBox('image', null, size);
   const ids = await addImages(std, [file], {
     point: input.clientPoint,
-    maxWidth: MAX_CANVAS_IMAGE_WIDTH,
+    maxWidth: box.w,
     // AFFiNE converts screen → model coordinates itself; doing it here as well
     // double-transforms and lands the image somewhere else entirely.
     shouldTransformPoint: true,
@@ -386,6 +458,18 @@ export async function placeAsset(
   if (!ids.length) {
     return { ok: false, reason: 'rejected', message: 'The canvas refused this image.' };
   }
+  /**
+   * NORMALISE TO THE CARD BOX, in the same breath as the insert.
+   *
+   * Two things are wrong with what the helper left behind, and both are only
+   * fixable once the real dimensions have been read off the file:
+   *   • a PORTRAIT still is over the height cap (960-wide logic, uncapped h);
+   *   • a SMALL still is under the box, so a row of references drawn from mixed
+   *     sources came out at mixed widths — which is most of what "it does not
+   *     organise the board" looks like.
+   * `fit` handles both: fill the width, cap the height, keep the aspect.
+   */
+  normaliseMediaCard(std, ids[0], 'image', size);
   stamp(ids[0]);
   return { ok: true, blockId: ids[0] };
 }

@@ -127,4 +127,9 @@ export const surface: InspectorSurface<AutoCutSilenceConfig> = {
       return { ok: false, error: msg };
     }
   },
+  /**
+   * Deliberately absent. This surface CUTS — it splits the clip and removes
+   * ranges — so there is no "current setting" to report, and a read returning
+   * `{}` would imply otherwise. `read_timeline` shows the result.
+   */
 };

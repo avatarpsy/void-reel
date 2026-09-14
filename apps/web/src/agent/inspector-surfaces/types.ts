@@ -95,6 +95,30 @@ export interface InspectorSurface<TConfig = unknown> {
     config: TConfig,
     ctx: ApplyContext,
   ) => ApplyResult | Promise<ApplyResult>;
+  /**
+   * CURRENT STATE of this surface on one clip — the other half of the contract.
+   *
+   * ── WHY EVERY SURFACE SHOULD HAVE ONE ───────────────────────────────────────
+   * Without a read, a surface is a write-only control: the agent can set a
+   * blur but cannot see it, cannot remove it (removal takes the effect's ID,
+   * which only a read produces), cannot verify the apply landed, and cannot
+   * tell it already applied the same thing a turn ago. Every one of those
+   * failures is silent — the timeline looks fine until the render.
+   *
+   * Return the shape the surface's own `config` accepts wherever that is
+   * possible, so a read can be edited and handed straight back to `apply`.
+   * Return `null` for "this surface is not engaged on this clip", which is
+   * different from `{}` ("engaged, all defaults").
+   *
+   * Optional only because a surface whose state genuinely cannot be read back
+   * should say so by omission rather than by returning a lie. `get-state`'s
+   * per-clip `looks` covers the common overview; this is the precise,
+   * on-demand read for one surface.
+   */
+  read?: (
+    clip: InspectorSurfaceClip,
+    ctx: ApplyContext,
+  ) => unknown | Promise<unknown>;
 }
 
 /**

@@ -228,10 +228,22 @@ export interface Marker {
   readonly color: string;
 }
 
+/**
+ * WHICH EDGE of a single clip a transition belongs to.
+ *
+ * A transition normally joins two clips. It can also sit on the open edge of
+ * one — a fade up from black at the head of the film, a dip to black at the
+ * tail — where there is no second clip to blend with. Shape and spelling are
+ * upstream's so the branches converge rather than conflict.
+ */
+export type TransitionEdge = "in" | "out";
+
 export interface Transition {
   readonly id: string;
   readonly clipAId: string;
-  readonly clipBId: string;
+  /** Absent for an edge transition (see `edge`). */
+  readonly clipBId?: string;
+  readonly edge?: TransitionEdge;
   readonly type: TransitionType;
   readonly duration: number;
   readonly params: Record<string, unknown>;

@@ -1587,16 +1587,24 @@ editor-host {
    belongs to the canvas again. Driven by `gfx.keyboard.spaceKey$` — the same
    signal `default-tool.ts` reads to decide it is panning — so the CSS and the
    tool can never disagree about whether a pan is in progress. */
-[data-space-pan='true'] voidspace-shot,
-[data-space-pan='true'] voidspace-screenplay,
-[data-space-pan='true'] voidspace-blockdraft {
+[data-space-pan] voidspace-shot,
+[data-space-pan] voidspace-screenplay,
+[data-space-pan] voidspace-blockdraft {
   pointer-events: none !important;
 }
 /* The whole viewport says "you are panning", not just the empty parts of it. */
-[data-space-pan='true'] .affine-edgeless-viewport,
-[data-space-pan='true'] voidspace-shot,
-[data-space-pan='true'] voidspace-screenplay {
+[data-space-pan] .affine-edgeless-viewport,
+[data-space-pan] voidspace-shot,
+[data-space-pan] voidspace-screenplay {
   cursor: grab !important;
+}
+/* Space + ⌘/Ctrl/Shift is the zoom half of the same gesture, and it says so
+   before the drag starts rather than after. Attribute VALUE, not presence —
+   the rules above are deliberately written for either. */
+[data-space-pan='zoom'] .affine-edgeless-viewport,
+[data-space-pan='zoom'] voidspace-shot,
+[data-space-pan='zoom'] voidspace-screenplay {
+  cursor: zoom-in !important;
 }
 
 /* ══ The spine ═════════════════════════════════════════════════════════════

@@ -97,9 +97,31 @@ export function mountBoard(opts: MountBoardOptions): MountedBoard {
   const doc = workspace.createDoc(opts.boardId);
   const store = doc.getStore({ extensions: boardStoreExtensions() });
 
-  // Idempotent: seeds only when the Y.Doc has no blocks, so reopening a saved
-  // board never stacks a second page/surface on the user's canvas.
-  doc.load(() => seedBoardTree(store));
+  /**
+   * `store.load`, NOT `doc.load` — and that one word IS the undo stack.
+   *
+   * Both seed the tree, so the board looked identical either way. Only
+   * `Store.load` goes on to run `ext.loaded()` over the store extensions, and
+   * `HistoryExtension.loaded()` is where the Y.UndoManager's `stack-item-added`
+   * observer is attached. Skip it and `canUndo` is a signal that is initialised
+   * false and never updated again.
+   *
+   * Nothing looked broken from the store's side: the UndoManager was tracking
+   * correctly the whole time (`undoManager.canUndo()` really was true), so the
+   * toolbar's Undo button — which calls `store.undo()` and never consults the
+   * signal — worked. CTRL+Z did not, because BlockSuite's keyboard manager
+   * guards on the signal: `if (this._doc.canUndo) this._doc.undo()`. A false
+   * signal there swallows every undo silently, and redo with it. That reads to
+   * a user as "undo is broken", and it is worst for pen work, where Ctrl+Z is
+   * the gesture you reach for after every stroke.
+   *
+   * It also loads `StoreSelectionExtension` — the selection constructors and
+   * the awareness listener — and fires `slots.ready`.
+   *
+   * Still idempotent: seeds only when the Y.Doc has no blocks, so reopening a
+   * saved board never stacks a second page/surface on the user's canvas.
+   */
+  store.load(() => seedBoardTree(store));
 
   // ORDER MATTERS, and both obvious orderings are wrong:
   //   render → append → mount  ⇒ the edgeless root reaches `firstUpdated` before
@@ -110,9 +132,42 @@ export function mountBoard(opts: MountBoardOptions): MountedBoard {
   //     use, the `render` method should be called first".
   // The only order satisfying both: build the host, mount the watchers against
   // it, and append LAST so Lit's first render happens with everything in place.
+  /**
+   * MOUNT EXACTLY ONCE — `connectedCallback` already does it.
+   *
+   * `EditorHost.connectedCallback()` ends with `this.std.mount()`, and
+   * `BlockStdScope.mount()` has no idempotence guard: it simply calls
+   * `mounted()` on every life-cycle watcher it holds. Calling it here as well
+   * mounted every gfx extension TWICE, and the one that matters is
+   * `ToolController`, whose `mounted()` subscribes to `dragStart` / `dragMove` /
+   * `dragEnd`. Two subscriptions meant every tool event was delivered to the
+   * active tool twice, and for the pen that produced two distinct defects:
+   *
+   *   • TWO `dragStart`s per stroke. The first creates a brush element, the
+   *     second creates another and takes over `_draggingElement` — so every
+   *     stroke left behind an orphaned ONE-POINT element sitting under its own
+   *     start. Invisible while the stroke covers it, and still there after the
+   *     stroke is erased: a speck the eraser never touches, because it is a
+   *     separate element the eraser path never crossed. That is what "I can't
+   *     cleanly erase" was.
+   *
+   *   • TWO `dragMove`s per pointer sample, each appending the SAME coordinate.
+   *     Every stroke carried double the points, half of them exact duplicates of
+   *     their neighbour, which is both wasted work on every frame (the whole
+   *     perfect-freehand stroke is recomputed per append) and worse input to a
+   *     smoothing pass that assumes samples carry new information.
+   *
+   * Measured on the built board, ten pointer moves per stroke, five strokes:
+   * before, every stroke gave 2 dragStart / 20 dragMove and left two elements
+   * (1 point + 21 points); after, 1 dragStart / 10 dragMove and one element.
+   *
+   * The host is appended to `.affine-edgeless-viewport` BEFORE that wrapper
+   * enters the document, so by the time `connectedCallback` runs the viewport
+   * element the gfx watchers look for is already its parent — which is the
+   * constraint the old explicit call was there to satisfy.
+   */
   const std = new BlockStdScope({ store, extensions: boardViewExtensions() });
   const host = std.render();
-  std.mount();
 
   // THE HOST MUST BE WRAPPED IN `.affine-edgeless-viewport` — WE provide it.
   //

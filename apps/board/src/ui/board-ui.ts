@@ -61,51 +61,26 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
 
   // ── Empty state ───────────────────────────────────────────────────────────
   const empty = el<HTMLDivElement>('div', 'vs-board-empty');
-  // The card doubles as the tutorial. A first-time user's question is not "what
-  // is an infinite canvas" — it is "what am I supposed to DO here, and which of
-  // these little icons does what". So it answers both, in place, once.
+  // Keep the empty state to one decision: start thinking here, or start a film.
+  // The toolbar and contextual controls teach themselves once there is work on
+  // the canvas; duplicating their entire manual here buried the invitation.
   empty.innerHTML = `
     <div class="vs-board-empty__card">
       <h2>Start thinking out loud</h2>
       <p>
-        Tell me what is on your mind in the chat — an idea, a decision, a plan, a mess you
-        cannot name yet. It appears here as notes, diagrams, mind maps and references you can
-        drag around and argue with.
+        Tell the agent what is on your mind. It will turn the conversation into notes,
+        diagrams and references you can move around and make sense of.
       </p>
 
       <div class="vs-board-guide">
         <p class="vs-board-guide__lead">
-          <strong>This canvas is the work, not the scratch paper.</strong> Ask for a mind map of
-          the problem, a flow of the process, the options side by side, or the research pulled off
-          the web and laid out. Say “cluster this” or “what am I missing” and it changes in front
-          of you.
-        </p>
-        <p class="vs-board-guide__lead">
-          <strong>If what you are making is a video</strong>, say so and the board grows a
-          screenplay panel and a filmstrip of <strong>shots</strong>. A shot is one scene. Drop
-          media <strong>onto</strong> a shot and it joins that scene — stills, clips and audio each
-          land in their own row. Anything left on the open canvas stays thinking space.
+          Use the toolbar to add your own. Making a video? Start a storyboard.
         </p>
         <p class="vs-board-guide__lead">
           <button type="button" class="vs-board-btn" data-act="first-shot">
             ${ICONS.plus}<span>Start a storyboard</span>
           </button>
         </p>
-        <p class="vs-board-guide__lead">
-          A shot is either a <strong>video clip</strong> a model generates, or a
-          <strong>graphic</strong> built from one of your HyperFrames blocks — a title card, a
-          stat, a lower third. Graphics render on your own computer, cost nothing, and put the
-          words on screen exactly as you wrote them.
-        </p>
-        <ul class="vs-board-guide__keys">
-          <li><b>Toolbar below</b><span>notes, pen, shapes, text, mind maps, images, arrows, links</span></li>
-          <li><b>Type <kbd>/</kbd> in a note</b><span>headings, lists, tables, callouts, dividers</span></li>
-          <li><b>▶ on a clip</b><span>plays it right there — nothing streams until you ask</span></li>
-          <li><b>Drop on a shot</b><span>adds it to that scene · drop on a slot to set its role</span></li>
-          <li><b>Double-click</b><span>a card title to rename · the script to edit it where you clicked</span></li>
-          <li><b>Scroll</b><span>pan · over a row it scrolls the row · ⌘/Ctrl + scroll to zoom</span></li>
-          <li><b>Ctrl + Z</b><span>undo — including anything the agent did, in one step</span></li>
-        </ul>
       </div>
     </div>`;
 
@@ -377,6 +352,18 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
     if (shotCount() > 0) return true;
     const surface = board.store.getBlock(board.surfaceId)?.model;
     if ((surface?.children.length ?? 0) > 0) return true;
+    /**
+     * DRAWING IS CONTENT TOO — and it is not a child.
+     *
+     * `children` holds BLOCKS parented to the surface. Everything drawn on the
+     * canvas — brush strokes, shapes, connectors, canvas text, mind maps — is a
+     * canvas ELEMENT, kept in the surface's `elements` map instead, so a board
+     * someone had been drawing on for ten minutes still read as empty. The card
+     * takes pointer events, so it sat in the middle of the canvas swallowing
+     * every click and stroke that landed on it: the same failure the note above
+     * describes for dropped images, in the one place a pen user starts.
+     */
+    if (((surface as { elementModels?: unknown[] } | undefined)?.elementModels?.length ?? 0) > 0) return true;
     // Root-level blocks are notes/images/text placed on the canvas.
     return (board.store.root?.children.length ?? 0) > 1;
   }

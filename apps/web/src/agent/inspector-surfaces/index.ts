@@ -31,7 +31,18 @@ import type { Project } from "@openreel/core";
 
 // Vite glob: collect every .ts in this folder except types/index/factories.
 // `eager: true` inlines them so first-RPC latency is zero.
-const modules = import.meta.glob<Record<string, unknown>>("./*.ts", { eager: true });
+//
+// TEST FILES ARE EXCLUDED AT THE GLOB, not by the filter below, and that
+// distinction matters: `eager: true` means every match is a real import in the
+// production bundle. A `*.test.ts` sitting in this directory would therefore
+// pull `vitest` into the shipped app — it would never export a `surface`, so
+// the filter would find nothing and the only symptom would be a bundle that
+// imports a test runner. Keeping the negative pattern here means a surface can
+// have its tests next to it, which is where they belong.
+const modules = import.meta.glob<Record<string, unknown>>(
+  ["./*.ts", "!./*.test.ts"],
+  { eager: true },
+);
 
 export const SURFACES: Record<string, InspectorSurface> = {};
 
@@ -63,11 +74,23 @@ export function listSurfaces(): Array<{
   name: string;
   description: string;
   appliesTo: readonly ClipKind[];
+  readable: boolean;
 }> {
   // Discovery payload — names + descriptions only. Schemas fetched
   // on-demand via get-inspector-tool-schema to keep agent context small.
+  //
+  // `readable` rides along because it changes what the agent should DO: a
+  // readable surface can be inspected before it is changed (and its ids
+  // recovered, which `video-effects` needs for update/remove/toggle), while an
+  // unreadable one can only be set. One boolean per row, and it stops the
+  // agent guessing at a read that would come back empty.
   return Object.values(SURFACES)
-    .map((s) => ({ name: s.name, description: s.description, appliesTo: s.appliesTo }))
+    .map((s) => ({
+      name: s.name,
+      description: s.description,
+      appliesTo: s.appliesTo,
+      readable: typeof s.read === "function",
+    }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 

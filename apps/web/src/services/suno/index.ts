@@ -87,13 +87,23 @@ export const ADVANCED_STEM_NAMES = [
   "Brass", "Woodwinds", "Synth", "Organ", "Percussion", "FX",
 ] as const;
 
-/** Keys Suno accepts for a Sounds generation. */
+/**
+ * Keys Suno accepts for a Sounds generation, in the WIRE spelling.
+ * The long form this list used to hold ("A Minor") is now a hard 422
+ * ({"code":422,"msg":"soundKey error"}) — the endpoint takes shorthand, and
+ * sharps only (`A#`, never `Bb`). Verified against the live endpoint.
+ * The server normalises common spellings, so a stale bundle still works;
+ * these are the values the picker should actually send.
+ */
 export const SOUND_KEYS = [
-  "C Major", "C Minor", "C# Major", "C# Minor", "D Major", "D Minor",
-  "D# Major", "D# Minor", "E Major", "E Minor", "F Major", "F Minor",
-  "F# Major", "F# Minor", "G Major", "G Minor", "G# Major", "G# Minor",
-  "A Major", "A Minor", "A# Major", "A# Minor", "B Major", "B Minor",
+  "C", "Cm", "C#", "C#m", "D", "Dm", "D#", "D#m", "E", "Em", "F", "Fm",
+  "F#", "F#m", "G", "Gm", "G#", "G#m", "A", "Am", "A#", "A#m", "B", "Bm",
 ] as const;
+
+/** Picker labels — the wire values are terse, so spell them out for humans. */
+export const SOUND_KEY_LABELS: Record<string, string> = Object.fromEntries(
+  SOUND_KEYS.map((k) => [k, k.endsWith("m") ? `${k.slice(0, -1)} Minor` : `${k} Major`]),
+);
 
 export interface SunoTrack {
   url: string;

@@ -678,8 +678,50 @@ import { rewriteToProxy } from "@openreel/core";
  * URLs, Kie outputs, Firebase Storage) keep their existing query
  * strings untouched.
  */
+/**
+ * Voidspace API paths that serve media and REQUIRE a signed-in user.
+ *
+ * ── WHY THIS IS A LIST AND NOT ONE REGEX ────────────────────────────────────
+ * Only `/api/studio/local-asset` was stamped. `/api/media-library/file` — the
+ * url that `use_media_library_asset` and `search_media` hand back for anything
+ * in the user's own library — is just as authenticated (`requireUserId`, and it
+ * answers 401 without a token), and it was fetched bare.
+ *
+ * The consequence was total and silent: EVERY attempt to put a library asset on
+ * the timeline failed with "could not fetch media" in about 12ms. Watched on a
+ * real run, the agent searched, found the media, tried to place it, failed,
+ * assumed it had picked the wrong clip, searched again — and burned the whole
+ * turn on a loop whose cause was a missing query parameter. "Find two videos in
+ * my library and put them on the timeline" could not succeed at all.
+ *
+ * `requireUserId` accepts the token as `?t=`, so stamping is all that was ever
+ * needed. `thumb` and `proxy` are here for the same reason: same auth, same
+ * failure, and a thumbnail that 401s is a library that looks empty.
+ */
+const AUTHED_MEDIA_PATHS = [
+  "/api/studio/local-asset",
+  "/api/media-library/file",
+  "/api/media-library/thumb",
+  "/api/media-library/proxy",
+];
+
 async function maybeAuthStamp(url: string): Promise<string> {
-  if (!/\/api\/studio\/local-asset(\?|$)/.test(url)) return url;
+  /**
+   * SAME-ORIGIN ONLY. The token is a bearer credential: appending it to a URL
+   * because the PATH happened to match would hand it to any third-party host
+   * that chose the same path. Relative urls are ours by definition; an absolute
+   * one has to prove it.
+   */
+  let path: string;
+  try {
+    const parsed = new URL(url, window.location.origin);
+    if (parsed.origin !== window.location.origin) return url;
+    path = parsed.pathname;
+  } catch {
+    return url;
+  }
+  if (!AUTHED_MEDIA_PATHS.some((p) => path === p || path.startsWith(`${p}/`))) return url;
+
   const u = auth.currentUser;
   if (!u) return url;
   try {

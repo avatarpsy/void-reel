@@ -32,15 +32,39 @@
 import { GfxControllerIdentifier } from '@blocksuite/std/gfx';
 
 import { anchorFor } from '../board/canvas';
+import { type Size, cardBox } from '../board/metrics';
 import { SHOT_H } from '../shot/model';
 import type { MountedBoard } from '../blocksuite/editor';
 
-/** What a placeholder occupies, in model units — a portrait card, matching the
- *  shape most generations come back as. Width follows the media it stands in
- *  for so the swap is not a visible resize. */
-const CARD_W = 300;
-const CARD_H = 400;
-const AUDIO_H = 120;
+/**
+ * WHAT A PLACEHOLDER OCCUPIES — the box the result will occupy, and nothing else.
+ *
+ * It used to be a fixed 300 × 400 (120 for audio) while an image landed at up to
+ * 960 × 1707, so the card the user watched for a minute was replaced by one
+ * THIRTEEN TIMES its area. The swap read as the board breaking rather than as
+ * the picture arriving.
+ *
+ * So the size comes from `metrics.ts` — the same call the placement makes, with
+ * the same arguments — and the aspect the generation ASKED FOR is passed in, so
+ * a 9:16 job shows a 9:16 spinner. A placeholder that is not the shape of its
+ * result is pointing at the wrong rectangle, which is the same failure as
+ * pointing at the wrong place.
+ */
+function pendingBox(kind: 'image' | 'video' | 'audio', aspect?: string): Size {
+  return cardBox(kind, parseAspect(aspect), 'hero');
+}
+
+/**
+ * "16:9" → natural dimensions to fit. Null for anything unparseable, which
+ * `cardBox` reads as "nothing has measured this yet" and answers with 16:9.
+ */
+function parseAspect(aspect?: string): Size | null {
+  const m = /^\s*(\d+(?:\.\d+)?)\s*[:/x]\s*(\d+(?:\.\d+)?)\s*$/.exec(aspect ?? '');
+  if (!m) return null;
+  const w = Number(m[1]);
+  const h = Number(m[2]);
+  return w > 0 && h > 0 ? { w, h } : null;
+}
 
 interface Pending {
   id: string;
@@ -61,8 +85,14 @@ const LABEL: Record<string, string> = {
 
 export interface PendingMediaApi {
   /** Draw one. `referenceIds` decides where — the same anchor the finished
-   *  media will use, so the picture replaces the spinner in place. */
-  show(id: string, kind: 'image' | 'video' | 'audio', referenceIds: string[]): void;
+   *  media will use, so the picture replaces the spinner in place — and `aspect`
+   *  decides its shape, so the swap is not a visible resize either. */
+  show(
+    id: string,
+    kind: 'image' | 'video' | 'audio',
+    referenceIds: string[],
+    aspect?: string,
+  ): void;
   /** Take one away. Called on success AND on failure — see `fail`. */
   hide(id: string): void;
   /** Leave it on screen saying what went wrong, dismissable by click.
@@ -93,7 +123,12 @@ export function installPendingMedia(board: MountedBoard, container: HTMLElement)
 
   const sub = gfx.viewport.viewportUpdated.subscribe(() => project());
 
-  function show(id: string, kind: 'image' | 'video' | 'audio', referenceIds: string[]): void {
+  function show(
+    id: string,
+    kind: 'image' | 'video' | 'audio',
+    referenceIds: string[],
+    aspect?: string,
+  ): void {
     if (items.has(id)) return;
     /**
      * Beside the references when there are any, and otherwise in the same clear
@@ -101,7 +136,7 @@ export function installPendingMedia(board: MountedBoard, container: HTMLElement)
      * the two agree about where a result with no references goes.
      */
     const at = anchorFor(board.std, referenceIds) ?? { x: 0, y: SHOT_H + 240 };
-    const h = kind === 'audio' ? AUDIO_H : CARD_H;
+    const box = pendingBox(kind, aspect);
 
     const el = document.createElement('div');
     el.className = `vs-pending vs-pending--${kind}`;
@@ -112,7 +147,7 @@ export function installPendingMedia(board: MountedBoard, container: HTMLElement)
     // underneath, not the sign that something is on its way.
     layer.append(el);
 
-    items.set(id, { id, kind, x: at.x, y: at.y, w: CARD_W, h, el });
+    items.set(id, { id, kind, x: at.x, y: at.y, w: box.w, h: box.h, el });
     project();
   }
 

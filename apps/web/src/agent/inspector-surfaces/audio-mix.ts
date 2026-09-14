@@ -89,4 +89,11 @@ export const surface: InspectorSurface<AudioMixConfig> = {
       ].filter(Boolean).join(" "),
     };
   },
+  read: (clip) => {
+    const raw = clip.raw as any;
+    return {
+      volume: typeof raw.volume === "number" ? raw.volume : 1,
+      muted: raw.muted === true,
+    };
+  },
 };

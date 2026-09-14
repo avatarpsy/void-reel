@@ -38,6 +38,9 @@ import { installMediaInspector } from './ui/media-inspector';
 import { installCanvasMenu } from './ui/canvas-menu';
 import { installPendingMedia } from './ui/pending-media';
 import { installSpacePan } from './ui/space-pan';
+import { installCanvasFocus } from './ui/canvas-focus';
+import { installHistoryKeys } from './ui/history-keys';
+import { installPen } from './ui/pen';
 import { installSpine } from './ui/spine';
 import { installToasts, toast } from './ui/toast';
 import { installViewportAnchor, installPaneShift } from './ui/viewport';
@@ -108,7 +111,14 @@ async function boot(): Promise<void> {
 
   const ydoc = new Y.Doc({ guid: boardId });
   const persistence = new IndexeddbPersistence(`voidspace-board-${boardId}`, ydoc);
-  await persistence.whenSynced;
+  // IndexedDB can remain locked briefly after a crashed/reloaded editor tab.
+  // Do not leave the user on an indefinite “Opening board…” screen: the cloud
+  // pull below still protects an empty document from being seeded or saved over
+  // a real board, and a delayed local restore will merge through Yjs normally.
+  await Promise.race([
+    persistence.whenSynced,
+    new Promise<void>((resolve) => window.setTimeout(resolve, 3_000)),
+  ]);
 
   const root = document.getElementById('board-root');
   if (!root) throw new Error('#board-root missing from index.html');
@@ -261,6 +271,18 @@ async function boot(): Promise<void> {
   // Hold space and drag to pan — a gesture every other canvas tool has and
   // BlockSuite does not implement at all. See space-pan.ts.
   installSpacePan(board, chromeHost);
+
+  // The keyboard half of pen work. Lifting the pen off the tablet fires
+  // `pointerleave` on the editor host, which is how BlockSuite decides its
+  // dispatcher is no longer active — and with it every shortcut it binds. These
+  // two put the keys back: one keeps the host focused so the whole keymap stays
+  // live, the other owns undo/redo outright so they never depend on it.
+  installCanvasFocus(board);
+  installHistoryKeys(board);
+
+  // Pen behaviour the tablet expects: every sample the pen took (not one per
+  // frame), and a tap that erases as well as a swipe. See ui/pen.ts.
+  installPen(board);
   // Select references, right-click, make something from them. The generation
   // itself is the parent's — this only turns the gesture into a request.
   installCanvasMenu(board, chromeHost);

@@ -4,6 +4,7 @@ import type {
   Clip,
   Effect,
   Transform,
+  Transition,
 } from "../types/timeline";
 import { compoundIdOfClip } from "../types/timeline";
 import type { MediaItem, Project } from "../types/project";
@@ -27,6 +28,7 @@ import type {
   PreloadRequest,
 } from "./types";
 import { getSpeedEngine } from "./speed-engine";
+import { TransitionEngine } from "./transition-engine";
 import {
   ParallelFrameDecoder,
   getParallelFrameDecoder,
@@ -233,6 +235,13 @@ export class VideoEngine {
 
   /** See `compoundIdOfClip` — shared with the preview so the two cannot
    *  disagree about what is a nested sequence. */
+  /**
+   * Lazily built, and rebuilt whenever the output size changes — the geometry
+   * of a wipe or a slide is computed in engine pixels, so an engine sized for
+   * the preview would draw the wrong sweep into a 4K export.
+   */
+  private transitionEngine: TransitionEngine | null = null;
+
   private compoundIdOf(clip: Clip): string | null {
     return compoundIdOfClip(clip);
   }
@@ -536,7 +545,7 @@ export class VideoEngine {
   ): Promise<RenderedFrame> {
     this.ensureInitialized();
 
-    const { timeline, mediaLibrary, settings } = project;
+    const { timeline, settings } = project;
     const width = targetWidth ?? settings.width;
     const height = targetHeight ?? settings.height;
 
@@ -599,8 +608,22 @@ export class VideoEngine {
 
     for (const { track } of allRenderableTracks) {
       if (track.type === "video" || track.type === "image") {
+        /**
+         * CLIP-TO-CLIP TRANSITIONS, BEFORE THE CLIPS THEMSELVES.
+         *
+         * A transition blends two shots into ONE frame, so it has to be drawn
+         * as one frame — and the clips it consumed must then be skipped, or the
+         * ordinary draw below would paint the outgoing shot straight back over
+         * the blend. `renderActiveTransition` returns exactly the ids it drew;
+         * on failure it returns an empty set, so the two clips fall through and
+         * play as a hard cut rather than leaving a hole.
+         */
+        const transitioned = await this.renderActiveTransition(
+          track, time, project, width, height, ctx,
+        );
         const clips = this.getClipsAtTime(track, time);
         for (const clip of clips) {
+          if (transitioned.has(clip.id)) continue;
           const clipInfo = this.createClipRenderInfo(clip, time);
 
           /**
@@ -623,97 +646,12 @@ export class VideoEngine {
            * transitioned exactly like a clip, and nothing here has to know
            * that it is a whole timeline underneath.
            */
-          let bitmap: ImageBitmap | null = null;
-          // A compound frame is OURS and must be closed after drawing; a cached
-          // media bitmap belongs to the cache and must not be.
-          let bitmapFromCache = false;
-
-          const compoundId = this.compoundIdOf(clip);
-          if (compoundId) {
-            bitmap = await this.renderCompoundFrame(
-              project,
-              compoundId,
-              clipInfo.sourceTime,
-              width,
-              height,
-            );
-            // A sequence that cannot be resolved (deleted, or a cycle) draws
-            // nothing, exactly as its audio contributes nothing.
-            if (!bitmap) continue;
-          } else {
-            const mediaItem = mediaLibrary.items.find(
-              (m) => m.id === clipInfo.mediaId,
-            );
-            if (!mediaItem) continue;
-            if (!mediaItem.blob) {
-              const hydrated = await this.hydrateMediaBlob(mediaItem);
-              if (!hydrated) continue;
-            }
-            const mediaBlob = mediaItem.blob;
-            if (!mediaBlob) continue;
-
-            // `bitmap` and `bitmapFromCache` are declared above, outside this
-            // branch, because a compound resolves into the same pair.
-
-            if (mediaItem.type === "image") {
-              try {
-                if (isAnimatedGif(mediaBlob)) {
-                  let gifCache = this.gifFrameCache.get(mediaItem.id);
-                  if (!gifCache) {
-                    const newCache = await createGifFrameCache(mediaBlob);
-                    if (newCache) {
-                      this.gifFrameCache.set(mediaItem.id, newCache);
-                      gifCache = newCache;
-                    }
-                  }
-                  if (gifCache && gifCache.frames.length > 0) {
-                    const clipLocalTime = time - clip.startTime;
-                    const frameIndex = getGifFrameAtTime(
-                      gifCache,
-                      clipLocalTime * 1000,
-                    );
-                    bitmap = gifCache.frames[frameIndex];
-                    bitmapFromCache = true;
-                  } else {
-                    bitmap = await createImageBitmap(mediaBlob);
-                  }
-                } else {
-                  const cached = this.staticImageCache.get(mediaItem.id);
-                  if (cached) {
-                    bitmap = cached;
-                    bitmapFromCache = true;
-                  } else {
-                    bitmap = await createImageBitmap(mediaBlob);
-                    this.staticImageCache.set(mediaItem.id, bitmap);
-                    bitmapFromCache = true;
-                  }
-                }
-              } catch (error) {
-                console.warn(
-                  `Failed to create ImageBitmap for image ${mediaItem.id}:`,
-                  error,
-                );
-              }
-            } else {
-              bitmap = await this.decodeFrameWithMediaBunny(
-                mediaBlob,
-                clipInfo.sourceTime,
-                settings.width,
-                settings.height,
-                clipInfo.mediaId,
-              );
-              if (!bitmap) {
-                bitmap = await this.decodeFrameWithVideoElement(
-                  mediaItem.id,
-                  mediaBlob,
-                  clipInfo.sourceTime,
-                  settings.width,
-                  settings.height,
-                );
-              }
-            }
-
-          }
+          const resolved = await this.resolveClipBitmap(
+            clip, clipInfo, project, time, width, height,
+          );
+          if (!resolved) continue;
+          const bitmap: ImageBitmap | null = resolved.bitmap;
+          const bitmapFromCache = resolved.fromCache;
 
           if (bitmap) {
             let finalTransform = clipInfo.transform;
@@ -1157,6 +1095,315 @@ export class VideoEngine {
       const clipEnd = clip.startTime + clip.duration;
       return time >= clip.startTime && time < clipEnd;
     });
+  }
+
+
+  /**
+   * Resolve one clip to the bitmap that represents it at `time`.
+   *
+   * ── WHY THIS IS A METHOD NOW ────────────────────────────────────────────────
+   * It was inline in `renderFrame`'s clip loop, which was fine while the loop
+   * was the only thing that needed a picture. Clip-to-clip transitions need
+   * TWO pictures at once — the outgoing clip and the incoming one, decoded at
+   * the same instant and blended — and the one thing a transition must not do
+   * is decode differently from the normal path. A crossfade whose first half
+   * came from a second, simpler decoder would cross-fade between two slightly
+   * different-looking versions of the same footage.
+   *
+   * So: one resolver, three sources, in the order that matters.
+   *  • a NESTED SEQUENCE resolves by recursion into an ordinary bitmap, which
+   *    is what lets a sequence be transitioned exactly like footage;
+   *  • an IMAGE (including an animated GIF, frame-picked by clip-local time)
+   *    comes from a cache;
+   *  • VIDEO decodes through MediaBunny, falling back to a `<video>` element.
+   *
+   * `fromCache` is the ownership flag and it is load-bearing: a cached bitmap
+   * belongs to the cache and closing it would blank every later frame that
+   * reuses it, while a freshly decoded one leaks if it is NOT closed.
+   *
+   * Returns null when the clip draws nothing — a deleted sequence, a cycle,
+   * missing media, a blob that would not hydrate.
+   */
+  private async resolveClipBitmap(
+    clip: Clip,
+    clipInfo: VideoClipRenderInfo,
+    project: Project,
+    time: number,
+    width: number,
+    height: number,
+  ): Promise<{ bitmap: ImageBitmap; fromCache: boolean } | null> {
+    const mediaLibrary = project.mediaLibrary;
+    const settings = project.settings;
+    void width; void height;
+      let bitmap: ImageBitmap | null = null;
+      // A compound frame is OURS and must be closed after drawing; a cached
+      // media bitmap belongs to the cache and must not be.
+      let bitmapFromCache = false;
+
+      const compoundId = this.compoundIdOf(clip);
+      if (compoundId) {
+        bitmap = await this.renderCompoundFrame(
+          project,
+          compoundId,
+          clipInfo.sourceTime,
+          width,
+          height,
+        );
+        // A sequence that cannot be resolved (deleted, or a cycle) draws
+        // nothing, exactly as its audio contributes nothing.
+        if (!bitmap) return null;
+      } else {
+        const mediaItem = mediaLibrary.items.find(
+          (m) => m.id === clipInfo.mediaId,
+        );
+        if (!mediaItem) return null;
+        if (!mediaItem.blob) {
+          const hydrated = await this.hydrateMediaBlob(mediaItem);
+          if (!hydrated) return null;
+        }
+        const mediaBlob = mediaItem.blob;
+        if (!mediaBlob) return null;
+
+        // `bitmap` and `bitmapFromCache` are declared above, outside this
+        // branch, because a compound resolves into the same pair.
+
+        if (mediaItem.type === "image") {
+          try {
+            if (isAnimatedGif(mediaBlob)) {
+              let gifCache = this.gifFrameCache.get(mediaItem.id);
+              if (!gifCache) {
+                const newCache = await createGifFrameCache(mediaBlob);
+                if (newCache) {
+                  this.gifFrameCache.set(mediaItem.id, newCache);
+                  gifCache = newCache;
+                }
+              }
+              if (gifCache && gifCache.frames.length > 0) {
+                const clipLocalTime = time - clip.startTime;
+                const frameIndex = getGifFrameAtTime(
+                  gifCache,
+                  clipLocalTime * 1000,
+                );
+                bitmap = gifCache.frames[frameIndex];
+                bitmapFromCache = true;
+              } else {
+                bitmap = await createImageBitmap(mediaBlob);
+              }
+            } else {
+              const cached = this.staticImageCache.get(mediaItem.id);
+              if (cached) {
+                bitmap = cached;
+                bitmapFromCache = true;
+              } else {
+                bitmap = await createImageBitmap(mediaBlob);
+                this.staticImageCache.set(mediaItem.id, bitmap);
+                bitmapFromCache = true;
+              }
+            }
+          } catch (error) {
+            console.warn(
+              `Failed to create ImageBitmap for image ${mediaItem.id}:`,
+              error,
+            );
+          }
+        } else {
+          bitmap = await this.decodeFrameWithMediaBunny(
+            mediaBlob,
+            clipInfo.sourceTime,
+            settings.width,
+            settings.height,
+            clipInfo.mediaId,
+          );
+          if (!bitmap) {
+            bitmap = await this.decodeFrameWithVideoElement(
+              mediaItem.id,
+              mediaBlob,
+              clipInfo.sourceTime,
+              settings.width,
+              settings.height,
+            );
+          }
+        }
+
+      }
+
+    return bitmap ? { bitmap, fromCache: bitmapFromCache } : null;
+  }
+
+  /**
+   * The transition whose window contains `time` on this track, if any.
+   *
+   * Only ONE can be active at a moment: they are anchored to clip boundaries
+   * and a clip has one of each edge, so an overlap would mean two transitions
+   * competing for the same frame. The first match wins rather than blending
+   * blends.
+   */
+  private findActiveTransition(
+    track: Track,
+    time: number,
+  ): { transition: Transition; clipA: Clip; clipB?: Clip; progress: number } | null {
+    const transitions = track.transitions ?? [];
+    if (transitions.length === 0) return null;
+
+    // A 1x1 engine is enough to answer the timing questions below; the real
+    // one is sized when there is actually a frame to draw.
+    if (!this.transitionEngine) {
+      this.transitionEngine = new TransitionEngine({ width: 1, height: 1 });
+    }
+
+    for (const transition of transitions) {
+      const clipA = track.clips.find((c) => c.id === transition.clipAId);
+      const clipB = transition.clipBId
+        ? track.clips.find((c) => c.id === transition.clipBId)
+        : undefined;
+      // A transition whose clips have been deleted is stale, not fatal.
+      if (!clipA || (transition.clipBId && !clipB)) continue;
+      if (!this.transitionEngine.isTimeInTransition(transition, clipA, time)) continue;
+
+      const progress = this.transitionEngine.calculateTransitionProgress(
+        transition,
+        clipA,
+        time,
+      );
+      return { transition, clipA, clipB, progress };
+    }
+    return null;
+  }
+
+  /** A fully transparent frame, so an edge transition has something to blend
+   *  against without inventing a black clip that would dip the picture. */
+  private async transparentFrame(width: number, height: number): Promise<ImageBitmap | null> {
+    if (typeof OffscreenCanvas === "undefined") return null;
+    const c = new OffscreenCanvas(width, height);
+    const cx = c.getContext("2d");
+    if (!cx) return null;
+    cx.clearRect(0, 0, width, height);
+    return await createImageBitmap(c);
+  }
+
+  /**
+   * Draw the active clip-to-clip transition on this track, if there is one.
+   *
+   * ── WHY THIS IS NOT "TWO CLIPS WITH OPACITY" ────────────────────────────────
+   * A cross-dissolve needs BOTH shots on screen at the same instant, blended by
+   * a single function of progress. Fading one out and the next in as separate
+   * draws gives a dip through the background in the middle, which is the
+   * artefact people recognise instantly as "not a real dissolve". So both
+   * frames are decoded, each gets its own clip's effects applied, and the
+   * transition engine produces one composited frame.
+   *
+   * Returns the ids it drew so the ordinary per-clip loop can skip them —
+   * drawing them again on top would erase the blend it just made.
+   */
+  private async renderActiveTransition(
+    track: Track,
+    time: number,
+    project: Project,
+    width: number,
+    height: number,
+    ctx: OffscreenCanvasRenderingContext2D,
+  ): Promise<Set<string>> {
+    const drawn = new Set<string>();
+    const active = this.findActiveTransition(track, time);
+    if (!active) return drawn;
+
+    const { transition, clipA, clipB, progress } = active;
+
+    let resolvedA: { bitmap: ImageBitmap; fromCache: boolean } | null = null;
+    let resolvedB: { bitmap: ImageBitmap; fromCache: boolean } | null = null;
+    let edgeFrame: ImageBitmap | null = null;
+    let processedA: ImageBitmap | null = null;
+    let processedB: ImageBitmap | null = null;
+
+    try {
+      // The SAME resolver the normal loop uses — including nested sequences,
+      // so a sequence can be dissolved like any other shot.
+      resolvedA = await this.resolveClipBitmap(
+        clipA, this.createClipRenderInfo(clipA, time), project, time, width, height,
+      );
+      if (!resolvedA) return drawn;
+
+      if (clipB) {
+        resolvedB = await this.resolveClipBitmap(
+          clipB, this.createClipRenderInfo(clipB, time), project, time, width, height,
+        );
+        if (!resolvedB) return drawn;
+      } else {
+        edgeFrame = await this.transparentFrame(width, height);
+        if (!edgeFrame) return drawn;
+      }
+
+      processedA = await this.applyClipEffectsForTransition(clipA, resolvedA.bitmap, width, height);
+      processedB = resolvedB
+        ? await this.applyClipEffectsForTransition(clipB!, resolvedB.bitmap, width, height)
+        : edgeFrame!;
+
+      if (
+        !this.transitionEngine ||
+        this.transitionEngine.getEngineDimensions().width !== width ||
+        this.transitionEngine.getEngineDimensions().height !== height
+      ) {
+        this.transitionEngine = new TransitionEngine({ width, height });
+      }
+
+      // On an EDGE transition the single clip is the one ARRIVING for "in" and
+      // the one LEAVING for "out"; the transparent frame plays the other part.
+      const outgoing = !clipB && transition.edge === "in" ? processedB : processedA;
+      const incoming = !clipB && transition.edge === "in" ? processedA : processedB;
+
+      const result = await this.transitionEngine.renderTransition(
+        outgoing, incoming, transition, progress,
+      );
+      if (result.frame) {
+        ctx.drawImage(result.frame, 0, 0, width, height);
+        result.frame.close();
+      }
+
+      drawn.add(clipA.id);
+      if (clipB) drawn.add(clipB.id);
+    } catch (error) {
+      // A failed transition must not take the whole frame down — returning an
+      // empty set lets the normal loop draw both clips un-blended, which looks
+      // like a hard cut rather than a black hole.
+      console.warn(
+        `[VideoEngine] transition render failed (${transition.type}, clipA=${clipA.id}):`,
+        error,
+      );
+      return new Set<string>();
+    } finally {
+      if (processedA && processedA !== resolvedA?.bitmap) processedA.close();
+      if (processedB && processedB !== resolvedB?.bitmap && processedB !== edgeFrame) processedB.close();
+      if (edgeFrame) edgeFrame.close();
+      // Only close what we own: a cached bitmap belongs to the cache, and
+      // closing it would blank every later frame that reuses it.
+      if (resolvedA && !resolvedA.fromCache) resolvedA.bitmap.close();
+      if (resolvedB && !resolvedB.fromCache) resolvedB.bitmap.close();
+    }
+
+    return drawn;
+  }
+
+  /** Run a clip's own effect chain over its frame before it enters a blend, so
+   *  a graded shot dissolves as the graded shot the viewer is watching. */
+  private async applyClipEffectsForTransition(
+    clip: Clip,
+    bitmap: ImageBitmap,
+    width: number,
+    height: number,
+  ): Promise<ImageBitmap> {
+    if (!clip.effects || clip.effects.length === 0) return bitmap;
+    try {
+      if (!this.effectsEngine) {
+        this.effectsEngine = new VideoEffectsEngine({
+          width, height, useGPU: true, preferWebGPU: false,
+        });
+        await this.effectsEngine.initialize();
+      }
+      const r = await this.effectsEngine.applyEffects(bitmap, clip.effects);
+      return r.image;
+    } catch {
+      return bitmap;
+    }
   }
 
   private createClipRenderInfo(clip: Clip, time: number): VideoClipRenderInfo {
