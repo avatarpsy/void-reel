@@ -473,6 +473,64 @@ export interface ProjectState {
 /**
  * Create the project store
  */
+/**
+ * MIRROR THE EFFECT CHAIN ONTO THE CLIP, WHICH IS WHERE THE RENDERER LOOKS.
+ *
+ * ── THE SPLIT BRAIN THIS CLOSES ─────────────────────────────────────────────
+ * `EffectsBridge` keeps per-clip effects in its OWN Map. The live Preview
+ * consults that map (`Preview.tsx` → `hasClipEffects` → `canvas-renderers`), so
+ * an effect applied from the Inspector or by the agent appears on screen
+ * immediately and everything looks fine.
+ *
+ * `VideoEngine` — which draws `render-frame` AND every frame of the EXPORT —
+ * reads `clip.effects`, the field on the clip. Nothing ever wrote it:
+ * `addVideoEffect` only called the bridge, and `updateVideoEffect` mapped over
+ * `clip.effects` entries that were therefore never there.
+ *
+ * Net effect: every blur, grade, vignette and chroma key the agent applied was
+ * visible while editing and ABSENT FROM THE FILE. Measured on a live editor —
+ * apply exposure/saturation/temperature, read it back fine, render the same
+ * frame before and after: rgb(190,36,64) → rgb(190,36,64), moved 0.0.
+ *
+ * One source of truth: after any chain mutation, copy the bridge's chain (in
+ * `order`) onto the clip. The bridge stays the editing model, the clip stays
+ * what the renderer and the project file carry, and they can no longer
+ * disagree.
+ */
+function mirrorClipEffectsToProject(
+  set: (partial: Partial<ProjectState>) => void,
+  get: () => ProjectState,
+  clipId: string,
+): void {
+  const bridge = getEffectsBridge();
+  const chain = (bridge.isInitialized() ? bridge.getEffects(clipId) : []) ?? [];
+  const effects = [...chain]
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+    .map((e) => ({
+      id: e.id,
+      type: e.type as string,
+      params: { ...(e.params ?? {}) },
+      enabled: e.enabled !== false,
+    }));
+
+  const { project } = get();
+  let found = false;
+  const tracks = project.timeline.tracks.map((track: Track) => {
+    if (!track.clips.some((c: Clip) => c.id === clipId)) return track;
+    found = true;
+    return {
+      ...track,
+      clips: track.clips.map((c: Clip) => (c.id === clipId ? { ...c, effects } : c)),
+    };
+  });
+
+  set({
+    project: found
+      ? { ...project, timeline: { ...project.timeline, tracks }, modifiedAt: Date.now() }
+      : { ...project, modifiedAt: Date.now() },
+  });
+}
+
 export const useProjectStore = create<ProjectState>()(
   subscribeWithSelector((set, get) => {
     const actionHistory = new ActionHistory();
@@ -4412,8 +4470,7 @@ export const useProjectStore = create<ProjectState>()(
 
         const effect = effectsBridge.getEffect(clipId, result.effectId);
         if (effect) {
-          // Trigger re-render by updating project state
-          set({ project: { ...get().project, modifiedAt: Date.now() } });
+          mirrorClipEffectsToProject(set, get, clipId);
         }
         return effect || null;
       },
@@ -4445,29 +4502,10 @@ export const useProjectStore = create<ProjectState>()(
 
         const effect = effectsBridge.getEffect(clipId, effectId);
         if (effect) {
-          const { project } = get();
-          const updatedTracks = project.timeline.tracks.map((track) => ({
-            ...track,
-            clips: track.clips.map((clip) => {
-              if (clip.id === clipId) {
-                const updatedEffects = clip.effects.map((e) =>
-                  e.id === effectId
-                    ? { ...e, params: { ...e.params, ...params } }
-                    : e,
-                );
-                return { ...clip, effects: updatedEffects };
-              }
-              return clip;
-            }),
-          }));
-
-          set({
-            project: {
-              ...project,
-              timeline: { ...project.timeline, tracks: updatedTracks },
-              modifiedAt: Date.now(),
-            },
-          });
+          // Was: map over `clip.effects` and patch the matching id. That could
+          // only ever patch an entry `addVideoEffect` had put there, and it
+          // never put any there — so the update landed in the bridge alone.
+          mirrorClipEffectsToProject(set, get, clipId);
         }
         return effect || null;
       },
@@ -4489,8 +4527,7 @@ export const useProjectStore = create<ProjectState>()(
           return false;
         }
 
-        // Trigger re-render by updating project state
-        set({ project: { ...get().project, modifiedAt: Date.now() } });
+        mirrorClipEffectsToProject(set, get, clipId);
         return true;
       },
 
@@ -4511,8 +4548,8 @@ export const useProjectStore = create<ProjectState>()(
           return false;
         }
 
-        // Trigger re-render by updating project state
-        set({ project: { ...get().project, modifiedAt: Date.now() } });
+        // Order matters to the renderer, so the mirror has to run here too.
+        mirrorClipEffectsToProject(set, get, clipId);
         return true;
       },
 
@@ -4539,8 +4576,7 @@ export const useProjectStore = create<ProjectState>()(
 
         const effect = effectsBridge.getEffect(clipId, effectId);
         if (effect) {
-          // Trigger re-render by updating project state
-          set({ project: { ...get().project, modifiedAt: Date.now() } });
+          mirrorClipEffectsToProject(set, get, clipId);
         }
         return effect || null;
       },

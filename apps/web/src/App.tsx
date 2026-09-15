@@ -3086,7 +3086,15 @@ function App() {
 
             const history = (useProjectStore.getState() as any).actionHistory;
             history?.beginGroup?.("Cut ranges");
-            const applied: { start: number; end: number }[] = [];
+            // `actual` is the duration of the segment REALLY deleted, which is
+            // not always `end - start`: the `mid` finder below matches with a
+            // ±0.1s / ±0.15s tolerance, so a split that landed slightly off
+            // still gets cut. Reporting the REQUESTED length instead made
+            // `removedSec` over-report — measured 0.6 claimed against 0.5
+            // actually removed on a two-range cut — and an agent that trusts
+            // that number reports a cut to the user that the timeline does not
+            // have.
+            const applied: { start: number; end: number; actual: number }[] = [];
             const failed: { start: number; end: number; reason: string }[] = [];
             try {
               // Back-to-front: a later cut can't disturb an earlier one's times.
@@ -3104,8 +3112,9 @@ function App() {
                     failed.push({ start, end, reason: "could not isolate the range" });
                     continue;
                   }
+                  const actual = Number(mid.duration) || (end - start);
                   await useProjectStore.getState().rippleDeleteClip(mid.id);
-                  applied.push({ start, end });
+                  applied.push({ start, end, actual });
                 } catch (e: any) {
                   failed.push({ start, end, reason: e?.message ?? "cut failed" });
                 }
@@ -3113,7 +3122,7 @@ function App() {
             } finally {
               history?.endGroup?.();
             }
-            const removedSec = applied.reduce((s, r) => s + (r.end - r.start), 0);
+            const removedSec = applied.reduce((s, r) => s + r.actual, 0);
             reply({
               type: "voidspace:ack",
               requestId: msg.requestId,

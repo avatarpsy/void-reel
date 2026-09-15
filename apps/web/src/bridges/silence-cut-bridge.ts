@@ -139,6 +139,15 @@ export class SilenceCutBridge {
       return { success: false, error: "Clip not found" };
     }
 
+    // Every lookup below is scoped to THIS clip's track — see the comment on
+    // `findClipContainingTime`. Without it the cuts land on whatever clip
+    // happens to share the timecode on another track.
+    const trackId = store.project.timeline.tracks
+      .find((t) => t.clips.some((c) => c.id === clipId))?.id;
+    if (!trackId) {
+      return { success: false, error: "Clip is not on any track" };
+    }
+
     const clipStartTime = initialClip.startTime;
     const sortedRegions = [...silentRegions].sort((a, b) => b.start - a.start);
 
@@ -156,7 +165,7 @@ export class SilenceCutBridge {
         const absoluteStart = clipStartTime + region.start;
         const absoluteEnd = clipStartTime + region.end;
 
-        const currentClip = this.findClipContainingTime(absoluteStart);
+        const currentClip = this.findClipContainingTime(absoluteStart, trackId);
         if (!currentClip) {
           continue;
         }
@@ -173,7 +182,7 @@ export class SilenceCutBridge {
           }
         }
 
-        const clipAfterFirstSplit = this.findClipContainingTime(absoluteStart);
+        const clipAfterFirstSplit = this.findClipContainingTime(absoluteStart, trackId);
         if (!clipAfterFirstSplit) {
           continue;
         }
@@ -193,6 +202,7 @@ export class SilenceCutBridge {
         const silentClip = this.findClipInTimeRange(
           absoluteStart,
           absoluteEnd,
+          trackId,
         );
         if (silentClip) {
           await store.rippleDeleteClip(silentClip.id);
@@ -210,31 +220,45 @@ export class SilenceCutBridge {
     }
   }
 
-  private findClipContainingTime(time: number) {
-    const store = useProjectStore.getState();
-    const { project } = store;
-
-    for (const track of project.timeline.tracks) {
-      for (const clip of track.clips) {
-        const clipEnd = clip.startTime + clip.duration;
-        if (time >= clip.startTime && time < clipEnd) {
-          return clip;
-        }
+  /**
+   * ── THESE TWO LOOKUPS MUST BE SCOPED TO ONE TRACK ──────────────────────────
+   *
+   * Both used to walk EVERY track and return the FIRST clip whose time range
+   * matched, with no reference to the clip being cut. On a one-track timeline
+   * that is the right answer by luck. On any real project it is not: "cut the
+   * silence out of this narration" would find whatever clip sits at that moment
+   * on the first track — normally the PICTURE — then split it twice and ripple
+   * delete the middle, and report success.
+   *
+   * So the failure was not "nothing happened". It was silently editing a
+   * different clip than the one named, destructively, and answering `ok`.
+   * Measured on a live editor: a 6.0s speech clip, note "Cut 2 silent gaps,
+   * 2.6s of 6.0s", speech clip still 6.03s — the cuts had landed elsewhere.
+   *
+   * `trackId` is now required. A lookup that cannot be scoped is a bug, not a
+   * convenience.
+   */
+  private findClipContainingTime(time: number, trackId: string) {
+    const { project } = useProjectStore.getState();
+    const track = project.timeline.tracks.find((t) => t.id === trackId);
+    if (!track) return null;
+    for (const clip of track.clips) {
+      const clipEnd = clip.startTime + clip.duration;
+      if (time >= clip.startTime && time < clipEnd) {
+        return clip;
       }
     }
     return null;
   }
 
-  private findClipInTimeRange(start: number, end: number) {
-    const store = useProjectStore.getState();
-    const { project } = store;
-
-    for (const track of project.timeline.tracks) {
-      for (const clip of track.clips) {
-        const clipMidpoint = clip.startTime + clip.duration / 2;
-        if (clipMidpoint >= start && clipMidpoint < end) {
-          return clip;
-        }
+  private findClipInTimeRange(start: number, end: number, trackId: string) {
+    const { project } = useProjectStore.getState();
+    const track = project.timeline.tracks.find((t) => t.id === trackId);
+    if (!track) return null;
+    for (const clip of track.clips) {
+      const clipMidpoint = clip.startTime + clip.duration / 2;
+      if (clipMidpoint >= start && clipMidpoint < end) {
+        return clip;
       }
     }
     return null;

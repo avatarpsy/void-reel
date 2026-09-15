@@ -17,6 +17,10 @@ import {
   type ClipPropertyDescriptor,
   makeClipPropertySurface,
 } from "./clip-property-surface";
+// Text/shape/svg clips do not live on `timeline.tracks` — they live in the
+// title and graphics engines, which is where `updateClipBlendOpacity` writes.
+// A readback that only consults the project snapshot cannot see them.
+import { useEngineStore } from "../../stores/engine-store";
 
 const VISUAL_KINDS: readonly ClipKind[] = [
   "video", "image", "text", "graphics", "shape", "sticker", "svg",
@@ -82,7 +86,33 @@ const ENTRIES: ClipPropertyDescriptor[] = [
       additionalProperties: false,
     },
     toStoreArgs: (cfg) => [Math.max(0, Math.min(100, Number(cfg.opacity)))],
-    fromClip: (clip) => ({ opacity: (clip.raw as any).blendOpacity ?? 100 }),
+    /**
+     * ASK THE ENGINE THAT HOLDS THE CLIP, NOT THE PROJECT SNAPSHOT.
+     *
+     * This surface applies only to text/shape/svg/sticker, and NONE of those
+     * live on `timeline.tracks`. `updateClipBlendOpacity` knows that — it falls
+     * through to `titleEngine.updateTextClip` / `graphicsEngine.updateShapeClip`
+     * / `updateSVGClip`. The readback did not: it read `clip.raw.blendOpacity`,
+     * where `raw` is the object `resolveTargetClips` pulled out of
+     * `project.textClips` — a snapshot the title engine syncs into on save, not
+     * on every edit.
+     *
+     * So the write went to the engine and the read looked at the project, and
+     * the agent saw its own edit as un-applied. Measured live: apply 55, read
+     * back 100.
+     */
+    fromClip: (clip) => {
+      const fromRaw = (clip.raw as any)?.blendOpacity;
+      if (typeof fromRaw === "number") return { opacity: fromRaw };
+      const eng = useEngineStore.getState();
+      const live =
+        eng.getTitleEngine()?.getTextClip(clip.id) ??
+        eng.getGraphicsEngine()?.getShapeClip(clip.id) ??
+        eng.getGraphicsEngine()?.getSVGClip(clip.id) ??
+        null;
+      const v = (live as { blendOpacity?: number } | null)?.blendOpacity;
+      return { opacity: typeof v === "number" ? v : 100 };
+    },
   },
 
   // ── 3D transforms: DELIBERATELY NOT EXPOSED ────────────────────────────────
@@ -143,37 +173,22 @@ const ENTRIES: ClipPropertyDescriptor[] = [
     fromClip: (clip) => (clip.raw as any).transform ?? null,
   },
 
-  // ── Color grading (single store method, partial) ──
-  {
-    name: "color-grading",
-    description: "Color grading settings (exposure, contrast, saturation, temperature, tint, highlights, shadows, etc.). Pass only fields to change.",
-    appliesTo: ["video", "image"],
-    storeMethod: "updateColorGrading",
-    schema: {
-      type: "object",
-      properties: {
-        exposure: { type: "number" },
-        contrast: { type: "number" },
-        saturation: { type: "number" },
-        temperature: { type: "number" },
-        tint: { type: "number" },
-        highlights: { type: "number" },
-        shadows: { type: "number" },
-        whites: { type: "number" },
-        blacks: { type: "number" },
-        vibrance: { type: "number" },
-      },
-      additionalProperties: true,
-    },
-    toStoreArgs: (cfg) => [cfg],
-    // Grading lives in the EffectsBridge, not on the clip: ask the store.
-    fromClip: (clip, ctx) => {
-      const fn = (ctx.store as any).getColorGrading;
-      if (typeof fn !== "function") return null;
-      const g = fn.call(ctx.store, clip.id);
-      return g && Object.keys(g).length > 0 ? g : null;
-    },
-  },
+  // ── Colour grading: MOVED OUT, because this row was a total no-op ─────────
+  //
+  // It pointed `updateColorGrading` at a schema of ten flat fields — exposure,
+  // contrast, saturation, temperature, tint, highlights, shadows, whites,
+  // blacks, vibrance. That store method reads FOUR keys and none of them are in
+  // that list: `colorWheels`, `curves`, `lut`, `hsl`. Every call fell through
+  // every branch, bumped `modifiedAt`, returned `true` — and
+  // `makeClipPropertySurface` reads anything but `false` as success, so the
+  // agent was told "color-grading ✓" for an edit that did not exist. Verified
+  // against a live editor: readback null, `looks` null, rendered frame
+  // unchanged.
+  //
+  // The real surface is now `color-grading.ts`, which compiles those words into
+  // the VIDEO EFFECT CHAIN — the path that renders in the preview, survives
+  // into the exported file, persists through `project.effectsState`, and is
+  // visible in `get-state` `looks`. Do not re-add a row here.
 
   // ── Raw keyframes (advanced; lets agent set arbitrary curves) ──
   {

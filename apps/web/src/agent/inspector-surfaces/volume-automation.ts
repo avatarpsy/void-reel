@@ -147,8 +147,43 @@ export const surface: InspectorSurface<VolumeAutomationConfig> = {
         .join(" "),
     };
   },
+  /**
+   * READ THE TWO PLACES `apply` ACTUALLY WRITES.
+   *
+   * ── WHY THIS WAS EMPTY FOREVER ──────────────────────────────────────────
+   * It used to read `clip.automation.volume` — the LEGACY parallel array that
+   * `apply` deliberately stopped writing (see the comment above: playback no
+   * longer reads it). So the readback could not return a value no matter what
+   * was set: fades landed on `clip.fade`, volume curves landed on
+   * `clip.keyframes` with `property: "volume"`, and the reader looked at
+   * neither. Measured live: set fadeIn 0.8 / fadeOut 1.2, tool answers
+   * `ok: "fadeIn=0.8s fadeOut=1.2s"`, readback `null`.
+   *
+   * A readback that cannot succeed is worse than no readback: `readable: true`
+   * tells the agent this surface can be inspected, so an empty answer reads as
+   * "nothing is set" and invites it to apply the same fade again.
+   *
+   * Neutral values are omitted so an untouched clip reads `null`.
+   */
   read: (clip) => {
-    const pts = (clip.raw as any).automation?.volume ?? [];
-    return Array.isArray(pts) && pts.length > 0 ? { points: pts } : null;
+    const raw = clip.raw as {
+      fade?: { fadeIn?: number; fadeOut?: number };
+      keyframes?: Keyframe[];
+    };
+    const out: Record<string, unknown> = {};
+
+    const fadeIn = Number(raw?.fade?.fadeIn);
+    const fadeOut = Number(raw?.fade?.fadeOut);
+    if (Number.isFinite(fadeIn) && fadeIn > 0) out.fadeIn = fadeIn;
+    if (Number.isFinite(fadeOut) && fadeOut > 0) out.fadeOut = fadeOut;
+
+    const points = (raw?.keyframes ?? [])
+      .filter((k) => k.property === "volume")
+      .map((k) => ({ time: Number(k.time), value: Number(k.value) }))
+      .filter((p) => Number.isFinite(p.time) && Number.isFinite(p.value))
+      .sort((a, b) => a.time - b.time);
+    if (points.length > 0) out.points = points;
+
+    return Object.keys(out).length > 0 ? out : null;
   },
 };

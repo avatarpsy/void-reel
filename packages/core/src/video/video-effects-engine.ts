@@ -1258,16 +1258,22 @@ export class VideoEffectsEngine {
     const params = effect.params as Record<string, number>;
 
     switch (effect.type) {
+      // `??` NOT `||`: zero is a LEGAL value for every one of these, and `||`
+      // silently promoted it to the neutral default. `saturation: 0` is black
+      // and white — the most-requested grade there is — and it was being served
+      // back as `saturate(1)`, i.e. no change at all, with no error anywhere.
+      // Same for `contrast: 0` (flat grey) and a brightness of exactly 0.
       case "brightness":
-        return `brightness(${1 + (params.value || 0) / 100})`;
+        // `value` is PERCENT (-100..100), matching the Inspector's slider.
+        return `brightness(${1 + (params.value ?? 0) / 100})`;
       case "contrast":
-        return `contrast(${params.value || 1})`;
+        return `contrast(${params.value ?? 1})`;
       case "saturation":
-        return `saturate(${params.value || 1})`;
+        return `saturate(${params.value ?? 1})`;
       case "hue":
-        return `hue-rotate(${params.rotation || 0}deg)`;
+        return `hue-rotate(${params.rotation ?? 0}deg)`;
       case "blur":
-        return `blur(${params.radius || 0}px)`;
+        return `blur(${params.radius ?? 0}px)`;
       default:
         return "";
     }

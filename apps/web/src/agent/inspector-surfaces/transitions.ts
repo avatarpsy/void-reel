@@ -72,6 +72,31 @@ export const surface: InspectorSurface<TransitionsConfig> = {
     const dur = Number((raw as any).duration) || 0;
     if (dur <= 0) return { ok: false, error: "clip has no duration" };
 
+    /**
+     * A CONFIG THAT NAMES NO PRESET IS A MISTAKE, NOT A REQUEST TO CLEAR.
+     *
+     * Everything below reads `config.entry.preset` and `config.exit.preset`,
+     * defaulting each to "none". So a caller that guessed the field names —
+     * `{ entry: { type: "fade", duration: 0.5 } }` is the natural guess, and
+     * one this harness made — fell straight through to "none / none", WIPED
+     * any entry and exit animation the clip already had, and was answered
+     * `ok: "cleared"`. Destroying work and reporting success is the worst
+     * possible response to a typo.
+     *
+     * Clearing stays available and stays EXPLICIT: `{ entry: { preset: "none" } }`.
+     */
+    const named = (side?: { preset?: string }) => typeof side?.preset === "string";
+    const gaveSomething = config != null && Object.keys(config).length > 0;
+    if (gaveSomething && !named(config?.entry) && !named(config?.exit)) {
+      return {
+        ok: false,
+        error:
+          'no preset given. Use { entry: { preset: "fade", durationSec: 0.5 } } and/or ' +
+          '{ exit: { preset: "fade" } }. To remove an animation pass preset: "none" explicitly. ' +
+          `Got: ${JSON.stringify(config).slice(0, 160)}`,
+      };
+    }
+
     // Detect adjacent clips to avoid black dips at boundaries.
     // Entry transitions are skipped when a predecessor ends at this clip's
     // start; exit transitions are skipped when a successor starts at this
