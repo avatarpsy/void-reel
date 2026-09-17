@@ -18,7 +18,7 @@ import { exportArtboard } from '../services/export-service';
 import { uploadReferenceImage } from '../services/generative-fill';
 import {
   saveImageToVoidspaceLibrary,
-  overwriteLocalAsset,
+  overwriteEditSource,
   NotSignedInError,
 } from '../services/voidspace-storage';
 import type { Artboard, Layer, Project } from '../types/project';
@@ -198,11 +198,11 @@ registerImageRpc('voidspace:img-save', async (msg: any) => {
     });
 
     if (wantsOverwrite && editSource) {
-      // overwriteLocalAsset already posts the `voidspace-image-edit` broadcast
+      // overwriteEditSource already posts the `voidspace-image-edit` broadcast
       // that makes the studio tab re-fetch — the URL does not change, so without
       // that nudge the video editor keeps showing its cached previous version
       // and the edit looks like it did nothing.
-      const res = await overwriteLocalAsset(blob, editSource as any);
+      const res = await overwriteEditSource(blob, editSource);
       return { ok: true, mode: 'overwrite', url: res?.url ?? null };
     }
 

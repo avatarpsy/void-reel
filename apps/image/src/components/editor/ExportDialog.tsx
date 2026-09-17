@@ -15,7 +15,7 @@ import {
   type ExportQuality,
   type ExportOptions,
 } from '../../services/export-service';
-import { saveImageToVoidspaceLibrary, overwriteLocalAsset, NotSignedInError } from '../../services/voidspace-storage';
+import { saveImageToVoidspaceLibrary, overwriteEditSource, NotSignedInError } from '../../services/voidspace-storage';
 import { announceEditedImage } from '../../services/image-handoff';
 
 interface ExportDialogProps {
@@ -417,9 +417,13 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
       const blob = await exportArtboard(project, artboard, options);
 
       if (updateOriginal) {
-        await overwriteLocalAsset(blob, editSource!);
+        await overwriteEditSource(blob, editSource!);
         setHasSavedOnce(true);
-        showNotification('success', 'Updated the original — refresh the studio to see it');
+        // The url did not change and every surface listening on
+        // `voidspace-image-edit` re-fetches, so this is true immediately —
+        // it used to say "refresh the studio to see it", which it no longer
+        // needs and which made a working save look half-finished.
+        showNotification('success', 'Updated everywhere this image is used');
         onClose();
         return;
       }
@@ -798,10 +802,10 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
             </button>
           </div>
           {editSource && saveMode === 'overwrite' && (
-            <span className="text-[10px] text-muted-foreground">replaces the studio image — shows on refresh</span>
+            <span className="text-[10px] text-muted-foreground">replaces this image everywhere it is used</span>
           )}
           {editSource && saveMode === 'copy' && (
-            <span className="text-[10px] text-muted-foreground">new Library image — swap it in from the studio</span>
+            <span className="text-[10px] text-muted-foreground">keeps the original — saves a new image beside it</span>
           )}
           {!editSource && hasSavedOnce && saveMode === 'copy' && (
             <span className="text-[10px] text-muted-foreground">a new Library entry each save</span>

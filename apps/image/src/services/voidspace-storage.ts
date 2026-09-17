@@ -19,6 +19,10 @@
 // GET /api/studio/library (type=image) exactly like a generated video frame.
 // -----------------------------------------------------------------------------
 
+// `EditSource` is a TYPE only, so this import is erased at build time and the
+// image-handoff -> voidspace-storage dependency stays one-way at runtime.
+import type { EditSource } from './image-handoff';
+
 const FB_DB = 'firebaseLocalStorageDb';
 const FB_STORE = 'firebaseLocalStorage';
 // Firebase persists the signed-in user under a key shaped like
@@ -310,23 +314,14 @@ export async function saveImageToVoidspaceLibrary(
 }
 
 /**
- * Overwrite an EXISTING studio image file in place. Used when the editor was
- * opened to edit a studio scene/cover image (a /api/studio/local-asset URL):
- * we write the new bytes to the SAME projectId/kind/filename via save-render,
- * so the source URL serves the updated image (shows on a refresh). save-render
- * and local-asset both resolve safeSlug(projectId)/<dir>/safeSlug(stem).<ext>,
- * and frame names are already slug-stable, so this lands on the same file.
+ * Overwrite an EXISTING studio image file on the studio machine's disk.
  *
- * The blob MUST be encoded in the source's format (caller's responsibility) so
- * the in-place bytes stay valid for the file's extension.
+ * We write the new bytes to the SAME projectId/kind/filename via save-render,
+ * so the source URL serves the updated image. save-render and local-asset both
+ * resolve safeSlug(projectId)/<dir>/safeSlug(stem).<ext>, and frame names are
+ * already slug-stable, so this lands on the same file.
  */
-export async function overwriteLocalAsset(
-  blob: Blob,
-  target: { projectId: string; kind: string; filename: string; ext: string; url: string },
-): Promise<{ url: string }> {
-  const token = await getVoidspaceIdToken();
-  if (!token) throw new NotSignedInError();
-
+async function overwriteLocalAsset(blob: Blob, target: EditSource, token: string): Promise<void> {
   const stem = target.filename.replace(/\.[^.]+$/, '');
   const ext = (target.ext || 'png').toLowerCase();
   const qs = new URLSearchParams({
@@ -344,11 +339,62 @@ export async function overwriteLocalAsset(
     body: blob,
   });
   if (!res.ok) throw new Error(`overwrite failed (${res.status})`);
-  // Tell any same-origin surface that opened us (the studio tab) that this
-  // source file changed, so it can cache-bust the now-stale displayed image.
+}
+
+/**
+ * Overwrite an EXISTING object in our storage bucket — a mirrored generation,
+ * a project cover, a chat image.
+ *
+ * Multipart rather than a raw body because the url has to travel with the
+ * bytes: the server does NOT take a path, it re-derives one from the url and
+ * refuses anything that is not the caller's own image. A 403 here means exactly
+ * that, and the caller turns it into "save a copy instead" rather than an error
+ * the user cannot act on.
+ */
+async function overwriteCloudImage(blob: Blob, target: EditSource, token: string): Promise<void> {
+  const body = new FormData();
+  body.append('url', target.url);
+  body.append('file', blob, target.filename || `image.${target.ext || 'png'}`);
+  const res = await fetch('/api/studio/overwrite-image', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` }, // no Content-Type: the browser sets the boundary
+    body,
+  });
+  if (res.ok) return;
+  throw new Error(
+    res.status === 403
+      ? 'that image is not one this account can replace'
+      : `overwrite failed (${res.status})`,
+  );
+}
+
+/**
+ * Replace an image IN PLACE, wherever it lives, and tell the other tabs.
+ *
+ * One entry point for both origins so every caller — the export dialog, the
+ * agent's save tool — gets the same behaviour, including the broadcast. The
+ * blob MUST be encoded in the target's own format (the caller's job), because
+ * the url and its extension do not change and bytes that disagree with the
+ * extension would serve as a broken image at an address nothing can correct.
+ */
+export async function overwriteEditSource(blob: Blob, target: EditSource): Promise<{ url: string }> {
+  const token = await getVoidspaceIdToken();
+  if (!token) throw new NotSignedInError();
+
+  if (target.origin === 'cloud') await overwriteCloudImage(blob, target, token);
+  else await overwriteLocalAsset(blob, target, token);
+
+  /**
+   * THE URL DID NOT CHANGE, WHICH IS THE WHOLE POINT AND ALSO THE PROBLEM.
+   *
+   * Nothing downstream has any way to notice — and mirrored objects are served
+   * `immutable`, so a browser holding one will not even revalidate. Every
+   * surface showing this image listens on this channel and re-requests with a
+   * fresh cache-buster when it hears. Without the nudge the user saves an edit
+   * and keeps looking at the old picture, which reads as "Save did nothing".
+   */
   try {
     new BroadcastChannel('voidspace-image-edit').postMessage({ type: 'image-updated', url: target.url });
   } catch { /* BroadcastChannel unavailable — the file is still updated */ }
-  // The file is replaced in place; the original URL now serves the new bytes.
   return { url: target.url };
 }

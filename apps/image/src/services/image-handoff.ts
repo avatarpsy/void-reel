@@ -4,11 +4,18 @@
 // the image editor in a new tab with `?src=<imageUrl>&from=<label>` and we load
 // that image as a fresh project — so the user doesn't have to re-upload it.
 //
-// Saving is deliberately plain: the user uses Export → "Save to Voidspace"
-// (overwrite the same Library entry, or save a copy). The result lands in the
-// shared Library (the studio's assets browser), where they swap it onto a scene
-// or cover. No auto-apply / cross-tab magic — overwrite shows on refresh, a copy
-// is picked from the assets browser.
+// Saving has two shapes, and which one the user gets depends entirely on
+// whether the source is OURS TO WRITE (see `parseEditSource`):
+//
+//  - "Update original" — the bytes at the same url are replaced, so the picture
+//    changes everywhere it is already referenced (chat card, project cover,
+//    ledger row, the phone) without anything being re-pointed. The surface that
+//    opened us is told over `voidspace-image-edit` so it can drop its cached
+//    copy; this is the default when it is available, because it is what a
+//    person means by "edit this".
+//  - "New copy" — the fallback for a provider URL we cannot write to. It lands
+//    in the shared Library, and if the caller asked for the round trip
+//    (`editReturn=`) it is also handed back to that card as a new variation.
 // -----------------------------------------------------------------------------
 
 import { useProjectStore } from '../stores/project-store';
@@ -21,19 +28,35 @@ export interface HandoffParams {
    * The card that opened us and wants the result back.
    *
    * Set only when a surface explicitly asks for the round trip (`editReturn=`
-   * on the handoff URL). A cloud-hosted image has no overwrite-in-place target
-   * — `parseLocalAssetSource` returns null for anything but a local-asset URL
-   * — so without this, editing a generated cover was a one-way trip: the user
-   * saved a copy and the card they started from still showed the old picture.
+   * on the handoff URL). It is the fallback path: when the source CANNOT be
+   * overwritten in place (a provider URL that is not ours to write), the user
+   * saves a copy and this is the only way that copy reaches the card they
+   * started from instead of sitting in the Library.
    */
   editReturn?: string;
 }
 
-/** A studio image file we can overwrite IN PLACE (a local-asset URL). */
+/**
+ * An image file we can overwrite IN PLACE, so the edit shows up at the SAME
+ * url everywhere it is already referenced.
+ *
+ * Two origins, because the studio stores images in two places and both are
+ * worth editing:
+ *  - `local` — a `/api/studio/local-asset` URL: a file on the machine running
+ *    the studio, rewritten through `save-render`'s stable-filename path.
+ *  - `cloud` — an object in our own storage bucket (a mirrored generation, a
+ *    project cover, a chat image), rewritten through `/api/studio/overwrite-image`.
+ *
+ * `cloud` is the one that made "Edit" useful on a generated cover. Before it,
+ * the only option for anything not on local disk was to save a COPY, which
+ * left the ledger row, the music project, the song entry and the phone all
+ * pointing at the picture the user had just replaced.
+ */
 export interface EditSource {
-  projectId: string;
-  kind: string;       // save-render KIND_DIRS key; 'image' for frames
-  filename: string;   // on-disk name incl. extension
+  origin: 'local' | 'cloud';
+  projectId: string;  // save-render project; '' for a cloud object
+  kind: string;       // save-render KIND_DIRS key; 'image' for frames and covers
+  filename: string;   // on-disk / object name incl. extension
   ext: string;        // png | jpg | webp …
   url: string;        // the original src URL (unchanged after overwrite)
 }
@@ -63,12 +86,15 @@ export function setEditReturnId(id: string | null): void { editReturnId = id || 
 export function getEditReturnId(): string | null { return editReturnId; }
 
 /**
- * Hand a saved image back to the card that asked for it.
+ * Hand a saved COPY back to the card that asked for it.
  *
- * Same BroadcastChannel `overwriteLocalAsset` already uses, because this is the
- * same conversation: "an image you are showing has changed". The studio appends
- * it as a new variation on that card and selects it, so the original stays one
+ * Same BroadcastChannel the in-place overwrite uses, because this is the same
+ * conversation: "an image you are showing has changed". The studio appends it
+ * as a new variation on that card and selects it, so the original stays one
  * arrow away rather than being replaced.
+ *
+ * NOT called for an overwrite. There the url is unchanged, so a variation would
+ * be the same picture listed twice; `image-updated` is the message for that.
  */
 export function announceEditedImage(url: string): void {
   const returnTo = editReturnId;
@@ -83,8 +109,7 @@ export function announceEditedImage(url: string): void {
  * If `src` is a studio `local-asset` URL, return the file it points at so the
  * editor can overwrite it in place (the studio's read path and save-render's
  * write path both resolve safeSlug(projectId)/frames/safeSlug(name) — same
- * file). Returns null for any other URL (Kie/GCS temp links), where the only
- * option is to save a copy.
+ * file). Returns null for any other URL.
  */
 export function parseLocalAssetSource(src: string): EditSource | null {
   try {
@@ -95,16 +120,69 @@ export function parseLocalAssetSource(src: string): EditSource | null {
     const kind = (u.searchParams.get('kind') || 'image').trim() || 'image';
     if (!projectId || !filename) return null;
     const ext = (filename.split('.').pop() || 'png').toLowerCase();
-    return { projectId, kind, filename, ext, url: src };
+    return { origin: 'local', projectId, kind, filename, ext, url: src };
   } catch {
     return null;
   }
 }
 
+/** Formats we can write back. An overwrite reuses the object's own extension,
+ *  so a format we cannot encode is a source we must not offer to replace. */
+const CLOUD_EDIT_EXTS = new Set(['png', 'jpg', 'jpeg', 'webp']);
+
+/**
+ * If `src` is an image in OUR storage bucket, describe it as an overwrite
+ * target.
+ *
+ * Loose on purpose: this only decides whether to OFFER "Update original".
+ * `/api/studio/overwrite-image` re-derives the object path and checks that it
+ * belongs to the caller, so a url that looks right here but isn't theirs is
+ * refused there, with the editor falling back to saving a copy. Duplicating
+ * the ownership rule in the browser would add a second place for it to drift
+ * and buy nothing — the browser's copy could never be the one enforcing it.
+ *
+ * Excludes provider hosts (Suno, Kie tempfiles, an imported web image) for the
+ * plain reason that we cannot write to them; those still get the copy path.
+ */
+export function parseCloudEditSource(src: string): EditSource | null {
+  try {
+    const u = new URL(src, window.location.origin);
+    if (u.protocol !== 'https:') return null;
+    const host = u.hostname.toLowerCase();
+    const ours = host === 'storage.googleapis.com'
+      || host === 'firebasestorage.googleapis.com'
+      || host.endsWith('.storage.googleapis.com');
+    if (!ours) return null;
+
+    // The object name, wherever this url shape keeps it. Firebase download
+    // urls percent-encode the whole path into one segment after `/o/`.
+    const fb = /\/v0\/b\/[^/]+\/o\/([^?]+)/.exec(u.pathname);
+    const objectPath = decodeURIComponent(fb ? fb[1] : u.pathname.replace(/^\/+/, ''));
+    const filename = objectPath.split('/').filter(Boolean).pop() || '';
+    const ext = (filename.split('.').pop() || '').toLowerCase();
+    if (!filename || !CLOUD_EDIT_EXTS.has(ext)) return null;
+
+    return { origin: 'cloud', projectId: '', kind: 'image', filename, ext, url: src };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The overwrite target for a handoff source, whichever kind it is, or null when
+ * the only honest option is to save a copy.
+ *
+ * ONE reader, so "can this be updated in place?" is answered the same way by
+ * the export dialog, the agent's save tool and anything added later.
+ */
+export function parseEditSource(src: string): EditSource | null {
+  return parseLocalAssetSource(src) || parseCloudEditSource(src);
+}
+
 /** Strip the handoff params so a refresh doesn't reload the source image. */
 export function clearHandoffUrl(): void {
   const url = new URL(window.location.href);
-  ['src', 'from'].forEach((k) => url.searchParams.delete(k));
+  ['src', 'from', 'editReturn'].forEach((k) => url.searchParams.delete(k));
   window.history.replaceState({}, '', url.pathname + (url.search || '') + url.hash);
 }
 

@@ -10,7 +10,7 @@ import { useKeyboardShortcuts } from './services/keyboard-service';
 import { useAutoSave, loadSavedProject } from './hooks/useAutoSave';
 import { bakePendingCompositions } from './services/composition/bake';
 import { useProjectCloudSync } from './hooks/useProjectCloudSync';
-import { readHandoffParams, setEditReturnId, clearHandoffUrl, loadSrcAsProject, parseLocalAssetSource } from './services/image-handoff';
+import { readHandoffParams, setEditReturnId, clearHandoffUrl, loadSrcAsProject, parseEditSource } from './services/image-handoff';
 import { openCloudCarouselById } from './services/carousel-cloud';
 import { openCloudImageProject } from './services/project-cloud-open';
 import { installImageRpc } from './agent/rpc';
@@ -239,14 +239,16 @@ export default function App() {
     if (!h) return;
     if (handoffClaimed) return;
     handoffClaimed = true;
-    const source = parseLocalAssetSource(h.src);
+    const source = parseEditSource(h.src);
     (async () => {
       try {
         await loadSrcAsProject(h.src, h.from);
-        setEditSource(source); // overwrite-in-place target (null if not local)
-        // Who gets the result back. Only set when the caller asked for the
-        // round trip; a cloud image has no `source` above, so this is the only
-        // way an edit reaches the card it came from.
+        // Overwrite-in-place target — a studio file on disk OR an object in
+        // our own bucket. Null only for a provider url we cannot write to.
+        setEditSource(source);
+        // Who gets a saved COPY back. Still set when `source` exists, because
+        // the user may choose "New copy" over updating the original, and that
+        // copy should reach the card rather than only the Library.
         setEditReturnId(h.editReturn ?? null);
         setCurrentView('editor');
         setHandoffError(null);
