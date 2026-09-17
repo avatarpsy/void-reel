@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from 'react';
-import { Download, FileImage, Loader2, Link2, Link2Off, Printer, Instagram, Youtube, Twitter, Linkedin, Facebook, Image, CloudUpload } from 'lucide-react';
+import { Download, Loader2, Link2, Link2Off, CloudUpload } from 'lucide-react';
 import { Dialog, DialogFooter } from '../ui/Dialog';
 import { useProjectStore } from '../../stores/project-store';
 import { useUIStore } from '../../stores/ui-store';
@@ -84,7 +84,6 @@ const DPI_OPTIONS = [
 type PlatformPreset = {
   id: string;
   name: string;
-  icon: React.ElementType;
   format: ExportFormat;
   quality: ExportQuality;
   maxFileSize?: string;
@@ -96,7 +95,6 @@ const PLATFORM_PRESETS: PlatformPreset[] = [
   {
     id: 'instagram-post',
     name: 'Instagram Post',
-    icon: Instagram,
     format: 'jpg',
     quality: 'high',
     recommendedSize: { width: 1080, height: 1080 },
@@ -105,7 +103,6 @@ const PLATFORM_PRESETS: PlatformPreset[] = [
   {
     id: 'instagram-story',
     name: 'Instagram Story',
-    icon: Instagram,
     format: 'jpg',
     quality: 'high',
     recommendedSize: { width: 1080, height: 1920 },
@@ -114,7 +111,6 @@ const PLATFORM_PRESETS: PlatformPreset[] = [
   {
     id: 'youtube-thumbnail',
     name: 'YouTube Thumbnail',
-    icon: Youtube,
     format: 'jpg',
     quality: 'high',
     maxFileSize: '2MB',
@@ -124,7 +120,6 @@ const PLATFORM_PRESETS: PlatformPreset[] = [
   {
     id: 'twitter-post',
     name: 'Twitter/X Post',
-    icon: Twitter,
     format: 'png',
     quality: 'high',
     recommendedSize: { width: 1200, height: 675 },
@@ -133,7 +128,6 @@ const PLATFORM_PRESETS: PlatformPreset[] = [
   {
     id: 'facebook-post',
     name: 'Facebook Post',
-    icon: Facebook,
     format: 'jpg',
     quality: 'high',
     recommendedSize: { width: 1200, height: 630 },
@@ -142,7 +136,6 @@ const PLATFORM_PRESETS: PlatformPreset[] = [
   {
     id: 'linkedin-post',
     name: 'LinkedIn Post',
-    icon: Linkedin,
     format: 'png',
     quality: 'high',
     recommendedSize: { width: 1200, height: 627 },
@@ -151,7 +144,6 @@ const PLATFORM_PRESETS: PlatformPreset[] = [
   {
     id: 'web-optimized',
     name: 'Web Optimized',
-    icon: Image,
     format: 'webp',
     quality: 'medium',
     description: 'Smallest file size',
@@ -159,7 +151,6 @@ const PLATFORM_PRESETS: PlatformPreset[] = [
   {
     id: 'print-ready',
     name: 'Print Ready',
-    icon: Printer,
     format: 'png',
     quality: 'max',
     description: 'Highest quality PNG',
@@ -167,6 +158,15 @@ const PLATFORM_PRESETS: PlatformPreset[] = [
 ];
 
 type SizeMode = 'scale' | 'custom' | 'dpi';
+
+/**
+ * Where the exported image goes. The three things a person can actually mean,
+ * named as verbs so the button can simply say them.
+ *  - `replace`  the image this editor was opened on, at the same url
+ *  - `library`  a new image in the user's Voidspace Library
+ *  - `download` a file on this computer
+ */
+type Destination = 'replace' | 'library' | 'download';
 
 export function ExportDialog({ open, onClose }: ExportDialogProps) {
   const { project, selectedArtboardId } = useProjectStore();
@@ -192,17 +192,29 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
   const [progress, setProgress] = useState(0);
   const [progressMessage, setProgressMessage] = useState('');
   const [saveName, setSaveName] = useState('');
-  // Whether a re-save overwrites the same Library entry or adds a new copy.
-  const [saveMode, setSaveMode] = useState<'copy' | 'overwrite'>('copy');
   const [hasSavedOnce, setHasSavedOnce] = useState(false);
 
-  // Opened to edit a studio image we can overwrite in place → default to
-  // updating the original (the user's intent), not spawning a Library copy,
-  // and match the picker to the source's format so it's not misleading (the
-  // file extension is fixed, so an overwrite always writes that format).
+  /**
+   * ── ONE QUESTION: WHERE IS THIS GOING? ──────────────────────────────────
+   *
+   * This dialog used to ask it three times and never quite answer it. There
+   * was an "On save: New copy / Overwrite" toggle, a "Save to Voidspace"
+   * button and an "Export" button — and the toggle silently applied to only
+   * one of the buttons, while "Overwrite" meant "replace the Library entry",
+   * not "replace the image I opened", which is what the word plainly says to
+   * someone who arrived here from an Edit button.
+   *
+   * So it is one choice now, and the button says what that choice does.
+   */
+  const [destination, setDestination] = useState<Destination>('library');
+
+  // Opened to edit an image we can replace in place → that is what the user
+  // came to do, so it is the default. The format follows the SOURCE's, because
+  // a replacement keeps the original's url and extension and bytes in another
+  // format would serve as a broken image at an address nothing can correct.
   useEffect(() => {
     if (!editSource) return;
-    setSaveMode('overwrite');
+    setDestination('replace');
     const srcFmt: ExportFormat = editSource.ext === 'jpg' || editSource.ext === 'jpeg'
       ? 'jpg' : editSource.ext === 'webp' ? 'webp' : 'png';
     setFormat(srcFmt);
@@ -210,6 +222,17 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
 
   const currentFormat = FORMATS.find((f) => f.id === format)!;
   const artboard = project?.artboards.find((a) => a.id === selectedArtboardId);
+
+  /**
+   * What this image is called, unless the user says otherwise.
+   *
+   * The page suffix belongs to a document, not to an image: a single-page
+   * project showed "image — Page 1", where `image` was the handoff label and
+   * `Page 1` was the only page there is. Neither half told anyone anything.
+   */
+  const defaultName = (project && artboard)
+    ? (project.artboards.length > 1 ? `${project.name} — ${artboard.name}` : project.name)
+    : 'Image';
 
   const effectiveScale = useMemo(() => {
     if (!artboard) return 1;
@@ -381,7 +404,13 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
 
       blobs.forEach((blob, index) => {
         const artboardName = artboards[index]?.name ?? `artboard-${index + 1}`;
-        const filename = getExportFilename(project.name, artboardName, format);
+        // One name field, both destinations. It used to feed the Library save
+        // only, so a user who typed a name and pressed Export got a file called
+        // something else entirely.
+        const named = blobs.length === 1 && saveName.trim();
+        const filename = named
+          ? `${saveName.trim().replace(/[^\w\s.-]+/g, '').slice(0, 80) || 'image'}.${format}`
+          : getExportFilename(project.name, artboardName, format);
         downloadBlob(blob, filename);
       });
 
@@ -401,9 +430,9 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
     if (!project || !artboard) return;
     setIsSaving(true);
     try {
-      // "Update original" = overwrite the exact studio file we opened, encoded
-      // in ITS format so the in-place bytes stay valid for its extension.
-      const updateOriginal = !!editSource && saveMode === 'overwrite';
+      // "Replace original" = overwrite the exact file we opened, encoded in ITS
+      // format so the in-place bytes stay valid for its extension.
+      const updateOriginal = !!editSource && destination === 'replace';
       const fmt: ExportFormat = updateOriginal
         ? (editSource!.ext === 'jpg' || editSource!.ext === 'jpeg' ? 'jpg' : editSource!.ext === 'webp' ? 'webp' : 'png')
         : format;
@@ -430,8 +459,17 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
 
       // SVG/PDF fall back to PNG bytes in the exporter; store as a raster type.
       const rasterFormat = fmt === 'jpg' || fmt === 'webp' ? fmt : 'png';
-      const name = (saveName.trim() || `${project.name} — ${artboard.name}`).slice(0, 80);
-      const saved = await saveImageToVoidspaceLibrary(blob, name, rasterFormat, { overwrite: saveMode === 'overwrite' });
+      const name = (saveName.trim() || defaultName).slice(0, 80);
+      /**
+       * A RE-SAVE UPDATES THE IMAGE IT SAVED, RATHER THAN STACKING ANOTHER.
+       *
+       * This used to be the "On save" toggle's job, which made the user answer
+       * a question they could not have an opinion about until after the first
+       * save. The stable filename is derived from the NAME, so this is exactly
+       * how Save As behaves everywhere else: save again and it updates; change
+       * the name and it forks. No control needed.
+       */
+      const saved = await saveImageToVoidspaceLibrary(blob, name, rasterFormat, { overwrite: hasSavedOnce });
       /**
        * Hand it back to whoever opened us for an edit.
        *
@@ -444,7 +482,7 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
        */
       announceEditedImage(saved.permanentUrl || saved.url);
       setHasSavedOnce(true);
-      showNotification('success', saveMode === 'overwrite' ? 'Updated in your Voidspace Library' : 'Saved to your Voidspace Library');
+      showNotification('success', hasSavedOnce ? 'Updated in your Voidspace Library' : 'Saved to your Voidspace Library');
       onClose();
     } catch (error) {
       if (error instanceof NotSignedInError) {
@@ -459,434 +497,348 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
 
   if (!project || !artboard) return null;
 
+  /** Only offered when there is something to replace — see `parseEditSource`. */
+  const canReplace = !!editSource;
+
   /**
-   * The editor was opened to change one existing image, and saving will replace
-   * it rather than add to the Library. That single fact decides the label, the
-   * emphasis and the order of the footer buttons below.
+   * Some choices are not the user's to make.
+   *
+   * A PowerPoint or a PDF is the whole document and several pages at once, and
+   * "export all artboards" is several files — neither is one image, so neither
+   * can land in the Library or replace anything. Rather than let the user pick
+   * a destination that would then be ignored, the choice collapses to Download
+   * and the dialog SAYS why.
    */
-  const cameToEdit = !!editSource;
-  const willOverwrite = cameToEdit && saveMode === 'overwrite';
+  const downloadOnly = !!currentFormat.document || exportAll;
+  const dest: Destination = downloadOnly
+    ? 'download'
+    : (destination === 'replace' && !canReplace ? 'library' : destination);
 
-  const PRIMARY = 'bg-primary text-primary-foreground hover:bg-primary/90';
-  const SECONDARY = 'bg-secondary text-foreground hover:bg-accent';
+  const DESTINATIONS: { id: Destination; label: string; hint: string }[] = [
+    ...(canReplace ? [{
+      id: 'replace' as const,
+      label: 'Replace original',
+      hint: 'Updates this image everywhere it is used — same link, no copies.',
+    }] : []),
+    {
+      id: 'library',
+      label: hasSavedOnce ? 'Update saved image' : 'Save to Voidspace',
+      hint: hasSavedOnce
+        ? 'Updates the image you saved. Change the name to save a separate one.'
+        : 'Adds a new image to your Library, reusable in video and other flows.',
+    },
+    { id: 'download', label: 'Download', hint: 'Saves a file to this computer.' },
+  ];
+  const destHint = DESTINATIONS.find((d) => d.id === dest)?.hint ?? '';
 
-  const saveButton = (
-    <button
-      key="save"
-      onClick={handleSaveToVoidspace}
-      disabled={isExporting || isSaving || exportAll}
-      title={willOverwrite
-        ? 'Replace the image you opened — it updates everywhere it is used'
-        : 'Save this artboard to your Voidspace Library (reusable in video and other flows)'}
-      className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 ${cameToEdit ? PRIMARY : SECONDARY}`}
-    >
-      {isSaving ? (
-        <>
-          <Loader2 size={16} className="animate-spin" />
-          Saving...
-        </>
-      ) : (
-        <>
-          <CloudUpload size={16} />
-          {willOverwrite ? 'Update original' : 'Save to Voidspace'}
-        </>
-      )}
-    </button>
-  );
+  const busy = isExporting || isSaving;
+  const primaryLabel = dest === 'replace' ? 'Replace original'
+    : dest === 'library' ? (hasSavedOnce ? 'Update saved image' : 'Save to Voidspace')
+    : 'Download';
 
-  const exportButton = (
-    <button
-      key="export"
-      onClick={handleExport}
-      disabled={isExporting || isSaving}
-      className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 ${cameToEdit ? SECONDARY : PRIMARY}`}
-    >
-      {isExporting ? (
-        <>
-          <Loader2 size={16} className="animate-spin" />
-          Exporting...
-        </>
-      ) : (
-        <>
-          <Download size={16} />
-          Export
-        </>
-      )}
-    </button>
-  );
+  /** Scale, custom and print collapse into ONE dropdown — they were a row of
+   *  mode buttons above a row of scale buttons, two decisions deep for a thing
+   *  almost everyone leaves at 1x. */
+  const sizeKey = sizeMode === 'custom' ? 'custom' : sizeMode === 'dpi' ? 'print' : `x${scale}`;
 
   return (
     <Dialog
       open={open}
       onClose={onClose}
-      title="Export Image"
-      description="Choose format and quality settings"
+      title={canReplace ? 'Save image' : 'Export image'}
+      description={canReplace
+        ? 'Replace the image you opened, or keep it and save a new one.'
+        : 'Choose where it goes, then how it is written.'}
       maxWidth="md"
     >
-      <div className="space-y-6">
-        <div>
-          <div className="flex items-center justify-between mb-3">
-            <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-              Quick Presets
-            </label>
-            {selectedPreset && (
-              <button
-                onClick={clearPreset}
-                className="text-[10px] text-muted-foreground hover:text-foreground transition-colors"
-              >
-                Clear
-              </button>
-            )}
-          </div>
-          <div className="grid grid-cols-4 gap-2">
-            {PLATFORM_PRESETS.map((preset) => {
-              const Icon = preset.icon;
-              const isSelected = selectedPreset === preset.id;
-              return (
-                <button
-                  key={preset.id}
-                  onClick={() => handlePresetSelect(preset)}
-                  className={`p-2 rounded-lg border text-center transition-all ${
-                    isSelected
-                      ? 'border-primary bg-primary/5 ring-1 ring-primary'
-                      : 'border-border hover:border-muted-foreground/50 hover:bg-secondary/50'
-                  }`}
-                >
-                  <Icon size={16} className={`mx-auto mb-1 ${isSelected ? 'text-primary' : 'text-muted-foreground'}`} />
-                  <span className="block text-[10px] font-medium truncate">{preset.name}</span>
-                  <span className="block text-[8px] text-muted-foreground truncate">{preset.description}</span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        <div>
-          <label className="block text-xs font-medium text-muted-foreground uppercase tracking-wide mb-3">
-            Format
-          </label>
-          <div className="grid grid-cols-3 gap-2">
-            {FORMATS.map((f) => (
-              <button
-                key={f.id}
-                onClick={() => setFormat(f.id)}
-                className={`p-3 rounded-lg border text-left transition-all ${
-                  format === f.id
-                    ? 'border-primary bg-primary/5 ring-1 ring-primary'
-                    : 'border-border hover:border-muted-foreground/50 hover:bg-secondary/50'
-                }`}
-              >
-                <div className="flex items-center gap-2 mb-1">
-                  <FileImage size={16} className={format === f.id ? 'text-primary' : 'text-muted-foreground'} />
-                  <span className="font-medium text-sm">{f.name}</span>
-                </div>
-                <p className="text-[11px] text-muted-foreground">{f.description}</p>
-              </button>
-            ))}
-          </div>
-
-          {/* Says what will actually happen to this deck's text, rather than
-              promising something that depends on how the slides were made. */}
-          {format === 'pptx' && pptxNote && (
-            <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
-              {pptxNote}
-            </p>
-          )}
-        </div>
-
-        {currentFormat.supportsQuality && (
+      <div className="space-y-4">
+        {/*
+          WHERE IT GOES, FIRST — because it decides what everything below means.
+          A format and a size are settings; the destination is the decision, and
+          it used to be spread across a toggle and two competing buttons.
+        */}
+        {!downloadOnly ? (
           <div>
-            <label className="block text-xs font-medium text-muted-foreground uppercase tracking-wide mb-3">
-              Quality
-            </label>
-            <div className="grid grid-cols-4 gap-2">
-              {QUALITY_PRESETS.map((q) => (
+            <label className="block text-[11px] font-medium text-muted-foreground mb-1.5">Where</label>
+            <div className="flex rounded-lg border border-input overflow-hidden text-xs">
+              {DESTINATIONS.map((d) => (
                 <button
-                  key={q.id}
-                  onClick={() => setQuality(q.id)}
-                  className={`px-3 py-2 rounded-lg border text-center transition-all ${
-                    quality === q.id
-                      ? 'border-primary bg-primary/5 ring-1 ring-primary'
-                      : 'border-border hover:border-muted-foreground/50 hover:bg-secondary/50'
+                  key={d.id}
+                  onClick={() => setDestination(d.id)}
+                  className={`flex-1 px-3 py-2 font-medium transition-colors ${
+                    dest === d.id
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-background text-muted-foreground hover:bg-accent hover:text-foreground'
                   }`}
                 >
-                  <span className="text-sm font-medium">{q.name}</span>
-                  <span className="block text-[10px] text-muted-foreground">{q.value}%</span>
+                  {d.label}
                 </button>
               ))}
             </div>
+            <p className="mt-1.5 text-[11px] text-muted-foreground">{destHint}</p>
           </div>
-        )}
-
-        <div>
-          <label className="block text-xs font-medium text-muted-foreground uppercase tracking-wide mb-3">
-            Size
-          </label>
-          <div className="flex gap-2 mb-3">
-            <button
-              onClick={() => setSizeMode('scale')}
-              className={`flex-1 px-3 py-2 rounded-lg border text-center text-sm font-medium transition-all ${
-                sizeMode === 'scale'
-                  ? 'border-primary bg-primary/5 ring-1 ring-primary'
-                  : 'border-border hover:border-muted-foreground/50 hover:bg-secondary/50'
-              }`}
-            >
-              Scale
-            </button>
-            <button
-              onClick={() => setSizeMode('custom')}
-              className={`flex-1 px-3 py-2 rounded-lg border text-center text-sm font-medium transition-all ${
-                sizeMode === 'custom'
-                  ? 'border-primary bg-primary/5 ring-1 ring-primary'
-                  : 'border-border hover:border-muted-foreground/50 hover:bg-secondary/50'
-              }`}
-            >
-              Custom
-            </button>
-            <button
-              onClick={() => setSizeMode('dpi')}
-              className={`flex-1 px-3 py-2 rounded-lg border text-center text-sm font-medium transition-all flex items-center justify-center gap-1.5 ${
-                sizeMode === 'dpi'
-                  ? 'border-primary bg-primary/5 ring-1 ring-primary'
-                  : 'border-border hover:border-muted-foreground/50 hover:bg-secondary/50'
-              }`}
-            >
-              <Printer size={14} />
-              Print
-            </button>
-          </div>
-
-          {sizeMode === 'scale' && (
-            <div className="flex gap-2">
-              {SCALE_OPTIONS.map((s) => (
-                <button
-                  key={s.value}
-                  onClick={() => setScale(s.value)}
-                  className={`flex-1 px-3 py-2 rounded-lg border text-center text-sm font-medium transition-all ${
-                    scale === s.value
-                      ? 'border-primary bg-primary/5 ring-1 ring-primary'
-                      : 'border-border hover:border-muted-foreground/50 hover:bg-secondary/50'
-                  }`}
-                >
-                  {s.label}
-                </button>
-              ))}
-            </div>
-          )}
-
-          {sizeMode === 'custom' && (
-            <div className="flex items-center gap-2">
-              <div className="flex-1">
-                <label className="block text-[10px] text-muted-foreground mb-1">Width (px)</label>
-                <input
-                  type="number"
-                  value={customWidth}
-                  onChange={(e) => handleCustomWidthChange(Number(e.target.value))}
-                  className="w-full px-3 py-2 text-sm bg-background border border-border rounded-lg focus:outline-none focus:ring-1 focus:ring-primary"
-                  min={1}
-                  max={16384}
-                />
-              </div>
-              <button
-                onClick={() => setLockAspectRatio(!lockAspectRatio)}
-                className={`mt-5 p-2 rounded-lg transition-colors ${
-                  lockAspectRatio ? 'bg-primary text-primary-foreground' : 'bg-secondary text-muted-foreground hover:text-foreground'
-                }`}
-                title={lockAspectRatio ? 'Unlock aspect ratio' : 'Lock aspect ratio'}
-              >
-                {lockAspectRatio ? <Link2 size={16} /> : <Link2Off size={16} />}
-              </button>
-              <div className="flex-1">
-                <label className="block text-[10px] text-muted-foreground mb-1">Height (px)</label>
-                <input
-                  type="number"
-                  value={customHeight}
-                  onChange={(e) => handleCustomHeightChange(Number(e.target.value))}
-                  className="w-full px-3 py-2 text-sm bg-background border border-border rounded-lg focus:outline-none focus:ring-1 focus:ring-primary"
-                  min={1}
-                  max={16384}
-                />
-              </div>
-            </div>
-          )}
-
-          {sizeMode === 'dpi' && (
-            <div className="space-y-3">
-              <div className="grid grid-cols-4 gap-2">
-                {DPI_OPTIONS.map((d) => (
-                  <button
-                    key={d.value}
-                    onClick={() => setDpi(d.value)}
-                    className={`px-2 py-2 rounded-lg border text-center transition-all ${
-                      dpi === d.value
-                        ? 'border-primary bg-primary/5 ring-1 ring-primary'
-                        : 'border-border hover:border-muted-foreground/50 hover:bg-secondary/50'
-                    }`}
-                  >
-                    <span className="block text-sm font-medium">{d.value}</span>
-                    <span className="block text-[9px] text-muted-foreground">{d.description}</span>
-                  </button>
-                ))}
-              </div>
-              {printDimensions && (
-                <div className="p-3 bg-secondary/30 rounded-lg text-xs text-muted-foreground">
-                  <p>Print size at {dpi} DPI:</p>
-                  <p className="font-medium text-foreground mt-1">
-                    {printDimensions.inches.width}" × {printDimensions.inches.height}" ({printDimensions.cm.width} × {printDimensions.cm.height} cm)
-                  </p>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        {currentFormat.supportsTransparency && (
-          <div>
-            <label className="block text-xs font-medium text-muted-foreground uppercase tracking-wide mb-3">
-              Background
-            </label>
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                onClick={() => setBackground('include')}
-                className={`px-3 py-2.5 rounded-lg border text-sm font-medium transition-all ${
-                  background === 'include'
-                    ? 'border-primary bg-primary/5 ring-1 ring-primary'
-                    : 'border-border hover:border-muted-foreground/50 hover:bg-secondary/50'
-                }`}
-              >
-                Include Background
-              </button>
-              <button
-                onClick={() => setBackground('transparent')}
-                className={`px-3 py-2.5 rounded-lg border text-sm font-medium transition-all ${
-                  background === 'transparent'
-                    ? 'border-primary bg-primary/5 ring-1 ring-primary'
-                    : 'border-border hover:border-muted-foreground/50 hover:bg-secondary/50'
-                }`}
-              >
-                Transparent
-              </button>
-            </div>
-          </div>
+        ) : (
+          <p className="text-[11px] text-muted-foreground">
+            {currentFormat.document
+              ? `A ${currentFormat.name} file is the whole document — it downloads to this computer.`
+              : `Every page exports as its own file — ${project.artboards.length} downloads.`}
+          </p>
         )}
 
         {/*
-          A DOCUMENT IS ALWAYS EVERY PAGE, so it must not offer the choice.
-
-          The checkbox stayed visible for PowerPoint and PDF, where the export
-          path ignores it and writes all pages regardless — a control that reads
-          as a choice, accepts a click, and changes nothing. Found in an
-          end-to-end run: unticking it still produced a five-slide deck.
-
-          Replaced with a statement of what will happen, which is the honest
-          version of the same line.
+          A NAME, only where a name is a real thing. Replacing the original
+          keeps its url and its filename, so a name field there is a control
+          that cannot do anything — and the placeholder it used to show
+          ("image — Page 1", the handoff label plus a page number) was nobody's
+          idea of what the picture is called.
         */}
-        {project.artboards.length > 1 && (currentFormat.document ? (
-          <p className="text-sm text-muted-foreground">
-            All {project.artboards.length} pages are included — a {currentFormat.name} file is the
-            whole document.
-          </p>
-        ) : (
+        {dest !== 'replace' && (
           <div>
-            <label className="flex items-center gap-3 cursor-pointer">
+            <label className="block text-[11px] font-medium text-muted-foreground mb-1.5">Name</label>
+            <input
+              type="text"
+              value={saveName}
+              onChange={(e) => setSaveName(e.target.value)}
+              placeholder={defaultName}
+              className="w-full px-2.5 py-2 text-xs bg-background border border-input rounded-md focus:outline-none focus:ring-1 focus:ring-primary"
+            />
+          </div>
+        )}
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-[11px] font-medium text-muted-foreground mb-1.5">Preset</label>
+            <select
+              value={selectedPreset ?? ''}
+              onChange={(e) => {
+                const preset = PLATFORM_PRESETS.find((x) => x.id === e.target.value);
+                if (preset) handlePresetSelect(preset); else clearPreset();
+              }}
+              className="w-full px-2 py-2 text-xs bg-background border border-input rounded-md focus:outline-none focus:ring-1 focus:ring-primary"
+            >
+              <option value="">No preset</option>
+              {PLATFORM_PRESETS.map((pr) => (
+                <option key={pr.id} value={pr.id}>{pr.name} — {pr.description}</option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-[11px] font-medium text-muted-foreground mb-1.5">Format</label>
+            <select
+              value={format}
+              onChange={(e) => { setFormat(e.target.value as ExportFormat); clearPreset(); }}
+              disabled={dest === 'replace'}
+              className="w-full px-2 py-2 text-xs bg-background border border-input rounded-md focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60"
+            >
+              {FORMATS.map((f) => (
+                <option key={f.id} value={f.id}>{f.name} — {f.description}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        {/* A replacement writes to the original's url, which carries its
+            extension — bytes in another format would serve as a broken image
+            at an address nothing downstream can correct. So the format is not
+            a choice here, and the dialog says so instead of greying a control
+            with no explanation. */}
+        {dest === 'replace' && (
+          <p className="text-[11px] text-muted-foreground -mt-1">
+            Saved as {currentFormat.name}, matching the image you opened.
+          </p>
+        )}
+
+        {/* Says what will actually happen to this deck's text, rather than
+            promising something that depends on how the slides were made. */}
+        {format === 'pptx' && pptxNote && (
+          <p className="text-[11px] leading-relaxed text-muted-foreground">{pptxNote}</p>
+        )}
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-[11px] font-medium text-muted-foreground mb-1.5">Size</label>
+            <select
+              value={sizeKey}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v === 'custom') { setSizeMode('custom'); return; }
+                if (v === 'print') { setSizeMode('dpi'); return; }
+                setSizeMode('scale');
+                setScale(Number(v.slice(1)));
+              }}
+              className="w-full px-2 py-2 text-xs bg-background border border-input rounded-md focus:outline-none focus:ring-1 focus:ring-primary"
+            >
+              {SCALE_OPTIONS.map((sc) => (
+                <option key={sc.value} value={`x${sc.value}`}>
+                  {sc.label} — {Math.round(artboard.size.width * sc.value)} × {Math.round(artboard.size.height * sc.value)}
+                </option>
+              ))}
+              <option value="custom">Custom size…</option>
+              <option value="print">Print size…</option>
+            </select>
+          </div>
+
+          {currentFormat.supportsQuality && (
+            <div>
+              <label className="block text-[11px] font-medium text-muted-foreground mb-1.5">Quality</label>
+              <select
+                value={quality}
+                onChange={(e) => setQuality(e.target.value as ExportQuality)}
+                className="w-full px-2 py-2 text-xs bg-background border border-input rounded-md focus:outline-none focus:ring-1 focus:ring-primary"
+              >
+                {QUALITY_PRESETS.map((q) => (
+                  <option key={q.id} value={q.id}>{q.name} — {q.value}%</option>
+                ))}
+              </select>
+            </div>
+          )}
+        </div>
+
+        {sizeMode === 'custom' && (
+          <div className="flex items-end gap-2">
+            <div className="flex-1">
+              <label className="block text-[10px] text-muted-foreground mb-1">Width (px)</label>
+              <input
+                type="number"
+                value={customWidth}
+                onChange={(e) => handleCustomWidthChange(Number(e.target.value))}
+                className="w-full px-2.5 py-2 text-xs bg-background border border-input rounded-md focus:outline-none focus:ring-1 focus:ring-primary"
+                min={1}
+                max={16384}
+              />
+            </div>
+            <button
+              onClick={() => setLockAspectRatio(!lockAspectRatio)}
+              className={`p-2 rounded-md transition-colors ${
+                lockAspectRatio ? 'bg-primary text-primary-foreground' : 'bg-secondary text-muted-foreground hover:text-foreground'
+              }`}
+              title={lockAspectRatio ? 'Unlock aspect ratio' : 'Lock aspect ratio'}
+            >
+              {lockAspectRatio ? <Link2 size={14} /> : <Link2Off size={14} />}
+            </button>
+            <div className="flex-1">
+              <label className="block text-[10px] text-muted-foreground mb-1">Height (px)</label>
+              <input
+                type="number"
+                value={customHeight}
+                onChange={(e) => handleCustomHeightChange(Number(e.target.value))}
+                className="w-full px-2.5 py-2 text-xs bg-background border border-input rounded-md focus:outline-none focus:ring-1 focus:ring-primary"
+                min={1}
+                max={16384}
+              />
+            </div>
+          </div>
+        )}
+
+        {sizeMode === 'dpi' && (
+          <div className="flex items-end gap-3">
+            <div className="flex-1">
+              <label className="block text-[10px] text-muted-foreground mb-1">Resolution</label>
+              <select
+                value={dpi}
+                onChange={(e) => setDpi(Number(e.target.value))}
+                className="w-full px-2 py-2 text-xs bg-background border border-input rounded-md focus:outline-none focus:ring-1 focus:ring-primary"
+              >
+                {DPI_OPTIONS.map((d) => (
+                  <option key={d.value} value={d.value}>{d.label} — {d.description}</option>
+                ))}
+              </select>
+            </div>
+            {printDimensions && (
+              <p className="flex-1 text-[11px] text-muted-foreground pb-2">
+                {printDimensions.inches.width}" × {printDimensions.inches.height}"
+                <span className="block">{printDimensions.cm.width} × {printDimensions.cm.height} cm</span>
+              </p>
+            )}
+          </div>
+        )}
+
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+          {currentFormat.supportsTransparency && (
+            <label className="flex items-center gap-2 cursor-pointer text-xs">
+              <input
+                type="checkbox"
+                checked={background === 'transparent'}
+                onChange={(e) => setBackground(e.target.checked ? 'transparent' : 'include')}
+                className="w-3.5 h-3.5 rounded border-border bg-background text-primary focus:ring-primary/50"
+              />
+              <span>Transparent background</span>
+            </label>
+          )}
+
+          {/*
+            A DOCUMENT IS ALWAYS EVERY PAGE, so it must not offer the choice.
+            The checkbox used to stay visible for PowerPoint and PDF, where the
+            export path writes all pages regardless — a control that reads as a
+            choice, accepts a click and changes nothing.
+          */}
+          {project.artboards.length > 1 && !currentFormat.document && (
+            <label className="flex items-center gap-2 cursor-pointer text-xs">
               <input
                 type="checkbox"
                 checked={exportAll}
                 onChange={(e) => setExportAll(e.target.checked)}
-                className="w-4 h-4 rounded border-border bg-background text-primary focus:ring-primary/50"
+                className="w-3.5 h-3.5 rounded border-border bg-background text-primary focus:ring-primary/50"
               />
-              <span className="text-sm">Export all artboards ({project.artboards.length})</span>
+              <span>All {project.artboards.length} pages</span>
             </label>
-          </div>
-        ))}
-
-        <div className="p-4 bg-secondary/50 rounded-lg space-y-2">
-          <div className="flex items-center justify-between text-sm">
-            <span className="text-muted-foreground">Dimensions</span>
-            <span className="font-medium">
-              {dimensions?.width} × {dimensions?.height} px
-            </span>
-          </div>
-          <div className="flex items-center justify-between text-sm">
-            <span className="text-muted-foreground">Estimated size</span>
-            <span className="font-medium">{estimatedSize}</span>
-          </div>
+          )}
         </div>
 
-        {isExporting && (
+        {dimensions && (
+          <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-secondary/40 text-[11px] text-muted-foreground">
+            <span>{dimensions.width} × {dimensions.height} px</span>
+            {estimatedSize && <span>{estimatedSize}</span>}
+          </div>
+        )}
+
+        {busy && (
           <div className="space-y-2">
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-muted-foreground">{progressMessage}</span>
+            <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+              <span>{progressMessage || 'Working…'}</span>
               <span className="font-medium">{Math.round(progress)}%</span>
             </div>
-            <div className="h-2 bg-secondary rounded-full overflow-hidden">
-              <div
-                className="h-full bg-primary transition-all duration-300"
-                style={{ width: `${progress}%` }}
-              />
+            <div className="h-1.5 bg-secondary rounded-full overflow-hidden">
+              <div className="h-full bg-primary transition-all duration-300" style={{ width: `${progress}%` }} />
             </div>
           </div>
         )}
-      </div>
-
-      {/* Save-to-Library controls: name it, and choose new copy vs overwrite. */}
-      <div className="px-1 pt-2 pb-1 space-y-2 border-t border-border">
-        <div className="flex items-center gap-2">
-          <label className="text-[11px] text-muted-foreground w-14 shrink-0">Save name</label>
-          <input
-            type="text"
-            value={saveName}
-            onChange={(e) => setSaveName(e.target.value)}
-            placeholder={artboard ? `${project.name} — ${artboard.name}` : 'Image name'}
-            className="flex-1 px-2 py-1.5 text-xs bg-background border border-input rounded-md focus:outline-none focus:ring-1 focus:ring-primary"
-          />
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="text-[11px] text-muted-foreground w-14 shrink-0">On save</span>
-          <div className="inline-flex rounded-md border border-input overflow-hidden text-[11px]">
-            <button
-              onClick={() => setSaveMode('copy')}
-              className={`px-2.5 py-1 transition-colors ${saveMode === 'copy' ? 'bg-primary text-primary-foreground' : 'bg-background text-muted-foreground hover:bg-accent'}`}
-            >
-              New copy
-            </button>
-            <button
-              onClick={() => setSaveMode('overwrite')}
-              className={`px-2.5 py-1 transition-colors ${saveMode === 'overwrite' ? 'bg-primary text-primary-foreground' : 'bg-background text-muted-foreground hover:bg-accent'}`}
-            >
-              {editSource ? 'Update original' : 'Overwrite'}
-            </button>
-          </div>
-          {editSource && saveMode === 'overwrite' && (
-            <span className="text-[10px] text-muted-foreground">replaces this image everywhere it is used</span>
-          )}
-          {editSource && saveMode === 'copy' && (
-            <span className="text-[10px] text-muted-foreground">keeps the original — saves a new image beside it</span>
-          )}
-          {!editSource && hasSavedOnce && saveMode === 'copy' && (
-            <span className="text-[10px] text-muted-foreground">a new Library entry each save</span>
-          )}
-        </div>
       </div>
 
       <DialogFooter>
         <button
           onClick={onClose}
-          disabled={isExporting || isSaving}
+          disabled={busy}
           className="px-4 py-2 rounded-lg text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors disabled:opacity-50"
         >
           Cancel
         </button>
         {/*
-          WHICH BUTTON IS THE ANSWER DEPENDS ON WHY THE EDITOR IS OPEN.
-          Opened from a card's Edit, the user came to change that picture, and
-          the accent button was "Export" — download a file to disk, which is
-          not what they asked for. Saving takes the accent and the last slot
-          for a handoff; for someone who opened the editor on their own, Export
-          is still the answer and nothing moves.
+          ONE action, matching the destination above. There were two competing
+          buttons and a mode toggle that applied to only one of them, so the
+          same click meant a different thing depending on a control three
+          sections away — and the word "Overwrite" meant the Library entry, not
+          the image the user had opened.
         */}
-        {cameToEdit ? exportButton : saveButton}
-        {cameToEdit ? saveButton : exportButton}
+        <button
+          onClick={dest === 'download' ? handleExport : handleSaveToVoidspace}
+          disabled={busy}
+          title={destHint}
+          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors disabled:opacity-50"
+        >
+          {busy ? (
+            <>
+              <Loader2 size={16} className="animate-spin" />
+              {isSaving ? 'Saving…' : 'Exporting…'}
+            </>
+          ) : (
+            <>
+              {dest === 'download' ? <Download size={16} /> : <CloudUpload size={16} />}
+              {primaryLabel}
+            </>
+          )}
+        </button>
       </DialogFooter>
     </Dialog>
   );
