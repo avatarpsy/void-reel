@@ -459,6 +459,62 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
 
   if (!project || !artboard) return null;
 
+  /**
+   * The editor was opened to change one existing image, and saving will replace
+   * it rather than add to the Library. That single fact decides the label, the
+   * emphasis and the order of the footer buttons below.
+   */
+  const cameToEdit = !!editSource;
+  const willOverwrite = cameToEdit && saveMode === 'overwrite';
+
+  const PRIMARY = 'bg-primary text-primary-foreground hover:bg-primary/90';
+  const SECONDARY = 'bg-secondary text-foreground hover:bg-accent';
+
+  const saveButton = (
+    <button
+      key="save"
+      onClick={handleSaveToVoidspace}
+      disabled={isExporting || isSaving || exportAll}
+      title={willOverwrite
+        ? 'Replace the image you opened — it updates everywhere it is used'
+        : 'Save this artboard to your Voidspace Library (reusable in video and other flows)'}
+      className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 ${cameToEdit ? PRIMARY : SECONDARY}`}
+    >
+      {isSaving ? (
+        <>
+          <Loader2 size={16} className="animate-spin" />
+          Saving...
+        </>
+      ) : (
+        <>
+          <CloudUpload size={16} />
+          {willOverwrite ? 'Update original' : 'Save to Voidspace'}
+        </>
+      )}
+    </button>
+  );
+
+  const exportButton = (
+    <button
+      key="export"
+      onClick={handleExport}
+      disabled={isExporting || isSaving}
+      className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 ${cameToEdit ? SECONDARY : PRIMARY}`}
+    >
+      {isExporting ? (
+        <>
+          <Loader2 size={16} className="animate-spin" />
+          Exporting...
+        </>
+      ) : (
+        <>
+          <Download size={16} />
+          Export
+        </>
+      )}
+    </button>
+  );
+
   return (
     <Dialog
       open={open}
@@ -821,41 +877,16 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
         >
           Cancel
         </button>
-        <button
-          onClick={handleSaveToVoidspace}
-          disabled={isExporting || isSaving || exportAll}
-          title="Save this artboard to your Voidspace Library (reusable in video and other flows)"
-          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-secondary text-foreground text-sm font-medium hover:bg-accent transition-colors disabled:opacity-50"
-        >
-          {isSaving ? (
-            <>
-              <Loader2 size={16} className="animate-spin" />
-              Saving...
-            </>
-          ) : (
-            <>
-              <CloudUpload size={16} />
-              Save to Voidspace
-            </>
-          )}
-        </button>
-        <button
-          onClick={handleExport}
-          disabled={isExporting || isSaving}
-          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors disabled:opacity-50"
-        >
-          {isExporting ? (
-            <>
-              <Loader2 size={16} className="animate-spin" />
-              Exporting...
-            </>
-          ) : (
-            <>
-              <Download size={16} />
-              Export
-            </>
-          )}
-        </button>
+        {/*
+          WHICH BUTTON IS THE ANSWER DEPENDS ON WHY THE EDITOR IS OPEN.
+          Opened from a card's Edit, the user came to change that picture, and
+          the accent button was "Export" — download a file to disk, which is
+          not what they asked for. Saving takes the accent and the last slot
+          for a handoff; for someone who opened the editor on their own, Export
+          is still the answer and nothing moves.
+        */}
+        {cameToEdit ? exportButton : saveButton}
+        {cameToEdit ? saveButton : exportButton}
       </DialogFooter>
     </Dialog>
   );
