@@ -4041,6 +4041,27 @@ function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [handleKeyDown]);
 
+  /**
+   * EMBEDDED, THE CANVAS IS THE POINT — so the Inspector starts shut.
+   *
+   * Opening a project from Voidspace puts this editor in a pane beside the
+   * chat, and the Inspector then takes a third of what is left for a column
+   * that says "No selection" until something is clicked. Collapsed, the
+   * timeline and the preview get that width back, and one click on its header
+   * brings it straight back.
+   *
+   * ON OPEN, not as a default: the panel store is persisted, so a default
+   * would be overwritten the first time anyone touched it and never apply
+   * again. Running once per mount means every project opens focused and
+   * anything the user does afterwards stands for as long as they are in there.
+   *
+   * Standalone (no `embed=1`) is untouched — there the editor IS the page.
+   */
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("embed") !== "1") return;
+    useUIStore.getState().setPanelCollapsed("inspector", true);
+  }, []);
+
   const searchParams = new URLSearchParams(window.location.search);
   const forceWelcome =
     params.forceWelcome === "1" || searchParams.get("forceWelcome") === "1";
