@@ -10,7 +10,7 @@ import { useKeyboardShortcuts } from './services/keyboard-service';
 import { useAutoSave, loadSavedProject } from './hooks/useAutoSave';
 import { bakePendingCompositions } from './services/composition/bake';
 import { useProjectCloudSync } from './hooks/useProjectCloudSync';
-import { readHandoffParams, clearHandoffUrl, loadSrcAsProject, parseLocalAssetSource } from './services/image-handoff';
+import { readHandoffParams, setEditReturnId, clearHandoffUrl, loadSrcAsProject, parseLocalAssetSource } from './services/image-handoff';
 import { openCloudCarouselById } from './services/carousel-cloud';
 import { openCloudImageProject } from './services/project-cloud-open';
 import { installImageRpc } from './agent/rpc';
@@ -244,6 +244,10 @@ export default function App() {
       try {
         await loadSrcAsProject(h.src, h.from);
         setEditSource(source); // overwrite-in-place target (null if not local)
+        // Who gets the result back. Only set when the caller asked for the
+        // round trip; a cloud image has no `source` above, so this is the only
+        // way an edit reaches the card it came from.
+        setEditReturnId(h.editReturn ?? null);
         setCurrentView('editor');
         setHandoffError(null);
         clearHandoffUrl(); // consumed — a refresh must not re-import over the work

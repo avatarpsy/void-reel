@@ -16,6 +16,7 @@ import {
   type ExportOptions,
 } from '../../services/export-service';
 import { saveImageToVoidspaceLibrary, overwriteLocalAsset, NotSignedInError } from '../../services/voidspace-storage';
+import { announceEditedImage } from '../../services/image-handoff';
 
 interface ExportDialogProps {
   open: boolean;
@@ -426,7 +427,18 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
       // SVG/PDF fall back to PNG bytes in the exporter; store as a raster type.
       const rasterFormat = fmt === 'jpg' || fmt === 'webp' ? fmt : 'png';
       const name = (saveName.trim() || `${project.name} — ${artboard.name}`).slice(0, 80);
-      await saveImageToVoidspaceLibrary(blob, name, rasterFormat, { overwrite: saveMode === 'overwrite' });
+      const saved = await saveImageToVoidspaceLibrary(blob, name, rasterFormat, { overwrite: saveMode === 'overwrite' });
+      /**
+       * Hand it back to whoever opened us for an edit.
+       *
+       * `permanentUrl`, not the auth-gated `url`: the studio puts this on the
+       * card's variation list, which persists to Firestore and is read by the
+       * phone — a token-scoped link would render here and nowhere else.
+       *
+       * No-op unless the caller asked for the round trip, so an ordinary Save
+       * to Library behaves exactly as it did.
+       */
+      announceEditedImage(saved.permanentUrl || saved.url);
       setHasSavedOnce(true);
       showNotification('success', saveMode === 'overwrite' ? 'Updated in your Voidspace Library' : 'Saved to your Voidspace Library');
       onClose();

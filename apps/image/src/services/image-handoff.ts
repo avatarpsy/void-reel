@@ -17,6 +17,16 @@ import { getVoidspaceIdToken } from './voidspace-storage';
 export interface HandoffParams {
   src: string;
   from: string;
+  /**
+   * The card that opened us and wants the result back.
+   *
+   * Set only when a surface explicitly asks for the round trip (`editReturn=`
+   * on the handoff URL). A cloud-hosted image has no overwrite-in-place target
+   * — `parseLocalAssetSource` returns null for anything but a local-asset URL
+   * — so without this, editing a generated cover was a one-way trip: the user
+   * saved a copy and the card they started from still showed the old picture.
+   */
+  editReturn?: string;
 }
 
 /** A studio image file we can overwrite IN PLACE (a local-asset URL). */
@@ -33,7 +43,40 @@ export function readHandoffParams(): HandoffParams | null {
   const q = new URLSearchParams(window.location.search);
   const src = q.get('src');
   if (!src) return null;
-  return { src, from: q.get('from') || 'image' };
+  return {
+    src,
+    from: q.get('from') || 'image',
+    editReturn: (q.get('editReturn') || '').trim() || undefined,
+  };
+}
+
+/**
+ * Who asked for the edited image back, for as long as this tab is open.
+ *
+ * Module-level rather than a store field because it is not UI state: nothing
+ * renders from it, it never changes after the handoff is consumed, and the
+ * export path is the only reader. Cleared with the URL for the same reason the
+ * handoff itself is — a refresh must not re-send an old edit somewhere.
+ */
+let editReturnId: string | null = null;
+export function setEditReturnId(id: string | null): void { editReturnId = id || null; }
+export function getEditReturnId(): string | null { return editReturnId; }
+
+/**
+ * Hand a saved image back to the card that asked for it.
+ *
+ * Same BroadcastChannel `overwriteLocalAsset` already uses, because this is the
+ * same conversation: "an image you are showing has changed". The studio appends
+ * it as a new variation on that card and selects it, so the original stays one
+ * arrow away rather than being replaced.
+ */
+export function announceEditedImage(url: string): void {
+  const returnTo = editReturnId;
+  if (!returnTo || !url) return;
+  try {
+    new BroadcastChannel('voidspace-image-edit')
+      .postMessage({ type: 'image-edited', returnTo, url });
+  } catch { /* no BroadcastChannel — the copy is still saved in the library */ }
 }
 
 /**
