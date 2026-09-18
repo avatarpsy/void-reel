@@ -237,9 +237,72 @@ export async function captureBoard(
   );
   if (!canvas) throw new Error('The board could not be rendered to an image.');
 
+  drawFrameTitles(canvas, subjects, { x: span.x0, y: span.y0 }, dpr);
+
   const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'));
   if (!blob) throw new Error('The rendered image could not be read.');
 
   const url = await uploadPng(blob, `board-${scope}-${canvas.width}x${canvas.height}.png`);
   return { url, width: canvas.width, height: canvas.height, items: subjects.length, scope };
+}
+
+/**
+ * ── FRAME TITLES, DRAWN ON AFTERWARDS ───────────────────────────────────────
+ *
+ * BlockSuite renders a frame's BOX but not its NAME: the title is a separate
+ * overlay in the editor chrome, outside what `toCanvas` composites. So a
+ * screenshot of a well-sectioned board came back with three unlabelled
+ * rectangles, and the one thing a reviewer most needs to check — whether the
+ * sections say what they should — was the one thing missing.
+ *
+ * That matters beyond looks. An agent reviewing its own board reads the
+ * picture; if section names are invisible there, it cannot verify them and will
+ * confidently report a layout it has not actually seen.
+ *
+ * The mapping is exact rather than guessed: `toCanvas` renders the union bounds
+ * of the subjects at `dpr`, so a model point is (model - origin) * dpr in
+ * canvas pixels. Verified against a real capture — a 1452x1820 model span came
+ * back 1285x1608, which is dpr 0.885 on both axes.
+ */
+function drawFrameTitles(
+  canvas: HTMLCanvasElement,
+  subjects: GfxModel[],
+  origin: { x: number; y: number },
+  dpr: number,
+): void {
+  const frames = subjects.filter(m =>
+    (m as unknown as { flavour?: string }).flavour === 'affine:frame');
+  if (!frames.length) return;
+
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  // Legible at the size these captures are actually read at, and never so small
+  // it becomes noise on a zoomed-out board.
+  const size = Math.max(13, Math.round(22 * dpr));
+  ctx.save();
+  ctx.font = `600 ${size}px system-ui, -apple-system, "Segoe UI", sans-serif`;
+  ctx.textBaseline = 'alphabetic';
+
+  for (const frame of frames) {
+    const box = boundsOf(frame);
+    const title = String(
+      (frame as unknown as { title?: { toString(): string } }).title ?? '',
+    ).trim();
+    if (!box || !title) continue;
+
+    const x = (box.x - origin.x) * dpr;
+    // The title sits ON the frame's top edge, which is where AFFiNE draws it.
+    const y = (box.y - origin.y) * dpr - Math.round(size * 0.4);
+    if (y < size) continue; // Off the top of the capture — better absent than clipped.
+
+    // A plate behind it, so a title stays readable over whatever the frame
+    // happens to sit on.
+    const w = ctx.measureText(title).width;
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(x - 6, y - size, w + 12, size * 1.35);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(title, x, y + size * 0.1);
+  }
+  ctx.restore();
 }
