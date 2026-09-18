@@ -40,6 +40,7 @@ import {
 import { reserveFlow } from '../board/space';
 import { arrangeCanvas } from '../board/arrange';
 import { type ComposeSection, composeRegion } from '../board/compose';
+import { readBoardMap } from '../board/map';
 import { pendingToast } from '../ui/toast';
 import type { PendingMediaApi } from '../ui/pending-media';
 import { renderBoardThumbnail } from '../board/thumbnail';
@@ -180,6 +181,7 @@ export const READ_ONLY_RPC: ReadonlySet<string> = new Set([
   'voidspace:board-read-script',
   'voidspace:board-read-draft',
   'voidspace:board-canvas-read',
+  'voidspace:board-map',
   'voidspace:board-document',
   'voidspace:board-screenshot',
   'voidspace:board-selection',
@@ -2305,6 +2307,20 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
         digest,
       };
     },
+
+    /**
+     * THE BOARD AS A MAP — structure and judgement, at constant cost.
+     *
+     * The read that answers "what is this board, and is it any good" without
+     * pixels. One line per SECTION, never per element, plus the ids that
+     * section holds — which `board-canvas-read { ids }` already takes, so the
+     * ladder is map -> section -> item with no new scoping verb.
+     *
+     * It exists because geometry is not structure: an agent with the complete
+     * coordinates of 57 elements declared a board good and the user's verdict
+     * was that it explained nothing. Every fault was computable. See map.ts.
+     */
+    'voidspace:board-map': () => ({ ok: true as const, rev, ...readBoardMap(board.std) }),
 
     'voidspace:board-canvas-read': args => {
       /**
