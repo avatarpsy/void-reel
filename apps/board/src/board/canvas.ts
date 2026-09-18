@@ -205,13 +205,32 @@ export interface DrawResult {
  * place until now was the constant 260x40 for every `text` element at every
  * size, which is wrong by a factor of three on an ordinary title.
  *
- * `GLYPH_EM` is the mean advance width of a character as a fraction of the font
- * size for the sans-serif the board draws in. 0.58 is a little over the true
- * mean (~0.52) BY DESIGN: overestimating leaves a roomy box, underestimating
- * puts the next element on top of the words.
+ * Advance widths are PER CHARACTER CLASS rather than one mean, because board
+ * titles are usually SET IN CAPITALS and a capital is about half again as wide
+ * as a lowercase letter. Checked against boxes AFFiNE itself settled on:
+ *
+ *   "THE QUIET WAR"    at 56px → 491 actual, 477 here
+ *   "UNIVERSE — REDO"  at 56px → 670 actual, 622 here
+ *
+ * A flat mean of 0.58 gave 422 and 487 — under by up to a quarter, and under is
+ * the dangerous direction: it puts the next element on top of the words. The
+ * SAFETY factor below keeps the error on the roomy side.
  */
-const GLYPH_EM = 0.58;
+const EM = {
+  upper: 0.76,
+  digit: 0.60,
+  narrow: 0.32,
+  space: 0.30,
+  wide: 1.00,
+  other: 0.56,
+} as const;
+/** Characters that are much narrower than the class they belong to. */
+const NARROW = 'iljtfIr.,:;\'`!|()[]{}';
+/** Em dash, en dash and friends really are about a full em. */
+const WIDE = '—–—…@%&MW';
 const LINE_EM = 1.35;
+/** Erring roomy, because the failure mode of under-measuring is a collision. */
+const SAFETY = 1.08;
 
 export function measureLabel(
   text: string,
@@ -220,7 +239,18 @@ export function measureLabel(
 ): { w: number; h: number } {
   const size = Math.max(1, fontSize);
   const lines = String(text ?? '').split(/\r?\n/);
-  const widthOf = (line: string) => Math.ceil(Math.max(1, line.length) * size * GLYPH_EM);
+  const widthOf = (line: string) => {
+    let em = 0;
+    for (const ch of line) {
+      if (ch === ' ') em += EM.space;
+      else if (NARROW.includes(ch)) em += EM.narrow;
+      else if (WIDE.includes(ch)) em += EM.wide;
+      else if (ch >= 'A' && ch <= 'Z') em += EM.upper;
+      else if (ch >= '0' && ch <= '9') em += EM.digit;
+      else em += EM.other;
+    }
+    return Math.ceil(Math.max(em, 1) * size * SAFETY);
+  };
 
   const natural = Math.max(...lines.map(widthOf), size);
   const w = maxWidth ? Math.max(size, maxWidth) : natural;

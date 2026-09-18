@@ -770,3 +770,30 @@ describe('a text element is sized for what it says', () => {
     expect(m.h).toBeLessThan(120);
   });
 });
+
+/**
+ * Checked against the boxes AFFiNE itself settled on for real titles, read back
+ * off a live board. Under-measuring is the dangerous direction — it puts the
+ * next element on top of the words — so these assert we are never under.
+ */
+describe('measureLabel against boxes the browser really produced', () => {
+  const cases: Array<[string, number, number]> = [
+    ['THE QUIET WAR', 56, 491],
+    ['UNIVERSE — REDO', 56, 670],
+  ];
+  for (const [text, size, actual] of cases) {
+    it(`is close to ${actual}px for "${text}" and never wildly under`, () => {
+      const w = measureLabel(text, size).w;
+      expect(w).toBeGreaterThan(actual * 0.85);
+      expect(w).toBeLessThan(actual * 1.45);
+    });
+  }
+
+  it('makes capitals wider than lowercase', () => {
+    expect(measureLabel('AAAAAAAA', 40).w).toBeGreaterThan(measureLabel('aaaaaaaa', 40).w);
+  });
+
+  it('gives a line enough height for its font', () => {
+    expect(measureLabel('Anything', 56).h).toBeGreaterThan(56);
+  });
+});
