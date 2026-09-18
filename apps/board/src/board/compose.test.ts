@@ -3,7 +3,8 @@ import { describe, expect, it } from 'vitest';
 import { makeTestBoard } from '../blocksuite/test-board';
 import { drawOnCanvas, fitFramesToMembers, readCanvas } from './canvas';
 import {
-  ACCENT_MAX_RATIO, CARD_W, GUTTER, cardHeight, columnsFor, composeRegion,
+  ACCENT_MAX_RATIO, CARD_W, GUTTER, cardHeight, columnsFor, composeRegion, numberCard,
+  sequenceWidth,
 } from './compose';
 
 /**
@@ -314,5 +315,105 @@ describe('a section picks the column count that fills', () => {
     const six = new Set(notes.filter(n => n.text.startsWith('b')).map(n => n.x));
     expect(four.size).toBe(2);
     expect(six.size).toBe(3);
+  });
+});
+
+/**
+ * ── ORDERED CONTENT READS DIFFERENTLY FROM UNORDERED ────────────────────────
+ * A season is sections stacked down the page; an episode is one run across it.
+ * The same shape is a funnel, a process or a checklist — nothing here knows the
+ * word "episode", which is the point.
+ */
+describe('a sequence is a run, not a grid', () => {
+  const beats = (n: number) => Array.from({ length: n }, (_, i) => ({ text: `# Beat ${i + 1}\nwhat happens` }));
+
+  it('keeps every card on ONE row, however many there are', () => {
+    const { elements } = composeRegion({
+      title: 'S1',
+      columns: 3,
+      sections: [{ title: 'S1E01', layout: 'sequence', cards: beats(5) }],
+    });
+    const notes = elements.filter(e => e.kind === 'note');
+    expect(new Set(notes.map(n => n.y)).size, 'one row').toBe(1);
+    expect(new Set(notes.map(n => n.x)).size, 'five distinct columns').toBe(5);
+  });
+
+  it('spans the same width as the page grid, so sections line up', () => {
+    const page = 3 * CARD_W + 2 * GUTTER;
+    const { elements } = composeRegion({
+      title: 'S1',
+      columns: 3,
+      sections: [{ title: 'E1', layout: 'sequence', cards: beats(5) }],
+    });
+    const notes = elements.filter(e => e.kind === 'note');
+    const right = Math.max(...notes.map(n => n.x! + n.w!));
+    expect(Math.abs(right - page), 'run ends on the page edge').toBeLessThanOrEqual(6);
+    expect(Math.min(...notes.map(n => n.x!))).toBe(0);
+  });
+
+  it('numbers a run, because there the order is information', () => {
+    const { elements } = composeRegion({
+      title: 'S1',
+      sections: [{ title: 'E1', layout: 'sequence', cards: beats(3) }],
+    });
+    const texts = elements.filter(e => e.kind === 'note').map(e => (e as { text: string }).text);
+    expect(texts[0]).toMatch(/^# 1 · Beat 1/);
+    expect(texts[2]).toMatch(/^# 3 · Beat 3/);
+  });
+
+  it('does NOT number a grid, where order is an accident of typing', () => {
+    const { elements } = composeRegion({
+      title: 'T',
+      sections: [{ title: 'S', cards: [{ text: '# One' }, { text: '# Two' }, { text: '# Three' }] }],
+    });
+    const texts = elements.filter(e => e.kind === 'note').map(e => (e as { text: string }).text);
+    expect(texts.every(t => !/^#\s*\d+\s*·/.test(t))).toBe(true);
+  });
+
+  it('numbers a card that has no heading, without eating its text', () => {
+    expect(numberCard('just a line', 2)).toBe('**2** just a line');
+    expect(numberCard('# Head\nbody', 4)).toBe('# 4 · Head\nbody');
+  });
+
+  it('lets a long run overflow rather than shrink into slivers', () => {
+    // Ten beats cannot fit the page width and stay readable.
+    expect(sequenceWidth(10, 3)).toBeGreaterThanOrEqual(220);
+    expect(sequenceWidth(5, 3)).toBeLessThan(CARD_W);
+  });
+
+  it('stacks runs down the page in order, so a season reads top to bottom', () => {
+    const { elements } = composeRegion({
+      title: 'SEASON ONE',
+      columns: 3,
+      sections: [
+        { title: 'S1E01', layout: 'sequence', cards: beats(4) },
+        { title: 'S1E02', layout: 'sequence', cards: beats(4) },
+        { title: 'S1E03', layout: 'sequence', cards: beats(4) },
+      ],
+    });
+    const frames = elements.filter(e => e.kind === 'frame');
+    expect(frames.map(f => (f as { title: string }).title)).toEqual(['S1E01', 'S1E02', 'S1E03']);
+    // Each episode's cards start further down than the last one's.
+    const notes = elements.filter(e => e.kind === 'note') as Array<{ y: number }>;
+    const rows = [...new Set(notes.map(n => n.y))].sort((a, b) => a - b);
+    expect(rows.length).toBe(3);
+  });
+
+  it('mixes a run and a grid on one page without either breaking', () => {
+    const { elements } = composeRegion({
+      title: 'T',
+      columns: 3,
+      sections: [
+        { title: 'THE WORLD', cards: [{ text: 'a' }, { text: 'b' }, { text: 'c' }] },
+        { title: 'S1E01', layout: 'sequence', cards: beats(5) },
+      ],
+    });
+    const notes = elements.filter(e => e.kind === 'note') as Array<{ x: number; w: number; text: string }>;
+    const grid = notes.filter(n => !/·/.test(n.text));
+    const runCards = notes.filter(n => /·/.test(n.text));
+    expect(new Set(grid.map(n => n.w))).toEqual(new Set([CARD_W]));
+    expect(new Set(runCards.map(n => n.w)).size).toBe(1);
+    // Both start on the same left edge — one document, not two.
+    expect(Math.min(...grid.map(n => n.x))).toBe(Math.min(...runCards.map(n => n.x)));
   });
 });

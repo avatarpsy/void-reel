@@ -36,6 +36,22 @@ export interface ComposeCard {
 export interface ComposeSection {
   title: string;
   cards: ComposeCard[];
+  /**
+   * HOW THIS SECTION'S CARDS RELATE TO EACH OTHER.
+   *
+   *   grid      (default) an unordered SET. Wraps into columns, and the count
+   *             is chosen to fill the last row.
+   *   sequence  an ordered RUN — beats of an episode, steps of a process,
+   *             stages of a funnel. One row, left to right, never wrapped,
+   *             and numbered, because in a sequence the order is information
+   *             and in a grid it is an accident of typing.
+   *
+   * This is the whole of what makes a board hold a long-running series: a
+   * season is sections stacked down the page and an episode is one run across
+   * it, which is also a funnel, a timeline or a checklist. Nothing here knows
+   * the word "episode", and it should not.
+   */
+  layout?: 'grid' | 'sequence';
 }
 
 export interface ComposeRequest {
@@ -146,6 +162,46 @@ export function columnsFor(count: number, requested: number): number {
   return best;
 }
 
+/** Gutter inside a sequence run — tighter than between grid columns, because
+ *  a run reads as one object and a grid reads as separate ones. */
+const SEQ_GUTTER = 24;
+/** Below this a beat card stops being readable, so a long run overflows the
+ *  page width rather than shrinking into unreadable slivers. */
+const SEQ_MIN_W = 220;
+
+/**
+ * A sequence spans the SAME width as the page grid, divided evenly.
+ *
+ * That is what keeps a board with runs and grids on it looking like one
+ * document: every section starts on the same left edge and ends on the same
+ * right edge, whatever it holds. Five beats across a three-column page is five
+ * cards of 249, not five of 400 spilling 900px past everything else.
+ */
+export function sequenceWidth(count: number, pageColumns: number): number {
+  const pageW = pageColumns * CARD_W + (pageColumns - 1) * GUTTER;
+  const n = Math.max(1, count);
+  return Math.max(SEQ_MIN_W, Math.floor((pageW - (n - 1) * SEQ_GUTTER) / n));
+}
+
+/**
+ * Number a card in a run.
+ *
+ * Order is real information in a sequence, so saying it is honest — the same
+ * reason a grid is NOT numbered, where order is an accident of typing. Folded
+ * into the card's own heading rather than drawn as a separate element, so a
+ * run is still one card per beat and not two.
+ */
+export function numberCard(text: string, n: number): string {
+  const body = String(text ?? '');
+  const nl = body.indexOf('\n');
+  const first = nl === -1 ? body : body.slice(0, nl);
+  const rest = nl === -1 ? '' : body.slice(nl);
+  const heading = first.match(/^(#+)\s*(.*)$/);
+  return heading
+    ? `${heading[1]} ${n} · ${heading[2]}${rest}`
+    : `**${n}** ${body}`;
+}
+
 /** Roughly how tall a card of this text will be once AFFiNE has grown it. */
 export function cardHeight(text: string, width = CARD_W): number {
   const perLine = Math.max(8, Math.floor((width - 48) / (CARD_FONT * CARD_GLYPH_EM)));
@@ -234,7 +290,14 @@ export function composeRegion(req: ComposeRequest): ComposePlan {
     const cards = section.cards ?? [];
     // Per SECTION, not per page: a four-card section beside a six-card one
     // should not inherit an orphan row from it.
-    const cols = columnsFor(cards.length, columns);
+    // A RUN never wraps: its order is the point, and a beat that falls onto a
+    // second line stops being the fourth beat and becomes the first of a new
+    // row. A SET wraps and picks the count that fills.
+    const run = section.layout === 'sequence';
+    const cols = run ? Math.max(1, cards.length) : columnsFor(cards.length, columns);
+    const cardW = run ? sequenceWidth(cards.length, columns) : CARD_W;
+    const gutter = run ? SEQ_GUTTER : GUTTER;
+
     const refs: Array<{ ref: string }> = [];
     let rowTop = y;
     let rowTallest = 0;
@@ -248,18 +311,19 @@ export function composeRegion(req: ComposeRequest): ComposePlan {
       const ref = `c${si}-${ci}`;
       const useAccent = !!card.accent && spent < budget;
       if (useAccent) spent++;
+      const text = run ? numberCard(card.text, ci + 1) : card.text;
 
       elements.push({
         kind: 'note',
-        text: card.text,
-        x: originX + col * (CARD_W + GUTTER),
+        text,
+        x: originX + col * (cardW + gutter),
         y: rowTop,
-        w: CARD_W,
+        w: cardW,
         ...(useAccent ? { color: accent } : {}),
         ref,
       });
       refs.push({ ref });
-      rowTallest = Math.max(rowTallest, cardHeight(card.text));
+      rowTallest = Math.max(rowTallest, cardHeight(text, cardW));
     });
 
     /**
