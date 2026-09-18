@@ -29,55 +29,12 @@
   z-index: 40;
   display: flex;
   flex-direction: column;
+  /* The gutter the sheet sits on. The PAGE's own palette lives at :root in
+     voidspace.css, because the card on the canvas renders the same paper from
+     a shadow root and can never see a token defined here. */
   background: var(--vs-page-gutter, #e8eaf0);
-
-  /* ── THE SHEET'S OWN PALETTE ────────────────────────────────────────────
-     The chrome around the page followed the app theme from the start; the PAGE
-     did not. Its background, ink, rules and margin marks were literals, so a
-     board in dark mode opened a document mode that was a slab of white — the
-     one surface people sit in front of for an hour.
-
-     Tokens rather than a second set of rules, because every value below is used
-     in two or three places and the failure when they drift is invisible on the
-     theme you happen to be looking at.
-
-     PRINT IS NOT THEMED and must never be: the @media print block pins #fff and
-     #000 on purpose. A dark page sent to paper is a black rectangle. */
-  --page-bg: #fffef9;
-  --page-ink: #14151a;
-  --page-edge: rgba(15, 23, 42, 0.12);
-  --page-shadow: 0 4px 24px rgba(15, 23, 42, 0.12);
-  --page-rule: rgba(15, 23, 42, 0.25);
-  --page-section: #7c3aed;
-  --page-section-rule: rgba(124, 58, 237, 0.22);
-  --page-synopsis: #6b7280;
-  --page-mark: #b45309;
-  --page-mark-done: #16a34a;
-  --page-hover: rgba(74, 155, 217, 0.1);
-  /* The paper fold. Barely there on purpose — it is a measure, not a rule. */
-  --page-fold: rgba(15, 23, 42, 0.10);
 }
-[data-theme='dark'] .vs-focus {
-  background: #14161c;
-
-  /* Not black: paper dimmed, so the sheet still reads as a sheet against the
-     gutter behind it. Pure #000 loses the page edge entirely and the document
-     stops looking like a document. */
-  --page-bg: #171920;
-  --page-ink: #e7e9f0;
-  --page-edge: rgba(255, 255, 255, 0.09);
-  --page-shadow: 0 6px 28px rgba(0, 0, 0, 0.55);
-  --page-rule: rgba(255, 255, 255, 0.22);
-  /* The violet and amber lifted until they carry on a dark ground — the light
-     values are unreadable there, which is how a "themed" page still fails. */
-  --page-section: #c4a2ff;
-  --page-section-rule: rgba(196, 162, 255, 0.28);
-  --page-synopsis: #98a0b0;
-  --page-mark: #e0a458;
-  --page-mark-done: #5ec98a;
-  --page-hover: rgba(122, 178, 232, 0.14);
-  --page-fold: rgba(255, 255, 255, 0.10);
-}
+[data-theme='dark'] .vs-focus { background: #14161c; }
 
 /* The board underneath is hidden rather than merely covered: its chrome sits in
    the same host and would otherwise still take clicks along the edges. */

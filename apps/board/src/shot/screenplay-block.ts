@@ -127,7 +127,7 @@ export class ScreenplayBlockComponent extends GfxBlockComponent<ScreenplayBlockM
       width: 100%;
       max-width: 520px;
       margin: 0 auto;
-      background: var(--vs-page, #fffef9);
+      background: var(--page-bg, #fffef9);
       border: 1px solid rgba(15, 23, 42, 0.1);
       box-shadow: 0 2px 10px rgba(15, 23, 42, 0.1);
       /* 1in top/bottom, 1.5in left, 1in right — scaled to this width. */
@@ -137,7 +137,7 @@ export class ScreenplayBlockComponent extends GfxBlockComponent<ScreenplayBlockM
       font-family: 'Courier New', Courier, monospace;
       font-size: 11.5px;
       line-height: 1.36;
-      color: #14151a;
+      color: var(--page-ink, #14151a);
       white-space: pre-wrap;
       word-break: break-word;
     }
@@ -173,7 +173,7 @@ export class ScreenplayBlockComponent extends GfxBlockComponent<ScreenplayBlockM
        the margin voice — visible while working, obviously not the film. */
     .el-section {
       font-family: var(--affine-font-family, Inter, sans-serif);
-      color: #7c3aed;
+      color: var(--page-section, #7c3aed);
       font-weight: 700;
       letter-spacing: 0.08em;
       text-transform: uppercase;
@@ -187,7 +187,7 @@ export class ScreenplayBlockComponent extends GfxBlockComponent<ScreenplayBlockM
       font-family: var(--affine-font-family, Inter, sans-serif);
       font-style: italic;
       font-size: 10.5px;
-      color: #6b7280;
+      color: var(--page-synopsis, #6b7280);
       margin: 0 0 8px;
     }
 
@@ -207,9 +207,9 @@ export class ScreenplayBlockComponent extends GfxBlockComponent<ScreenplayBlockM
       font-size: 8.5px;
       font-weight: 700;
       letter-spacing: 0.04em;
-      color: #b45309;
+      color: var(--page-mark, #b45309);
     }
-    .marker[data-covered='yes']::before { color: #16a34a; font-weight: 500; }
+    .marker[data-covered='yes']::before { color: var(--page-mark-done, #16a34a); font-weight: 500; }
 
     /* ── The editor ─────────────────────────────────────────────────────── */
     .editor {
@@ -221,8 +221,8 @@ export class ScreenplayBlockComponent extends GfxBlockComponent<ScreenplayBlockM
       outline: none;
       resize: none;
       padding: 16px 18px;
-      background: var(--vs-page, #fffef9);
-      color: #14151a;
+      background: var(--page-bg, #fffef9);
+      color: var(--page-ink, #14151a);
       font-family: 'Courier New', Courier, monospace;
       font-size: 12px;
       line-height: 1.45;
@@ -235,7 +235,7 @@ export class ScreenplayBlockComponent extends GfxBlockComponent<ScreenplayBlockM
       padding: 26px 24px;
       font: 400 12px/1.6 var(--affine-font-family, sans-serif);
       color: var(--vs-muted, #64748b);
-      background: var(--vs-page, #fffef9);
+      background: var(--page-bg, #fffef9);
       border: 1px dashed rgba(15, 23, 42, 0.18);
       border-radius: 8px;
       text-align: center;

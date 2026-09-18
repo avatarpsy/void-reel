@@ -38,6 +38,36 @@
   --vs-text-dim: rgba(255, 255, 255, 0.7);
   --vs-text-mute: rgba(255, 255, 255, 0.42);
 
+  /* ── THE PAGE, WHEREVER IT IS DRAWN ─────────────────────────────────────
+     A screenplay is rendered TWICE — as the card on the canvas (Lit styles in
+     shot/screenplay-block.ts) and at page size in focus mode (theme/
+     screenplay-focus.css). They are different renderings on purpose, one a
+     thumbnail in px and one a page in inches, but they are the same PAPER.
+
+     The palette therefore lives here, at the root, and not in either of them:
+     the card is in a shadow root and is not inside `.vs-focus`, so a token
+     defined on the overlay can never reach it. Defined on the overlay, exactly
+     that happened — focus mode themed correctly and the card stayed a slab of
+     white on a dark canvas.
+
+     PRINT IS NOT THEMED: both @media print blocks pin #fff and #000, because a
+     dark page sent to paper is a black rectangle. */
+  --page-bg: #171920;
+  --page-ink: #e7e9f0;
+  --page-edge: rgba(255, 255, 255, 0.09);
+  --page-shadow: 0 6px 28px rgba(0, 0, 0, 0.55);
+  --page-rule: rgba(255, 255, 255, 0.22);
+  /* The violet and amber lifted until they carry on a dark ground. The light
+     values are unreadable there, which is how a "themed" page still fails. */
+  --page-section: #c4a2ff;
+  --page-section-rule: rgba(196, 162, 255, 0.28);
+  --page-synopsis: #98a0b0;
+  --page-mark: #e0a458;
+  --page-mark-done: #5ec98a;
+  --page-hover: rgba(122, 178, 232, 0.14);
+  /* The paper fold. Barely there on purpose — it is a measure, not a rule. */
+  --page-fold: rgba(255, 255, 255, 0.1);
+
   --affine-background-primary-color: var(--vs-bg);
   --affine-background-secondary-color: var(--vs-surface);
   --affine-background-tertiary-color: var(--vs-surface-strong);
@@ -92,6 +122,22 @@
   --vs-text: #1a1a2e;
   --vs-text-dim: rgba(26, 26, 46, 0.66);
   --vs-text-mute: rgba(26, 26, 46, 0.42);
+
+  /* The same paper in daylight — see the note in the dark block. Warm white
+     rather than pure #fff, which is what a script has always been printed on
+     and what stops the sheet glaring against the grey canvas. */
+  --page-bg: #fffef9;
+  --page-ink: #14151a;
+  --page-edge: rgba(15, 23, 42, 0.12);
+  --page-shadow: 0 4px 24px rgba(15, 23, 42, 0.12);
+  --page-rule: rgba(15, 23, 42, 0.25);
+  --page-section: #7c3aed;
+  --page-section-rule: rgba(124, 58, 237, 0.22);
+  --page-synopsis: #6b7280;
+  --page-mark: #b45309;
+  --page-mark-done: #16a34a;
+  --page-hover: rgba(74, 155, 217, 0.1);
+  --page-fold: rgba(15, 23, 42, 0.1);
 
   --affine-background-primary-color: var(--vs-bg);
   --affine-background-secondary-color: rgba(15, 23, 42, 0.04);
