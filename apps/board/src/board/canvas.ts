@@ -197,6 +197,42 @@ export interface DrawResult {
 
 
 /** Default size per kind, so a spec only has to say what it IS. */
+/**
+ * ── HOW BIG A LABEL ACTUALLY IS ──────────────────────────────────────────────
+ *
+ * An approximation, on purpose. Real metrics need a laid-out font, which does
+ * not exist when a spec is being turned into a box — and the alternative in
+ * place until now was the constant 260x40 for every `text` element at every
+ * size, which is wrong by a factor of three on an ordinary title.
+ *
+ * `GLYPH_EM` is the mean advance width of a character as a fraction of the font
+ * size for the sans-serif the board draws in. 0.58 is a little over the true
+ * mean (~0.52) BY DESIGN: overestimating leaves a roomy box, underestimating
+ * puts the next element on top of the words.
+ */
+const GLYPH_EM = 0.58;
+const LINE_EM = 1.35;
+
+export function measureLabel(
+  text: string,
+  fontSize: number,
+  maxWidth?: number,
+): { w: number; h: number } {
+  const size = Math.max(1, fontSize);
+  const lines = String(text ?? '').split(/\r?\n/);
+  const widthOf = (line: string) => Math.ceil(Math.max(1, line.length) * size * GLYPH_EM);
+
+  const natural = Math.max(...lines.map(widthOf), size);
+  const w = maxWidth ? Math.max(size, maxWidth) : natural;
+
+  // Wrapped rows, so a long label constrained to a column reports the height it
+  // will really occupy rather than one line's worth.
+  let rows = 0;
+  for (const line of lines) rows += Math.max(1, Math.ceil(widthOf(line) / w));
+
+  return { w: Math.ceil(w), h: Math.ceil(rows * size * LINE_EM) };
+}
+
 const SIZE: Record<string, { w: number; h: number }> = {
   note: { w: 400, h: 100 },
   text: { w: 260, h: 40 },
@@ -695,8 +731,33 @@ export function drawOnCanvas(
   std.store.transact(() => {
     for (const spec of specs) {
       const size = SIZE[spec.kind] ?? { w: 200, h: 120 };
-      const w = spec.w ?? size.w;
-      const h = spec.h ?? size.h;
+      /**
+       * ── A LABEL'S BOX HAS TO MATCH ITS TYPE ────────────────────────────────
+       *
+       * MEASURED, before this existed: EVERY `text` element came out 260x40, at
+       * every font size and every length. "THE QUIET WAR" at 56px needs about
+       * 420x76. "Short" at 96px needs about 280x130. A 56-character label at
+       * 32px needs about 1000 wide.
+       *
+       * The renderer draws the glyphs anyway, so it looks survivable — and then
+       * every layout decision downstream is made against a box that is a
+       * fiction. Things get placed on top of titles, frames fit around the wrong
+       * bounds, and `relaxOverlaps` will not intervene because it deliberately
+       * trusts an author-sized element (see AUTO_SIZED). That is the "text
+       * overlaps other text" report, and no amount of better prompting could
+       * have fixed it: the caller was never told the default ignores fontSize.
+       *
+       * An estimate is enough and is vastly better than a constant. It is
+       * deliberately generous, so the error is a slightly roomy title rather
+       * than a collision.
+       */
+      const measured = spec.kind === 'text'
+        ? measureLabel((spec as { text?: string }).text ?? '',
+                       (spec as { fontSize?: number }).fontSize ?? 24,
+                       spec.w)
+        : null;
+      const w = spec.w ?? measured?.w ?? size.w;
+      const h = spec.h ?? measured?.h ?? size.h;
       /**
        * ── A FRAME THAT NAMES ITS MEMBERS TAKES ITS BOX FROM THEM ─────────────
        *

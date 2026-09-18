@@ -39,6 +39,7 @@ import {
 } from '../board/canvas';
 import { reserveFlow } from '../board/space';
 import { arrangeCanvas } from '../board/arrange';
+import { type ComposeSection, composeRegion } from '../board/compose';
 import { pendingToast } from '../ui/toast';
 import type { PendingMediaApi } from '../ui/pending-media';
 import { renderBoardThumbnail } from '../board/thumbnail';
@@ -2544,6 +2545,67 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
         created: made.length,
         ids: result.ids,
         refs: result.refs,
+        ...(result.problems.length ? { problems: result.problems } : {}),
+      };
+    },
+
+    /**
+     * COMPOSE A DESIGNED REGION FROM CONTENT ALONE.
+     *
+     * `board-draw` takes coordinates, which is right for a diagram and wrong
+     * for a brainstorm: it puts every layout decision in the hands of a model
+     * choosing numbers. Measured on a real board — seventeen cards at four
+     * widths, fourteen coloured, seven frames wrapping nothing, a title in a
+     * box a third the size of its text.
+     *
+     * This takes a title, sections and cards, and owns the grid, the type
+     * scale, the frames and the accent budget. A misaligned board cannot be
+     * produced through this door because no coordinate is ever asked for.
+     *
+     * It still goes out as ONE `drawOnCanvas` batch, so a composed page is one
+     * transaction and one Ctrl+Z, exactly like a drawn one.
+     */
+    'voidspace:board-compose': args => {
+      const g = addGuard(args); if (!g.ok) return g;
+      const sections = asArray<ComposeSection>(args.sections);
+      if (!sections.length) {
+        return fail('empty', 'Send at least one section in `sections`.');
+      }
+
+      const plan = composeRegion({
+        title: String(args.title ?? ''),
+        subtitle: typeof args.subtitle === 'string' ? args.subtitle : undefined,
+        sections,
+        columns: typeof args.columns === 'number' ? args.columns : undefined,
+        accent: typeof args.accent === 'string' ? args.accent : undefined,
+        // Placed in clear space like any other unplaced batch unless the caller
+        // says where — composing a second region beside a first is legitimate.
+        x: typeof args.x === 'number' ? args.x : undefined,
+        y: typeof args.y === 'number' ? args.y : undefined,
+      });
+
+      const result = drawOnCanvas(board.std, plan.elements);
+      rev++;
+
+      const made = result.ids.filter((id): id is string => !!id);
+      const boxes = readCanvas(board.std).filter(i => made.includes(i.id));
+      if (boxes.length) {
+        ensureVisible({
+          x: Math.min(...boxes.map(b => b.x)),
+          y: Math.min(...boxes.map(b => b.y)),
+          w: Math.max(...boxes.map(b => b.x + b.w)) - Math.min(...boxes.map(b => b.x)),
+          h: Math.max(...boxes.map(b => b.y + b.h)) - Math.min(...boxes.map(b => b.y)),
+        });
+      }
+
+      return {
+        ok: true as const,
+        rev,
+        created: made.length,
+        sections: sections.length,
+        // The accent budget's verdict is a NOTE, not a problem: the page was
+        // drawn, and the caller should know colour was withheld and why.
+        ...(plan.notes.length ? { notes: plan.notes } : {}),
         ...(result.problems.length ? { problems: result.problems } : {}),
       };
     },

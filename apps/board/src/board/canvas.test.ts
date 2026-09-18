@@ -13,7 +13,8 @@ import { describe, expect, it } from 'vitest';
 import { makeTestBoard } from '../blocksuite/test-board';
 import { createShots } from '../shot/shots';
 import {
-  canvasDigest, clearOfOwned, drawOnCanvas, editCanvas, fitFramesToMembers, readCanvas, relaxOverlaps,
+  canvasDigest, clearOfOwned, drawOnCanvas, editCanvas, fitFramesToMembers, measureLabel, readCanvas,
+  relaxOverlaps,
 } from './canvas';
 import { THINKING_EDGE, overlaps } from './space';
 
@@ -698,5 +699,74 @@ describe('a frame that names its members', () => {
     const board = makeTestBoard();
     const r = drawOnCanvas(board.std, [{ kind: 'frame', title: 'Empty', x: 0, y: 0 }]);
     expect(fitFramesToMembers(board.std, [{ frameId: r.ids[0]!, memberIds: ['gone'] }])).toBe(0);
+  });
+});
+
+/**
+ * ── A LABEL'S BOX HAS TO MATCH ITS TYPE ─────────────────────────────────────
+ * MEASURED before this existed: every `text` element came out 260x40, at every
+ * font size and every length. The renderer draws the glyphs anyway, so it looks
+ * survivable — and then every layout decision downstream is made against a box
+ * that is a fiction. Things land on top of titles, frames fit the wrong bounds,
+ * and `relaxOverlaps` will not intervene because it trusts an author-sized
+ * element. That was the "text overlapping text" report.
+ */
+describe('a text element is sized for what it says', () => {
+  it('grows with the font size', () => {
+    const board = makeTestBoard();
+    const r = drawOnCanvas(board.std, [
+      { kind: 'text', text: 'THE QUIET WAR', fontSize: 56, x: 0, y: 0 },
+      { kind: 'text', text: 'THE QUIET WAR', fontSize: 24, x: 0, y: 600 },
+    ]);
+    const items = readCanvas(board.std);
+    const big = items.find(i => i.id === r.ids[0])!;
+    const small = items.find(i => i.id === r.ids[1])!;
+
+    expect(big.w!).toBeGreaterThan(small.w!);
+    expect(big.h!).toBeGreaterThan(small.h!);
+    // A 56px line cannot live in 40px of height.
+    expect(big.h!).toBeGreaterThan(56);
+    // And it is no longer the old constant.
+    expect(big.w).not.toBe(260);
+  });
+
+  it('grows with the length of the words', () => {
+    const board = makeTestBoard();
+    const r = drawOnCanvas(board.std, [
+      { kind: 'text', text: 'Short', fontSize: 32, x: 0, y: 0 },
+      { kind: 'text', text: 'A considerably longer label than that one', fontSize: 32, x: 0, y: 600 },
+    ]);
+    const items = readCanvas(board.std);
+    expect(items.find(i => i.id === r.ids[1])!.w!)
+      .toBeGreaterThan(items.find(i => i.id === r.ids[0])!.w!);
+  });
+
+  it('wraps to the width it was given, and reports the taller box', () => {
+    const board = makeTestBoard();
+    const r = drawOnCanvas(board.std, [
+      { kind: 'text', text: 'A considerably longer label than that one', fontSize: 32, w: 200, x: 0, y: 0 },
+    ]);
+    const t = readCanvas(board.std).find(i => i.id === r.ids[0])!;
+    expect(t.w).toBe(200);
+    // Constrained to 200px it must be several lines tall, not one.
+    expect(t.h!).toBeGreaterThan(32 * 2);
+  });
+
+  it('still honours an explicit box', () => {
+    const board = makeTestBoard();
+    const r = drawOnCanvas(board.std, [
+      { kind: 'text', text: 'Pinned', fontSize: 48, x: 0, y: 0, w: 900, h: 300 },
+    ]);
+    const t = readCanvas(board.std).find(i => i.id === r.ids[0])!;
+    expect([t.w, t.h]).toEqual([900, 300]);
+  });
+
+  /** The unit, directly — the numbers the layout depends on. */
+  it('measures a title at roughly the size a person would draw it', () => {
+    const m = measureLabel('THE QUIET WAR', 56);
+    expect(m.w).toBeGreaterThan(350);
+    expect(m.w).toBeLessThan(600);
+    expect(m.h).toBeGreaterThan(56);
+    expect(m.h).toBeLessThan(120);
   });
 });
