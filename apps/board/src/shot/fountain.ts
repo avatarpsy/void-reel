@@ -151,11 +151,35 @@ const TITLE_FIELD = /^\s*(Title|Credit|Author|Authors|Source|Draft date|Contact|
  * being read as a character with no lines. Fountain's own rule is the same: a
  * character cue must be followed by a non-blank line.
  */
-function isCharacter(line: string, next: string | undefined): boolean {
+function isCharacter(
+  line: string,
+  next: string | undefined,
+  prev: string | undefined,
+): boolean {
   const t = line.trim();
   if (!t || !next || !next.trim()) return false;
-  // `@Name` forces a character cue — for lowercase or unusual names.
+  /**
+   * A CHARACTER CUE HAS A BLANK LINE BEFORE IT, and leaving that out is how
+   * action turns into dialogue.
+   *
+   * Fountain: "any line entirely in uppercase, with one empty line before it
+   * and without an empty line after it". Only the second half was checked, so
+   * an ordinary capitalised action line mid-paragraph was read as a cue and
+   * swallowed the line after it as speech:
+   *
+   *     He stops.
+   *     SILENCE.            <- became CHARACTER
+   *     The lift arrives.   <- became their DIALOGUE
+   *
+   * Which then travels: the compile writes that line as a spoken line, the
+   * video agent gives it to a voice, and an avatar says "the lift arrives".
+   * `prev === undefined` is the top of the document, which counts as blank.
+   */
+  // `@Name` forces a character cue — for lowercase or unusual names. Checked
+  // BEFORE the blank-line rule, because forcing is the writer overriding
+  // detection and a rule that ignores the override is not an override.
   if (t.startsWith('@')) return true;
+  if (prev !== undefined && prev.trim()) return false;
   if (t.length > 60) return false;
   // Must contain a letter, and every letter must be uppercase.
   if (!/[A-Za-z]/.test(t)) return false;
@@ -307,7 +331,7 @@ export function parseFountain(source: string): ParsedScript {
       continue;
     }
 
-    if (isCharacter(line, lines[i + 1])) {
+    if (isCharacter(line, lines[i + 1], i > 0 ? lines[i - 1] : undefined)) {
       elements.push({ type: 'character', text: trimmed.replace(/^@/, ''), line: i });
       continue;
     }

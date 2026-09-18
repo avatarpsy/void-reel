@@ -285,3 +285,83 @@ describe('offsetOfLine', () => {
     }
   });
 });
+
+/**
+ * ── A CUE HAS A BLANK LINE BEFORE IT ────────────────────────────────────────
+ * Fountain: "any line entirely in uppercase, with one empty line before it and
+ * without an empty line after it". Only the second half was checked, so an
+ * ordinary capitalised action line mid-paragraph became a character cue and
+ * swallowed the line after it as speech.
+ *
+ * It does not stop at the page. The compile writes that line onto a shot as a
+ * spoken line, the video agent hands it to a voice, and an avatar says "the
+ * lift arrives" out loud.
+ */
+describe('uppercase action is not a character cue', () => {
+  const types = (src: string) =>
+    parseFountain(src).elements.filter(e => e.type !== 'blank').map(e => `${e.type}:${e.text}`);
+
+  it('does not turn a shouted action line into dialogue', () => {
+    const out = types([
+      'INT. STAIRWELL - DUSK', '',
+      'He stops.',
+      'SILENCE.',
+      'The lift arrives.',
+    ].join('\n'));
+    expect(out).toEqual([
+      'scene_heading:INT. STAIRWELL - DUSK',
+      'action:He stops.',
+      'action:SILENCE.',
+      'action:The lift arrives.',
+    ]);
+  });
+
+  it('still reads a real cue, which has its blank line', () => {
+    const out = types([
+      'INT. STAIRWELL - DUSK', '',
+      'He stops.', '',
+      'PSY',
+      'Third time this week.',
+    ].join('\n'));
+    expect(out).toEqual([
+      'scene_heading:INT. STAIRWELL - DUSK',
+      'action:He stops.',
+      'character:PSY',
+      'dialogue:Third time this week.',
+    ]);
+  });
+
+  it('keeps the extension on the cue and out of the name test', () => {
+    const out = types(['PSY (V.O.)', 'I say yes before I decide to.'].join('\n'));
+    expect(out).toEqual(['character:PSY (V.O.)', 'dialogue:I say yes before I decide to.']);
+  });
+
+  it('reads a cue at the very top of the document', () => {
+    expect(types(['PSY', 'Alone.'].join('\n'))).toEqual(['character:PSY', 'dialogue:Alone.']);
+  });
+
+  it('honours a forced @cue even without the blank line', () => {
+    const out = types(['He stops.', '@McAvoy', 'Forced.'].join('\n'));
+    expect(out).toEqual(['action:He stops.', 'character:McAvoy', 'dialogue:Forced.']);
+  });
+
+  it('reads names with full stops and apostrophes', () => {
+    const out = types([
+      'DR. MEHTA', 'You look tired.', '',
+      "MRS. O'BRIEN", 'He always does.',
+    ].join('\n'));
+    expect(out).toEqual([
+      'character:DR. MEHTA', 'dialogue:You look tired.',
+      "character:MRS. O'BRIEN", 'dialogue:He always does.',
+    ]);
+  });
+
+  it('keeps a parenthetical under the cue as a parenthetical', () => {
+    const out = types(['ASTRA', '(too cheerful)', 'That is just being neighbourly.'].join('\n'));
+    expect(out).toEqual([
+      'character:ASTRA',
+      'parenthetical:(too cheerful)',
+      'dialogue:That is just being neighbourly.',
+    ]);
+  });
+});
