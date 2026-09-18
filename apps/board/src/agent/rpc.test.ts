@@ -20,8 +20,8 @@ import { setBlockCatalogue } from '../shot/blocks';
 import { setModelCatalogue, type ModelCaps } from '../shot/models';
 import { installScreenplayFocus, type ScreenplayFocus } from '../ui/screenplay-focus';
 import { installDocumentView, type DocumentView } from '../ui/document-view';
-import { drawOnCanvas } from '../board/canvas';
-import { installBoardRpc } from './rpc';
+import { drawOnCanvas, readCanvas } from '../board/canvas';
+import { READ_ONLY_RPC, installBoardRpc } from './rpc';
 
 const SEEDANCE: ModelCaps = {
   id: 'bytedance/seedance-2',
@@ -1509,5 +1509,75 @@ describe('board_document', () => {
     const closed = await call('voidspace:board-document', { action: 'close' });
     expect(closed.open).toBe(false);
     expect(documentView!.isOpen()).toBe(false);
+  });
+});
+
+/**
+ * ── ONE AGENT ACTION IS ONE Ctrl+Z ──────────────────────────────────────────
+ *
+ * BlockSuite merges consecutive writes into one undo unit until something calls
+ * `captureSync()`. Right for a person typing; wrong the moment a second author
+ * appears. With no boundary, what the agent does next merges into what the USER
+ * did last, so one Ctrl+Z takes back both — their edit AND the agent's work —
+ * and there is no way to undo only the agent.
+ *
+ * Several paths already closed the unit themselves, which was exactly the
+ * problem: whether an agent action was separately undoable depended on which
+ * verb it happened to be.
+ */
+describe('agent actions undo as their own step', () => {
+  it('does not swallow the user\'s previous edit', async () => {
+    // The user draws something and it settles into their own undo unit.
+    const mine = drawOnCanvas(board.std, [
+      { kind: 'note', text: 'the user wrote this', x: 0, y: 0, w: 400, h: 100 },
+    ]);
+    board.std.store.captureSync();
+
+    // Then the agent composes a page.
+    const r = await call('voidspace:board-compose', {
+      title: 'AGENT PAGE',
+      sections: [{ title: 'S', cards: [{ text: 'agent card one' }, { text: 'agent card two' }] }],
+    });
+    expect(r.ok).toBe(true);
+
+    board.store.undo();
+
+    // The agent's work is gone and the user's note is still there.
+    const left = readCanvas(board.std);
+    expect(left.some(i => i.id === mine.ids[0])).toBe(true);
+    expect(left.some(i => i.text?.includes('agent card one'))).toBe(false);
+  });
+
+  it('separates two agent actions, so the last one can be taken back alone', async () => {
+    await call('voidspace:board-draw', {
+      elements: [{ kind: 'note', text: 'first action', x: 0, y: 0, w: 400, h: 100 }],
+    });
+    await call('voidspace:board-draw', {
+      elements: [{ kind: 'note', text: 'second action', x: 600, y: 0, w: 400, h: 100 }],
+    });
+
+    board.store.undo();
+
+    const left = readCanvas(board.std).map(i => i.text ?? '');
+    expect(left.some(t => t.includes('first action'))).toBe(true);
+    expect(left.some(t => t.includes('second action'))).toBe(false);
+  });
+
+  /**
+   * A checkpoint is harmless to the document and NOT free to the user:
+   * `board_read` runs on effectively every turn, and splitting somebody's
+   * in-progress typing because an agent glanced at the board is a worse bug
+   * than the one being fixed.
+   */
+  it('does not checkpoint on a read', () => {
+    expect(READ_ONLY_RPC.has('voidspace:board-read')).toBe(true);
+    expect(READ_ONLY_RPC.has('voidspace:board-canvas-read')).toBe(true);
+    expect(READ_ONLY_RPC.has('voidspace:board-screenshot')).toBe(true);
+    // …and every verb that changes the document is NOT in it.
+    for (const t of ['voidspace:board-draw', 'voidspace:board-compose',
+      'voidspace:board-add-shots', 'voidspace:board-write-script',
+      'voidspace:board-edit-canvas', 'voidspace:board-delete-shot']) {
+      expect(READ_ONLY_RPC.has(t), `${t} must get an undo checkpoint`).toBe(false);
+    }
   });
 });

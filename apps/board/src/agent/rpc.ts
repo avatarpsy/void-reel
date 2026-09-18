@@ -167,6 +167,40 @@ function asArray<T>(value: unknown): T[] {
  * purpose: recompiling mints a new project, so fixing a mistake costs nothing
  * and there is no state a person can get stuck in.
  */
+/**
+ * The handlers that only LOOK. Everything else gets an undo checkpoint before
+ * it runs — see the note at the dispatcher.
+ *
+ * A deny-list rather than an allow-list, deliberately: a verb added later and
+ * forgotten here gets a checkpoint it may not have needed, which costs nothing.
+ * The other way round, it would silently become un-undoable.
+ */
+export const READ_ONLY_RPC: ReadonlySet<string> = new Set([
+  'voidspace:board-read',
+  'voidspace:board-read-script',
+  'voidspace:board-read-draft',
+  'voidspace:board-canvas-read',
+  'voidspace:board-document',
+  'voidspace:board-screenshot',
+  'voidspace:board-selection',
+  'voidspace:board-blocks',
+  'voidspace:board-block-catalog',
+  'voidspace:board-model-catalog',
+  'voidspace:board-models',
+  'voidspace:board-graphic-fills',
+  'voidspace:board-compile-payload',
+  'voidspace:board-shot-at',
+  'voidspace:board-shot-gen-input',
+  'voidspace:board-running-takes',
+  'voidspace:board-take-progress',
+  'voidspace:board-pending-media',
+  'voidspace:board-thumbnail',
+  'voidspace:board-progress',
+  'voidspace:board-fit',
+  'voidspace:board-lock',
+  'voidspace:board-library-changed',
+]);
+
 function checkWritable(board: MountedBoard): { ok: true } | ReturnType<typeof fail> {
   if (!board.store.readonly) return { ok: true };
   return fail(
@@ -2916,6 +2950,32 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
     if (!type.startsWith('voidspace:board-')) return;
     const handler = handlers[type];
     if (!handler) return;
+
+    /**
+     * ── ONE AGENT ACTION IS ONE Ctrl+Z ──────────────────────────────────────
+     *
+     * BlockSuite merges consecutive writes into one undo unit until something
+     * calls `captureSync()`. That is right for a person typing, and wrong the
+     * moment a second author appears: with no boundary, whatever the agent does
+     * next merges into whatever the USER did last, so one Ctrl+Z takes back both
+     * — their sentence AND the agent's twelve cards — and there is no way to
+     * undo the agent's work alone.
+     *
+     * Several individual paths already closed the unit themselves (`drawOnCanvas`,
+     * `arrangeCanvas`, the shot block's own setters). That is exactly the problem:
+     * it was per-path, so whether an agent action was separately undoable
+     * depended on which verb it happened to be, and nothing checked the ones that
+     * did not. Doing it HERE makes it true of all of them, including every verb
+     * added later.
+     *
+     * READS ARE EXCLUDED on purpose. A checkpoint is harmless to the document but
+     * not free to the user: `board_read` runs on effectively every turn, and
+     * splitting somebody's in-progress typing into two undo units because an
+     * agent glanced at the board is a worse bug than the one being fixed.
+     */
+    if (!READ_ONLY_RPC.has(type)) {
+      try { board.std.store.captureSync(); } catch { /* never block an action over undo */ }
+    }
 
     const requestId = data?.requestId;
     const reply: Reply = payload => {
