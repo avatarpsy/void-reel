@@ -391,7 +391,20 @@ export function installAssetPanel(board: MountedBoard, container: HTMLElement): 
   let query = '';
   // Remembered, like the width beside it. The board was the only surface that
   // reopened the panel on every load no matter how the user had left it.
-  let collapsed = loadPanelCollapsed('assets');
+  /**
+   * COLLAPSED BY DEFAULT, because an editor window should open on the work.
+   *
+   * The board is the thing people came to look at, and three drawers around it
+   * — assets here, the agent chat and the chat history in the parent page —
+   * left the canvas as the smallest region on screen. Every one of them is a
+   * click away on its rail, and none of them is where the work is.
+   *
+   * The `true` is only a FALLBACK: `loadPanelCollapsed` returns the stored
+   * choice whenever there is one, so a user who opens this panel keeps it open
+   * on every later board. Changing the default is not the same as overriding
+   * somebody's decision, and this must not do the second.
+   */
+  let collapsed = loadPanelCollapsed('assets', true);
   // Both come from the CORE, so the preference follows the user between the
   // board and the video editor rather than being re-chosen on each surface.
   let viewMode: ViewMode = loadViewMode();
