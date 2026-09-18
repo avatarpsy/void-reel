@@ -54,6 +54,8 @@
   --page-mark: #b45309;
   --page-mark-done: #16a34a;
   --page-hover: rgba(74, 155, 217, 0.1);
+  /* The paper fold. Barely there on purpose — it is a measure, not a rule. */
+  --page-fold: rgba(15, 23, 42, 0.10);
 }
 [data-theme='dark'] .vs-focus {
   background: #14161c;
@@ -74,6 +76,7 @@
   --page-mark: #e0a458;
   --page-mark-done: #5ec98a;
   --page-hover: rgba(122, 178, 232, 0.14);
+  --page-fold: rgba(255, 255, 255, 0.10);
 }
 
 /* The board underneath is hidden rather than merely covered: its chrome sits in
@@ -153,13 +156,38 @@
   max-width: 816px;
   margin: 0 auto;
   box-sizing: border-box;
-  background: var(--page-bg);
+  /*
+   * ── WHERE EACH PAGE ENDS, ON THE PAGE ────────────────────────────────────
+   * This mode exists because "a page runs about a minute, so page count IS
+   * pacing, and a writer judges pacing by looking". On screen the sheet is one
+   * continuous scroll, so there was nothing to look AT — the page count only
+   * appeared once it had been printed, which is the wrong moment to find out
+   * the second act drags.
+   *
+   * US letter is 11in with 1in top and bottom, so 9in of text — 864px at 96dpi.
+   * A hairline every 864px, offset by the top margin, is where the paper breaks.
+   * Costs one gradient and no JavaScript, and it is now true because the screen
+   * is set at the printed metrics (see line-height above).
+   */
+  background-color: var(--page-bg);
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent 863px,
+    var(--page-fold) 863px,
+    var(--page-fold) 864px
+  );
+  background-position: 0 96px;
   border: 1px solid var(--page-edge);
   box-shadow: var(--page-shadow);
   padding: 96px 96px 96px 144px;
-  font-family: 'Courier New', Courier, monospace;
+  font-family: 'Courier Prime', 'Courier Final Draft', 'Courier Screenplay', 'Nimbus Mono PS', 'Courier New', Courier, monospace;
+  /* 12pt at 96dpi is 16px, and a screenplay is set solid — 55 lines to the
+     page. line-height 1.5 was comfortable and WRONG: it fits 36 lines where
+     paper fits 55, so the page count this mode exists to let a writer judge
+     was out by a third. Screen and print now measure the same. */
   font-size: 16px;
-  line-height: 1.5;
+  line-height: 1.15;
   color: var(--page-ink);
   white-space: pre-wrap;
   word-break: break-word;
@@ -242,7 +270,7 @@
   padding: 32px 40px 64px;
   background: var(--page-bg);
   color: var(--page-ink);
-  font-family: 'Courier New', Courier, monospace;
+  font-family: 'Courier Prime', 'Courier Final Draft', 'Courier Screenplay', 'Nimbus Mono PS', 'Courier New', Courier, monospace;
   font-size: 15px;
   line-height: 1.6;
   tab-size: 4;
@@ -358,7 +386,7 @@
     box-shadow: none;
     background: #fff;
     /* 12pt Courier is the standard, and the reason a page runs a minute. */
-    font-family: 'Courier New', Courier, monospace;
+    font-family: 'Courier Prime', 'Courier Final Draft', 'Courier Screenplay', 'Nimbus Mono PS', 'Courier New', Courier, monospace;
     font-size: 12pt;
     line-height: 1;
     color: #000;

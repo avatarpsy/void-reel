@@ -4,6 +4,24 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Voidspace Board</title>
+    <!--
+      COURIER PRIME — the face screenplays are actually set in.
+
+      'Courier New' is a typewriter face bent onto screens: thin, weak at small
+      sizes, and the reason a script rendered in a browser looks like a draft
+      rather than a script. Courier Prime was drawn for screenwriting, is
+      metrically compatible (so page count is unchanged), and is free.
+
+      Loaded with display=swap and behind a full fallback stack, so a board with
+      no network still sets the script in whatever Courier the machine has. It
+      is the only webfont this app loads.
+    -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Courier+Prime:ital,wght@0,400;0,700;1,400&display=swap"
+    />
   </head>
   <body>
     <!-- Painted until the editor host mounts. See #board-boot in voidspace.css. -->
