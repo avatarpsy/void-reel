@@ -12,7 +12,9 @@ import { describe, expect, it } from 'vitest';
 
 import { makeTestBoard } from '../blocksuite/test-board';
 import { createShots } from '../shot/shots';
-import { canvasDigest, clearOfOwned, drawOnCanvas, editCanvas, readCanvas, relaxOverlaps } from './canvas';
+import {
+  canvasDigest, clearOfOwned, drawOnCanvas, editCanvas, fitFramesToMembers, readCanvas, relaxOverlaps,
+} from './canvas';
 import { THINKING_EDGE, overlaps } from './space';
 
 describe('drawing on the open canvas', () => {
@@ -617,5 +619,84 @@ describe('an agent batch never lands on the storyboard', () => {
     const r = drawOnCanvas(board.std, [{ kind: 'note', text: 'anywhere', x: 0, y: 0 }]);
     const made = r.ids.filter(Boolean) as string[];
     expect(clearOfOwned(board.std, made)).toBe(0);
+  });
+});
+
+/**
+ * ── THE COLUMN OF EMPTY BOXES ───────────────────────────────────────────────
+ * Seven frames were drawn on a real brainstorm, each with `contains`, none with
+ * coordinates — because the whole point of `contains` is that the caller does
+ * not know where the members will end up. Every one was treated as an ordinary
+ * unplaced element: given the next flow slot and the default 900x600. The board
+ * came out as seven empty titled rectangles down the left, with every note they
+ * were meant to gather sitting outside them.
+ *
+ * It is not fixable by asking the caller for coordinates. A frame wraps notes,
+ * and a note's height is decided by AFFiNE after it renders — the same reason
+ * `relaxOverlaps` exists.
+ */
+describe('a frame that names its members', () => {
+  it('wraps them, with room for the title bar AFFiNE draws above the box', () => {
+    const board = makeTestBoard();
+    const r = drawOnCanvas(board.std, [
+      { kind: 'note', ref: 'a', text: 'left', x: 0, y: 0, w: 400, h: 200 },
+      { kind: 'note', ref: 'b', text: 'right', x: 600, y: 300, w: 400, h: 200 },
+      { kind: 'frame', title: 'SECTION', contains: [{ ref: 'a' }, { ref: 'b' }] },
+    ]);
+    expect(r.problems).toEqual([]);
+
+    const frameId = r.ids[2]!;
+    expect(fitFramesToMembers(board.std, [{ frameId, memberIds: [r.ids[0]!, r.ids[1]!] }])).toBe(1);
+
+    const box = JSON.parse(
+      (board.store.getBlock(frameId)!.model as unknown as { xywh: string }).xywh,
+    ) as number[];
+    const [x, y, w, h] = box;
+    // Members span x 0..1000, y 0..500. One pad all round, plus the title bar.
+    expect(x).toBe(-56);
+    expect(y).toBe(-56 - 48);
+    expect(w).toBe(1000 + 112);
+    expect(h).toBe(500 + 112 + 48);
+  });
+
+  /**
+   * THE ACTUAL SYMPTOM. A derived frame must not take a slot in the flow, or it
+   * pushes everything after it down by its default height and leaves a hole
+   * where the empty box sits.
+   */
+  it('does not consume a flow slot, so nothing is pushed down behind it', () => {
+    const board = makeTestBoard();
+    const r = drawOnCanvas(board.std, [
+      { kind: 'note', ref: 'a', text: 'a member', x: 0, y: 0, w: 400, h: 200 },
+      { kind: 'frame', title: 'SECTION', contains: [{ ref: 'a' }] },
+      { kind: 'note', text: 'unplaced, and it should not be 600px lower' },
+    ]);
+
+    const after = readCanvas(board.std).find(i => i.id === r.ids[2]);
+    const frame = readCanvas(board.std).find(i => i.id === r.ids[1]);
+    expect(after).toBeTruthy();
+    // The default frame height is 600; the trailing note must not have been
+    // shifted past it.
+    expect((after!.y ?? 0) - (frame!.y ?? 0)).toBeLessThan(600);
+  });
+
+  /** A caller who DID give coordinates meant them — fitting is for the case
+   *  where the information does not exist at authoring time. */
+  it('leaves a frame that was given its own box alone', () => {
+    const board = makeTestBoard();
+    const r = drawOnCanvas(board.std, [
+      { kind: 'note', ref: 'a', text: 'inside', x: 100, y: 100, w: 200, h: 100 },
+      { kind: 'frame', title: 'FIXED', x: 0, y: 0, w: 1200, h: 900, contains: [{ ref: 'a' }] },
+    ]);
+    const box = JSON.parse(
+      (board.store.getBlock(r.ids[1]!)!.model as unknown as { xywh: string }).xywh,
+    ) as number[];
+    expect(box).toEqual([0, 0, 1200, 900]);
+  });
+
+  it('ignores a frame whose members have all gone', () => {
+    const board = makeTestBoard();
+    const r = drawOnCanvas(board.std, [{ kind: 'frame', title: 'Empty', x: 0, y: 0 }]);
+    expect(fitFramesToMembers(board.std, [{ frameId: r.ids[0]!, memberIds: ['gone'] }])).toBe(0);
   });
 });

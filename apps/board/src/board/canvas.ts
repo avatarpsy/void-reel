@@ -653,6 +653,9 @@ export function drawOnCanvas(
   const framesToFill: Array<{
     frameId: string;
     members: Array<{ id: string } | { ref: string }>;
+    /** True when the caller gave no coordinates, so the frame must be fitted
+     *  around its members once they have sized and settled. */
+    derive: boolean;
   }> = [];
 
   if (!surface || !rootId) {
@@ -694,7 +697,31 @@ export function drawOnCanvas(
       const size = SIZE[spec.kind] ?? { w: 200, h: 120 };
       const w = spec.w ?? size.w;
       const h = spec.h ?? size.h;
-      const placed = spec.x === undefined || spec.y === undefined;
+      /**
+       * ── A FRAME THAT NAMES ITS MEMBERS TAKES ITS BOX FROM THEM ─────────────
+       *
+       * THE FAILURE THIS FIXES, seen on a real brainstorm. Seven frames were
+       * drawn, each with `contains`, none with coordinates — because the whole
+       * point of `contains` is that the caller does not know where the members
+       * will end up. Every one of them was treated as an ordinary unplaced
+       * element: given `origin.x`, given the next `flowY`, and given the default
+       * 900x600 frame size. The result was a column of seven EMPTY titled boxes
+       * down the left of the board while the notes they were supposed to gather
+       * sat somewhere else entirely, unframed.
+       *
+       * It cannot be fixed by asking the caller for coordinates. A frame wraps
+       * notes, and a note's height is decided by AFFiNE after it renders — the
+       * same reason `relaxOverlaps` exists. The bounding box is not knowable at
+       * authoring time, so the board has to compute it afterwards.
+       *
+       * `arrange.ts` has done this correctly all along (`makeFrame`: bbox of the
+       * members, plus a pad, plus room for the title bar). This is that, applied
+       * to the frames `board_draw` makes.
+       */
+      const derivedFrame = spec.kind === 'frame'
+        && !!spec.contains?.length
+        && (spec.x === undefined || spec.y === undefined);
+      const placed = !derivedFrame && (spec.x === undefined || spec.y === undefined);
       const x = spec.x ?? origin.x;
       const y = spec.y ?? flowY;
       if (placed) flowY = y + h + 40;
@@ -812,7 +839,7 @@ export function drawOnCanvas(
              * later in the same array — see the adoption pass below.
              */
             if (id && spec.contains?.length) {
-              framesToFill.push({ frameId: id, members: spec.contains });
+              framesToFill.push({ frameId: id, members: spec.contains, derive: derivedFrame });
             }
             break;
           }
@@ -901,6 +928,10 @@ export function drawOnCanvas(
    * batch already opened, so `board_draw` keeps its one-call-one-undo promise —
    * the same argument `relaxOverlaps` makes two frames later.
    */
+  /** Frames whose box is the bounding box of what they hold — fitted below, in
+   *  the same deferred pass that resolves overlaps, because a note's height and
+   *  a mind map's bounds are both decided after this function returns. */
+  const derivedFrames: Array<{ frameId: string; memberIds: string[] }> = [];
   for (const pending of framesToFill) {
     const memberIds = pending.members
       .map(m => ('ref' in m ? refs[m.ref] : m.id))
@@ -913,6 +944,7 @@ export function drawOnCanvas(
       );
     }
     if (!memberIds.length) continue;
+    if (pending.derive) derivedFrames.push({ frameId: pending.frameId, memberIds });
     const adopted = adoptIntoFrame(std, pending.frameId, memberIds);
     if (adopted < memberIds.length) {
       problems.push(
@@ -959,6 +991,9 @@ export function drawOnCanvas(
       // round tidies a layout and then moves the whole thing anyway.
       try { clearOfOwned(std, madeIds); } catch { /* never break a draw over layout */ }
       try { relaxOverlaps(std, madeIds); } catch { /* never break a draw over layout */ }
+      // LAST, because it measures what the two passes above just moved. A frame
+      // fitted before them wraps where its members USED to be.
+      try { fitFramesToMembers(std, derivedFrames); } catch { /* layout is never fatal */ }
     }));
   }
 
@@ -1307,4 +1342,63 @@ export function editCanvas(std: BlockStdScope, ops: EditOp[]): EditResult {
   });
 
   return { changed, problems };
+}
+
+/**
+ * ── FIT A FRAME AROUND WHAT IT HOLDS ─────────────────────────────────────────
+ *
+ * A frame that names its members has no coordinates worth asking the caller
+ * for: it wraps notes, a note's height is decided by AFFiNE after it renders,
+ * and `relaxOverlaps` may have pushed half of them down afterwards. The box can
+ * only be computed here, once everything has settled.
+ *
+ * Without this, a `contains` frame drawn without coordinates was allocated a
+ * slot in the flow like any other element and given the default 900x600 — so a
+ * seven-section board came out as seven empty titled rectangles in a column
+ * down the left, with every note it should have gathered sitting outside them.
+ *
+ * The geometry matches `makeFrame` in `arrange.ts` deliberately: one pad all
+ * round, plus room above for the title bar, which AFFiNE draws OUTSIDE the box.
+ * Two ways to draw a section must not produce two different looking sections.
+ */
+export function fitFramesToMembers(
+  std: BlockStdScope,
+  frames: ReadonlyArray<{ frameId: string; memberIds: string[] }>,
+): number {
+  if (!frames.length) return 0;
+  const gfx = std.get(GfxControllerIdentifier);
+  const surface = gfx.surface;
+  if (!surface) return 0;
+
+  /** Same pad and title bar as `arrange.ts` — see the note above. */
+  const PAD = 56;
+  const TITLE_H = 48;
+  let fitted = 0;
+
+  for (const { frameId, memberIds } of frames) {
+    const frame = std.store.getBlock(frameId)?.model as unknown as {
+      xywh?: string;
+    } | undefined;
+    if (!frame) continue;
+
+    const boxes = memberIds
+      .map(id => surface.getElementById(id) ?? std.store.getBlock(id)?.model)
+      .map(el => (el ? boundsOf(el) : null))
+      .filter((b): b is Box => !!b);
+    if (!boxes.length) continue;
+
+    const b = bboxOf(boxes);
+    if (!b) continue;
+
+    const x = Math.round(b.x - PAD);
+    const y = Math.round(b.y - PAD - TITLE_H);
+    const w = Math.round(b.w + PAD * 2);
+    const h = Math.round(b.h + PAD * 2 + TITLE_H);
+    // Written through the model rather than the CRUD helper: the frame already
+    // exists and this is a resize, so it merges into the undo unit the batch
+    // opened. One call is still one Ctrl+Z.
+    frame.xywh = `[${x},${y},${w},${h}]`;
+    fitted++;
+  }
+  return fitted;
 }
