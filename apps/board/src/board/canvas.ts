@@ -1060,7 +1060,27 @@ export function drawOnCanvas(
    */
   const madeIds = ids.filter((id): id is string => !!id);
   if (madeIds.length) {
-    requestAnimationFrame(() => requestAnimationFrame(() => {
+    /**
+     * ── AND IT HAS TO RUN MORE THAN ONCE ──────────────────────────────────
+     *
+     * THE FAILURE THIS FIXES, measured on a live board. Fourteen cards drawn in
+     * three rows; four of them ended up ON TOP of the card above, by 19 to 45px.
+     * The pass had run, found nothing, and done nothing — correctly, because at
+     * two frames AFFiNE had not yet grown the notes. Every box it measured was
+     * still the one the caller asked for, and those do not overlap. The growth
+     * happened afterwards, and nothing looked again.
+     *
+     * Two frames is not a property of the document, it is a guess about how
+     * long rendering takes — and a guess that is wrong on a slower machine, a
+     * bigger batch, or a cold font cache, all of which make it LATER.
+     *
+     * So it settles repeatedly over the first second. Each pass is idempotent:
+     * with nothing overlapping it moves nothing and costs a bounds read, and
+     * the guards below make a vanished batch a no-op. Cheap insurance against a
+     * timing assumption that cannot be made safely.
+     */
+    const settleAt = [0, 250, 900];
+    const settle = () => {
       if (std.store.readonly) return;
       /**
        * THE BATCH MAY BE GONE BY NOW, and touching it if it is throws inside
@@ -1085,7 +1105,13 @@ export function drawOnCanvas(
       // LAST, because it measures what the two passes above just moved. A frame
       // fitted before them wraps where its members USED to be.
       try { fitFramesToMembers(std, derivedFrames); } catch { /* layout is never fatal */ }
-    }));
+    };
+
+    // The first pass keeps the original two-frame timing, which is what makes
+    // the writes merge into this batch's undo unit. The later ones are
+    // corrections, and by then there is usually nothing to correct.
+    requestAnimationFrame(() => requestAnimationFrame(settle));
+    for (const ms of settleAt.slice(1)) setTimeout(settle, ms);
   }
 
   return { ids, refs, problems };

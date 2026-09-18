@@ -797,3 +797,50 @@ describe('measureLabel against boxes the browser really produced', () => {
     expect(measureLabel('Anything', 56).h).toBeGreaterThan(56);
   });
 });
+
+/**
+ * ── THE PASS HAS TO LOOK MORE THAN ONCE ─────────────────────────────────────
+ * Measured on a live board: fourteen cards, four of them 19-45px ON TOP of the
+ * card above. The pass had run, found nothing and done nothing — correctly, because
+ * at two frames AFFiNE had not yet grown the notes. Every box it measured was
+ * still the one the caller asked for, and those do not overlap.
+ *
+ * Two frames is not a property of the document; it is a guess about how long
+ * rendering takes, and every way that guess is wrong makes it LATER.
+ *
+ * `relaxOverlaps` is called directly here, which is what the later settle passes
+ * do — so this asserts the property the repeated pass exists to provide: cards
+ * that grew after the fact still get separated.
+ */
+describe('cards that grow after they are placed still get separated', () => {
+  it('pushes a card off one that grew underneath it', () => {
+    const board = makeTestBoard();
+    const r = drawOnCanvas(board.std, [
+      { kind: 'note', text: 'top', x: 0, y: 0, w: 400, h: 100 },
+      { kind: 'note', text: 'below', x: 0, y: 140, w: 400, h: 100 },
+    ]);
+
+    // Simulate AFFiNE growing the first note AFTER the initial pass — which is
+    // exactly what happened on the real board.
+    const top = board.store.getBlock(r.ids[0]!)!.model as unknown as { xywh: string };
+    top.xywh = '[0,0,400,300]';
+
+    expect(relaxOverlaps(board.std, r.ids.filter((i): i is string => !!i))).toBeGreaterThan(0);
+
+    const items = readCanvas(board.std);
+    const a = items.find(i => i.id === r.ids[0])!;
+    const b = items.find(i => i.id === r.ids[1])!;
+    expect(b.y!, 'the lower card must clear the grown one').toBeGreaterThanOrEqual(a.y! + a.h!);
+  });
+
+  it('does nothing when there is nothing to fix, so repeating is free', () => {
+    const board = makeTestBoard();
+    const r = drawOnCanvas(board.std, [
+      { kind: 'note', text: 'a', x: 0, y: 0, w: 400, h: 100 },
+      { kind: 'note', text: 'b', x: 0, y: 400, w: 400, h: 100 },
+    ]);
+    const ids = r.ids.filter((i): i is string => !!i);
+    relaxOverlaps(board.std, ids);
+    expect(relaxOverlaps(board.std, ids)).toBe(0);
+  });
+});
