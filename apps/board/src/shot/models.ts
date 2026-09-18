@@ -67,6 +67,27 @@ export interface ModelCaps {
   usesReferenceTags: boolean;
   /** Capital `Image` (Seedance) or lowercase `image` (Grok). */
   referenceTagSyntax: 'Image' | 'image';
+
+  /**
+   * HOW MANY references of each kind this model takes.
+   *
+   * Separate from `usesReferenceTags`, which only says whether the prompt can
+   * ADDRESS a reference. A model that reads tags still has a ceiling — Grok
+   * takes 7 images, gpt-image-2 4, nano-banana 14 — and the board had no way to
+   * know it, so nothing stopped an agent attaching twelve stills to a shot that
+   * would silently carry seven. The surplus is not refused at generation time,
+   * it is dropped, and the one that goes missing is as likely as not the one
+   * the prompt names by tag.
+   *
+   * OPTIONAL, because a parent page from before these were sent omits them, and
+   * `undefined` is the honest description of that. `refCeilingWarning` treats
+   * missing as "don't judge" and 0 as "takes none" — inventing a limit for an
+   * older parent would warn about references that are actually fine.
+   */
+  maxRefImages?: number;
+  maxRefVideos?: number;
+  maxRefAudios?: number;
+
   deliveryModes: Array<'first-frame' | 'reference'>;
   defaultDelivery: 'first-frame' | 'reference';
 
@@ -570,6 +591,49 @@ export function checkShot(
    *
    * A warning that fires on correct work teaches people to ignore warnings.
    */
+
+  /**
+   * MORE REFERENCES THAN THE MODEL TAKES — the one over-attaching is silent about.
+   *
+   * Every other warning here is about a reference the model cannot USE. This one
+   * is about references it would use and never receives: the surplus is dropped
+   * on the way to the model, not refused, so the shot generates, looks wrong in
+   * a way nobody can point at, and has already been paid for.
+   *
+   * COUNTED PER KIND ACROSS THE WHOLE SHOT, not per role, because that is how
+   * `referenceTag` numbers them and how the generation step packs them — an
+   * image is an image whether it is the first frame, the last frame or a plain
+   * reference. Counting only `role === 'reference'` would clear a shot carrying
+   * a first frame, a last frame and six references on a model that takes seven.
+   *
+   * WHICH ONES SURVIVE is worth saying, and is knowable: numbering is list
+   * order, so it is the first N that arrive and the tail that vanishes. That
+   * turns "too many" into an instruction — drop one, or reorder so the one that
+   * matters is not last.
+   */
+  for (const [kind, max, noun] of [
+    ['image', caps.maxRefImages, 'image'],
+    ['video', caps.maxRefVideos, 'video reference'],
+    ['audio', caps.maxRefAudios, 'audio reference'],
+  ] as const) {
+    // `undefined` ⇒ an older parent that never sent the ceilings. Say nothing
+    // rather than invent one; 0 is a real answer and does get warned about.
+    if (typeof max !== 'number') continue;
+    const of = shot.media.filter(m => m.kind === kind);
+    if (of.length <= max) continue;
+    const dropped = of.slice(max);
+    out.push({
+      mediaId: dropped[0]?.id,
+      message: max === 0
+        ? `${caps.label} takes no ${noun}s, so ${of.length === 1 ? 'this one' : `these ${of.length}`} `
+          + 'will be ignored. Pick a model that reads them, or remove them.'
+        : `${caps.label} takes ${max} ${noun}${max === 1 ? '' : 's'} and this shot has `
+          + `${of.length}. The first ${max} are sent in list order; the last `
+          + `${dropped.length} will be dropped silently at generation. Remove `
+          + `${dropped.length === 1 ? 'one' : `${dropped.length}`}, or reorder so the ones that `
+          + 'matter come first.',
+    });
+  }
 
   if (shot.durationSec > 0 && shot.durationSec > caps.maxDurationSec) {
     out.push({

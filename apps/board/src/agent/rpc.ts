@@ -1245,6 +1245,15 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
         takesLastFrame: m.supportsLastFrame,
         readsReferenceTags: m.usesReferenceTags,
         referenceTagSyntax: m.referenceTagSyntax,
+        // HOW MANY, not just whether. An agent choosing from this list was told
+        // a model reads references and never how many it accepts, so nothing
+        // here stopped it attaching twelve stills to a model that carries seven
+        // — the surplus is dropped at generation, after the user has paid.
+        // Counted per kind across the whole shot, first-frame included, which
+        // is how they are numbered and packed.
+        maxRefImages: m.maxRefImages,
+        maxRefVideos: m.maxRefVideos,
+        maxRefAudios: m.maxRefAudios,
         deliveryModes: m.deliveryModes,
       })),
     }),

@@ -180,6 +180,94 @@ describe('checkShot', () => {
 });
 
 /**
+ * ── TOO MANY REFERENCES, WHICH NOTHING USED TO SAY ──────────────────────────
+ *
+ * Every other warning is about a reference the model cannot USE. This one is
+ * about references it would use and never receives. A model has a ceiling —
+ * Grok 7 images, gpt-image-2 4, nano-banana 14 — and the surplus is DROPPED on
+ * the way to the model rather than refused, so the shot generates, is wrong in
+ * a way nobody can point at, and has already been paid for.
+ *
+ * The board could not warn about it because `ModelCaps` never carried the
+ * number: it knew whether a model reads references, not how many it takes.
+ */
+const GROK: ModelCaps = {
+  ...KLING,
+  id: 'grok-imagine/image-to-video',
+  label: 'Grok Imagine',
+  usesReferenceTags: true,
+  referenceTagSyntax: 'image',
+  maxRefImages: 7,
+  maxRefVideos: 0,
+  maxRefAudios: 0,
+};
+
+const img = (n: number) => Array.from({ length: n }, (_, i) => ({
+  id: `i${i + 1}`, role: 'reference' as const, kind: 'image' as const,
+}));
+
+describe('a shot carrying more references than the model takes', () => {
+  beforeEach(() => setModelCatalogue([GROK, KLING], GROK.id));
+
+  it('is silent at the ceiling', () => {
+    expect(checkShot(shot({ model: GROK.id, media: img(7) }))).toEqual([]);
+  });
+
+  it('warns one over, and says how many will be dropped', () => {
+    const w = checkShot(shot({ model: GROK.id, media: img(8) }));
+    expect(w).toHaveLength(1);
+    expect(w[0].message).toContain('takes 7 images and this shot has 8');
+    expect(w[0].message).toContain('the last 1 will be dropped');
+  });
+
+  /**
+   * The first frame is an IMAGE. Counting only `role === 'reference'` would
+   * clear a shot carrying a first frame, a last frame and six references on a
+   * model that takes seven — eight images, one of them silently gone.
+   */
+  it('counts the first and last frame against the image budget', () => {
+    const w = checkShot(shot({
+      model: GROK.id,
+      media: [
+        { id: 'f', role: 'firstFrame', kind: 'image' },
+        { id: 'l', role: 'lastFrame', kind: 'image' },
+        ...img(6),
+      ],
+    }));
+    expect(w.some(x => x.message.includes('this shot has 8'))).toBe(true);
+  });
+
+  /** Numbering is list order, so the tail is what vanishes — and that is
+   *  actionable: reorder, and the reference that matters survives. */
+  it('points at the first reference that will not arrive', () => {
+    const w = checkShot(shot({ model: GROK.id, media: img(9) }));
+    expect(w[0].mediaId).toBe('i8');
+    expect(w[0].message).toContain('the last 2 will be dropped');
+  });
+
+  it('says a model that takes none takes none, rather than quoting a limit of 0', () => {
+    const w = checkShot(shot({
+      model: GROK.id,
+      media: [{ id: 'v', role: 'motionRef', kind: 'video' }],
+    }));
+    expect(w.some(x => x.message.includes('takes no video references'))).toBe(true);
+    expect(w.every(x => !x.message.includes('takes 0'))).toBe(true);
+  });
+
+  /**
+   * A PARENT PAGE FROM BEFORE THE CEILINGS WERE SENT must not be warned at.
+   *
+   * `undefined` means "this board was never told", and inventing a limit there
+   * would flag references that are perfectly fine — the exact failure mode the
+   * note on `ShotWarning` exists to avoid. 0 is a real answer; missing is not.
+   */
+  it('says nothing when the parent never sent a ceiling', () => {
+    setModelCatalogue([KLING], KLING.id);
+    expect(checkShot(shot({ model: KLING.id, media: img(40) }))).toEqual([]);
+  });
+});
+
+/**
  * WHAT THE SHOT WILL COST, before a credit is spent.
  *
  * Approximate on purpose — the real figure depends on the length the model
