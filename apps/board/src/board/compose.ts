@@ -120,6 +120,32 @@ const TITLE_SIZE = 56;
  */
 export const ACCENT_MAX_RATIO = 1 / 3;
 
+/**
+ * HOW MANY COLUMNS THIS SECTION SHOULD ACTUALLY USE.
+ *
+ * Four cards in three columns leaves a row of one and two empty slots beside
+ * it — half a screen of nothing, which is what the first composed board looked
+ * like. The same four in two columns is a filled 2x2 block.
+ *
+ * So the requested count is a CEILING, not an instruction: pick whatever fills
+ * the last row best, and keep the request on a tie so an even grid is never
+ * broken for no reason. A section is allowed to be narrower than the one above
+ * it — a filled block reads as deliberate, an orphan row reads as a mistake.
+ */
+export function columnsFor(count: number, requested: number): number {
+  if (count <= 1) return Math.max(2, requested);
+  let best = requested;
+  let bestFill = -1;
+  // Widest first, so the request wins ties and wider layouts beat narrower ones
+  // at equal fill.
+  for (let c = Math.min(requested, count); c >= 2; c--) {
+    const lastRow = count % c === 0 ? c : count % c;
+    const fill = lastRow / c;
+    if (fill > bestFill + 1e-9) { bestFill = fill; best = c; }
+  }
+  return best;
+}
+
 /** Roughly how tall a card of this text will be once AFFiNE has grown it. */
 export function cardHeight(text: string, width = CARD_W): number {
   const perLine = Math.max(8, Math.floor((width - 48) / (CARD_FONT * CARD_GLYPH_EM)));
@@ -206,12 +232,15 @@ export function composeRegion(req: ComposeRequest): ComposePlan {
   // ── Sections ──────────────────────────────────────────────────────────────
   sections.forEach((section, si) => {
     const cards = section.cards ?? [];
+    // Per SECTION, not per page: a four-card section beside a six-card one
+    // should not inherit an orphan row from it.
+    const cols = columnsFor(cards.length, columns);
     const refs: Array<{ ref: string }> = [];
     let rowTop = y;
     let rowTallest = 0;
 
     cards.forEach((card, ci) => {
-      const col = ci % columns;
+      const col = ci % cols;
       if (col === 0 && ci > 0) {
         rowTop += rowTallest + 40;
         rowTallest = 0;

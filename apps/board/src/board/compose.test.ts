@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 
 import { makeTestBoard } from '../blocksuite/test-board';
 import { drawOnCanvas, fitFramesToMembers, readCanvas } from './canvas';
-import { ACCENT_MAX_RATIO, CARD_W, GUTTER, cardHeight, composeRegion } from './compose';
+import {
+  ACCENT_MAX_RATIO, CARD_W, GUTTER, cardHeight, columnsFor, composeRegion,
+} from './compose';
 
 /**
  * ── WHAT THIS FILE IS DEFENDING ─────────────────────────────────────────────
@@ -264,5 +266,53 @@ describe('a tall card does not get sat on', () => {
     const tall = notes[0];
     const below = notes[3];
     expect(below.y!).toBeGreaterThanOrEqual(tall.y! + 194);
+  });
+});
+
+/**
+ * Four cards in three columns leaves a row of one and two empty slots — half a
+ * screen of nothing, which is exactly how the first composed board looked.
+ */
+describe('a section picks the column count that fills', () => {
+  const cases: Array<[number, number, number]> = [
+    [4, 3, 2],  // 3+1 orphan  ->  2+2 filled
+    [3, 3, 3],  // already exact
+    [6, 3, 3],  // already exact
+    [5, 3, 3],  // 3+2 beats 2+2+1
+    [2, 3, 2],
+    [7, 4, 4],  // 4+3 beats 3+3+1
+  ];
+  for (const [count, requested, expected] of cases) {
+    it(`${count} cards asked for ${requested} columns -> ${expected}`, () => {
+      expect(columnsFor(count, requested)).toBe(expected);
+    });
+  }
+
+  it('lays four cards out as a filled 2x2, not 3 and an orphan', () => {
+    const { elements } = composeRegion({
+      title: 'T',
+      columns: 3,
+      sections: [{ title: 'S', cards: [{ text: 'a' }, { text: 'b' }, { text: 'c' }, { text: 'd' }] }],
+    });
+    const xs = elements.filter(e => e.kind === 'note').map(e => e.x!);
+    expect(new Set(xs).size, 'two columns').toBe(2);
+    // …and two distinct rows.
+    expect(new Set(elements.filter(e => e.kind === 'note').map(e => e.y!)).size).toBe(2);
+  });
+
+  it('decides per section, so one orphan does not narrow the whole page', () => {
+    const { elements } = composeRegion({
+      title: 'T',
+      columns: 3,
+      sections: [
+        { title: 'FOUR', cards: Array.from({ length: 4 }, (_, i) => ({ text: `a${i}` })) },
+        { title: 'SIX', cards: Array.from({ length: 6 }, (_, i) => ({ text: `b${i}` })) },
+      ],
+    });
+    const notes = elements.filter(e => e.kind === 'note') as Array<{ text: string; x: number }>;
+    const four = new Set(notes.filter(n => n.text.startsWith('a')).map(n => n.x));
+    const six = new Set(notes.filter(n => n.text.startsWith('b')).map(n => n.x));
+    expect(four.size).toBe(2);
+    expect(six.size).toBe(3);
   });
 });
