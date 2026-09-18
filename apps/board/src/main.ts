@@ -25,6 +25,7 @@ import * as Y from 'yjs';
 import { defaultApiBase, setBlockTokenProvider } from '@openreel/asset-browser';
 
 import { mountBoard, type MountedBoard } from './blocksuite/editor';
+import { installFrameTitleScale } from './ui/frame-title-scale';
 import * as shots from './shot/shots';
 import * as boardMeta from './board/board-meta';
 import { installCloudSync } from './board/cloud-sync';
@@ -178,6 +179,16 @@ async function boot(): Promise<void> {
    * case. Runs before the cloud pull so a merge cannot resurrect the old string
    * unnoticed; anything the pull brings in is normalised on the next open.
    */
+  /**
+   * FRAME TITLES SCALE WITH THE VIEWPORT.
+   *
+   * BlockSuite pins them at a constant screen size, so at fit-zoom a title is
+   * proportionally three times too big and sits on whatever is above it. See
+   * ui/frame-title-scale.ts — spacing cannot fix it, because the overlap is a
+   * function of zoom and the spacing is fixed in model space.
+   */
+  installFrameTitleScale(board.std);
+
   shots.normaliseShotTitles(board.std);
 
   /**
