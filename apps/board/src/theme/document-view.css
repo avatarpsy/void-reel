@@ -15,8 +15,8 @@
   max-width: 46rem;         /* ~75 characters — the measure prose is read at. */
   margin: 0 auto;
   padding: 3.5rem 3rem 5rem;
-  background: var(--vs-panel, #fff);
-  color: var(--vs-text, #16181d);
+  background: var(--page-bg);
+  color: var(--page-ink);
   font-family: var(--affine-font-family, ui-sans-serif, system-ui, sans-serif);
   font-size: 15px;
   line-height: 1.65;
