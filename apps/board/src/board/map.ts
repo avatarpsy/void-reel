@@ -48,6 +48,12 @@ const ALIGN_TOLERANCE = 12;
 const GLANCE_CHARS = 240;
 /** Wider or taller than this and no zoom shows the whole board usefully. */
 const RIBBON_RATIO = 3;
+/** Fewer than one image per this many elements and the wall is not visual. */
+const IMAGE_SHARE = 8;
+/** Past this share of text cards, a canvas is a document with extra steps. */
+const PROSE_SHARE = 0.8;
+/** Below this many elements it is a sketch, and a sketch is not judged. */
+const MIN_TO_JUDGE = 8;
 
 export interface MapSection {
   id: string;
@@ -131,13 +137,50 @@ function findIssues(
   looseCount: number,
 ): string[] {
   const out: string[] = [];
+  /**
+   * A SKETCH IS NOT A BOARD YET, and nagging one is how a critique gets
+   * ignored. Three notes laid side by side are 8:1 wide and that is fine — it
+   * is two minutes of thinking, not a wall. Every judgement below assumes
+   * somebody was trying to build something.
+   */
+  if (items.length < MIN_TO_JUDGE) return out;
+
   const cards = items.filter(i => i.kind === 'note');
   const images = items.filter(i => i.kind === 'image' || i.kind === 'video').length;
 
-  if (items.length >= 12 && images === 0) {
+  /**
+   * TOO FEW PICTURES, not zero pictures.
+   *
+   * The first version fired only at images === 0, and the board that prompted
+   * all this had exactly ONE among fifty-eight elements — effectively none, and
+   * the check stayed silent. A single reference does not make a wall visual.
+   */
+  if (items.length >= 12 && images * IMAGE_SHARE < items.length) {
     out.push(
-      `${items.length} elements and not one image. A board is looked at; if the meaning is `
-      + 'only in the prose it is a document on a canvas.',
+      images === 0
+        ? `${items.length} elements and not one image. A board is looked at; if the meaning is `
+          + 'only in the prose it is a document on a canvas.'
+        : `${items.length} elements and only ${images} image(s). A board is looked at; this one `
+          + 'is still carrying its meaning in prose.',
+    );
+  }
+
+  /**
+   * AND THE ONE THAT ACTUALLY CATCHES IT: what share of the board is prose.
+   *
+   * Measured on the board a user called useless: 54 of 58 elements were text
+   * cards. Every geometric check passed — the widths were consistent, the
+   * frames fitted, nothing overlapped — because none of them asked the only
+   * question that mattered, which is whether a canvas was being used as a
+   * canvas or as a badly formatted document.
+   */
+  const proseShare = items.length ? cards.length / items.length : 0;
+  if (items.length >= 12 && proseShare > PROSE_SHARE) {
+    out.push(
+      `${cards.length} of ${items.length} elements are text cards (${Math.round(proseShare * 100)}%). `
+      + 'That is a document on a canvas. Position, pictures and grouping are what a board has '
+      + 'that a document does not — if none of them carry meaning here, nothing is gained by it '
+      + 'being a board.',
     );
   }
 

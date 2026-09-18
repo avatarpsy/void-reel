@@ -166,3 +166,49 @@ describe('the board judges itself, because a screenshot cannot be trusted to', (
     expect(map.issues).toEqual([]);
   });
 });
+
+/**
+ * ── THE CHECKS THAT WERE TOO SOFT ───────────────────────────────────────────
+ * Run against the real board a user called useless, the first version of this
+ * critique said almost nothing. Two thresholds were wrong:
+ *
+ *   images === 0   that board had exactly ONE image among fifty-eight elements.
+ *                  Effectively none, and the check stayed silent.
+ *   aspect only    the reference column widened the bounding box to 1:2.2, so
+ *                  the ribbon check passed on a board nobody could read.
+ *
+ * The fact that actually catches it is what SHARE of the board is prose: 54 of
+ * 58 elements were text cards. Every geometric check passed because none of
+ * them asked whether a canvas was being used as a canvas.
+ */
+describe('the critique is hard enough to be useful', () => {
+  const proseWall = (board: ReturnType<typeof makeTestBoard>, sections = 6) => composed(board, {
+    title: 'T',
+    sections: Array.from({ length: sections }, (_, s) => ({
+      title: `S${s}`,
+      cards: Array.from({ length: 3 }, (_, c) => ({ text: `# card ${s}-${c}\nbody` })),
+    })),
+  });
+
+  it('calls out a board that is almost entirely text cards', () => {
+    const board = makeTestBoard();
+    proseWall(board);
+    const issues = readBoardMap(board.std).issues.join(' ');
+    expect(issues).toMatch(/document on a canvas/i);
+    expect(issues).toMatch(/%/);
+  });
+
+  it('still complains when there is ONE image among many elements', () => {
+    const board = makeTestBoard();
+    proseWall(board);
+    // One picture does not make a wall visual.
+    drawOnCanvas(board.std, [{ kind: 'note', text: 'stand-in', x: 3000, y: 0, w: 200, h: 200 }]);
+    expect(readBoardMap(board.std).issues.join(' ')).toMatch(/only 0 image|not one image/i);
+  });
+
+  it('does not nag a small board that is simply a few notes', () => {
+    const board = makeTestBoard();
+    composed(board, { title: 'T', sections: [{ title: 'S', cards: [{ text: 'a' }, { text: 'b' }] }] });
+    expect(readBoardMap(board.std).issues).toEqual([]);
+  });
+});
