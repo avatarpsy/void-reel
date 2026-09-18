@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { makeTestBoard } from '../blocksuite/test-board';
 import { drawOnCanvas, fitFramesToMembers, readCanvas } from './canvas';
-import { ACCENT_MAX_RATIO, CARD_W, GUTTER, composeRegion } from './compose';
+import { ACCENT_MAX_RATIO, CARD_W, GUTTER, cardHeight, composeRegion } from './compose';
 
 /**
  * ── WHAT THIS FILE IS DEFENDING ─────────────────────────────────────────────
@@ -186,5 +186,83 @@ describe('nothing lands on top of anything', () => {
     const title = items.find(i => i.kind === 'text')!;
     const card = items.find(i => i.kind === 'note')!;
     expect(card.y!).toBeGreaterThanOrEqual(title.y! + title.h!);
+  });
+});
+
+/**
+ * ── CALIBRATED AGAINST CARDS A BROWSER REALLY DREW ──────────────────────────
+ * The first estimate under-read by up to 31%, which put one card 19px on top of
+ * the one above it on a live board. Under is the only dangerous direction:
+ * over-estimating costs whitespace the frame absorbs, under-estimating collides.
+ *
+ * These are the real heights, read back off the board after AFFiNE had grown
+ * every card. Each must be met or exceeded — never under.
+ */
+describe('cardHeight never under-reads a real card', () => {
+  const real: Array<[string, string, number]> = [
+    [
+      'heading plus a long line',
+      '# SEVEN\nOne tower block. Seven floors, one per drive — Survival at the ground, Purpose at the top. Riders nest by floor and travel in the walls.',
+      194,
+    ],
+    [
+      'heading plus two short lines',
+      '# The one rule\nSee it completely and it dies.\nFight it and it grows.',
+      180,
+    ],
+    [
+      'heading plus one medium line',
+      '# The tone\nFunny for fifty seconds. Then it turns, and the last ten seconds hurt.',
+      170,
+    ],
+    [
+      'one long paragraph, no heading',
+      'Why one building: a map that escalates by going **up**, a world small enough to feel intimate, and the same locations every episode — which is what makes a daily affordable.',
+      164,
+    ],
+    [
+      'a shorter paragraph, no heading',
+      "He owns the building the Riders nest in. He is right often enough to be frightening, and his whole argument is four words: *it's easier down here.*",
+      140,
+    ],
+  ];
+
+  for (const [label, text, actual] of real) {
+    it(`${label}: covers the real ${actual}px`, () => {
+      const h = cardHeight(text);
+      expect(h, 'must never be under the real height').toBeGreaterThanOrEqual(actual);
+      // …and not so far over that the page turns into whitespace.
+      expect(h, 'must not be absurdly over').toBeLessThan(actual * 1.6);
+    });
+  }
+
+  it('gives an empty card a floor rather than nothing', () => {
+    expect(cardHeight('')).toBeGreaterThanOrEqual(96);
+  });
+});
+
+/**
+ * THE COLLISION ITSELF, at the row that produced it: a tall card in column one
+ * and a second row beneath it.
+ */
+describe('a tall card does not get sat on', () => {
+  it('clears the tallest card in the row above', () => {
+    const { elements } = composeRegion({
+      title: 'T',
+      columns: 3,
+      sections: [{
+        title: 'S',
+        cards: [
+          { text: '# SEVEN\nOne tower block. Seven floors, one per drive — Survival at the ground, Purpose at the top. Riders nest by floor and travel in the walls.' },
+          { text: '# Short' },
+          { text: '# Also short' },
+          { text: 'The card that used to land on top of SEVEN.' },
+        ],
+      }],
+    });
+    const notes = elements.filter(e => e.kind === 'note');
+    const tall = notes[0];
+    const below = notes[3];
+    expect(below.y!).toBeGreaterThanOrEqual(tall.y! + 194);
   });
 });

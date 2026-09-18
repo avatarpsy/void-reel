@@ -63,13 +63,50 @@ export interface ComposePlan {
 export const CARD_W = 400;
 /** Gutter between columns. */
 export const GUTTER = 70;
-/** Clear space under a section before the next one's title bar. */
-export const SECTION_GAP = 190;
+/**
+ * Clear space under a section before the next one's title bar.
+ *
+ * FRAME_CHROME is added on top of this, so the real gap between the last card
+ * of one section and the first of the next is the sum. At 190 that came to 265
+ * measured on a live board — a screen of nothing between every section.
+ */
+export const SECTION_GAP = 76;
 /** A frame's title bar is drawn ABOVE its box; `fitFramesToMembers` pads for it. */
 const FRAME_CHROME = 104;
 /** Body text inside a note, for estimating how tall a card will be. */
 const CARD_FONT = 16;
-const CARD_PAD = 48;
+/**
+ * CALIBRATED AGAINST REAL CARDS, because the first guess overlapped.
+ *
+ * Measured on a live board, cards at w=400:
+ *
+ *   "SEVEN" (heading + 135 chars)        predicted 135   actual 194
+ *   "The one rule" (heading + 2 shorts)  predicted 135   actual 180
+ *   "Why one building" (165 chars)       predicted 135   actual 164
+ *
+ * Under by up to 31%, and under is what put a card 19px on top of the one
+ * above it — the exact defect this whole pass exists to remove.
+ *
+ * Three things the first estimate missed, all visible in those numbers:
+ *   • a note's inner width is much narrower than the box, so ~30 characters
+ *     fit on a 400px line and not the ~41 a title-tuned measure predicts;
+ *   • a "# heading" line is set larger, so it costs about 1.7 lines;
+ *   • every source line is its own BLOCK with a margin, so three short lines
+ *     are taller than one line of the same total length.
+ *
+ * Every constant here is deliberately rounded UP. Over-estimating costs
+ * whitespace, which the frame then absorbs; under-estimating costs a
+ * collision.
+ */
+const CARD_PAD = 60;
+/** Effective advance of a character in note body text, as a fraction of size. */
+const CARD_GLYPH_EM = 0.72;
+/** A `# heading` line is set larger than the body it sits above. */
+const HEADING_LINES = 1.7;
+/** Each source line is its own block, and blocks carry a margin. */
+const BLOCK_MARGIN = 15;
+/** Line height, matching the one `measureLabel` uses for labels. */
+const LINE_EM = 1.35;
 
 const TITLE_SIZE = 56;
 
@@ -84,9 +121,21 @@ const TITLE_SIZE = 56;
 export const ACCENT_MAX_RATIO = 1 / 3;
 
 /** Roughly how tall a card of this text will be once AFFiNE has grown it. */
-function cardHeight(text: string): number {
-  const m = measureLabel(text, CARD_FONT, CARD_W - 32);
-  return Math.max(96, m.h + CARD_PAD);
+export function cardHeight(text: string, width = CARD_W): number {
+  const perLine = Math.max(8, Math.floor((width - 48) / (CARD_FONT * CARD_GLYPH_EM)));
+  let lines = 0;
+  let blocks = 0;
+  for (const raw of String(text ?? '').split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    blocks++;
+    const heading = line.startsWith('#');
+    const body = heading ? line.replace(/^#+\s*/, '') : line;
+    const wrapped = Math.max(1, Math.ceil(body.length / perLine));
+    lines += heading ? wrapped * HEADING_LINES : wrapped;
+  }
+  const text_h = Math.ceil(lines * CARD_FONT * LINE_EM) + blocks * BLOCK_MARGIN;
+  return Math.max(96, text_h + CARD_PAD);
 }
 
 /**
