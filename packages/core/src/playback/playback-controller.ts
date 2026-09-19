@@ -568,6 +568,23 @@ export class PlaybackController {
     for (const track of this.project.timeline.tracks) {
       if (track.type !== "audio" && track.type !== "video") continue;
 
+      /**
+       * ── TRACK LEVELS ARE NOT PERSISTED ANYWHERE, SO THERE IS NOTHING TO
+       *    READ HERE — and that is the gap, not this line. ────────────────────
+       *
+       * Unity and centre look like a shortcut and are not: `Track` carries
+       * id/type/name/clips/transitions/locked/hidden/muted/solo and NO volume,
+       * pan or effects. The AudioMixer's faders write to React state and
+       * straight to the live graph (`updateTrackVolume`), so a channel strip
+       * survives exactly as long as the session: not saved with the project,
+       * not seen by the exporter, gone on reload.
+       *
+       * The graph is ready for it — `updateTrackVolume`, `updateTrackPan` and
+       * `updateTrackEffects` all exist and work. What is missing is the field
+       * on `Track` and the write path behind the fader. Until then the mix has
+       * to live on CLIPS, which do persist, and which is where the automation
+       * above comes from.
+       */
       this.realtimeAudioGraph.createTrack({
         trackId: track.id,
         volume: 1.0,
@@ -624,9 +641,34 @@ export class PlaybackController {
           endTime: clipEnd,
           mediaOffset: clip.inPoint,
           volume: clip.volume,
-          pan: 0,
+          pan: (clip as { pan?: number }).pan ?? 0,
           effects: clip.audioEffects || [],
           speed: clip.speed ?? 1,
+          /**
+           * ── THE PREVIEW HAS TO BE THE MIX, OR IT IS A LIE ─────────────────
+           *
+           * `AudioClipSchedule` has carried `automationVolume`, `fadeIn` and
+           * `fadeOut` all along and the realtime graph schedules a real gain
+           * envelope from them. This builder simply never filled them, so the
+           * preview played the flat `clip.volume` and nothing else: every fade
+           * the user drew, every duck the agent applied, and every volume line
+           * in the Inspector was inaudible HERE while being present in the
+           * project and applied by the export engine.
+           *
+           * That makes the preview a different mix from the file, which is the
+           * one thing a preview must never be — you cannot judge a mix you
+           * cannot hear, and you certainly cannot correct one.
+           *
+           * Same shape as `audio-engine.ts` builds for export, deliberately:
+           * native "volume" keyframes, finite values only, in time order.
+           */
+          automationVolume: (clip.keyframes ?? [])
+            .filter((k) => k.property === "volume"
+              && typeof k.value === "number" && Number.isFinite(k.value as number))
+            .map((k) => ({ time: k.time, value: k.value as number }))
+            .sort((a, b) => a.time - b.time),
+          fadeIn: clip.fade?.fadeIn,
+          fadeOut: clip.fade?.fadeOut,
         });
       }
     }
