@@ -11,6 +11,7 @@ import type {
   TimeRange,
 } from "./types";
 import { DEFAULT_AUDIO_CONFIG } from "./types";
+import { measureLoudnessOf } from "./loudness";
 
 const SEGMENTED_AUDIO_DECODE_THRESHOLD_SECONDS = 120;
 
@@ -313,7 +314,16 @@ export class AudioEngine {
         muted: track.muted,
         solo: track.solo,
         clips: clips.map((clip) =>
-          this.createClipRenderInfo(clip, startTime, endTime),
+          this.createClipRenderInfo(
+            clip,
+            startTime,
+            endTime,
+            // The channel fader, folded in here so the exported file is the
+            // same mix the preview plays. Absent on every pre-fader project,
+            // which must keep meaning unity/centre.
+            track.volume ?? 1,
+            track.pan ?? 0,
+          ),
         ),
       });
     });
@@ -336,6 +346,23 @@ export class AudioEngine {
     clip: Clip,
     rangeStart: number,
     rangeEnd: number,
+    /**
+     * The TRACK's fader and pan, folded into this clip.
+     *
+     * There is one gain node and one panner per clip in the offline graph, and
+     * no separate channel stage, so the channel's contribution is multiplied in
+     * here. Gain is linear, so folding it into the clip gain and into every
+     * automation point is exactly equivalent to a real fader — but it has to be
+     * BOTH, because a volume keyframe REPLACES `clip.volume` rather than
+     * scaling it, and scaling only one of them would make the fader stop
+     * working the moment a clip had a volume curve on it.
+     *
+     * Pan is summed and clamped rather than cascaded: two panners in series are
+     * not the same as one at the sum, and a single stage is what a channel strip
+     * actually is.
+     */
+    trackVolume: number = 1,
+    trackPan: number = 0,
   ): AudioClipRenderInfo {
     const clipStart = Math.max(clip.startTime, rangeStart);
     const clipEnd = Math.min(clip.startTime + clip.duration, rangeEnd);
@@ -353,8 +380,8 @@ export class AudioEngine {
       sourceTime,
       timelineStartTime: clipStart,
       duration: clipEnd - clipStart,
-      volume: clip.volume,
-      pan,
+      volume: clip.volume * trackVolume,
+      pan: Math.max(-1, Math.min(1, pan + trackPan)),
       effects: clip.effects,
       fadeIn: clip.fade?.fadeIn,
       fadeOut: clip.fade?.fadeOut,
@@ -366,7 +393,10 @@ export class AudioEngine {
       // silently missing from the final MP4.
       automationVolume: (clip.keyframes ?? [])
         .filter((k) => k.property === "volume" && typeof k.value === "number" && Number.isFinite(k.value as number))
-        .map((k) => ({ time: k.time, value: k.value as number }))
+        // × trackVolume: a volume keyframe REPLACES clip.volume, so the fader
+        // has to be applied to the curve as well or it stops working on exactly
+        // the clips that carry a fade or a duck.
+        .map((k) => ({ time: k.time, value: (k.value as number) * trackVolume }))
         .sort((a, b) => a.time - b.time),
       // The AUDIO chain, which nothing used to read — see AudioClipRenderInfo.
       // Only ENABLED effects travel: a disabled effect must cost nothing, and
@@ -1009,30 +1039,27 @@ export class AudioEngine {
     return silentRanges;
   }
 
+  /**
+   * Loudness of a decoded buffer, to BS.1770-4.
+   *
+   * This used to be `20*log10(rms_of_channel_0) - 0.691` with `range: 10`
+   * hard-coded — RMS wearing a LUFS label, which is a different quantity and
+   * the wrong one for every "put the bed N dB under the dialogue" decision the
+   * mixer makes. The real meter lives in ./loudness.ts and is calibrated
+   * against the EBU reference tones.
+   */
   measureLoudness(buffer: AudioBuffer): LoudnessMetrics {
-    const channelData = buffer.getChannelData(0);
-    let sumSquares = 0;
-    let peak = 0;
-
-    for (let i = 0; i < channelData.length; i++) {
-      const sample = channelData[i];
-      sumSquares += sample * sample;
-      peak = Math.max(peak, Math.abs(sample));
+    const channels: Float32Array[] = [];
+    for (let c = 0; c < buffer.numberOfChannels; c++) {
+      channels.push(buffer.getChannelData(c));
     }
-
-    const rms = Math.sqrt(sumSquares / channelData.length);
-    const rmsDb = 20 * Math.log10(rms || 0.0001);
-    const peakDb = 20 * Math.log10(peak || 0.0001);
-
-    // Approximate LUFS (simplified - real implementation would use K-weighting)
-    const lufs = rmsDb - 0.691; // Rough approximation
-
+    const r = measureLoudnessOf(channels, buffer.sampleRate);
     return {
-      integrated: lufs,
-      shortTerm: lufs,
-      momentary: lufs,
-      truePeak: peakDb,
-      range: 10, // Placeholder
+      integrated: r.integrated,
+      shortTerm: r.shortTerm,
+      momentary: r.momentary,
+      truePeak: r.truePeak,
+      range: r.range,
     };
   }
 

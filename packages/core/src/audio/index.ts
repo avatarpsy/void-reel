@@ -1,6 +1,7 @@
 export * from "./types";
 export * from "./fft";
 export * from "./audio-engine";
+export * from "./loudness";
 export * from "./realtime-processor";
 export * from "./audio-effects-engine";
 export * from "./noise-reduction";
