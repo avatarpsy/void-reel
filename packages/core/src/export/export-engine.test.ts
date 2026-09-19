@@ -525,3 +525,66 @@ describe("Export Types and Defaults", () => {
     });
   });
 });
+
+/**
+ * THE WAV HEADER MUST DESCRIBE THE BUFFER, NOT THE REQUEST.
+ *
+ * Regression guard. `AudioEngine.renderAudio` builds its OfflineAudioContext
+ * from `project.settings.sampleRate`, while the caller passes its own rate in
+ * the EXPORT settings. When those disagreed, the header took the export rate
+ * and the samples were the project's: ask for 48000 against a 44100 project and
+ * the file plays 8.8% fast, a semitone and a half sharp, and ends ~6s early
+ * because the tail runs past the declared length.
+ *
+ * Nothing threw. Byte count, peak level, loudness and waveform all looked
+ * correct, because they were — only the four bytes at offset 24 were wrong.
+ * That is why this is a test and not a comment.
+ */
+describe("encodeWav sample rate", () => {
+  const stubBuffer = (sampleRate: number, frames = 256): AudioBuffer => {
+    const channels = [new Float32Array(frames), new Float32Array(frames)];
+    return {
+      sampleRate,
+      numberOfChannels: 2,
+      length: frames,
+      duration: frames / sampleRate,
+      getChannelData: (ch: number) => channels[ch],
+    } as unknown as AudioBuffer;
+  };
+
+  /** Bytes 24..27 of a canonical WAV header are the sample rate, little-endian. */
+  const declaredRate = (blobBytes: Uint8Array): number =>
+    new DataView(blobBytes.buffer, blobBytes.byteOffset).getUint32(24, true);
+
+  it("declares the BUFFER's rate when the export settings disagree", async () => {
+    const engine = new ExportEngine();
+    const blob = (engine as never as {
+      encodeWav: (b: AudioBuffer, s: unknown) => Blob;
+    }).encodeWav(stubBuffer(44100), {
+      format: "wav",
+      sampleRate: 48000, // what the caller ASKED for — must not win
+      channels: 2,
+      bitDepth: 24,
+      bitrate: 320,
+    });
+
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    expect(declaredRate(bytes)).toBe(44100);
+  });
+
+  it("still declares the buffer's rate when the two agree", async () => {
+    const engine = new ExportEngine();
+    const blob = (engine as never as {
+      encodeWav: (b: AudioBuffer, s: unknown) => Blob;
+    }).encodeWav(stubBuffer(48000), {
+      format: "wav",
+      sampleRate: 48000,
+      channels: 2,
+      bitDepth: 24,
+      bitrate: 320,
+    });
+
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    expect(declaredRate(bytes)).toBe(48000);
+  });
+});

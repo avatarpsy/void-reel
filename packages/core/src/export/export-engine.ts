@@ -1251,7 +1251,26 @@ export class ExportEngine {
       buffer.numberOfChannels,
       settings.channels,
     );
-    const sampleRate = settings.sampleRate;
+    /**
+     * THE HEADER DESCRIBES THE BUFFER, NEVER THE REQUEST.
+     *
+     * Two different `settings` objects decide this, and they disagree.
+     * `AudioEngine.renderAudio` builds its OfflineAudioContext from
+     * `project.settings.sampleRate` — the PROJECT's rate, 44100 for everything
+     * the music editor creates. This function used to take the rate from the
+     * EXPORT settings, which is whatever the caller asked for. Ask for 48000
+     * and you got 44100 samples under a header that claimed 48000: the file
+     * plays 8.8% fast, pitched up about a semitone and a half, and ends 6
+     * seconds early because the tail runs off the end of the declared length.
+     *
+     * Nothing errors. The bytes are all there, correctly mixed. It is only the
+     * four bytes at offset 24 that are wrong, so every check short of actually
+     * listening — size, peak levels, loudness, even a waveform — passes.
+     *
+     * The MP3 path never had this bug because MediaBunny reads the rate off the
+     * buffer via `AudioSample.fromAudioBuffer`. This now does the same.
+     */
+    const sampleRate = buffer.sampleRate;
     const bitDepth = settings.bitDepth;
 
     if (bitDepth === 32) {
