@@ -61,22 +61,59 @@ interface DelayNodes {
   outputGain: GainNode;
 }
 
+/** Peak and RMS of one meter tap, as linear gain (1 = 0 dBFS). */
+export interface AudioLevel {
+  peak: number;
+  rms: number;
+}
+
 interface TrackNodes {
   inputGain: GainNode;
   effectChainInput: AudioNode;
   effectChainOutput: AudioNode;
   panNode: StereoPannerNode;
   outputGain: GainNode;
+  /**
+   * METER TAP — a dead end hanging off `outputGain`, deliberately.
+   *
+   * It is not in series with the signal: nothing downstream reads it, so it
+   * cannot colour or delay what you hear. It sits AFTER volume, pan and the
+   * effect chain, which is the only place a meter is worth reading — it shows
+   * what the track actually contributes to the mix, not what went into it.
+   */
+  analyser: AnalyserNode;
   compressor: DynamicsCompressorNode | null;
   eqFilters: BiquadFilterNode[];
   reverbNodes: ReverbNodes | null;
   delayNodes: DelayNodes | null;
 }
 
+/**
+ * 1024 samples at 48 kHz is ~21 ms — long enough for a stable RMS on speech and
+ * short enough that a transient still shows up on the peak.
+ */
+const METER_FFT_SIZE = 1024;
+
+/** Read peak + RMS off a meter tap. Reused by the track and master meters. */
+function readLevel(analyser: AnalyserNode): AudioLevel {
+  const data = new Float32Array(analyser.fftSize);
+  analyser.getFloatTimeDomainData(data);
+  let peak = 0;
+  let sumSquares = 0;
+  for (let i = 0; i < data.length; i++) {
+    const s = data[i];
+    const abs = s < 0 ? -s : s;
+    if (abs > peak) peak = abs;
+    sumSquares += s * s;
+  }
+  return { peak, rms: Math.sqrt(sumSquares / data.length) };
+}
+
 export class RealtimeAudioGraph {
   private audioContext: AudioContext;
   private masterClock: MasterTimelineClock;
   private masterGain: GainNode;
+  private masterAnalyser: AnalyserNode;
   private trackNodes: Map<string, TrackNodes> = new Map();
   private scheduledSources: Map<string, ScheduledSource[]> = new Map();
   private trackConfigs: Map<string, TrackConfig> = new Map();
@@ -98,6 +135,28 @@ export class RealtimeAudioGraph {
     this.audioContext = this.masterClock.getAudioContext();
     this.masterGain = this.audioContext.createGain();
     this.masterGain.connect(this.audioContext.destination);
+    this.masterAnalyser = this.audioContext.createAnalyser();
+    this.masterAnalyser.fftSize = METER_FFT_SIZE;
+    this.masterGain.connect(this.masterAnalyser);
+  }
+
+  /**
+   * Peak and RMS of one track, as it currently sounds.
+   *
+   * Returns silence for a track with no meter tap rather than throwing: the
+   * mixer polls this for every track on the timeline, and a track the graph has
+   * not built yet (before the first play, or mid-seek while tracks are being
+   * recreated) is a normal state, not an error.
+   */
+  getTrackLevel(trackId: string): AudioLevel {
+    const nodes = this.trackNodes.get(trackId);
+    if (!nodes) return { peak: 0, rms: 0 };
+    return readLevel(nodes.analyser);
+  }
+
+  /** Peak and RMS of the master bus, post-fader. */
+  getMasterLevel(): AudioLevel {
+    return readLevel(this.masterAnalyser);
   }
 
   getAudioContext(): AudioContext {
@@ -151,12 +210,17 @@ export class RealtimeAudioGraph {
     panNode.connect(outputGain);
     outputGain.connect(this.masterGain);
 
+    const analyser = this.audioContext.createAnalyser();
+    analyser.fftSize = METER_FFT_SIZE;
+    outputGain.connect(analyser);
+
     const trackNode: TrackNodes = {
       inputGain,
       effectChainInput,
       effectChainOutput,
       panNode,
       outputGain,
+      analyser,
       compressor,
       eqFilters,
       reverbNodes,
@@ -388,6 +452,7 @@ export class RealtimeAudioGraph {
       nodes.inputGain.disconnect();
       nodes.panNode.disconnect();
       nodes.outputGain.disconnect();
+      nodes.analyser.disconnect();
       if (nodes.compressor) nodes.compressor.disconnect();
       for (const filter of nodes.eqFilters) filter.disconnect();
       if (nodes.reverbNodes) {

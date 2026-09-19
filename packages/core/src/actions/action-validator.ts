@@ -272,6 +272,8 @@ export class ActionValidator {
       case "track/hide":
       case "track/mute":
       case "track/solo":
+      case "track/volume":
+      case "track/pan":
         if (
           !action.params.trackId ||
           typeof action.params.trackId !== "string"
@@ -329,6 +331,34 @@ export class ActionValidator {
             code: "INVALID_PARAMS",
             message: "Solo parameter must be a boolean",
             path: "params.solo",
+          });
+        }
+        // A non-finite gain reaches a GainNode and silences the track with no
+        // error, so it is rejected here rather than discovered at playback.
+        if (
+          action.type === "track/volume" &&
+          (typeof action.params.volume !== "number" ||
+            !Number.isFinite(action.params.volume) ||
+            action.params.volume < 0 ||
+            action.params.volume > 4)
+        ) {
+          errors.push({
+            code: "INVALID_PARAMS",
+            message: "Volume must be a finite number between 0 and 4",
+            path: "params.volume",
+          });
+        }
+        if (
+          action.type === "track/pan" &&
+          (typeof action.params.pan !== "number" ||
+            !Number.isFinite(action.params.pan) ||
+            action.params.pan < -1 ||
+            action.params.pan > 1)
+        ) {
+          errors.push({
+            code: "INVALID_PARAMS",
+            message: "Pan must be a finite number between -1 and 1",
+            path: "params.pan",
           });
         }
         break;

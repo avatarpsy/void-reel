@@ -569,26 +569,23 @@ export class PlaybackController {
       if (track.type !== "audio" && track.type !== "video") continue;
 
       /**
-       * ── TRACK LEVELS ARE NOT PERSISTED ANYWHERE, SO THERE IS NOTHING TO
-       *    READ HERE — and that is the gap, not this line. ────────────────────
+       * THE CHANNEL FADER, FROM THE PROJECT.
        *
-       * Unity and centre look like a shortcut and are not: `Track` carries
-       * id/type/name/clips/transitions/locked/hidden/muted/solo and NO volume,
-       * pan or effects. The AudioMixer's faders write to React state and
-       * straight to the live graph (`updateTrackVolume`), so a channel strip
-       * survives exactly as long as the session: not saved with the project,
-       * not seen by the exporter, gone on reload.
+       * This used to hard-code unity and centre, because `Track` had no volume
+       * or pan to read: the AudioMixer wrote to React state and straight into
+       * the live graph, so a fader move was audible in the preview, absent from
+       * the saved project and absent from the export. `Track.volume`/`Track.pan`
+       * now carry it, written through `track/volume` / `track/pan` so the move
+       * is undoable like every other edit.
        *
-       * The graph is ready for it — `updateTrackVolume`, `updateTrackPan` and
-       * `updateTrackEffects` all exist and work. What is missing is the field
-       * on `Track` and the write path behind the fader. Until then the mix has
-       * to live on CLIPS, which do persist, and which is where the automation
-       * above comes from.
+       * `?? 1` / `?? 0` is not defensive noise — every project written before
+       * those fields existed has neither, and a missing fader has to keep
+       * meaning "unity, centre" rather than "silent, hard left".
        */
       this.realtimeAudioGraph.createTrack({
         trackId: track.id,
-        volume: 1.0,
-        pan: 0,
+        volume: track.volume ?? 1.0,
+        pan: track.pan ?? 0,
         muted: track.muted,
         solo: track.solo,
         effects: [],

@@ -56,6 +56,28 @@ export interface Track {
     | "effects"
     | "ambience";
   readonly name: string;
+  /**
+   * CHANNEL FADER AND PAN, as the mixer sets them.
+   *
+   * Optional, because every project written before this has neither and a
+   * missing value must keep meaning UNITY/CENTRE rather than silence/hard-left.
+   *
+   * ── WHY THE MIX COULD NOT LIVE HERE UNTIL NOW ─────────────────────────────
+   * `Track` carried id/type/name/clips/transitions/locked/hidden/muted/solo and
+   * nothing else, so the AudioMixer's faders had nowhere to write. They pushed
+   * straight into the live audio graph and into React state, which meant a
+   * channel strip survived exactly as long as the session: correct in the
+   * preview, absent from the saved project, and absent from the export. Moving a
+   * fader and hearing it change is the strongest possible signal that the change
+   * took, and it was the one case where that signal was wrong.
+   *
+   * NOT UPSTREAM. Additive and optional, so a merge in either direction stays
+   * clean, and anything that does not know about these two fields behaves
+   * exactly as it did before.
+   */
+  readonly volume?: number;
+  /** -1 hard left, 0 centre, 1 hard right. See `volume`. */
+  readonly pan?: number;
   readonly clips: Clip[];
   readonly transitions: Transition[];
   readonly locked: boolean;

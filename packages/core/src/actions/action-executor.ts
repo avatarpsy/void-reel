@@ -672,6 +672,22 @@ export class ActionExecutor {
         );
         break;
       }
+
+      case "track/volume": {
+        const params = action.params as { trackId: string; volume: number };
+        timeline.tracks = timeline.tracks.map((t: MutableTrack) =>
+          t.id === params.trackId ? { ...t, volume: params.volume } : t,
+        );
+        break;
+      }
+
+      case "track/pan": {
+        const params = action.params as { trackId: string; pan: number };
+        timeline.tracks = timeline.tracks.map((t: MutableTrack) =>
+          t.id === params.trackId ? { ...t, pan: params.pan } : t,
+        );
+        break;
+      }
     }
   }
 

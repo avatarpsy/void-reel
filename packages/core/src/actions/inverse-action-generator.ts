@@ -277,6 +277,33 @@ export class InverseActionGenerator {
           solo: track.solo,
         });
       }
+
+      case "track/volume": {
+        const track = timeline.tracks.find(
+          (t) => t.id === action.params.trackId,
+        );
+        if (!track) return null;
+
+        // `?? 1` is the whole back-compat story: a track that never had a fader
+        // undoes back to unity, not to `undefined`, which would read as 0 gain
+        // the next time anything multiplied by it.
+        return this.createInverseAction(action, "track/volume", {
+          trackId: action.params.trackId,
+          volume: track.volume ?? 1,
+        });
+      }
+
+      case "track/pan": {
+        const track = timeline.tracks.find(
+          (t) => t.id === action.params.trackId,
+        );
+        if (!track) return null;
+
+        return this.createInverseAction(action, "track/pan", {
+          trackId: action.params.trackId,
+          pan: track.pan ?? 0,
+        });
+      }
     }
   }
 

@@ -93,7 +93,9 @@ export type TrackAction =
   | { type: "track/lock"; params: { trackId: string; locked: boolean } }
   | { type: "track/hide"; params: { trackId: string; hidden: boolean } }
   | { type: "track/mute"; params: { trackId: string; muted: boolean } }
-  | { type: "track/solo"; params: { trackId: string; solo: boolean } };
+  | { type: "track/solo"; params: { trackId: string; solo: boolean } }
+  | { type: "track/volume"; params: { trackId: string; volume: number } }
+  | { type: "track/pan"; params: { trackId: string; pan: number } };
 
 // Clip actions
 export type ClipAction =

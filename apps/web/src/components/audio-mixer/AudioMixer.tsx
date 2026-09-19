@@ -180,22 +180,40 @@ export const AudioMixer: React.FC<AudioMixerProps> = ({
       if (typeof graph.getMasterVolume === "function") {
         setMasterVolume(graph.getMasterVolume());
       }
-      if (typeof graph.getTrackVolume === "function" && typeof graph.getTrackPan === "function") {
-        setTrackVolumes((prev) => {
-          const next = { ...prev };
-          audioTracks.forEach((t) => {
-            next[t.id] = graph.getTrackVolume(t.id);
-          });
-          return next;
+      /**
+       * THE PROJECT IS THE SOURCE OF TRUTH; THE GRAPH IS THIS SESSION'S COPY.
+       *
+       * The graph only knows about a track once playback has built it, so on a
+       * freshly loaded project it answers unity for everything. Reading it first
+       * would therefore show every fader at 0 dB on a mix that is saved at
+       * something else — and then the first fader move would write that wrong
+       * value back. `Track.volume` is what was saved, so it wins; the graph is
+       * consulted only for a track the project has no value for yet.
+       */
+      setTrackVolumes((prev) => {
+        const next = { ...prev };
+        audioTracks.forEach((t) => {
+          next[t.id] =
+            typeof t.volume === "number"
+              ? t.volume
+              : (typeof graph.getTrackVolume === "function"
+                  ? graph.getTrackVolume(t.id)
+                  : 1);
         });
-        setTrackPans((prev) => {
-          const next = { ...prev };
-          audioTracks.forEach((t) => {
-            next[t.id] = graph.getTrackPan(t.id);
-          });
-          return next;
+        return next;
+      });
+      setTrackPans((prev) => {
+        const next = { ...prev };
+        audioTracks.forEach((t) => {
+          next[t.id] =
+            typeof t.pan === "number"
+              ? t.pan
+              : (typeof graph.getTrackPan === "function"
+                  ? graph.getTrackPan(t.id)
+                  : 0);
         });
-      }
+        return next;
+      });
     } catch {
       // Graph not ready yet
     }
@@ -212,8 +230,8 @@ export const AudioMixer: React.FC<AudioMixerProps> = ({
       trackId: track.id,
       trackName: track.name,
       trackType: track.type,
-      volume: trackVolumes[track.id] ?? 1,
-      pan: trackPans[track.id] ?? 0,
+      volume: trackVolumes[track.id] ?? track.volume ?? 1,
+      pan: trackPans[track.id] ?? track.pan ?? 0,
       muted: track.muted,
       solo: track.solo,
       peakLevel: trackLevels[track.id]?.peak ?? 0,
@@ -221,14 +239,33 @@ export const AudioMixer: React.FC<AudioMixerProps> = ({
     }));
   }, [audioTracks, trackVolumes, trackPans, trackLevels]);
 
-  // Handle volume change (Requirement 20.2) – applies to same graph used for playback
+  /**
+   * FADER MOVE — heard now, saved with the project, undoable.
+   *
+   * Three writes, and each is there for a different reason:
+   *  - the live graph, so the move is audible on the next buffer rather than
+   *    after a re-render;
+   *  - local state, so the fader tracks the pointer without waiting on a store
+   *    round trip;
+   *  - `setTrackVolume`, which goes through the ActionExecutor onto
+   *    `Track.volume` — the part that persists and that the export reads.
+   *
+   * Only the first two existed. A channel strip therefore survived exactly as
+   * long as the session: right in the preview, absent from the saved project,
+   * absent from the rendered file. Because the preview obeyed it, moving a
+   * fader gave every signal that the change had taken.
+   */
+  const setTrackVolumePersisted = useProjectStore((s) => s.setTrackVolume);
+  const setTrackPanPersisted = useProjectStore((s) => s.setTrackPan);
+
   const handleVolumeChange = useCallback((trackId: string, volume: number) => {
     setTrackVolumes((prev) => ({
       ...prev,
       [trackId]: volume,
     }));
     audioGraphRef.current?.updateTrackVolume(trackId, volume);
-  }, []);
+    void setTrackVolumePersisted?.(trackId, volume);
+  }, [setTrackVolumePersisted]);
 
   // Handle pan change (Requirement 20.3)
   const handlePanChange = useCallback((trackId: string, pan: number) => {
@@ -237,7 +274,8 @@ export const AudioMixer: React.FC<AudioMixerProps> = ({
       [trackId]: pan,
     }));
     audioGraphRef.current?.updateTrackPan(trackId, pan);
-  }, []);
+    void setTrackPanPersisted?.(trackId, pan);
+  }, [setTrackPanPersisted]);
 
   // Handle mute toggle (Requirement 20.5)
   const handleMuteToggle = useCallback(
@@ -267,48 +305,58 @@ export const AudioMixer: React.FC<AudioMixerProps> = ({
     audioGraphRef.current?.setMasterVolume(volume);
   }, []);
 
-  // Level metering – based on track volume and mute/solo
+  /**
+   * LEVEL METERING — read off the audio graph, not inferred from the faders.
+   *
+   * This used to compute `trackVolume * 0.4` on a timer and call it a level.
+   * Every strip therefore showed the same bar whenever the faders matched,
+   * whether the track was silent, clipping, or — as was usually the case —
+   * not playing at all. A meter that moves with the fader instead of the audio
+   * is worse than no meter: it is the one instrument you check to find out
+   * whether a mix decision worked, and it was answering from the decision
+   * rather than from the sound.
+   *
+   * `getTrackLevel` taps each track after volume, pan and effects, so what you
+   * read here is the track's real contribution to the mix. It covers VIDEO
+   * tracks as well as audio ones, and the music editor as well as the video
+   * editor, because both drive this same graph — a video clip's audio meters on
+   * its own strip exactly like a music bed does.
+   *
+   * rAF rather than a 100 ms timer: the browser suspends it in a background
+   * tab, so a hidden mixer stops polling instead of burning a frame's work
+   * forever. Peaks decay rather than snapping to zero, so a transient stays
+   * visible long enough to read.
+   */
   useEffect(() => {
     if (!visible) return;
+    let raf = 0;
+    const peakHold: Record<string, number> = {};
+    let masterHold = 0;
+    const DECAY = 0.92;
 
-    const interval = setInterval(() => {
-      const newLevels: Record<string, { peak: number; rms: number }> = {};
+    const tick = () => {
+      const graph = audioGraphRef.current;
+      const next: Record<string, { peak: number; rms: number }> = {};
 
       audioTracks.forEach((track) => {
-        const isAudible =
-          !track.muted && (!hasSoloedTracks || track.solo);
-        const trackVolume = trackVolumes[track.id] ?? 1;
-
-        if (isAudible && trackVolume > 0) {
-          // Calculate levels based on track volume
-          const baseLevel = trackVolume * 0.4;
-          newLevels[track.id] = {
-            peak: Math.min(1, baseLevel * 1.2),
-            rms: baseLevel,
-          };
-        } else {
-          newLevels[track.id] = { peak: 0, rms: 0 };
-        }
+        const live = graph?.getTrackLevel?.(track.id) ?? { peak: 0, rms: 0 };
+        const held = Math.max(live.peak, (peakHold[track.id] ?? 0) * DECAY);
+        peakHold[track.id] = held;
+        next[track.id] = { peak: Math.min(1, held), rms: Math.min(1, live.rms) };
       });
+      setTrackLevels(next);
 
-      setTrackLevels(newLevels);
+      const master = graph?.getMasterLevel?.() ?? { peak: 0, rms: 0 };
+      masterHold = Math.max(master.peak, masterHold * DECAY);
+      setMasterPeakLevel(Math.min(1, masterHold));
+      setMasterRmsLevel(Math.min(1, master.rms));
 
-      // Update master levels from active tracks
-      const activeLevels = Object.values(newLevels).filter((l) => l.rms > 0);
-      if (activeLevels.length > 0) {
-        const avgRms =
-          activeLevels.reduce((sum, l) => sum + l.rms, 0) / activeLevels.length;
-        const maxPeak = Math.max(...activeLevels.map((l) => l.peak));
-        setMasterRmsLevel(Math.min(1, avgRms * masterVolume));
-        setMasterPeakLevel(Math.min(1, maxPeak * masterVolume));
-      } else {
-        setMasterRmsLevel(0);
-        setMasterPeakLevel(0);
-      }
-    }, 100);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
 
-    return () => clearInterval(interval);
-  }, [visible, audioTracks, hasSoloedTracks, masterVolume, trackVolumes]);
+    return () => cancelAnimationFrame(raf);
+  }, [visible, audioTracks]);
 
   if (!visible) return null;
 

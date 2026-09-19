@@ -458,6 +458,8 @@ export interface ProjectState {
   restoreToSnapshot: (snapshotId: string) => Promise<ActionResult>;
 
   // Execute arbitrary action
+  setTrackVolume: (trackId: string, volume: number) => Promise<ActionResult>;
+  setTrackPan: (trackId: string, pan: number) => Promise<ActionResult>;
   executeAction: (action: Action) => Promise<ActionResult>;
 
   // Computed values
@@ -733,7 +735,13 @@ export const useProjectStore = create<ProjectState>()(
         };
         const result = await actionExecutor.execute(action, project);
         if (result.success) {
-          set({ project: { ...project } });
+          // modifiedAt: autosave is hash-gated on
+          // {id, modifiedAt, trackCount, clipCount, mediaCount} and the executor
+          // mutates the project IN PLACE, so an edit that changes none of those
+          // counts — a mute, a fader, a rename, a transition — hashed identically
+          // and was never written. It stayed right in memory until the next
+          // reload, then vanished. See computeHash in services/auto-save.ts.
+          set({ project: { ...project, modifiedAt: Date.now() } });
         }
         return result;
       },
@@ -749,7 +757,7 @@ export const useProjectStore = create<ProjectState>()(
         };
         const result = await actionExecutor.execute(action, project);
         if (result.success) {
-          set({ project: { ...project } });
+          set({ project: { ...project, modifiedAt: Date.now() } });
         }
         return result;
       },
@@ -960,7 +968,7 @@ export const useProjectStore = create<ProjectState>()(
         };
         const result = await actionExecutor.execute(action, project);
         if (result.success) {
-          set({ project: { ...project } });
+          set({ project: { ...project, modifiedAt: Date.now() } });
           deleteMediaBlob(mediaId).catch((err) =>
             console.warn("[ProjectStore] Failed to delete media blob:", err),
           );
@@ -1100,7 +1108,7 @@ export const useProjectStore = create<ProjectState>()(
         };
         const result = await actionExecutor.execute(action, project);
         if (result.success) {
-          set({ project: { ...project } });
+          set({ project: { ...project, modifiedAt: Date.now() } });
         }
         return result;
       },
@@ -1442,7 +1450,7 @@ export const useProjectStore = create<ProjectState>()(
         };
         const result = await actionExecutor.execute(action, project);
         if (result.success) {
-          set({ project: { ...project } });
+          set({ project: { ...project, modifiedAt: Date.now() } });
         }
         return result;
       },
@@ -1457,7 +1465,7 @@ export const useProjectStore = create<ProjectState>()(
         };
         const result = await actionExecutor.execute(action, project);
         if (result.success) {
-          set({ project: { ...project } });
+          set({ project: { ...project, modifiedAt: Date.now() } });
         }
         return result;
       },
@@ -1472,7 +1480,46 @@ export const useProjectStore = create<ProjectState>()(
         };
         const result = await actionExecutor.execute(action, project);
         if (result.success) {
-          set({ project: { ...project } });
+          set({ project: { ...project, modifiedAt: Date.now() } });
+        }
+        return result;
+      },
+
+      /**
+       * THE CHANNEL FADER — same shape as muteTrack, for the same reasons.
+       *
+       * Through the executor, so a fader move is undoable and lands on
+       * `Track.volume`, which is saved with the project and read by BOTH the
+       * preview graph and the export mixer. The AudioMixer used to keep this in
+       * React state and push it straight into the live audio graph: audible
+       * immediately, gone on reload, never in the rendered file.
+       */
+      setTrackVolume: async (trackId: string, volume: number) => {
+        const { project, actionExecutor } = get();
+        const action: Action = {
+          type: "track/volume",
+          id: uuidv4(),
+          timestamp: Date.now(),
+          params: { trackId, volume },
+        };
+        const result = await actionExecutor.execute(action, project);
+        if (result.success) {
+          set({ project: { ...project, modifiedAt: Date.now() } });
+        }
+        return result;
+      },
+
+      setTrackPan: async (trackId: string, pan: number) => {
+        const { project, actionExecutor } = get();
+        const action: Action = {
+          type: "track/pan",
+          id: uuidv4(),
+          timestamp: Date.now(),
+          params: { trackId, pan },
+        };
+        const result = await actionExecutor.execute(action, project);
+        if (result.success) {
+          set({ project: { ...project, modifiedAt: Date.now() } });
         }
         return result;
       },
@@ -1487,7 +1534,7 @@ export const useProjectStore = create<ProjectState>()(
         };
         const result = await actionExecutor.execute(action, project);
         if (result.success) {
-          set({ project: { ...project } });
+          set({ project: { ...project, modifiedAt: Date.now() } });
         }
         return result;
       },
@@ -1756,7 +1803,7 @@ export const useProjectStore = create<ProjectState>()(
         };
         const result = await actionExecutor.execute(action, project);
         if (result.success) {
-          set({ project: { ...project } });
+          set({ project: { ...project, modifiedAt: Date.now() } });
         }
         return result;
       },
@@ -1771,7 +1818,7 @@ export const useProjectStore = create<ProjectState>()(
         };
         const result = await actionExecutor.execute(action, project);
         if (result.success) {
-          set({ project: { ...project } });
+          set({ project: { ...project, modifiedAt: Date.now() } });
         }
         return result;
       },
@@ -1786,7 +1833,7 @@ export const useProjectStore = create<ProjectState>()(
         };
         const result = await actionExecutor.execute(action, project);
         if (result.success) {
-          set({ project: { ...project } });
+          set({ project: { ...project, modifiedAt: Date.now() } });
         }
         return result;
       },
@@ -1801,7 +1848,7 @@ export const useProjectStore = create<ProjectState>()(
         };
         const result = await actionExecutor.execute(action, project);
         if (result.success) {
-          set({ project: { ...project } });
+          set({ project: { ...project, modifiedAt: Date.now() } });
         }
         return result;
       },
@@ -1816,7 +1863,7 @@ export const useProjectStore = create<ProjectState>()(
         };
         const result = await actionExecutor.execute(action, project);
         if (result.success) {
-          set({ project: { ...project } });
+          set({ project: { ...project, modifiedAt: Date.now() } });
         }
         return result;
       },
@@ -1831,7 +1878,7 @@ export const useProjectStore = create<ProjectState>()(
         };
         const result = await actionExecutor.execute(action, project);
         if (result.success) {
-          set({ project: { ...project } });
+          set({ project: { ...project, modifiedAt: Date.now() } });
         }
         return result;
       },
@@ -1885,7 +1932,7 @@ export const useProjectStore = create<ProjectState>()(
         };
         const result = await actionExecutor.execute(action, project);
         if (result.success) {
-          set({ project: { ...project } });
+          set({ project: { ...project, modifiedAt: Date.now() } });
         }
         return result;
       },
@@ -1904,7 +1951,7 @@ export const useProjectStore = create<ProjectState>()(
         };
         const result = await actionExecutor.execute(action, project);
         if (result.success) {
-          set({ project: { ...project } });
+          set({ project: { ...project, modifiedAt: Date.now() } });
         }
         return result;
       },
@@ -1923,7 +1970,7 @@ export const useProjectStore = create<ProjectState>()(
         };
         const result = await actionExecutor.execute(action, project);
         if (result.success) {
-          set({ project: { ...project } });
+          set({ project: { ...project, modifiedAt: Date.now() } });
         }
         return result;
       },
@@ -2091,7 +2138,7 @@ export const useProjectStore = create<ProjectState>()(
           results.push(result);
         }
 
-        set({ project: { ...project } });
+        set({ project: { ...project, modifiedAt: Date.now() } });
         return results;
       },
 
@@ -2208,7 +2255,7 @@ export const useProjectStore = create<ProjectState>()(
           results.push(result);
         }
 
-        set({ project: { ...project } });
+        set({ project: { ...project, modifiedAt: Date.now() } });
         return (
           results[0] || {
             success: false,
@@ -3045,7 +3092,7 @@ export const useProjectStore = create<ProjectState>()(
         const { project, actionExecutor } = get();
         const result = await actionExecutor.execute(action, project);
         if (result.success) {
-          set({ project: { ...project } });
+          set({ project: { ...project, modifiedAt: Date.now() } });
         }
         return result;
       },
