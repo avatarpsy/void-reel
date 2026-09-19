@@ -132,3 +132,36 @@ describe("duckEnvelope", () => {
     expect(pts.every((p) => p.time >= 0 && p.time <= 30)).toBe(true);
   });
 });
+
+/**
+ * ── ROLE BEATS NAME ─────────────────────────────────────────────────────────
+ * Matching speech by track NAME is how a voice on "Audio 1" became invisible to
+ * the ducker: no error, just music that never ducked. `Track.role` (taken from
+ * upstream) says what a track IS. The name test stays for every project written
+ * before roles existed.
+ */
+describe("speechRangesFrom uses the track role", () => {
+  it("finds a dialogue track whatever it is called", () => {
+    const p = project([
+      { id: "t1", name: "Audio 1", role: "dialogue", clips: [{ startTime: 2, duration: 3 }] },
+    ]);
+    expect(speechRangesFrom(p, { mergeGapSec: 1.2 })).toEqual([{ start: 2, end: 5 }]);
+  });
+
+  /** A music track NAMED like speech must not be mistaken for it. */
+  it("ignores a non-dialogue track even when its name says otherwise", () => {
+    const p = project([
+      { id: "t2", name: "Dialogue stem", role: "music", clips: [{ startTime: 0, duration: 9 }] },
+    ]);
+    expect(speechRangesFrom(p, { mergeGapSec: 1.2 })).toEqual([]);
+  });
+
+  /** Roleless projects — all of them, before now — keep working on the name. */
+  it("falls back to the name when a track has no role", () => {
+    const p = project([
+      { id: "t3", name: "Narration", clips: [{ startTime: 1, duration: 2 }] },
+      { id: "t4", name: "Audio 1", clips: [{ startTime: 4, duration: 2 }] },
+    ]);
+    expect(speechRangesFrom(p, { mergeGapSec: 0.1 })).toEqual([{ start: 1, end: 3 }]);
+  });
+});

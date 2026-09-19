@@ -2248,8 +2248,18 @@ function App() {
               break;
             }
             const store = useProjectStore.getState();
+            /**
+             * The tool's vocabulary, mapped onto UPSTREAM's `Track.role` union
+             * and the name a person reads. Two columns because they answer
+             * different questions: `role` is what code matches on (auto-duck
+             * looks for dialogue), the name is what the timeline shows.
+             *
+             * `voice` → `dialogue` and `sfx` → `effects` are the only renames;
+             * the tool's enum shipped first and stays as it is, because a
+             * caller should not have to learn our storage names.
+             */
             const ROLE_TRACK_NAME: Record<string, string> = {
-              voice: "Dialogue",     // matches auto-duck's speech test
+              voice: "Dialogue",
               music: "Music",
               sfx: "SFX",
               ambience: "Ambience",  // an sfx bed that runs under a whole scene
@@ -2257,6 +2267,16 @@ function App() {
               image: "Images",
               text: "Captions",
               graphics: "Graphics",
+            };
+            const ROLE_TRACK_ROLE: Record<string, string> = {
+              voice: "dialogue",
+              music: "music",
+              sfx: "effects",
+              ambience: "ambience",
+              text: "captions",
+              video: "general",
+              image: "general",
+              graphics: "general",
             };
             const role = typeof (msg as any).role === "string"
               ? (msg as any).role.trim().toLowerCase() : "";
@@ -2352,7 +2372,7 @@ function App() {
                         && !sameRole.some((s: any) => s.id === t.id));
                     if (fresh) {
                       targetTrackId = fresh.id;
-                      try { useProjectStore.getState().renameTrack(fresh.id, roleName); }
+                      try { useProjectStore.getState().renameTrack(fresh.id, roleName, ROLE_TRACK_ROLE[role] as never); }
                       catch { /* non-fatal */ }
                     }
                   }
@@ -2409,7 +2429,7 @@ function App() {
               const isDefaultName = !cur?.name
                 || /^(audio|video|image|text|graphics)\s*\d*$/i.test(String(cur.name).trim());
               if (cur && isDefaultName && cur.name !== wantName) {
-                try { useProjectStore.getState().renameTrack(targetTrackId, wantName); }
+                try { useProjectStore.getState().renameTrack(targetTrackId, wantName, ROLE_TRACK_ROLE[role] as never); }
                 catch { /* non-fatal: the clip still belongs there */ }
               }
             }

@@ -89,8 +89,25 @@ export function speechRangesFrom(
     if (opts.onlyTrackId) {
       if (t.id !== opts.onlyTrackId) continue;
     } else {
-      const hay = `${String(t.id ?? "")} ${String(t.name ?? "")}`;
-      if (!VOICE_HINT.test(hay)) continue;
+      /**
+       * ROLE FIRST, NAME ONLY AS A FALLBACK.
+       *
+       * Matching on text was how a voice sitting on "Audio 1" became invisible
+       * to this — no error, just music that never ducked. `Track.role` says
+       * what a track IS, so a dialogue track is found whatever it is called and
+       * a music track called "Dialogue stem" is not mistaken for one.
+       *
+       * The name test stays for every project written before roles existed,
+       * which is all of them. Same shape upstream uses for captions:
+       * `track.role === "captions" || track.name === "Captions"`.
+       */
+      const role = String(t.role ?? "");
+      if (role) {
+        if (role !== "dialogue") continue;
+      } else {
+        const hay = `${String(t.id ?? "")} ${String(t.name ?? "")}`;
+        if (!VOICE_HINT.test(hay)) continue;
+      }
     }
     for (const c of t.clips ?? []) {
       if (c?.muted === true) continue;

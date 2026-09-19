@@ -144,7 +144,7 @@ export interface ProjectState {
   hideTrack: (trackId: string, hidden: boolean) => Promise<ActionResult>;
   muteTrack: (trackId: string, muted: boolean) => Promise<ActionResult>;
   soloTrack: (trackId: string, solo: boolean) => Promise<ActionResult>;
-  renameTrack: (trackId: string, name: string) => void;
+  renameTrack: (trackId: string, name: string, role?: Track["role"]) => void;
   getTrack: (trackId: string) => Track | undefined;
 
   // Clip actions
@@ -1393,7 +1393,7 @@ export const useProjectStore = create<ProjectState>()(
         return result;
       },
 
-      renameTrack: (trackId: string, name: string) => {
+      renameTrack: (trackId: string, name: string, role?: Track["role"]) => {
         const { project } = get();
         const trimmed = name.trim();
         if (!trimmed) return;
@@ -1403,7 +1403,13 @@ export const useProjectStore = create<ProjectState>()(
             timeline: {
               ...project.timeline,
               tracks: project.timeline.tracks.map((t) =>
-                t.id === trackId ? { ...t, name: trimmed } : t
+                // `role` rides along because naming and meaning are decided
+                // at the same moment, and a name without its role leaves every
+                // reader matching on text again — which is how a voice on
+                // "Audio 1" became invisible to auto-duck.
+                t.id === trackId
+                  ? { ...t, name: trimmed, ...(role ? { role } : {}) }
+                  : t
               ),
             },
             modifiedAt: Date.now(),

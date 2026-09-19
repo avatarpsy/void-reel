@@ -27,6 +27,34 @@ export interface TimelineBeatAnalysis {
 export interface Track {
   readonly id: string;
   readonly type: "video" | "audio" | "image" | "text" | "graphics";
+  /**
+   * What this track is FOR, as opposed to what kind of media it holds.
+   *
+   * ── TAKEN FROM UPSTREAM, DELIBERATELY ───────────────────────────────────────
+   * Same field, same union, same spelling as `upstream/main` — "editorial
+   * meaning used for naming, captions, and audio mixing". We had reinvented it
+   * as a naming convention and would have ended up with two vocabularies for
+   * one idea; this is theirs, so a cherry-pick in either direction stays clean.
+   *
+   * ── WHY A TYPE CANNOT DO THIS JOB ───────────────────────────────────────────
+   * `type` is what the timeline can hold. Dialogue, an ambience bed and a score
+   * are all `audio`, which is why a new track can only ever be called "Audio 2"
+   * and why anything downstream had to guess from the NAME. `auto-duck` finds
+   * speech by matching the name, so a voice on "Audio 1" was invisible to it and
+   * the music never ducked — no error, just a mix that was quietly wrong.
+   * Upstream hit the same wall on captions and answers it the same way:
+   * `track.role === "captions" || track.name === "Captions"`.
+   *
+   * Optional, because every project written before this has none, and a missing
+   * role must keep meaning "fall back to the name" rather than "not that kind".
+   */
+  readonly role?:
+    | "general"
+    | "captions"
+    | "dialogue"
+    | "music"
+    | "effects"
+    | "ambience";
   readonly name: string;
   readonly clips: Clip[];
   readonly transitions: Transition[];
