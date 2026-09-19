@@ -2248,6 +2248,18 @@ function App() {
               break;
             }
             const store = useProjectStore.getState();
+            const ROLE_TRACK_NAME: Record<string, string> = {
+              voice: "Dialogue",     // matches auto-duck's speech test
+              music: "Music",
+              sfx: "SFX",
+              ambience: "Ambience",  // an sfx bed that runs under a whole scene
+              video: "Video",
+              image: "Images",
+              text: "Captions",
+              graphics: "Graphics",
+            };
+            const role = typeof (msg as any).role === "string"
+              ? (msg as any).role.trim().toLowerCase() : "";
             let startTime: number = isAppend ? 0 : (rawStart as number);
             // Resolve the target track. Explicit trackId wins; otherwise
             // auto-pick a type-compatible track with a free slot at
@@ -2304,9 +2316,50 @@ function App() {
                 ? duration
                 : (Number(media.metadata?.duration) || Number(media.duration) || 5);
               const tracks = store.project.timeline?.tracks ?? [];
-              const free = tracks.find((t: any) =>
-                wantTypes.includes(t.type) &&
-                !(t.clips ?? []).some((c: any) => c.startTime < startTime + estDur && c.startTime + c.duration > startTime));
+              const vacant = (t: any) => !(t.clips ?? []).some(
+                (c: any) => c.startTime < startTime + estDur && c.startTime + c.duration > startTime);
+              /**
+               * ── A ROLE ROUTES, IT DOES NOT ONLY LABEL ────────────────────
+               *
+               * Naming a track was not enough. The picker below takes the first
+               * type-compatible track with a free slot, so a foley hit dropped
+               * into the gap between two ambience beds and landed on the
+               * Ambience track — correct by type, wrong by kind, and it breaks
+               * the one rule that makes the rest work: every later decision is
+               * PER TRACK. You duck a track, reverb a track, ride a track. Four
+               * kinds sharing one can only be changed together.
+               *
+               * So a clip that says what it IS goes to the track for that kind,
+               * and gets a new one when that track is busy rather than
+               * borrowing a neighbour's. Falls through to the ordinary picker
+               * when no role was given, which is every existing caller.
+               */
+              const roleName = ROLE_TRACK_NAME[role] ?? "";
+              if (roleName) {
+                const sameRole = tracks.filter(
+                  (t: any) => wantTypes.includes(t.type) && t.name === roleName);
+                const freeSameRole = sameRole.find(vacant);
+                if (freeSameRole) {
+                  targetTrackId = freeSameRole.id;
+                } else {
+                  // A track of this kind exists but is busy here, or there is
+                  // none yet. Either way this clip needs its own.
+                  const trackType = (mType === "audio" ? "audio" : mType === "image" ? "image" : "video") as any;
+                  const tRes = await store.addTrack(trackType);
+                  if (tRes.success) {
+                    const fresh = useProjectStore.getState().project.timeline?.tracks?.find(
+                      (t: any) => t.type === trackType && (t.clips ?? []).length === 0
+                        && !sameRole.some((s: any) => s.id === t.id));
+                    if (fresh) {
+                      targetTrackId = fresh.id;
+                      try { useProjectStore.getState().renameTrack(fresh.id, roleName); }
+                      catch { /* non-fatal */ }
+                    }
+                  }
+                }
+              }
+              const free = targetTrackId ? null : tracks.find((t: any) =>
+                wantTypes.includes(t.type) && vacant(t));
               if (free) {
                 targetTrackId = free.id;
               } else {
@@ -2349,18 +2402,6 @@ function App() {
              * ONLY RENAMES A DEFAULT. A track the user has already named is
              * theirs, and an agent placing a clip must not relabel their work.
              */
-            const ROLE_TRACK_NAME: Record<string, string> = {
-              voice: "Dialogue",     // matches auto-duck's speech test
-              music: "Music",
-              sfx: "SFX",
-              ambience: "Ambience",  // an sfx bed that runs under a whole scene
-              video: "Video",
-              image: "Images",
-              text: "Captions",
-              graphics: "Graphics",
-            };
-            const role = typeof (msg as any).role === "string"
-              ? (msg as any).role.trim().toLowerCase() : "";
             const wantName = ROLE_TRACK_NAME[role] ?? "";
             if (wantName) {
               const cur = useProjectStore.getState().project.timeline?.tracks
