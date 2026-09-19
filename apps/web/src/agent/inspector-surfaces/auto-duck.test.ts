@@ -165,3 +165,119 @@ describe("speechRangesFrom uses the track role", () => {
     expect(speechRangesFrom(p, { mergeGapSec: 0.1 })).toEqual([{ start: 1, end: 3 }]);
   });
 });
+
+/**
+ * ── THE ONE-CLIP EPISODE ────────────────────────────────────────────────────
+ *
+ * A generated audio drama arrives as a single voice clip covering the whole
+ * episode. Ducking from clip extents then produces a flat gain — the music
+ * never dips for a line — and that is what made dialogue hard to hear. These
+ * pin the waveform path that fixes it.
+ */
+import { speechFromSilence, voiceClipsFrom, mergeRanges } from "./auto-duck";
+
+describe("speechFromSilence", () => {
+  const clip = { startTime: 2, duration: 10, inPoint: 0 };
+
+  it("inverts silence into speech, in TIMELINE time", () => {
+    // Quiet from 3-4s and 6-7s of the media => speech 0-3, 4-6, 7-10.
+    expect(
+      speechFromSilence([{ start: 3, end: 4 }, { start: 6, end: 7 }], clip),
+    ).toEqual([
+      { start: 2, end: 5 },
+      { start: 6, end: 8 },
+      { start: 9, end: 12 },
+    ]);
+  });
+
+  it("offsets by inPoint, so a trimmed clip still lines up", () => {
+    expect(
+      speechFromSilence([{ start: 5, end: 6 }], {
+        startTime: 100,
+        duration: 4,
+        inPoint: 4,
+      }),
+    ).toEqual([
+      { start: 100, end: 101 },
+      { start: 102, end: 104 },
+    ]);
+  });
+
+  it("ignores silence outside the part of the media the clip plays", () => {
+    // Silence at 20-30s cannot matter to a clip playing 0-10s.
+    expect(speechFromSilence([{ start: 20, end: 30 }], clip)).toEqual([
+      { start: 2, end: 12 },
+    ]);
+  });
+
+  it("drops blips too short to be a line, so the music does not pump", () => {
+    // 0-0.05 is a click between two silences; it must not become a passage.
+    const r = speechFromSilence(
+      [{ start: 0.05, end: 3 }, { start: 3.05, end: 10 }],
+      clip,
+    );
+    expect(r).toEqual([]);
+  });
+
+  it("returns the whole clip when nothing is silent", () => {
+    expect(speechFromSilence([], clip)).toEqual([{ start: 2, end: 12 }]);
+  });
+
+  it("returns nothing when the clip is silent end to end", () => {
+    expect(speechFromSilence([{ start: 0, end: 10 }], clip)).toEqual([]);
+  });
+
+  it("THE REGRESSION: one long clip yields many passages, not one flat range", () => {
+    // Four lines with pauses between them, as a single 20s clip.
+    const silences = [
+      { start: 4, end: 4.8 },
+      { start: 9, end: 9.9 },
+      { start: 14, end: 14.7 },
+    ];
+    const speech = speechFromSilence(silences, {
+      startTime: 0,
+      duration: 20,
+      inPoint: 0,
+    });
+    expect(speech).toHaveLength(4);
+
+    // And at the analysis default (0.45s) those pauses SURVIVE the merge, so
+    // the envelope can lift between lines. At the old 1.2s default they would
+    // all fold into one range — which is the flat duck this fixes.
+    expect(mergeRanges(speech, 0.45)).toHaveLength(4);
+    expect(mergeRanges(speech, 1.2)).toHaveLength(1);
+  });
+});
+
+describe("voiceClipsFrom", () => {
+  const project = {
+    timeline: {
+      tracks: [
+        {
+          id: "t-dlg",
+          role: "dialogue",
+          name: "Dialogue",
+          clips: [
+            { id: "c1", mediaId: "m1", startTime: 2, duration: 70, inPoint: 0, outPoint: 70 },
+          ],
+        },
+        {
+          id: "t-mus",
+          role: "music",
+          name: "Music",
+          clips: [{ id: "c2", mediaId: "m2", startTime: 0, duration: 40, inPoint: 0, outPoint: 40 }],
+        },
+      ],
+    },
+  };
+
+  it("returns the voice clip with what the waveform path needs", () => {
+    const v = voiceClipsFrom(project, {});
+    expect(v).toHaveLength(1);
+    expect(v[0]).toMatchObject({ clipId: "c1", mediaId: "m1", startTime: 2, inPoint: 0 });
+  });
+
+  it("still excludes the clip's own track", () => {
+    expect(voiceClipsFrom(project, { excludeTrackId: "t-dlg" })).toEqual([]);
+  });
+});

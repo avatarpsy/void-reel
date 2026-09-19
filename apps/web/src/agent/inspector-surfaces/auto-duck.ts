@@ -25,11 +25,23 @@
  * So: the agent picks the music clip and the depth; this computes the envelope.
  *
  * ── HOW IT DECIDES WHERE THE VOICE IS ───────────────────────────────────────
- * From the TIMELINE, not from the audio signal. Every speech clip on the
- * timeline already declares exactly when it plays, so a waveform analysis
- * would be a slower, less reliable way to learn something already known. It
- * also means ducking works before any audio has been decoded — which matters,
- * because a delegated production ducks immediately after placing narration.
+ * From the WAVEFORM by default, and from the timeline when it cannot.
+ *
+ * This used to read the timeline only, on the reasoning that every speech clip
+ * already declares when it plays, so analysing audio would be a slower way to
+ * learn a known thing. That holds only while there is roughly one clip per line.
+ * A generated audio episode is the opposite: four characters, seventy seconds,
+ * ONE clip. "Duck under the voice" then means duck from the first word to the
+ * last — a flat gain reduction that never dips, so the score sits at a constant
+ * level over every line. It reported success every time, and the music never
+ * moved once.
+ *
+ * So the default is now to run `AudioEngine.detectSilence` over the voice clip
+ * (the same analysis behind "cut the dead air") and invert it to get the real
+ * lines. When the media is not decodable here — bytes still only in the browser,
+ * a codec the AudioContext refuses — it falls back to clip extents and SAYS so
+ * in its note, so a downgrade is never silent. `analyze: false` asks for the old
+ * behaviour explicitly.
  *
  * ── WHAT IT WRITES ──────────────────────────────────────────────────────────
  * Native `clip.keyframes` rows with `property === "volume"`, through the very
@@ -62,6 +74,11 @@ export interface AutoDuckConfig {
   againstTrackId?: string;
   /** Clear ducking instead of applying it. */
   clear?: boolean;
+  /** Read the voice track's WAVEFORM to find the real lines instead of using
+   *  the clip's start/end. Default true. Set false for the old behaviour. */
+  analyze?: boolean;
+  /** Anything under this is a pause, not a line. Default -45 dBFS. */
+  silenceThresholdDb?: number;
 }
 
 /** Tracks whose clips count as "voice" for the purpose of ducking. */
@@ -79,7 +96,38 @@ export function speechRangesFrom(
   project: { timeline?: { tracks?: Array<Record<string, unknown>> } },
   opts: { mergeGapSec: number; excludeTrackId?: string; onlyTrackId?: string },
 ): Range[] {
-  const raw: Range[] = [];
+  return mergeRanges(
+    voiceClipsFrom(project, opts).map((c) => ({
+      start: c.startTime,
+      end: c.startTime + c.duration,
+    })),
+    opts.mergeGapSec,
+  );
+}
+
+/** One voice clip, with what is needed to go and read its audio. */
+export interface VoiceClip {
+  clipId: string;
+  mediaId: string;
+  startTime: number;
+  duration: number;
+  inPoint: number;
+  outPoint: number;
+}
+
+/**
+ * The voice CLIPS themselves, before they are flattened to ranges.
+ *
+ * Same track selection as `speechRangesFrom` — which is now written in terms of
+ * this — because the waveform path needs the clip's `mediaId` and `inPoint` to
+ * map analysis time back onto the timeline, and a second copy of the role/name
+ * rules would drift from this one the first time either changed.
+ */
+export function voiceClipsFrom(
+  project: { timeline?: { tracks?: Array<Record<string, unknown>> } },
+  opts: { excludeTrackId?: string; onlyTrackId?: string },
+): VoiceClip[] {
+  const out: VoiceClip[] = [];
   for (const tr of project.timeline?.tracks ?? []) {
     const t = tr as any;
     if (opts.excludeTrackId && t.id === opts.excludeTrackId) continue;
@@ -114,18 +162,33 @@ export function speechRangesFrom(
       const start = Number(c?.startTime);
       const dur = Number(c?.duration);
       if (!Number.isFinite(start) || !Number.isFinite(dur) || dur <= 0) continue;
-      raw.push({ start, end: start + dur });
+      const inPoint = Number(c?.inPoint);
+      const outPoint = Number(c?.outPoint);
+      out.push({
+        clipId: String(c?.id ?? ""),
+        mediaId: String(c?.mediaId ?? ""),
+        startTime: start,
+        duration: dur,
+        inPoint: Number.isFinite(inPoint) ? inPoint : 0,
+        outPoint: Number.isFinite(outPoint)
+          ? outPoint
+          : (Number.isFinite(inPoint) ? inPoint : 0) + dur,
+      });
     }
   }
-  if (raw.length === 0) return [];
+  return out;
+}
 
-  raw.sort((a, b) => a.start - b.start);
+/** Sort, then fold together anything closer than `mergeGapSec`. */
+export function mergeRanges(raw: Range[], mergeGapSec: number): Range[] {
+  if (raw.length === 0) return [];
+  raw = raw.map((r) => ({ ...r })).sort((a, b) => a.start - b.start);
   const merged: Range[] = [raw[0]];
   for (const r of raw.slice(1)) {
     const last = merged[merged.length - 1];
     // A gap shorter than mergeGapSec is a breath between sentences, not a
     // place to bring the music back up and drop it again.
-    if (r.start - last.end <= opts.mergeGapSec) {
+    if (r.start - last.end <= mergeGapSec) {
       last.end = Math.max(last.end, r.end);
     } else {
       merged.push({ ...r });
@@ -135,15 +198,89 @@ export function speechRangesFrom(
 }
 
 /**
+ * WHERE THE VOICE ACTUALLY IS, from the waveform rather than the clip edges.
+ *
+ * ── WHY THE CLIP RECTANGLE IS NOT ENOUGH ────────────────────────────────────
+ * `speechRangesFrom` treats a voice clip as speech from its first frame to its
+ * last, which is right when a project has one clip per line and hopeless when it
+ * has one clip for the whole episode. An audio drama generated in a single pass
+ * is exactly that: 72 seconds of four characters with pauses between every line,
+ * arriving as ONE clip. Ducking "under the voice" then means ducking for the
+ * entire episode — a flat gain reduction, never a dip, so the score sits at a
+ * constant level over every word and the dialogue fights it the whole way.
+ * Measured: the music never moved once, and lines were genuinely hard to hear.
+ *
+ * `AudioEngine.detectSilence` already finds the quiet stretches inside a buffer
+ * — it is what "cut the dead air" runs on. Inverting its answer gives the real
+ * speech intervals, and those go into the SAME `duckEnvelope` below, so attack,
+ * release, lead, tail and merge behave exactly as they always have and the 18
+ * tests that pin that geometry still describe it.
+ *
+ * Pure, and takes the silence list as an argument, so the mapping can be checked
+ * without decoding anything.
+ *
+ * @param silent   quiet ranges in MEDIA time, as detectSilence returns them
+ * @param clip     the voice clip those ranges came from
+ * @returns        speech ranges in ABSOLUTE timeline seconds
+ */
+export function speechFromSilence(
+  silent: Range[],
+  clip: { startTime: number; duration: number; inPoint: number },
+  opts: { minSpeechSec?: number } = {},
+): Range[] {
+  const minSpeech = opts.minSpeechSec ?? 0.12;
+  const inPoint = clip.inPoint;
+  const outPoint = inPoint + clip.duration;
+
+  // Only the silence that falls inside the part of the media this clip plays.
+  const inside = silent
+    .map((s) => ({
+      start: Math.max(s.start, inPoint),
+      end: Math.min(s.end, outPoint),
+    }))
+    .filter((s) => s.end > s.start)
+    .sort((a, b) => a.start - b.start);
+
+  // Speech is the complement of silence across [inPoint, outPoint].
+  const speechMedia: Range[] = [];
+  let cursor = inPoint;
+  for (const s of inside) {
+    if (s.start > cursor) speechMedia.push({ start: cursor, end: s.start });
+    cursor = Math.max(cursor, s.end);
+  }
+  if (cursor < outPoint) speechMedia.push({ start: cursor, end: outPoint });
+
+  return speechMedia
+    // A blip shorter than a syllable is a click or a breath, not a line; ducking
+    // for it is the pumping this is supposed to avoid.
+    .filter((r) => r.end - r.start >= minSpeech)
+    // Media time → timeline time. The clip plays `inPoint` at `startTime`.
+    .map((r) => ({
+      start: clip.startTime + (r.start - inPoint),
+      end: clip.startTime + (r.end - inPoint),
+    }));
+}
+
+/**
  * Turn speech ranges into a volume envelope in CLIP-LOCAL seconds.
  *
  * Pure, and separated from the store on purpose — the geometry is the part
  * that has to be right, and it can be checked without a project.
  */
+/**
+ * What the envelope geometry needs — and nothing about HOW the speech ranges
+ * were found. Keeping analysis options out of here is what lets the waveform
+ * path reuse this function untouched.
+ */
+export type DuckGeometry = Pick<
+  Required<AutoDuckConfig>,
+  "duckTo" | "attackSec" | "releaseSec" | "leadSec" | "tailSec" | "mergeGapSec"
+>;
+
 export function duckEnvelope(
   speech: Range[],
   music: { startTime: number; duration: number },
-  cfg: Required<Omit<AutoDuckConfig, "clear" | "againstTrackId">>,
+  cfg: DuckGeometry,
 ): Array<{ time: number; value: number }> {
   const clipStart = music.startTime;
   const clipEnd = music.startTime + music.duration;
@@ -211,7 +348,17 @@ const DEFAULTS: Required<Omit<AutoDuckConfig, "clear" | "againstTrackId">> = {
   releaseSec: 0.5,
   leadSec: 0.15,
   tailSec: 0.25,
-  mergeGapSec: 1.2,
+  /**
+   * 0.45s, not the 1.2s a clip-per-line project wants.
+   *
+   * With waveform analysis the gaps are REAL pauses between spoken lines, and
+   * those run 0.4-0.9s in ordinary delivery. Folding them away at 1.2s would
+   * hand back the same flat duck the analysis exists to avoid; 0.45s lets the
+   * score lift between lines and still refuses to pump between words.
+   */
+  mergeGapSec: 0.45,
+  analyze: true,
+  silenceThresholdDb: -45,
 };
 
 export const surface: InspectorSurface<AutoDuckConfig> = {
@@ -233,6 +380,8 @@ export const surface: InspectorSurface<AutoDuckConfig> = {
       mergeGapSec: { type: "number", minimum: 0, maximum: 10, description: "Treat voice clips closer than this as one passage, so the music does not pump between sentences. Default 1.2." },
       againstTrackId: { type: "string", description: "Duck against ONE track id instead of auto-detecting every narration/dialogue track. Rarely needed." },
       clear: { type: "boolean", description: "Remove volume automation from this clip instead of ducking." },
+      analyze: { type: "boolean", description: "Find the real lines by reading the voice track's waveform rather than using the clip's start/end. Default true — required when the whole episode is ONE voice clip, which would otherwise duck flat from first word to last." },
+      silenceThresholdDb: { type: "number", minimum: -90, maximum: 0, description: "Below this is a pause, not a line. Default -45." },
     },
     additionalProperties: false,
   },
@@ -262,13 +411,88 @@ export const surface: InspectorSurface<AutoDuckConfig> = {
       leadSec: typeof config.leadSec === "number" ? Math.max(0, config.leadSec) : DEFAULTS.leadSec,
       tailSec: typeof config.tailSec === "number" ? Math.max(0, config.tailSec) : DEFAULTS.tailSec,
       mergeGapSec: typeof config.mergeGapSec === "number" ? Math.max(0, config.mergeGapSec) : DEFAULTS.mergeGapSec,
+      analyze: config.analyze !== false,
+      silenceThresholdDb:
+        typeof config.silenceThresholdDb === "number" ? config.silenceThresholdDb : DEFAULTS.silenceThresholdDb,
     };
 
-    const speech = speechRangesFrom(ctx.project as never, {
-      mergeGapSec: cfg.mergeGapSec,
-      excludeTrackId: clip.trackId,
-      onlyTrackId: config.againstTrackId,
-    });
+    /**
+     * LISTEN TO THE VOICE TRACK IF WE CAN, AND FALL BACK TO ITS EDGES IF NOT.
+     *
+     * Analysis is the default because the case it fixes — one long voice clip —
+     * is the normal shape for a generated episode, and the failure it produces
+     * (a flat gain that never dips) looks like working ducking right up until
+     * someone cannot hear a line. `analyze: false` keeps the old rectangle
+     * behaviour for anyone who wants it.
+     *
+     * Every failure path here falls back rather than throwing: media kept only
+     * in the browser, a codec the AudioContext will not decode, an OfflineAudio
+     * context that will not start. A duck from clip edges is worse than one from
+     * the waveform and far better than no duck at all — and the note says which
+     * one you got, so it is never a silent downgrade.
+     */
+    const analyse = config.analyze !== false;
+    let speech: Range[] = [];
+    let speechSource = "clip extents";
+
+    if (analyse) {
+      try {
+        const voices = voiceClipsFrom(ctx.project as never, {
+          excludeTrackId: clip.trackId,
+          onlyTrackId: config.againstTrackId,
+        });
+        const store = useProjectStore.getState() as any;
+        const engine = (await import("@openreel/core")).getAudioEngine();
+        const ac: AudioContext = new AudioContext();
+        try {
+          const { rewriteToProxy } = await import("@openreel/core");
+          const found: Range[] = [];
+          for (const v of voices) {
+            const media = store.getMediaItem?.(v.mediaId);
+            /**
+             * GENERATED NARRATION HAS NO BLOB.
+             *
+             * Voidspace TTS, music and Kie renders arrive as a remote
+             * `originalUrl` with `blob: null` — the bytes were never in
+             * IndexedDB, or autosave stripped them (autosave is JSON). Reading
+             * only `blob` would therefore find nothing for precisely the clip
+             * this analysis exists to inspect, and fall back to the flat duck
+             * without a word. Playback and export both hydrate from
+             * `originalUrl` through the CORS proxy; so does this, for the same
+             * reason — most of those hosts serve no CORS headers and a direct
+             * cross-origin fetch is hard-blocked.
+             */
+            let bytes: ArrayBuffer | null = null;
+            if (media?.blob instanceof Blob && media.blob.size > 0) {
+              bytes = await media.blob.arrayBuffer();
+            } else if (media?.originalUrl) {
+              const resp = await fetch(rewriteToProxy(media.originalUrl), { mode: "cors" });
+              if (resp.ok) bytes = await resp.arrayBuffer();
+            }
+            if (!bytes || bytes.byteLength === 0) continue;
+            const buf = await ac.decodeAudioData(bytes);
+            const silent = engine.detectSilence(buf, cfg.silenceThresholdDb);
+            found.push(...speechFromSilence(silent, v));
+          }
+          if (found.length > 0) {
+            speech = mergeRanges(found, cfg.mergeGapSec);
+            speechSource = "waveform";
+          }
+        } finally {
+          try { await ac.close(); } catch { /* already closed */ }
+        }
+      } catch {
+        // fall through to clip extents
+      }
+    }
+
+    if (speech.length === 0) {
+      speech = speechRangesFrom(ctx.project as never, {
+        mergeGapSec: cfg.mergeGapSec,
+        excludeTrackId: clip.trackId,
+        onlyTrackId: config.againstTrackId,
+      });
+    }
     if (speech.length === 0) {
       // Say so rather than writing a flat envelope that looks like success.
       return {
@@ -282,16 +506,37 @@ export const surface: InspectorSurface<AutoDuckConfig> = {
       return { ok: false, error: "no voice overlaps this clip — nothing to duck against here" };
     }
 
+    /**
+     * DUCK RELATIVE TO THE CLIP'S OWN LEVEL, NOT TO UNITY.
+     *
+     * `duckEnvelope` is normalised: 1 where the music plays out, `duckTo` where
+     * the voice is. That is the right shape to test and the wrong thing to write
+     * directly, because a volume KEYFRAME overrides `clip.volume` rather than
+     * scaling it. So ducking a score already mixed to 0.2 wrote 1.0 between the
+     * lines — the music jumping to full level in every gap, 14 dB above where
+     * the mix had it, and only in the gaps, which reads as the track surging
+     * rather than as a fault.
+     *
+     * Multiplying by the clip's base gain gives "duck THIS clip to 25% of where
+     * it sits", which is what the control says and what a mixer would expect.
+     */
+    const baseGain = Number.isFinite(Number(raw?.volume)) ? Number(raw.volume) : 1;
     const engine = new KeyframeEngine();
     const fresh = points.map((p) =>
-      engine.addKeyframe(clip.id, "volume", p.time, p.value, "linear"),
+      engine.addKeyframe(
+        clip.id,
+        "volume",
+        p.time,
+        Number((p.value * baseGain).toFixed(4)),
+        "linear",
+      ),
     );
     const merged = [...others, ...fresh].sort((a, b) => a.time - b.time);
     useProjectStore.getState().updateClipKeyframes(clip.id, merged);
 
     return {
       ok: true,
-      note: `ducked to ${Math.round(cfg.duckTo * 100)}% under ${speech.length} voice passage(s), ${points.length} keyframes`,
+      note: `ducked to ${Math.round(cfg.duckTo * 100)}% of ${baseGain} under ${speech.length} voice passage(s) found from ${speechSource}, ${points.length} keyframes`,
     };
   },
 
