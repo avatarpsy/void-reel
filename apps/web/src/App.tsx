@@ -2325,6 +2325,39 @@ function App() {
                 targetTrackId = fresh.id;
               }
             }
+            /**
+             * ── NAME THE TRACK, AT THE MOMENT WE KNOW WHAT IT HOLDS ──────────
+             *
+             * `addTrack` names by type and ordinal — "Audio 1", "Audio 2" — which
+             * is the only thing it CAN do, because it is told a type and nothing
+             * else. The caller placing the clip is the one that knows this is
+             * dialogue and that is the ambience bed, and it knew it a moment ago
+             * and never had anywhere to put it.
+             *
+             * That is not cosmetic. `auto-duck` finds speech BY TRACK NAME, so a
+             * voice sitting on "Audio 1" is invisible to it and the music never
+             * ducks — no error, just a mix that is quietly wrong. And a person
+             * opening a four-track episode has to solo each one to find out what
+             * it is.
+             *
+             * ONLY RENAMES A DEFAULT. A track the user has already named is
+             * theirs; an agent placing a clip on it must not relabel their work.
+             * A default name is the type plus a number, which is exactly what
+             * `addTrack` produces and what nobody chooses on purpose.
+             */
+            const wantName = typeof (msg as any).trackName === "string"
+              ? (msg as any).trackName.trim().slice(0, 60) : "";
+            if (wantName) {
+              const cur = useProjectStore.getState().project.timeline?.tracks
+                ?.find((t: any) => t.id === targetTrackId);
+              const isDefaultName = !cur?.name
+                || /^(audio|video|image|text|graphics)\s*\d*$/i.test(String(cur.name).trim());
+              if (cur && isDefaultName && cur.name !== wantName) {
+                try { useProjectStore.getState().renameTrack(targetTrackId, wantName); }
+                catch { /* non-fatal: the clip still belongs there */ }
+              }
+            }
+
             const r = await useProjectStore.getState().addClip(targetTrackId, mediaId, startTime, typeof duration === "number" && duration > 0 ? duration : undefined);
             if (!r.success) {
               const e: any = r.error;
@@ -2345,6 +2378,10 @@ function App() {
             reply({
               type: "voidspace:clip-added", requestId: msg.requestId,
               clip: newClip ?? null, ok: true, trackId: targetTrackId,
+              // What the track is CALLED, so the caller can say where it put
+              // things and can point `auto-duck` at the right one by id.
+              trackName: useProjectStore.getState().project.timeline?.tracks
+                ?.find((t: any) => t.id === targetTrackId)?.name ?? "",
               // Where it landed and how long it is. The caller of an append did
               // not choose the position, so echoing it back is what lets the
               // next append (or a transition on the join) be reasoned about
