@@ -2326,27 +2326,42 @@ function App() {
               }
             }
             /**
-             * ── NAME THE TRACK, AT THE MOMENT WE KNOW WHAT IT HOLDS ──────────
+             * ── NAME THE TRACK FROM WHAT IT HOLDS ────────────────────────────
              *
-             * `addTrack` names by type and ordinal — "Audio 1", "Audio 2" — which
-             * is the only thing it CAN do, because it is told a type and nothing
-             * else. The caller placing the clip is the one that knows this is
-             * dialogue and that is the ambience bed, and it knew it a moment ago
-             * and never had anywhere to put it.
+             * `addTrack` names by type and ordinal — "Audio 1", "Audio 2" —
+             * which is the only thing it CAN do, because it is told a TYPE and
+             * a type is not a role: dialogue, an ambience bed and a score are
+             * all `audio`. The caller knows which, and had nowhere to say so.
              *
-             * That is not cosmetic. `auto-duck` finds speech BY TRACK NAME, so a
-             * voice sitting on "Audio 1" is invisible to it and the music never
-             * ducks — no error, just a mix that is quietly wrong. And a person
-             * opening a four-track episode has to solo each one to find out what
-             * it is.
+             * Not cosmetic. `auto-duck` finds speech BY TRACK NAME, so a voice
+             * sitting on "Audio 1" is invisible to it and the music never ducks
+             * — no error anywhere, just a mix that is quietly wrong. And a
+             * person opening a four-track episode has to solo each one to learn
+             * what it is.
+             *
+             * The ROLE is the product's existing media vocabulary — the same
+             * `voice | music | sfx | video | image` the library filters by — so
+             * nothing new is invented and every track ends up with the same
+             * name for the same kind of content, across every project. A free
+             * text field would have given three agents three spellings of
+             * "Dialogue" and left `auto-duck` matching some of them.
              *
              * ONLY RENAMES A DEFAULT. A track the user has already named is
-             * theirs; an agent placing a clip on it must not relabel their work.
-             * A default name is the type plus a number, which is exactly what
-             * `addTrack` produces and what nobody chooses on purpose.
+             * theirs, and an agent placing a clip must not relabel their work.
              */
-            const wantName = typeof (msg as any).trackName === "string"
-              ? (msg as any).trackName.trim().slice(0, 60) : "";
+            const ROLE_TRACK_NAME: Record<string, string> = {
+              voice: "Dialogue",     // matches auto-duck's speech test
+              music: "Music",
+              sfx: "SFX",
+              ambience: "Ambience",  // an sfx bed that runs under a whole scene
+              video: "Video",
+              image: "Images",
+              text: "Captions",
+              graphics: "Graphics",
+            };
+            const role = typeof (msg as any).role === "string"
+              ? (msg as any).role.trim().toLowerCase() : "";
+            const wantName = ROLE_TRACK_NAME[role] ?? "";
             if (wantName) {
               const cur = useProjectStore.getState().project.timeline?.tracks
                 ?.find((t: any) => t.id === targetTrackId);
