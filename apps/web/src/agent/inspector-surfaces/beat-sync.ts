@@ -120,9 +120,40 @@ export const surface: InspectorSurface<BeatSyncConfig> = {
         const result = await bridge.analyzeAudioFromUrl(String(url), clip.id);
         const state = bridge.getState();
         (store as any).setBeatGrid(state.beatMarkers, state.beatAnalysis);
+        /**
+         * ── RETURN THE GRID, NOT JUST ITS SIZE ───────────────────────────────
+         *
+         * This used to answer "128 beats at 92 BPM" and keep the times to
+         * itself, which is everything a caller needs except the part it needs.
+         * `snap` moves PICTURE onto the grid and deliberately never touches
+         * audio — correct, since sliding narration would desync it from the
+         * shot — so an agent placing a stab or a cue entry had no way to land
+         * it on a downbeat and had to guess a second. A hit that misses by a
+         * beat is the single most audible amateur tell there is.
+         *
+         * Downbeats are sent separately because they are what a musical change
+         * belongs on: a cue entering on a bar line reads as intentional, and the
+         * same cue three sixteenths early reads as a mistake. Capped so a long
+         * track does not return thousands of numbers nobody reads.
+         */
+        // `TimelineBeatMarker` — `isDownbeat`, not a `type` string. (The
+        // sound-library `BeatMarker` is the one with `type`; these are not the
+        // same shape and the compiler is the only thing that says so.)
+        const markers = state.beatMarkers ?? [];
+        const at = (t: number) => Number(t.toFixed(3));
+        const downbeats = markers.filter((m) => m.isDownbeat).map((m) => at(m.time));
         return {
           ok: true,
-          note: `${state.beatMarkers.length} beats at ${Math.round(result.bpm)} BPM (confidence ${result.confidence.toFixed(2)})`,
+          note: `${markers.length} beats at ${Math.round(result.bpm)} BPM (confidence ${result.confidence.toFixed(2)})`,
+          bpm: Math.round(result.bpm * 10) / 10,
+          confidence: Number(result.confidence.toFixed(2)),
+          /** Bar lines — put a cue change or a sting here. */
+          downbeats: downbeats.slice(0, 256),
+          /** Every beat, for finer placement. */
+          beats: markers.map((m) => at(m.time)).slice(0, 512),
+          ...(downbeats.length > 256 || markers.length > 512
+            ? { truncated: true, totalBeats: markers.length, totalDownbeats: downbeats.length }
+            : {}),
         };
       } catch (e: any) {
         return { ok: false, error: `beat analysis failed: ${e?.message ?? String(e)}` };
