@@ -7,11 +7,16 @@
  * ┌─ SINGLE SOURCE OF TRUTH ───────────────────────────────────────────┐
  * │ `automationPoints` writes NATIVE openreel volume keyframes —         │
  * │ `clip.keyframes` rows with `property === "volume"` (value = gain,    │
- * │ 1 = unity, range 0–2) — via the SAME `KeyframeEngine` +             │
- * │ `updateClipKeyframes` path used by the Inspector's Keyframes panel   │
- * │ and the timeline VOL overlay. There is NO parallel automation store. │
- * │ This is why a fade/duck the agent applies shows up in the Inspector  │
- * │ and on the timeline, and survives save/load.                        │
+ * │ 1 = unity, range 0–2) — the same rows the Inspector's Keyframes      │
+ * │ panel and the timeline VOL overlay read. There is NO parallel        │
+ * │ automation store. This is why a fade/duck the agent applies shows up │
+ * │ in the Inspector and on the timeline, and survives save/load.        │
+ * │                                                                     │
+ * │ Written through the ACTION EXECUTOR (`keyframe/remove` + `keyframe/  │
+ * │ add`), not `updateClipKeyframes`. That method is a bare `set()` with │
+ * │ no history entry, so the curve could not be undone while the fade    │
+ * │ beside it could — one Ctrl+Z took back half a change and left a mix  │
+ * │ in a state nobody had chosen.                                       │
  * │                                                                     │
  * │ For animating non-audio properties (opacity, scale, …) use the      │
  * │ `clip-properties` keyframe path; both converge on clip.keyframes.   │
@@ -100,31 +105,68 @@ export const surface: InspectorSurface<VolumeAutomationConfig> = {
     }
 
     // ── Volume keyframes: NATIVE clip.keyframes (property "volume") ──
-    // Mirror the Inspector/timeline exactly: build rows with the shared
-    // KeyframeEngine, preserve every non-volume keyframe, and commit via
-    // updateClipKeyframes. NOT the legacy audio/addAutomation action (that
-    // wrote a parallel clip.automation.volume the playback no longer reads).
+    // Every non-volume keyframe on the clip is left alone — the remove pass
+    // below is scoped to `property: "volume"`, so an opacity or scale curve on
+    // the same clip survives a volume edit. NOT the legacy audio/addAutomation
+    // action (that wrote a parallel clip.automation.volume nothing reads).
     if (Array.isArray(config.automationPoints)) {
-      const { KeyframeEngine } = await import("@openreel/core");
-      const engine = new KeyframeEngine();
+      /**
+       * ── THROUGH THE EXECUTOR, BECAUSE A MIX MUST BE UNDOABLE ──────────────
+       *
+       * This wrote through `updateClipKeyframes`, which is a bare `set()` on
+       * the store with no history entry — so fades (which go through
+       * `audio/setFade` above) could be undone and the volume curve beside them
+       * could not. One Ctrl+Z took back half a change, and the surface's own
+       * description said "Undoable", which made it worse: a person who trusted
+       * that and hit undo got a mix in a state nobody had ever chosen.
+       *
+       * `keyframe/add` and `keyframe/remove` already exist, already have
+       * inverse generators, and are what the Inspector's own Keyframes panel
+       * goes through. Replacing the volume curve is a remove of what is there
+       * followed by an add of what replaces it, so the whole edit lands as one
+       * run of undoable actions rather than an invisible mutation.
+       */
       const existing: Keyframe[] =
         (clip.raw as { keyframes?: Keyframe[] })?.keyframes ?? [];
-      const others = existing.filter((k) => k.property !== "volume");
-      const fresh = config.automationPoints
-        .filter((p) => Number.isFinite(p.time) && Number.isFinite(p.value))
-        .map((p) =>
-          engine.addKeyframe(
-            clip.id,
-            "volume",
-            Math.max(0, p.time),
-            Math.max(0, Math.min(2, p.value)),
-            "linear",
-          ),
+      const oldVolume = existing.filter((k) => k.property === "volume");
+
+      for (const kf of oldVolume) {
+        const r = await exec.execute(
+          {
+            type: "keyframe/remove",
+            id: aid("kf-rm"),
+            timestamp: Date.now(),
+            params: { clipId: clip.id, property: "volume", time: kf.time },
+          },
+          store.project,
         );
-      const merged = [...others, ...fresh].sort((a, b) => a.time - b.time);
-      const projectStoreModule = await import("../../stores/project-store");
-      projectStoreModule.useProjectStore.getState().updateClipKeyframes(clip.id, merged);
-      didAny = true;
+        if (!r?.success) errors.push(`keyframe/remove@${kf.time}: ${r?.error?.message ?? "failed"}`);
+      }
+
+      const points = config.automationPoints
+        .filter((p) => Number.isFinite(p.time) && Number.isFinite(p.value))
+        .sort((a, b) => a.time - b.time);
+      for (const p of points) {
+        const r = await exec.execute(
+          {
+            type: "keyframe/add",
+            id: aid("kf-add"),
+            timestamp: Date.now(),
+            params: {
+              clipId: clip.id,
+              property: "volume",
+              time: Math.max(0, p.time),
+              value: Math.max(0, Math.min(2, p.value)),
+            },
+          },
+          store.project,
+        );
+        if (r?.success) didAny = true;
+        else errors.push(`keyframe/add@${p.time}: ${r?.error?.message ?? "failed"}`);
+      }
+      // An empty array CLEARS the curve, which is a real edit even though it
+      // adds nothing — the removes above are the whole change.
+      if (!points.length && oldVolume.length) didAny = true;
     }
 
     if (didAny) {
