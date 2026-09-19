@@ -2287,6 +2287,32 @@ function App() {
             // exists — so agents can place media without knowing track ids.
             let targetTrackId: string = typeof trackId === "string" ? trackId : "";
             /**
+             * `track-music` IS THE PROJECT'S BACKGROUND MUSIC, NOT A SPARE TRACK.
+             *
+             * It is rebuilt from `slData.music_url` on every load and rewritten
+             * whenever the BGM is swapped, so a foley hit placed here does not
+             * merely sit in an odd place — it gets its media repointed at the
+             * song, or vanishes on the next load. Both look like the sound
+             * failing to generate.
+             *
+             * A caller cannot be expected to know that from the track list,
+             * where it looks like any other audio track. So say it here, name
+             * the fix, and let the role router pick a real track instead.
+             */
+            if (targetTrackId === "track-music") {
+              reply({
+                type: "voidspace:error",
+                requestId: msg.requestId,
+                error: "\"track-music\" is the project BACKGROUND MUSIC track and has a single owner: "
+                  + "it is rebuilt from the project music on every load, and swapping the music rewrites "
+                  + "the clips on it. Any other media placed there loses its own audio or disappears. "
+                  + "Omit trackId and pass a role (voice / ambience / sfx / music) — the right track is "
+                  + "chosen, and created if needed. Background music itself arrives through create_media, "
+                  + "not through this call.",
+              });
+              break;
+            }
+            /**
              * For an append we must choose the track BEFORE computing the time,
              * because "the end" means the end OF THAT TRACK. Doing it the other
              * way round (the free-slot probe below, run at t=0) would pick the
@@ -2365,11 +2391,29 @@ function App() {
                   // A track of this kind exists but is busy here, or there is
                   // none yet. Either way this clip needs its own.
                   const trackType = (mType === "audio" ? "audio" : mType === "image" ? "image" : "video") as any;
+                  /**
+                   * TAKE THE TRACK WE JUST MADE, NOT THE FIRST EMPTY ONE.
+                   *
+                   * This searched for any empty track of the right type, which is
+                   * a different track whenever the project already had one — and
+                   * an audio project always does ("Background Music" starts empty).
+                   * So the clip went onto THAT, the pre-existing track got RENAMED
+                   * to the role, and the track this branch had just created was
+                   * left behind empty. Measured: placing four roled clips answered
+                   * `trackName: "SFX"` with `trackId: "track-music"`, renamed the
+                   * music track, and littered the timeline with empty "Audio 6",
+                   * "Audio 7", "Audio 8", "Audio 9".
+                   *
+                   * Diffing the ids is the only way to be sure which one is ours:
+                   * "empty and of the right type" describes the new track and an
+                   * unknown number of innocent bystanders.
+                   */
+                  const beforeIds = new Set(
+                    (useProjectStore.getState().project.timeline?.tracks ?? []).map((t: any) => t.id));
                   const tRes = await store.addTrack(trackType);
                   if (tRes.success) {
-                    const fresh = useProjectStore.getState().project.timeline?.tracks?.find(
-                      (t: any) => t.type === trackType && (t.clips ?? []).length === 0
-                        && !sameRole.some((s: any) => s.id === t.id));
+                    const fresh = (useProjectStore.getState().project.timeline?.tracks ?? [])
+                      .find((t: any) => !beforeIds.has(t.id));
                     if (fresh) {
                       targetTrackId = fresh.id;
                       try { useProjectStore.getState().renameTrack(fresh.id, roleName, ROLE_TRACK_ROLE[role] as never); }
@@ -2384,13 +2428,17 @@ function App() {
                 targetTrackId = free.id;
               } else {
                 const trackType = (mType === "audio" ? "audio" : mType === "image" ? "image" : "video") as any;
+                // Same id-diff as the role branch above, for the same reason: the
+                // first EMPTY track of a type is very often not the one we made.
+                const beforeIds2 = new Set(
+                  (useProjectStore.getState().project.timeline?.tracks ?? []).map((t: any) => t.id));
                 const tRes = await store.addTrack(trackType);
                 if (!tRes.success) {
                   reply({ type: "voidspace:error", requestId: msg.requestId, error: "could not create a track for that media type" });
                   break;
                 }
-                const fresh = useProjectStore.getState().project.timeline?.tracks?.find(
-                  (t: any) => t.type === trackType && (t.clips ?? []).length === 0);
+                const fresh = (useProjectStore.getState().project.timeline?.tracks ?? [])
+                  .find((t: any) => !beforeIds2.has(t.id));
                 if (!fresh) {
                   reply({ type: "voidspace:error", requestId: msg.requestId, error: "track created but not found" });
                   break;
@@ -3014,16 +3062,37 @@ function App() {
                 // atomic commit. Bypasses ActionExecutor for the
                 // same reason replace-clip-media does (no
                 // clip/setMediaId action type in core).
+                /**
+                 * ONLY THE BACKGROUND MUSIC — NOT EVERYTHING PARKED HERE.
+                 *
+                 * This rewrote `mediaId` on EVERY clip of `track-music`, on the
+                 * assumption that anything on that track is background music.
+                 * That held while BGM was the only thing that could land there.
+                 * It stopped holding the moment a clip could be placed on it by
+                 * id — and then swapping the music silently repointed those
+                 * clips at the song. Measured: three foley hits (engine off,
+                 * indicator, riser) placed on this track all came back carrying
+                 * the BGM's mediaId, one of them with the BGM's 39-second
+                 * duration. They would have played the music instead of the
+                 * sound, and nothing reported anything wrong.
+                 *
+                 * A BGM clip is one THIS path or the loader made: the loader
+                 * names them `clip-music-*`, and the ordinary case is a single
+                 * clip that can only be the music. Anything else on this track
+                 * belongs to someone else and is left alone.
+                 */
+                const isBgmClip = (c: any) =>
+                  existingClips.length === 1 || String(c?.id ?? "").startsWith("clip-music-");
                 useProjectStore.setState((s: any) => {
                   const tracks = (s.project.timeline?.tracks ?? []).map((tr: any) => {
                     if (tr.id !== "track-music") return tr;
                     return {
                       ...tr,
-                      clips: (tr.clips ?? []).map((c: any) => ({
+                      clips: (tr.clips ?? []).map((c: any) => (isBgmClip(c) ? {
                         ...c,
                         mediaId: newMediaId,
                         ...(clampedVolume !== null ? { volume: clampedVolume } : {}),
-                      })),
+                      } : c)),
                     };
                   });
                   return { project: { ...s.project, timeline: { ...s.project.timeline, tracks }, modifiedAt: Date.now() } };
@@ -3402,6 +3471,24 @@ function App() {
                 reply({ type: "voidspace:error", requestId: args.requestId, error: "clipIds or applyAll required" });
                 break;
               }
+              /**
+               * REFUSE A CONFIG THE SURFACE CANNOT READ, BEFORE TOUCHING ANYTHING.
+               *
+               * A surface's `apply` acts on the keys it recognises and ignores
+               * the rest — correct for a partial edit, silent for a config it
+               * understands none of: no branch runs, no error is recorded, and
+               * it returns ok. Sixteen calls in a row once answered
+               * `{ ok: true, clipsTouched: 1 }` and wrote nothing, because the
+               * config had been sent under `params` instead of `config`. One
+               * check here covers all 18 surfaces and every surface added after
+               * this line.
+               */
+              const { validateSurfaceConfig } = await import("./agent/inspector-surfaces/validate-config");
+              const configError = validateSurfaceConfig(surface, args.config);
+              if (configError) {
+                reply({ type: "voidspace:error", requestId: args.requestId, error: configError });
+                break;
+              }
               const project = useProjectStore.getState().project;
               const targets = resolveTargetClips(project, surface, {
                 clipIds: Array.isArray(args.clipIds) ? args.clipIds : undefined,
@@ -3426,6 +3513,24 @@ function App() {
                   const wrongKind = (args.clipIds as string[]).filter((id) => allKnownIds.has(id));
                   if (missing.length > 0) hint = `unknown clipIds: ${missing.join(", ")}`;
                   else if (wrongKind.length > 0) hint = `clip kind not in surface.appliesTo (${surface.appliesTo.join(",")}): ${wrongKind.join(", ")}`;
+                }
+                /**
+                 * NAMING CLIPS THAT DO NOT EXIST IS A FAILED CALL.
+                 *
+                 * `applyAll` matching nothing is a real no-op — "crossfade
+                 * everything" on a one-clip timeline correctly does nothing, and
+                 * failing a batch over it would be wrong. But a caller that
+                 * NAMED clips and hit none of them has a typo or a stale id, and
+                 * answering `ok: true` sends it on to the next step believing the
+                 * edit happened. It finds out at the export, if at all.
+                 */
+                if (Array.isArray(args.clipIds) && args.clipIds.length > 0) {
+                  reply({
+                    type: "voidspace:error",
+                    requestId: args.requestId,
+                    error: `${hint} (surface "${surface.name}" applies to ${surface.appliesTo.join(", ")})`,
+                  });
+                  break;
                 }
                 reply({
                   type: "voidspace:inspector-tool-applied",
@@ -3454,6 +3559,26 @@ function App() {
               );
               const results: Array<{ clipId: string; ok: boolean; note?: string; error?: string }> = [];
               let threw: unknown = null;
+              /**
+               * ONE EDIT, ONE UNDO — EVEN THOUGH THE PIECES ARRIVE SEPARATELY.
+               *
+               * Surfaces no longer all "mutate through direct store setters":
+               * volume-automation, audio-mix and clip-transitions go through the
+               * ActionExecutor, which shares THIS history. So one call can push
+               * several `keyframe/remove`s, several `keyframe/add`s, and then the
+               * state patch registered below.
+               *
+               * Auto-grouping does not save us — it only merges CONSECUTIVE
+               * entries of the SAME type, so that sequence lands as three
+               * separate groups. The first Ctrl+Z restores the whole
+               * before-state (correct), and the next two then replay keyframe
+               * inverses against a project that no longer has those keyframes.
+               * An explicit group makes the batch atomic to undo, which is what
+               * `Cut ranges` and `Cut silence` already do for the same reason.
+               */
+              const hist = (useProjectStore.getState() as any).actionHistory;
+              const historyDepthBefore: number = hist?.getHistory?.().length ?? 0;
+              try { hist?.beginGroup?.(`Apply ${surface.name}`); } catch { /* older history */ }
               try {
                 for (const t of targets) {
                   // LIVE STATE PER TARGET, NOT ONE SNAPSHOT FOR THE BATCH.
@@ -3486,6 +3611,10 @@ function App() {
                 }
               } catch (e) {
                 threw = e;
+              } finally {
+                // Close the group on every path, or the NEXT unrelated edit
+                // joins this one and a single Ctrl+Z takes back both.
+                try { hist?.endGroup?.(); } catch { /* older history */ }
               }
               // FOUNDATION FIX (F8): inspector batch is ALL-OR-NOTHING. The
               // surfaces mutate via direct store setters, so a throw or a single
@@ -3540,8 +3669,22 @@ function App() {
               // (Graphics clips live in engine stores the executor can't
               // reach; the Snapshots panel remains their rewind path.)
               try {
+                /**
+                 * DO NOT RECORD THE SAME EDIT TWICE.
+                 *
+                 * This block exists for surfaces that write straight to the
+                 * store, which the ActionExecutor never sees. An executor-backed
+                 * surface has ALREADY pushed its own undoable entries, and
+                 * adding a state patch on top means undoing the group applies
+                 * both: the patch restores the before-state, then the keyframe
+                 * inverses run against it and strip keyframes that legitimately
+                 * existed beforehand. Ask the history whether anything was
+                 * recorded rather than assuming either way.
+                 */
+                const surfacesRecorded =
+                  ((hist?.getHistory?.().length ?? 0) as number) > historyDepthBefore;
                 const applied = new Set(results.filter((r) => r.ok).map((r) => r.clipId));
-                if (applied.size > 0) {
+                if (applied.size > 0 && !surfacesRecorded) {
                   const fresh = useProjectStore.getState().project;
                   const freshTextClips: any[] = useEngineStore.getState().getTitleEngine()?.getAllTextClips()
                     ?? (fresh as any).textClips ?? [];
@@ -4025,6 +4168,133 @@ function App() {
            * good enough that the mix, not the codec, is what is being judged.
            * wav is there for a master.
            */
+          /**
+           * MEASURE EVERY AUDIO CLIP — loudness, peak, and the gain to fix it.
+           *
+           * ── WHY THE AGENT NEEDED THIS ─────────────────────────────────────
+           * It cannot hear, and until now it had no meter either, so every level
+           * was a guess that only got checked when a person said "I can't hear
+           * the dialogue". Loudness is also not a thing you can infer from the
+           * numbers already on the timeline: `clip.volume` is a multiplier, and
+           * how loud a source IS depends entirely on the file.
+           *
+           * Measures the SOURCE, not the mix, because that is what makes the
+           * answer actionable — source loudness plus a target gives a gain, and
+           * gain is linear in dB, so applying it lands exactly. The mix itself is
+           * measured by exporting and reading the file, which is one render
+           * rather than a guess per clip.
+           */
+          case "voidspace:measure-audio": {
+            const proj = useProjectStore.getState().project;
+            if (!proj) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: "no project loaded" });
+              break;
+            }
+            try {
+              const core = await import("@openreel/core");
+              const a = msg as any;
+              const anchorLufs = Number.isFinite(Number(a.anchorLufs)) ? Number(a.anchorLufs) : -18;
+              /**
+               * House offsets, in dB relative to the dialogue anchor. Under
+               * -12 a bed starts masking consonants; past -18 it stops being
+               * present at all. SFX are short and peak-driven, so they sit
+               * closer but are watched on peak rather than loudness.
+               */
+              const OFFSETS: Record<string, number> = {
+                dialogue: 0, narration: 0, voice: 0,
+                ambience: -15,
+                music: -12,
+                effects: -8, sfx: -8,
+                general: -12,
+                ...(a.targets && typeof a.targets === "object" ? a.targets : {}),
+              };
+
+              const roleOf = (track: any): string => {
+                const r = String(track?.role ?? "").toLowerCase();
+                if (r) return r;
+                const n = `${track?.name ?? ""}`.toLowerCase();
+                if (/narration|dialogue|voice|speech|vocal/.test(n)) return "dialogue";
+                if (/ambien|room|atmos/.test(n)) return "ambience";
+                if (/sfx|foley|effect/.test(n)) return "effects";
+                if (/music|score|bgm/.test(n)) return "music";
+                return "general";
+              };
+
+              const ac = new AudioContext();
+              const cache = new Map<string, any>();
+              const rows: any[] = [];
+              try {
+                for (const track of proj.timeline?.tracks ?? []) {
+                  if (track.type !== "audio" && track.type !== "video") continue;
+                  const role = roleOf(track);
+                  for (const clip of track.clips ?? []) {
+                    const media = (proj.mediaLibrary?.items ?? []).find((m: any) => m.id === clip.mediaId);
+                    if (!media) continue;
+                    let reading = cache.get(clip.mediaId);
+                    if (!reading) {
+                      // Same hydration the preview and export use: generated
+                      // narration/music arrive as a remote url with no blob.
+                      let bytes: ArrayBuffer | null = null;
+                      if ((media as any).blob instanceof Blob && (media as any).blob.size > 0) {
+                        bytes = await (media as any).blob.arrayBuffer();
+                      } else if ((media as any).originalUrl) {
+                        const resp = await fetch(core.rewriteToProxy((media as any).originalUrl), { mode: "cors" });
+                        if (resp.ok) bytes = await resp.arrayBuffer();
+                      }
+                      if (!bytes || bytes.byteLength === 0) continue;
+                      const buf = await ac.decodeAudioData(bytes);
+                      const chans: Float32Array[] = [];
+                      for (let c = 0; c < buf.numberOfChannels; c++) chans.push(buf.getChannelData(c));
+                      reading = core.measureLoudnessOf(chans, buf.sampleRate);
+                      cache.set(clip.mediaId, reading);
+                    }
+
+                    // What this clip is ACTUALLY playing at: a volume keyframe
+                    // replaces clip.volume, so the curve wins where it exists.
+                    const curve = (clip.keyframes ?? [])
+                      .filter((k: any) => k.property === "volume" && Number.isFinite(k.value))
+                      .map((k: any) => k.value as number);
+                    const currentGain = curve.length ? Math.max(...curve) : (clip.volume ?? 1);
+
+                    const offset = OFFSETS[role] ?? -12;
+                    const targetLufs = anchorLufs + offset;
+                    const suggestedGain = core.gainToReach(reading.integrated, targetLufs);
+
+                    rows.push({
+                      clipId: clip.id,
+                      track: track.name,
+                      role,
+                      sourceLufs: Number.isFinite(reading.integrated) ? Number(reading.integrated.toFixed(1)) : null,
+                      sourceTruePeakDb: Number.isFinite(reading.truePeak) ? Number(reading.truePeak.toFixed(1)) : null,
+                      currentGain: Number(currentGain.toFixed(3)),
+                      targetLufs: Number(targetLufs.toFixed(1)),
+                      suggestedGain: Number(suggestedGain.toFixed(3)),
+                      hasCurve: curve.length > 0,
+                    });
+                  }
+                }
+              } finally {
+                try { await ac.close(); } catch { /* already closed */ }
+              }
+
+              const peaks = rows.map((r) => r.sourceTruePeakDb).filter((p) => typeof p === "number");
+              reply({
+                type: "voidspace:audio-measured",
+                requestId: msg.requestId,
+                anchorLufs,
+                offsets: OFFSETS,
+                clips: rows,
+                loudestSourcePeakDb: peaks.length ? Math.max(...peaks) : null,
+                note:
+                  rows.length === 0
+                    ? "No decodable audio on the timeline."
+                    : "sourceLufs is the FILE's own loudness; suggestedGain puts it at targetLufs. Where hasCurve is true, scale every automation point by suggestedGain/currentGain — setting clip volume alone does nothing.",
+              });
+            } catch (err) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: String((err as any)?.message ?? err) });
+            }
+            break;
+          }
           case "voidspace:export-audio": {
             const proj = useProjectStore.getState().project;
             if (!proj) {
@@ -4037,40 +4307,67 @@ function App() {
               await engine.initialize();
 
               const a = msg as any;
-              const settings = {
-                format: (a.format === "wav" ? "wav" : "mp3") as "wav" | "mp3",
-                sampleRate: 48000 as const,
-                channels: 2 as const,
-                bitDepth: (a.format === "wav" ? 24 : 16) as 16 | 24,
-                bitrate: 320,
+
+              const runExport = async (format: "wav" | "mp3") => {
+                const settings = {
+                  format,
+                  sampleRate: 48000 as const,
+                  channels: 2 as const,
+                  bitDepth: (format === "wav" ? 24 : 16) as 16 | 24,
+                  bitrate: 320,
+                };
+                const gen = engine.exportAudio(proj, settings);
+                let result: any;
+                while (true) {
+                  const { value, done } = await gen.next();
+                  if (done) { result = value; break; }
+                  (e.source as Window | null)?.postMessage(
+                    {
+                      type: "voidspace:export-progress",
+                      requestId: msg.requestId,
+                      fraction: value?.progress ?? 0,
+                      phase: value?.phase ?? "Mixing",
+                    },
+                    "*",
+                  );
+                }
+                if (!result?.success || !result?.blob) {
+                  throw new Error(result?.error?.message || "Audio export produced no file.");
+                }
+                return result;
               };
 
-              const gen = engine.exportAudio(proj, settings);
+              // WAV IS THE FALLBACK, NOT A LESSER RESULT.
+              //
+              // The browser encoder refuses some perfectly ordinary MP3
+              // configurations — "(mp3, 320000 bps, 2 channels, 44100 Hz) is
+              // not supported by this browser" — and which ones depends on the
+              // build the viewer happens to be running. The caller is an agent
+              // finishing an episode; it cannot know that, and failing the
+              // whole mix over a container choice throws away several minutes
+              // of rendering for a reason nobody asked about. WAV is lossless,
+              // so the substitution costs file size and nothing else.
+              let format: "wav" | "mp3" = a.format === "wav" ? "wav" : "mp3";
               let result: any;
-              while (true) {
-                const { value, done } = await gen.next();
-                if (done) { result = value; break; }
-                (e.source as Window | null)?.postMessage(
-                  {
-                    type: "voidspace:export-progress",
-                    requestId: msg.requestId,
-                    fraction: value?.progress ?? 0,
-                    phase: value?.phase ?? "Mixing",
-                  },
-                  "*",
-                );
+              let fellBackFrom: string | undefined;
+              try {
+                result = await runExport(format);
+              } catch (mp3Err) {
+                if (format !== "mp3") throw mp3Err;
+                fellBackFrom = String((mp3Err as any)?.message ?? mp3Err);
+                format = "wav";
+                result = await runExport(format);
               }
-              if (!result?.success || !result?.blob) {
-                throw new Error(result?.error?.message || "Audio export produced no file.");
-              }
+
               reply({
                 type: "voidspace:export-audio-done",
                 requestId: msg.requestId,
                 blobUrl: URL.createObjectURL(result.blob),
-                mimeType: settings.format === "wav" ? "audio/wav" : "audio/mpeg",
-                format: settings.format,
+                mimeType: format === "wav" ? "audio/wav" : "audio/mpeg",
+                format,
                 bytes: result.blob.size,
                 durationSec: proj.timeline?.duration ?? 0,
+                ...(fellBackFrom ? { fellBackFrom } : {}),
               });
             } catch (err) {
               reply({
