@@ -3985,6 +3985,82 @@ function App() {
             }
             break;
           }
+          /**
+           * ── EXPORT THE MIX, NOT A PICTURE OF IT ───────────────────────────
+           *
+           * An audio episode rendered through the VIDEO path came out with the
+           * mixer ignored: a clip set to volume 0 still played at full level in
+           * the file, so nothing an agent (or a person) set in the mixer reached
+           * the output. Levels, fades and ducking were all being written and all
+           * being discarded, which is indistinguishable from a broken mixer and
+           * is why an episode kept coming back with the ambience on top of the
+           * dialogue however quiet it was set.
+           *
+           * `exportAudio` is the engine that renders the timeline THROUGH its
+           * mixer. It has always existed; it was reachable only from the
+           * toolbar's own button, behind a file-save picker, so no agent and no
+           * automation could use it. This is the same call, without the picker.
+           *
+           * mp3 at 320k by default: small enough to hand back as a blob url and
+           * good enough that the mix, not the codec, is what is being judged.
+           * wav is there for a master.
+           */
+          case "voidspace:export-audio": {
+            const proj = useProjectStore.getState().project;
+            if (!proj) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: "no project loaded" });
+              break;
+            }
+            try {
+              const core = await import("@openreel/core");
+              const engine = core.getExportEngine();
+              await engine.initialize();
+
+              const a = msg as any;
+              const settings = {
+                format: (a.format === "wav" ? "wav" : "mp3") as "wav" | "mp3",
+                sampleRate: 48000 as const,
+                channels: 2 as const,
+                bitDepth: (a.format === "wav" ? 24 : 16) as 16 | 24,
+                bitrate: 320,
+              };
+
+              const gen = engine.exportAudio(proj, settings);
+              let result: any;
+              while (true) {
+                const { value, done } = await gen.next();
+                if (done) { result = value; break; }
+                (e.source as Window | null)?.postMessage(
+                  {
+                    type: "voidspace:export-progress",
+                    requestId: msg.requestId,
+                    fraction: value?.progress ?? 0,
+                    phase: value?.phase ?? "Mixing",
+                  },
+                  "*",
+                );
+              }
+              if (!result?.success || !result?.blob) {
+                throw new Error(result?.error?.message || "Audio export produced no file.");
+              }
+              reply({
+                type: "voidspace:export-audio-done",
+                requestId: msg.requestId,
+                blobUrl: URL.createObjectURL(result.blob),
+                mimeType: settings.format === "wav" ? "audio/wav" : "audio/mpeg",
+                format: settings.format,
+                bytes: result.blob.size,
+                durationSec: proj.timeline?.duration ?? 0,
+              });
+            } catch (err) {
+              reply({
+                type: "voidspace:error",
+                requestId: msg.requestId,
+                error: String((err as any)?.message ?? err),
+              });
+            }
+            break;
+          }
           case "voidspace:play":
           case "voidspace:pause":
           case "voidspace:seek": {
