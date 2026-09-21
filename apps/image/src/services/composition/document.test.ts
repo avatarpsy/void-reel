@@ -377,3 +377,67 @@ describe('preparing from a stored composition', () => {
     expect(r.width).toBe(1080);
   });
 });
+
+/**
+ * A BLOCK THAT KEEPS ITS MARKUP IN A `<template>`.
+ *
+ * `document.querySelector` cannot reach into template content — that is what a
+ * template IS — so every slot these blocks declared resolved to null, the fill
+ * was skipped, and the block rendered with the designer's placeholder text in
+ * it. The call reported success. Measured across the starter library: 72
+ * declared slots on 12 `code-snippet-*` blocks, none of them fillable.
+ */
+describe('a slot inside a template', () => {
+  const TPL_BLOCK = [
+    '<!doctype html><html><body>',
+    '<div data-composition-id="tpl-demo">',
+    '<template id="row"><div class="kicker">PLACEHOLDER</div></template>',
+    '</div></body></html>',
+  ].join('');
+  const TPL_SLOTS: Record<string, SlotSpec> = { kicker: { sel: '.kicker', kind: 'text' } };
+
+  const contentOf = (html: string) => {
+    const tpl = parse(html).querySelector('template') as HTMLTemplateElement | null;
+    return tpl?.content?.querySelector('.kicker')?.textContent ?? null;
+  };
+
+  it('fills it, rather than reporting success and changing nothing', () => {
+    const r = prepareComposition(TPL_BLOCK, { slots: TPL_SLOTS, values: { kicker: 'REAL' } });
+    expect(contentOf(r.html)).toBe('REAL');
+  });
+
+  it('does not warn that the selector matched nothing', () => {
+    const r = prepareComposition(TPL_BLOCK, { slots: TPL_SLOTS, values: { kicker: 'REAL' } });
+    expect((r.warnings ?? []).join(' ')).not.toMatch(/matched nothing/);
+  });
+
+  /**
+   * Hiding only applies once SOMETHING has been filled — a block with no values
+   * at all keeps the designer's sample text on purpose. So this fills one slot
+   * and leaves the other, which is the case that actually occurs.
+   */
+  it('hides a sibling slot nobody filled', () => {
+    const TWO = [
+      '<!doctype html><html><body>',
+      '<div data-composition-id="tpl-demo">',
+      '<template id="row">',
+      '<div class="kicker">PLACEHOLDER</div><div class="sub">ALSO PLACEHOLDER</div>',
+      '</template>',
+      '</div></body></html>',
+    ].join('');
+    const SLOTS2: Record<string, SlotSpec> = {
+      kicker: { sel: '.kicker', kind: 'text' },
+      sub: { sel: '.sub', kind: 'text' },
+    };
+    const r = prepareComposition(TWO, { slots: SLOTS2, values: { kicker: 'REAL' } });
+    const tpl = parse(r.html).querySelector('template') as HTMLTemplateElement;
+    expect(tpl.content.querySelector('.kicker')?.textContent).toBe('REAL');
+    const sub = tpl.content.querySelector('.sub') as HTMLElement;
+    // Either route is correct — the element inside template content may belong
+    // to another document, where `instanceof HTMLElement` is false and the
+    // attribute path runs instead.
+    const hidden = sub.style?.display === 'none'
+      || /display\s*:\s*none/.test(sub.getAttribute('style') ?? '');
+    expect(hidden).toBe(true);
+  });
+});

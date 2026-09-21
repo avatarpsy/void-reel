@@ -153,6 +153,7 @@ function applySlot(
 ): void {
   const v = String(value);
 
+
   /**
    * COLOURS GO ON THE DOCUMENT ROOT, NOT THE COMPOSITION ROOT.
    *
@@ -176,7 +177,7 @@ function applySlot(
     return;
   }
 
-  const el = doc.querySelector(spec.sel);
+  const el = findSlotEl(doc, spec.sel);
   if (!el) {
     // Not fatal: a block edited after its manifest was written can lose an
     // element. Losing one line is better than refusing to render the slide.
@@ -195,6 +196,34 @@ function applySlot(
 }
 
 /**
+ * FIND A SLOT'S ELEMENT, INCLUDING INSIDE A `<template>`.
+ *
+ * `document.querySelector` cannot see into template content — that is the whole
+ * point of a template, its children are inert and live outside the document
+ * tree. Several blocks in the shipped library hold their markup in one and
+ * instantiate it at run time, so every slot they declared resolved to null
+ * here: the fill was skipped, a warning nobody reads was pushed, and the block
+ * rendered with the designer's placeholder text still in it.
+ *
+ * Measured across the starter library: 72 declared slots on 12 `code-snippet-*`
+ * blocks, all silently unfillable. The agent could set them, the call succeeded,
+ * and nothing changed.
+ *
+ * Filling inside the template is the correct place to do it: what gets cloned
+ * into the document is the content, so the value lands in every instance —
+ * which is what a slot on a repeated element means.
+ */
+function findSlotEl(doc: Document, sel: string): Element | null {
+  const direct = doc.querySelector(sel);
+  if (direct) return direct;
+  for (const tpl of Array.from(doc.querySelectorAll('template'))) {
+    const inside = (tpl as HTMLTemplateElement).content?.querySelector?.(sel);
+    if (inside) return inside;
+  }
+  return null;
+}
+
+/**
  * Hide a declared slot that nobody filled. Only meaningful for element-bound
  * slots: a colour is a CSS variable with no element to hide, and it already
  * falls back to whatever the stylesheet declares.
@@ -207,7 +236,7 @@ function applySlot(
  */
 function hideUnfilled(doc: Document, spec: SlotSpec): void {
   if (!spec.sel || spec.var || spec.kind === 'color') return;
-  const el = doc.querySelector(spec.sel);
+  const el = findSlotEl(doc, spec.sel);
   if (el instanceof HTMLElement) el.style.display = 'none';
   else if (el) el.setAttribute('style', `${el.getAttribute('style') ?? ''};display:none`);
 }

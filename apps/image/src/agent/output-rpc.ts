@@ -15,6 +15,7 @@ import { useUIStore } from '../stores/ui-store';
 import { registerImageRpc, registerImageMutation } from './rpc';
 import { removeLayerBackground } from '../services/background-removal-apply';
 import { exportArtboard } from '../services/export-service';
+import { bakePendingCompositions } from '../services/composition/bake';
 import { uploadReferenceImage } from '../services/generative-fill';
 import {
   saveImageToVoidspaceLibrary,
@@ -135,6 +136,34 @@ registerImageMutation('voidspace:img-adjust', 'Adjust image', (msg: any) => {
  * SAME `publish` tool the video agent uses, so there is no second publishing
  * implementation to keep in step.
  */
+/**
+ * EVERY PICTURE MUST EXIST BEFORE ANYTHING READS IT.
+ *
+ * A placed composition carries no asset until `bakeComposition` renders it on
+ * the user's own machine, which takes tens of seconds. `bakePendingCompositions`
+ * existed for exactly this and was called in ONE place — project load — so a
+ * reopened deck rendered correctly and a freshly built one did not.
+ *
+ * Measured through MCP: place three slides, export immediately, and the export
+ * came back `dropped: ["deck-close"]` at 502KB. The same export moments later
+ * was complete at 777KB. The sequence an agent naturally performs — place,
+ * place, place, export — produced a deck missing its last slide, and the only
+ * signal was a `dropped` list nothing told the caller to act on.
+ *
+ * So the readers settle first. It is cheap when there is nothing to do: bakes
+ * are hash-keyed and de-duplicated, so an already-baked deck pays one map
+ * lookup per layer.
+ */
+async function settleCompositions(): Promise<void> {
+  try {
+    await bakePendingCompositions();
+  } catch {
+    // A bake that cannot run is reported by the export itself, through the
+    // layers it had to drop. Failing the whole call here would turn one missing
+    // picture into no file at all.
+  }
+}
+
 registerImageRpc('voidspace:img-render-pages', async (msg: any) => {
   const project = useProjectStore.getState().project;
   if (!project) return fail('no_project', 'No image project is open.');
@@ -143,6 +172,9 @@ registerImageRpc('voidspace:img-render-pages', async (msg: any) => {
     ? project.artboards.filter((a) => msg.pageIds.includes(a.id))
     : project.artboards;
   if (!pages.length) return fail('no_pages', 'No pages to render.');
+
+  // Pixels first — see settleCompositions.
+  await settleCompositions();
 
   try {
     const urls: string[] = [];

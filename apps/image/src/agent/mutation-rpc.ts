@@ -28,7 +28,7 @@ import { getPopularFonts, loadGoogleFont } from '../services/fonts-service';
 import { libraryImageToAsset, getVoidspaceIdToken } from '../services/voidspace-storage';
 import { createTextDocument, layoutText } from '../tools/text/text-engine';
 import { loadBlock, resolveComposition } from '../services/composition/block-source';
-import { bakeComposition } from '../services/composition/bake';
+import { bakeComposition, bakePendingCompositions } from '../services/composition/bake';
 import { saveRegionToLibrary } from '../services/library-save';
 import { exportProjectToPdf, exportProjectToPptx, exportFileName } from '../services/pptx-export';
 import { uploadToLibrary } from '@openreel/asset-browser';
@@ -1508,6 +1508,25 @@ registerImageRpc('voidspace:img-export', async (msg: any) => {
 
   const token = await getVoidspaceIdToken().catch(() => null);
   if (!token) return fail('signed_out', 'Exporting needs the user to be signed in.');
+
+  /**
+   * SETTLE THE PICTURES BEFORE EXPORTING THEM.
+   *
+   * A placed composition has no pixels until it is baked on the user's machine,
+   * and `bakePendingCompositions` was called only on project load — so a deck
+   * that was REOPENED exported correctly and one just built did not.
+   *
+   * Measured through MCP: three slides placed, exported seconds later, and the
+   * file came back `dropped: ["deck-close"]` — the slide made last was missing,
+   * and the same export moments afterwards was complete. Place, place, place,
+   * export is the sequence anybody would perform, and it produced a deck with a
+   * hole in it whose only trace was a list nothing said to act on.
+   *
+   * Cheap when there is nothing to do: bakes are hash-keyed and de-duplicated.
+   * A failure here is deliberately not fatal — the export reports what it had to
+   * leave out, and one unrenderable layer must not cost the whole file.
+   */
+  await bakePendingCompositions().catch(() => undefined);
 
   // The SAME name the toolbar's Export produces — see exportFileName.
   const fileName = exportFileName(project.name, format);
