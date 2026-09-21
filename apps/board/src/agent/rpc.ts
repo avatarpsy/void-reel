@@ -2272,10 +2272,19 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
      */
     'voidspace:board-screenshot': async args => {
       const raw = String(args?.scope ?? 'viewport');
+      const ids = asArray<string>(args?.ids).map(String).filter(Boolean);
+      /**
+       * `ids` IMPLIES THE SCOPE. An agent that names four ids has said what it
+       * wants to look at; making it also say `scope: "ids"` is a second chance
+       * to get one call wrong, and getting it wrong silently returns a picture
+       * of the viewport instead — which looks like an answer.
+       */
       const scope: ShotScope =
-        raw === 'all' || raw === 'selection' ? raw : 'viewport';
+        raw === 'all' || raw === 'selection' || raw === 'auto' || raw === 'ids'
+          ? (raw as ShotScope)
+          : ids.length ? 'ids' : 'viewport';
       try {
-        return { ok: true as const, ...(await captureBoard(board, scope)) };
+        return { ok: true as const, ...(await captureBoard(board, scope, { ids })) };
       } catch (e) {
         // The reasons differ and so do the remedies — nothing selected, nothing
         // on screen, upload refused. Pass the sentence through.
