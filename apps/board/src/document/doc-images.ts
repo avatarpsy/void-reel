@@ -1,0 +1,182 @@
+/**
+ * Pictures inside a document.
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * WHY THE ADAPTER'S OWN IMAGE HANDLING IS NOT ENOUGH
+ * ══════════════════════════════════════════════════════════════════════════
+ * BlockSuite's markdown adapter does understand `![alt](url)`: it FETCHES the
+ * image, hashes the bytes, writes them to blob storage and emits an
+ * `affine:image` block. Two things make that wrong here.
+ *
+ * 1. THE BYTES WOULD BE DEVICE-LOCAL. A hashed blob goes to this browser's
+ *    IndexedDB. The board's own rule — the one every other image on the canvas
+ *    already follows — is that a picture is a REFERENCE to the Library
+ *    (`board/media-ref.ts`), resolved wherever it is opened. A document
+ *    imported on the desktop app would otherwise open with broken images on the
+ *    phone, and nothing would say why.
+ *
+ * 2. IT WOULD FETCH EVERY IMAGE AT IMPORT. A Word file with thirty figures
+ *    would download thirty images before the document appeared, to produce
+ *    copies of pictures we already have.
+ *
+ * So images are lifted OUT of the markdown before conversion, and put back as
+ * media-reference image blocks afterwards. Nothing is fetched, and the document
+ * carries the same kind of image block as the rest of the board.
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * AND BACK OUT AGAIN
+ * ══════════════════════════════════════════════════════════════════════════
+ * Reading has the mirror problem: the adapter serialises an image as
+ * `assets/<name>.png`, a path into a zip that only exists during an export — so
+ * a document read by the agent would come back referring to files nobody has.
+ * The same swap runs in reverse, and `document_read` returns the real URL.
+ *
+ * Both directions share ONE sentinel format, defined once here, which is what
+ * keeps them from drifting apart.
+ */
+import { decodeMediaRef, encodeMediaRef, guessMime, isMediaRef } from '../board/media-ref';
+
+/** A token no markdown construct touches and no human writes by accident. */
+const TOKEN = (n: number) => `!!vsimg-${n}!!`;
+const TOKEN_RE = /^!!vsimg-(\d+)!!$/;
+
+/** `![alt](url)`, with the alt text optional and the url unquoted. */
+const IMAGE_RE = /!\[([^\]]*)\]\(\s*(<[^>]*>|[^\s)]+)[^)]*\)/g;
+
+export interface LiftedImage {
+  url: string;
+  alt: string;
+}
+
+/**
+ * Take the http(s) images out, leaving a sentinel paragraph behind.
+ *
+ * `data:` URIs are deliberately LEFT IN PLACE. The adapter can read one without
+ * a network round trip, and a pasted screenshot inlined into markdown has no
+ * Library URL to reference — dropping it would lose the only copy. The import
+ * path avoids ever producing them (`docxToMarkdownDetailed` uploads instead),
+ * so in practice this is the hand-pasted case only.
+ */
+export function liftImages(markdown: string): { text: string; images: LiftedImage[] } {
+  const images: LiftedImage[] = [];
+  const text = String(markdown ?? '').replace(IMAGE_RE, (whole, alt: string, raw: string) => {
+    const url = String(raw ?? '').replace(/^<|>$/g, '').trim();
+    if (!/^https?:\/\//i.test(url)) return whole;
+    const n = images.length;
+    images.push({ url, alt: String(alt ?? '').trim() });
+    // Blank lines around it: an image inside a sentence becomes its own block,
+    // which is what a block editor does with one anyway.
+    return `\n\n${TOKEN(n)}\n\n`;
+  });
+  return { text, images };
+}
+
+/** A block snapshot node, loosely — the adapter's output is not typed for us. */
+type Node = { type?: string; flavour?: string; props?: any; children?: Node[] };
+
+/** The text of a paragraph snapshot, which carries a Y.Text delta. */
+function snapshotText(node: Node): string {
+  const delta = node?.props?.text?.delta;
+  if (!Array.isArray(delta)) return '';
+  return delta.map((d: any) => String(d?.insert ?? '')).join('').trim();
+}
+
+/**
+ * Put the images back, as reference-backed image blocks.
+ *
+ * Walks the whole tree rather than only the top level: a picture inside a list
+ * item or a quote is still a picture, and a sentinel left behind renders as the
+ * literal text `!!vsimg-3!!` in the middle of the user's document — the kind of
+ * failure that is obvious on screen and invisible to a model test.
+ */
+export function restoreImages(root: Node, images: LiftedImage[], nanoid: () => string): number {
+  if (!images.length) return 0;
+  let placed = 0;
+
+  const walk = (node: Node): void => {
+    const kids = node?.children;
+    if (!Array.isArray(kids)) return;
+    for (let i = 0; i < kids.length; i++) {
+      const child = kids[i]!;
+      const match = TOKEN_RE.exec(snapshotText(child));
+      const image = match ? images[Number(match[1])] : undefined;
+      if (image) {
+        kids[i] = {
+          type: 'block',
+          id: nanoid(),
+          flavour: 'affine:image',
+          props: {
+            sourceId: encodeMediaRef({
+              src: image.url,
+              kind: 'image',
+              mime: guessMime(image.url, 'image'),
+            }),
+            caption: image.alt || '',
+          },
+          children: [],
+        } as any;
+        placed += 1;
+        continue;
+      }
+      walk(child);
+    }
+  };
+
+  walk(root);
+  return placed;
+}
+
+/**
+ * ── READING ────────────────────────────────────────────────────────────────
+ * Replace reference-backed image blocks with sentinel paragraphs so the adapter
+ * does not try to resolve them, and hand back the urls to splice into the
+ * markdown afterwards.
+ *
+ * A LOCAL blob (a pasted screenshot) is left alone: the adapter can serialise
+ * that one properly, and it has no url to put in its place.
+ */
+export function stripImages(root: Node): LiftedImage[] {
+  const images: LiftedImage[] = [];
+
+  const walk = (node: Node): void => {
+    const kids = node?.children;
+    if (!Array.isArray(kids)) return;
+    for (let i = 0; i < kids.length; i++) {
+      const child = kids[i]!;
+      const sourceId = child?.flavour === 'affine:image' ? String(child?.props?.sourceId ?? '') : '';
+      if (sourceId && isMediaRef(sourceId)) {
+        const ref = decodeMediaRef(sourceId);
+        if (ref?.src) {
+          const n = images.length;
+          images.push({ url: ref.src, alt: String(child?.props?.caption ?? '').trim() });
+          kids[i] = {
+            type: 'block',
+            id: `vsimg-${n}`,
+            flavour: 'affine:paragraph',
+            props: { type: 'text', text: { '$blocksuite:internal:text$': true, delta: [{ insert: TOKEN(n) }] } },
+            children: [],
+          } as any;
+          continue;
+        }
+      }
+      walk(child);
+    }
+  };
+
+  walk(root);
+  return images;
+}
+
+/** Turn the sentinels in serialised markdown back into image syntax. */
+export function restoreMarkdownImages(markdown: string, images: LiftedImage[]): string {
+  if (!images.length) return markdown;
+  return String(markdown ?? '').replace(/!!vsimg-(\d+)!!/g, (whole, n: string) => {
+    const image = images[Number(n)];
+    return image ? `![${image.alt}](${image.url})` : whole;
+  });
+}
+
+/** How many pictures a piece of markdown carries — for the import message. */
+export function countImages(markdown: string): number {
+  return (String(markdown ?? '').match(IMAGE_RE) ?? []).length;
+}

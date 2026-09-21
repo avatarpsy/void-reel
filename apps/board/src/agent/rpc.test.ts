@@ -11,7 +11,19 @@
  * Handlers are driven the way the parent page drives them: a `postMessage` in,
  * one reply out carrying the same `requestId`.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+
+/**
+ * NO PARENT WINDOW IN A TEST, so the real `getParentToken` waits for an answer
+ * that never comes. The document path bounds that wait now — see
+ * `uploadDocument` — but eight seconds per call would still dominate this
+ * suite, and what it would be measuring is the mock's absence.
+ *
+ * Returning null is also the honest shape: a signed-out board. The tests below
+ * assert the document is still made and still downloaded when sharing fails,
+ * which is the behaviour that matters and the one that was broken.
+ */
+vi.mock('../board/parent-auth', () => ({ getParentToken: async () => null }));
 
 import { makeTestBoard, placeTestImage, type TestBoard } from '../blocksuite/test-board';
 import { writeBlockMeta } from '../board/board-meta';
@@ -20,6 +32,7 @@ import { setBlockCatalogue } from '../shot/blocks';
 import { setModelCatalogue, type ModelCaps } from '../shot/models';
 import { installScreenplayFocus, type ScreenplayFocus } from '../ui/screenplay-focus';
 import { installDocumentView, type DocumentView } from '../ui/document-view';
+import { installDocumentFocus, type DocumentFocus } from '../ui/document-focus';
 import { drawOnCanvas, readCanvas } from '../board/canvas';
 import { READ_ONLY_RPC, installBoardRpc } from './rpc';
 
@@ -64,6 +77,7 @@ let dispose: () => void;
 let focus: ScreenplayFocus | null = null;
 let focusHost: HTMLElement | null = null;
 let documentView: DocumentView | null = null;
+let documentFocus: DocumentFocus | null = null;
 
 /**
  * One RPC round trip, exactly as the page performs it.
@@ -95,6 +109,7 @@ beforeEach(() => {
   dispose?.();
   focus?.destroy();
   documentView?.destroy();
+  documentFocus?.destroy();
   focusHost?.remove();
   board = makeTestBoard();
   setModelCatalogue([SEEDANCE], SEEDANCE.id);
@@ -108,11 +123,21 @@ beforeEach(() => {
     surfaceId: board.surfaceId,
     pageId: board.pageId,
     destroy: () => {},
-  }, { screenplay: () => focus, document: () => documentView });
+  }, { screenplay: () => focus, document: () => documentView, documentFocus: () => documentFocus });
 
   focusHost = document.createElement('div');
   document.body.append(focusHost);
   documentView = installDocumentView({
+    workspace: board.workspace,
+    store: board.store,
+    std: board.std,
+    doc: board.doc,
+    host: board.std.host as unknown as HTMLElement,
+    surfaceId: board.surfaceId,
+    pageId: board.pageId,
+    destroy: () => {},
+  }, focusHost);
+  documentFocus = installDocumentFocus({
     workspace: board.workspace,
     store: board.store,
     std: board.std,
@@ -1579,5 +1604,324 @@ describe('agent actions undo as their own step', () => {
       'voidspace:board-edit-canvas', 'voidspace:board-delete-shot']) {
       expect(READ_ONLY_RPC.has(t), `${t} must get an undo checkpoint`).toBe(false);
     }
+  });
+});
+
+/**
+ * `create_document` OVER THE WIRE.
+ *
+ * ── WHY THIS SUITE EXISTS ───────────────────────────────────────────────────
+ * The handler had tests and they all passed while the feature was completely
+ * dead in the browser. `onMessage` drops anything whose type does not start
+ * with `voidspace:board-`, and this one was registered as
+ * `voidspace:document-create` — so the message was discarded before dispatch,
+ * no reply was ever sent, and the agent's tool call hung until the bridge timed
+ * out. Nothing threw, nothing logged.
+ *
+ * `call()` posts a real message, so these tests cross that guard. The first one
+ * would have failed.
+ */
+describe('create_document, over the wire', () => {
+  /**
+   * WARM THE LAZY MODULES FIRST.
+   *
+   * `call()` gives a handler 2s to reply, which is right for every other
+   * message on this bus. The first document ever made also pays for importing
+   * BlockSuite's markdown adapter and the two typesetters, and that alone can
+   * exceed the budget — so without this the FIRST test in this block fails and
+   * the rest pass, which reads as a flake rather than as module-load cost.
+   *
+   * The real bridge has the same problem and it is fixed there properly:
+   * `DOCUMENT_RENDER_TIMEOUT_MS` in useBoardBridge, because a user on a cold
+   * cache pays it too.
+   */
+  beforeAll(async () => {
+    await import('@blocksuite/affine/shared/adapters');
+    await import('@blocksuite/store');
+    await import('../document');
+    await import('../document/note-io');
+  }, 60_000);
+
+  it('EVERY handler is inside the board namespace the listener accepts', async () => {
+    // A message outside the prefix is silently dropped, so a handler named
+    // outside it can never run. Asserted against the real registry rather than
+    // one name, because the next one added is the one nobody will check.
+    const reply = await call('voidspace:board-document-create', {
+      markdown: '# Hello\n\nBody.', title: 'Hello', format: 'md',
+    });
+    expect(reply.ok, 'the listener never dispatched — check the type prefix').toBe(true);
+  });
+
+  it('puts an editable document on the canvas and opens it', async () => {
+    const reply = await call('voidspace:board-document-create', {
+      markdown: '# Field Report\n\nA paragraph.\n\n- one\n- two\n',
+      title: 'Field Report',
+      format: 'md',
+    });
+
+    expect(reply.ok).toBe(true);
+    expect(reply.noteId, 'nothing was placed on the board').toBeTruthy();
+    expect(reply.fileName).toBe('Field Report.md');
+
+    const model: any = board.store.getBlock(reply.noteId)!.model;
+    expect(model.flavour).toBe('affine:note');
+    expect(model.children.length).toBeGreaterThan(1);
+
+    // Opened, because work the user cannot see reads as nothing having happened.
+    expect(documentFocus!.isOpen()).toBe(true);
+    expect(documentFocus!.current()).toBe(reply.noteId);
+    expect(reply.note).toMatch(/OPEN ON THE BOARD/);
+  });
+
+  it('honours place:false for a caller that only wants the file', async () => {
+    const reply = await call('voidspace:board-document-create', {
+      markdown: '# Just A File\n\nBody.', title: 'Just A File', format: 'md', place: false,
+    });
+    expect(reply.ok).toBe(true);
+    expect(reply.noteId).toBeUndefined();
+    expect(documentFocus!.isOpen()).toBe(false);
+  });
+
+  it('refuses an empty document instead of placing a blank page', async () => {
+    const reply = await call('voidspace:board-document-create', { markdown: '   ', title: 'X' });
+    expect(reply.ok).toBe(false);
+    expect(String(reply.message)).toMatch(/empty/i);
+  });
+
+  /**
+   * The board has no code block — registering one costs a megabyte of Shiki. It
+   * is still in the FILE, so the model has to be told which copy lost it rather
+   * than the user discovering the gap.
+   */
+  it('reports what the canvas could not hold, rather than dropping it quietly', async () => {
+    const reply = await call('voidspace:board-document-create', {
+      markdown: '# With Code\n\nText.\n\n```\nconst x = 1;\n```\n',
+      title: 'With Code',
+      format: 'md',
+    });
+    expect(reply.ok).toBe(true);
+    expect(String(reply.note)).toMatch(/code blocks/);
+  });
+});
+
+/**
+ * SHARING CAN FAIL WITHOUT THE DOCUMENT FAILING.
+ *
+ * The file is typeset on the device and downloaded BEFORE any upload is
+ * attempted, so a signed-out board or a dead network costs the user a link,
+ * not their document. Reporting that as a total failure would send the model
+ * hunting for a problem the user cannot see — they have the file.
+ *
+ * This is the state these tests run in: `getParentToken` is mocked to null.
+ */
+describe('create_document when it cannot be shared', () => {
+  it('still reports the document as made, and says where it is', async () => {
+    const reply = await call('voidspace:board-document-create', {
+      markdown: '# Offline Note\n\nBody.', title: 'Offline Note', format: 'md',
+    });
+    expect(reply.ok).toBe(true);
+    expect(reply.fileName).toBe('Offline Note.md');
+    expect(reply.url, 'there is no link without an upload').toBeUndefined();
+    expect(String(reply.note)).toMatch(/downloaded it to the user/i);
+    expect(String(reply.note)).toMatch(/could not be uploaded|Downloads/i);
+  });
+
+  /** The editable copy is local, so it must land regardless of the network. */
+  it('still puts the editable document on the board', async () => {
+    const reply = await call('voidspace:board-document-create', {
+      markdown: '# Local Only\n\nBody.', title: 'Local Only', format: 'md',
+    });
+    expect(reply.noteId).toBeTruthy();
+    expect(board.store.getBlock(reply.noteId)!.model.flavour).toBe('affine:note');
+  });
+});
+
+/**
+ * READING AND EDITING A DOCUMENT, OVER THE WIRE.
+ *
+ * Through `call()`, so these cross the listener's `voidspace:board-` prefix
+ * guard — the guard that silently discarded `create_document` for a whole
+ * release because its handler was named outside the namespace.
+ */
+describe('document read and edit, over the wire', () => {
+  const DOC = [
+    'Opening prose before any heading.', '',
+    '# The Report', '', 'Intro.', '',
+    '## Findings', '', 'What we found.', '',
+    '### Detail', '', 'A subsection.', '',
+    '## Recommendations', '', 'What to do.',
+  ].join('\n');
+
+  async function makeDoc(markdown = DOC, title = 'The Report') {
+    const reply = await call('voidspace:board-document-create', {
+      markdown, title, format: 'md', place: true,
+    });
+    expect(reply.ok).toBe(true);
+    return reply.noteId as string;
+  }
+
+  it('lists every document on the board, because a board holds several', async () => {
+    await makeDoc();
+    await makeDoc('# Second\n\nIts body.', 'Second');
+
+    const reply = await call('voidspace:board-document-read', {});
+    expect(reply.ok).toBe(true);
+    expect(reply.documents.map((d: any) => d.title).sort()).toEqual(['Second', 'The Report']);
+    for (const doc of reply.documents) {
+      expect(doc.noteId).toBeTruthy();
+      expect(doc.words).toBeGreaterThan(0);
+    }
+  });
+
+  it('returns the outline alone when that is all that was asked for', async () => {
+    const noteId = await makeDoc();
+    const reply = await call('voidspace:board-document-read', { noteId, outlineOnly: true });
+
+    expect(reply.markdown, 'outlineOnly must not carry the body').toBeUndefined();
+    expect(reply.outline.map((s: any) => s.heading))
+      .toEqual(['', 'The Report', 'Findings', 'Detail', 'Recommendations']);
+    expect(reply.note).toMatch(/stable/i);
+  });
+
+  it('reads just the sections asked for, by id', async () => {
+    const noteId = await makeDoc();
+    const { outline } = await call('voidspace:board-document-read', { noteId, outlineOnly: true });
+    const recs = outline.find((s: any) => s.heading === 'Recommendations');
+
+    const reply = await call('voidspace:board-document-read', { noteId, sectionIds: [recs.id] });
+    expect(reply.markdown).toContain('What to do');
+    expect(reply.markdown).not.toContain('What we found');
+  });
+
+  /** Truncation that is not reported is a summary of a document half seen. */
+  it('says which sections did not fit, by id', async () => {
+    const long = ['# Long'];
+    for (let i = 1; i <= 30; i++) long.push('', `## S${i}`, '', 'Body. '.repeat(60));
+    const noteId = await makeDoc(long.join('\n'), 'Long');
+
+    const reply = await call('voidspace:board-document-read', { noteId, budget: 3000 });
+    expect(reply.omitted.length).toBeGreaterThan(0);
+    expect(reply.note).toMatch(/NOT SEEN ALL OF IT/);
+    expect(reply.omitted[0].id).toBeTruthy();
+  });
+
+  it('replaces one section and leaves the rest of the document alone', async () => {
+    const noteId = await makeDoc();
+    const { outline } = await call('voidspace:board-document-read', { noteId, outlineOnly: true });
+    const findings = outline.find((s: any) => s.heading === 'Findings');
+
+    const edit = await call('voidspace:board-document-edit', {
+      noteId, where: 'replace', sectionId: findings.id,
+      markdown: '## Findings\n\nRewritten.',
+    });
+    expect(edit.ok).toBe(true);
+    // The outline comes back FRESH, so held addresses cannot go stale silently.
+    expect(edit.outline.map((s: any) => s.heading))
+      .toEqual(['', 'The Report', 'Findings', 'Recommendations']);
+
+    const after = await call('voidspace:board-document-read', { noteId });
+    expect(after.markdown).toContain('Rewritten');
+    expect(after.markdown).not.toContain('What we found');
+    expect(after.markdown).toContain('What to do');
+  });
+
+  it('appends without needing a section id', async () => {
+    const noteId = await makeDoc();
+    const edit = await call('voidspace:board-document-edit', {
+      noteId, where: 'append', markdown: '## Next Steps\n\nGo.',
+    });
+    expect(edit.outline.at(-1).heading).toBe('Next Steps');
+  });
+
+  it('refuses an unknown document rather than editing the wrong one', async () => {
+    const reply = await call('voidspace:board-document-edit', {
+      noteId: 'nope', where: 'append', markdown: '## X\n\nY.',
+    });
+    expect(reply.ok).toBe(false);
+    expect(String(reply.message)).toMatch(/no document/i);
+  });
+
+  it('refuses a bad `where` by naming the ones that work', async () => {
+    const noteId = await makeDoc();
+    const reply = await call('voidspace:board-document-edit', {
+      noteId, where: 'shuffle', sectionId: 'x', markdown: 'y',
+    });
+    expect(reply.ok).toBe(false);
+    expect(String(reply.message)).toMatch(/replace, before, after, append or delete/);
+  });
+
+  it('requires a sectionId for everything but append', async () => {
+    const noteId = await makeDoc();
+    const reply = await call('voidspace:board-document-edit', {
+      noteId, where: 'replace', markdown: '## X\n\nY.',
+    });
+    expect(reply.ok).toBe(false);
+    expect(String(reply.message)).toMatch(/sectionId is required/);
+  });
+});
+
+/**
+ * GREP, over the wire.
+ *
+ * `searchDocument` had unit tests and the RPC path did not — the same gap that
+ * let a whole tool sit behind the listener's prefix guard, unreachable and
+ * green. This crosses the listener.
+ */
+describe('document search, over the wire', () => {
+  async function doc() {
+    const reply = await call('voidspace:board-document-create', {
+      markdown: [
+        '# Pricing Review', '',
+        '## Current plans', '', 'Pricing starts at ten pounds a month.', '',
+        '## Competitors', '', 'Their pricing is opaque.', '',
+        '## Recommendation', '', 'Leave it alone for now.',
+      ].join('\n'),
+      title: 'Pricing Review', format: 'md', place: true,
+    });
+    return reply.noteId as string;
+  }
+
+  it('returns hits with the section id each one is in', async () => {
+    const noteId = await doc();
+    const reply = await call('voidspace:board-document-read', { noteId, search: 'pricing' });
+
+    expect(reply.ok).toBe(true);
+    expect(reply.hits.length).toBeGreaterThanOrEqual(2);
+    for (const h of reply.hits) expect(h.id, 'a hit with no section id leads nowhere').toBeTruthy();
+    expect(reply.hits.map((h: any) => h.heading)).toContain('Current plans');
+    expect(reply.note).toMatch(/section id/i);
+  });
+
+  /** The id from a search must work directly as a read address. */
+  it('a hit id reads back that section and nothing else', async () => {
+    const noteId = await doc();
+    const { hits } = await call('voidspace:board-document-read', { noteId, search: 'opaque' });
+    const read = await call('voidspace:board-document-read', { noteId, sectionIds: [hits[0].id] });
+
+    expect(read.markdown).toContain('opaque');
+    expect(read.markdown).not.toContain('ten pounds');
+  });
+
+  /** And directly as an edit address, which is the whole point of carrying it. */
+  it('a hit id edits that section', async () => {
+    const noteId = await doc();
+    const { hits } = await call('voidspace:board-document-read', { noteId, search: 'Leave it alone' });
+    const edit = await call('voidspace:board-document-edit', {
+      noteId, where: 'replace', sectionId: hits[0].id,
+      markdown: '## Recommendation\n\nRaise it by ten percent.',
+    });
+
+    expect(edit.ok).toBe(true);
+    const after = await call('voidspace:board-document-read', { noteId });
+    expect(after.markdown).toContain('Raise it by ten percent');
+    expect(after.markdown).not.toContain('Leave it alone');
+  });
+
+  it('says plainly when nothing matches, rather than returning the document', async () => {
+    const noteId = await doc();
+    const reply = await call('voidspace:board-document-read', { noteId, search: 'kangaroo' });
+    expect(reply.hits).toEqual([]);
+    expect(reply.markdown).toBeUndefined();
+    expect(reply.note).toMatch(/Nothing matching/i);
   });
 });

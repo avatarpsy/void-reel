@@ -11,15 +11,49 @@
 
 /* ── on screen ──────────────────────────────────────────────────────────── */
 
-.vs-doc {
+/*
+ * ── IT MUST BEAT `.vs-focus .page`, NOT MERELY FOLLOW IT ────────────────────
+ *
+ * The article carries BOTH classes — `page` for the sheet of paper and
+ * `vs-doc` for the prose — and the screenplay's `.vs-focus .page` is (0,2,0)
+ * while a bare `.vs-doc` is (0,1,0). Load order does not enter into it: the
+ * screenplay won every property they share, so a document rendered in 12pt
+ * Courier, at screenplay margins (144px down the left), with `pre-wrap`
+ * collapsing its spacing and a page-fold rule ruled every 864px for paper this
+ * document is not set on. It looked like a bug in the exporter and was a bug
+ * in one selector.
+ *
+ * The `@media print` block at the bottom of this file already had to learn
+ * this — it uses `.vs-focus .page.vs-doc` and says why. Screen never did.
+ */
+.vs-focus .page.vs-doc {
   max-width: 46rem;         /* ~75 characters — the measure prose is read at. */
+  margin: 0 auto;
+  padding: 3.5rem 3rem 5rem;
+  background-color: var(--page-bg);
+  /* Screenplay paper is ruled where its pages break. Ours break somewhere
+     else entirely, so a rule here would be a lie drawn on the page. */
+  background-image: none;
+  color: var(--page-ink);
+  font-family: var(--affine-font-family, ui-sans-serif, system-ui, sans-serif);
+  font-size: 16px;
+  line-height: 1.7;
+  /* `pre-wrap` is for text laid out by its own whitespace. This is HTML: every
+     gap here is a margin, and honouring the source's newlines on top of them
+     doubled the space between everything. */
+  white-space: normal;
+  word-break: normal;
+}
+
+.vs-doc {
+  max-width: 46rem;
   margin: 0 auto;
   padding: 3.5rem 3rem 5rem;
   background: var(--page-bg);
   color: var(--page-ink);
   font-family: var(--affine-font-family, ui-sans-serif, system-ui, sans-serif);
-  font-size: 15px;
-  line-height: 1.65;
+  font-size: 16px;
+  line-height: 1.7;
 }
 
 .vs-doc__title {
@@ -143,3 +177,166 @@
   /* Pictures are sized for a screen; unconstrained they push a page each. */
   .vs-focus .page.vs-doc img { max-height: 4in; }
 }
+
+/* ══ The document index ══════════════════════════════════════════════════════
+   One list, two sources: what is open on this board and what is in the user's
+   Library. A floating card rather than a docked panel — it is consulted and
+   dismissed, not worked in, and docking it would take canvas away permanently
+   to serve a question asked for two seconds. */
+.vs-doc-index[hidden] { display: none; }
+
+.vs-doc-index {
+  position: absolute;
+  top: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 45;
+  width: min(30rem, calc(100vw - 32px));
+  max-height: min(32rem, calc(100vh - 120px));
+  overflow-y: auto;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid var(--vs-border, #e3e5ea);
+  background: var(--vs-surface, #fff);
+  box-shadow: 0 16px 40px rgb(0 0 0 / 20%);
+}
+[data-theme='dark'] .vs-doc-index { background: #1b1e26; border-color: #2c313c; }
+
+.vs-doc-index__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 6px 8px;
+}
+.vs-doc-index__head strong { font-size: 13px; font-weight: 650; }
+
+/* The head's right-hand side: a tidy-up and a close, in that order. Grouped so
+   the title keeps the left edge no matter how many actions land here. */
+.vs-doc-index__actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.vs-doc-index__tidy {
+  padding: 3px 9px;
+  border: 1px solid var(--vs-border, #e3e5ea);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--vs-text-dim, #8a8f98);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.vs-doc-index__tidy:hover {
+  color: var(--vs-text, #e8eaf0);
+  border-color: var(--vs-text-dim, #8a8f98);
+}
+[data-theme='dark'] .vs-doc-index__tidy { border-color: #2c313c; }
+.vs-doc-index__close {
+  border: 0;
+  background: transparent;
+  color: var(--vs-text-dim, #8a8f98);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.vs-doc-index__close:hover { color: var(--vs-text, #e8eaf0); }
+
+.vs-doc-index__group + .vs-doc-index__group { margin-top: 10px; }
+.vs-doc-index__group h4 {
+  margin: 0 0 4px;
+  padding: 0 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--vs-text-dim, #8a8f98);
+}
+
+/* A row is one document. The name can be long and the size never is, so the
+   name takes the slack and truncates rather than pushing the size off. */
+.vs-doc-index__row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.vs-doc-index__row:hover,
+.vs-doc-index__row:focus-visible {
+  background: var(--vs-hover, rgba(120, 130, 150, 0.12));
+  outline: none;
+}
+.vs-doc-index__name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.vs-doc-index__meta {
+  flex: none;
+  font-size: 11px;
+  color: var(--vs-text-dim, #8a8f98);
+}
+
+.vs-doc-index__empty {
+  margin: 0;
+  padding: 6px 8px 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--vs-text-dim, #8a8f98);
+}
+
+/* ══ What each box is ════════════════════════════════════════════════════════
+   A tag on the corner of every document, the way a file has an extension. It is
+   drawn INSIDE the transformed canvas layer — it is a pseudo-element of the
+   block itself — so it pans, zooms and drags with the page without a line of
+   JavaScript keeping it in position. `document/tags.ts` writes the attribute;
+   everything else here is CSS. */
+[data-vs-doc-tag] { position: relative; }
+
+[data-vs-doc-tag]::after {
+  content: attr(data-vs-doc-tag);
+  position: absolute;
+  /* Above the sheet, not on it: the top-left of a document is its title, and a
+     badge over the first word is worse than no badge. */
+  top: -22px;
+  left: 0;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: var(--vs-tag-bg, rgba(20, 24, 34, 0.72));
+  color: #fff;
+  font-family: var(--affine-font-family, ui-sans-serif, system-ui, sans-serif);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  line-height: 1.5;
+  white-space: nowrap;
+  /* It is a label, not a handle — every click belongs to the page underneath. */
+  pointer-events: none;
+  /* Under menus and the focus overlay, above the page it names. */
+  z-index: 1;
+}
+
+/* On a light canvas the dark chip reads; on a dark one it disappears into the
+   background, so it swaps to a light chip with dark type. */
+[data-theme='dark'] [data-vs-doc-tag]::after {
+  background: rgba(232, 234, 240, 0.86);
+  color: #14181f;
+}
+
+/* In focus mode the document IS the screen — its own header already says what
+   it is called, and a floating tag over the page is noise. */
+body[data-doc-focus] [data-vs-doc-tag]::after,
+body[data-focus-mode] [data-vs-doc-tag]::after { display: none; }

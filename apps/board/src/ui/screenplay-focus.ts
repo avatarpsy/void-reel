@@ -31,7 +31,7 @@
  * scroll position. So it behaves like one document that happens to render.
  */
 import { offsetOfLine } from '../shot/fountain';
-import { screenplayBlock } from '../shot/screenplay-doc';
+import { screenplayBlock, writeScript } from '../shot/screenplay-doc';
 import { rowClass, screenplayView } from '../shot/screenplay-view';
 import type { MountedBoard } from '../blocksuite/editor';
 import { toast } from './toast';
@@ -122,30 +122,94 @@ export function installScreenplayFocus(
    * whatever fitted on screen, which is the one way this could silently produce
    * a wrong document.
    */
-  function exportPdf(): void {
-    const { script } = screenplayView(board.std);
-    if (script.empty) {
+  const menuEl = (): HTMLElement | null => el.querySelector('[data-menu]');
+  const nameEl = (): HTMLInputElement | null => el.querySelector('[data-name]');
+
+  function setMenu(open2: boolean): void {
+    const menu = menuEl();
+    if (!menu) return;
+    menu.hidden = !open2;
+    el.querySelector('[data-act="menu"]')?.setAttribute('aria-expanded', String(open2));
+  }
+
+  /**
+   * Rename the screenplay by rewriting its `Title:` line.
+   *
+   * Fountain keeps the title on its title page, so the name IS part of the
+   * script — exactly as a document's name is its first heading. Renaming edits
+   * the source, which is what stops the bar, the title page and the exported
+   * file ever disagreeing. A script with no title page gets one.
+   */
+  function rename(next: string): void {
+    const value = next.trim();
+    const { script, text } = screenplayView(board.std);
+    if (!value || value === script.title) return;
+    const line = `Title: ${value}`;
+    const updated = /^\s*Title:.*$/mi.test(text)
+      ? text.replace(/^\s*Title:.*$/mi, line)
+      : `${line}
+
+${text}`;
+    try {
+      writeScript(board.std, board.surfaceId, updated);
+    } catch (e: any) {
+      console.warn('[screenplay-focus] rename failed:', e?.message ?? e);
+    }
+  }
+
+  let exporting = false;
+
+  /**
+   * A REAL PDF FILE, typeset here.
+   *
+   * This was `window.print()`: the browser's dialog, which saves nothing, hands
+   * back no file and needs a person sitting in front of it. A screenwriter
+   * could not get a file out of their own script. `renderScreenplayPdf` sets
+   * the page at the industry's actual measurements — 12pt Courier, 1.5in left
+   * margin, character cues at 3.7in — so the page count still means what a
+   * reader expects it to mean.
+   */
+  async function exportPdf(): Promise<void> {
+    const view = screenplayView(board.std);
+    if (view.script.empty) {
       toast('There is no screenplay to export yet.', 'error');
       return;
     }
-    const wasEditing = editing;
-    if (wasEditing) {
+    if (exporting) return;
+    // Commit an open edit first, or the file is of the draft they just left.
+    if (editing) {
       const ta = el.querySelector<HTMLTextAreaElement>('[data-editor]');
       if (ta) commit(ta);
     }
-    if (el.hidden) open();
 
-    // After the render that read mode just queued, or the print snapshot is of
-    // the editor that is on its way out. `data-focus-mode` is already set by
-    // `open()` and is what gates the print stylesheet — so there is no separate
-    // printing flag to keep in step.
-    // Guarded because this fires from a rAF callback, where a throw is an
-    // UNCAUGHT exception with no stack pointing back here. Every browser has
-    // `print`; test DOMs do not, and the resulting uncaught error is the kind
-    // of noise that hides a real one.
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      if (typeof window.print === 'function') window.print();
-    }));
+    exporting = true;
+    const buttons = el.querySelectorAll<HTMLButtonElement>('.vs-focus__btn');
+    buttons.forEach(b => { b.disabled = true; });
+    toast('Making your PDF…', 'info');
+    try {
+      const { renderScreenplayPdf } = await import('../document/screenplay-pdf');
+      const { documentFileName } = await import('../document/blocks');
+      const { downloadDocument } = await import('../document');
+      const fresh = screenplayView(board.std);
+      const out = await renderScreenplayPdf(
+        fresh.script.elements ?? fresh.rows,
+        { title: fresh.script.title, credit: fresh.script.credit },
+      );
+      const fileName = documentFileName(fresh.script.title || 'screenplay', 'pdf');
+      downloadDocument({ blob: out.blob, fileName, format: 'pdf', bytes: out.blob.size });
+      toast(
+        out.droppedGlyphs
+          ? `${fileName} — ${out.droppedGlyphs} character(s) could not be set in Courier.`
+          : `Downloaded ${fileName}`,
+        out.droppedGlyphs ? 'error' : 'info',
+      );
+    } catch (e: any) {
+      console.error('[screenplay-focus] pdf failed:', e);
+      toast('That PDF could not be made.', 'error');
+    } finally {
+      exporting = false;
+      buttons.forEach(b => { b.disabled = false; });
+    }
   }
 
   /**
@@ -197,20 +261,40 @@ export function installScreenplayFocus(
         <button type="button" class="vs-focus__back" data-act="close" title="Back to the board (Esc)">
           ← Board
         </button>
+        <!--
+          THE SAME BAR AS A DOCUMENT, because a screenplay IS one. The name is a
+          field you click, and the formats live inside one Download — the shape
+          every office suite uses, and the shape the document mode already had.
+          Only the PAGE below differs, because a script's typography is
+          semantic and prose typography would destroy it.
+        -->
         <div class="vs-focus__title">
-          <strong>${esc(script.title || 'Untitled screenplay')}</strong>
+          <input class="vs-focus__name" data-name value="${esc(script.title)}"
+                 size="${Math.max(10, Math.min(40, (script.title || '').length + 1))}"
+                 spellcheck="false" aria-label="Screenplay name"
+                 placeholder="Untitled screenplay" />
           ${stat ? `<span>${esc(stat)}</span>` : ''}
         </div>
         <div class="vs-focus__actions">
           <button type="button" class="vs-focus__btn" data-act="${editing ? 'read' : 'write'}">
             ${editing ? 'Done' : 'Edit'}
           </button>
-          <button type="button" class="vs-focus__btn" data-act="fountain" title="Download the plain-text source — opens in Final Draft, Highland, Slugline">
-            .fountain
-          </button>
-          <button type="button" class="vs-focus__btn vs-focus__btn--primary" data-act="pdf" title="Export a properly formatted PDF">
-            Export PDF
-          </button>
+          <div class="vs-focus__menu-wrap">
+            <button type="button" class="vs-focus__btn vs-focus__btn--primary"
+                    data-act="menu" aria-haspopup="menu" aria-expanded="false">
+              Download <span class="vs-focus__caret">&#9662;</span>
+            </button>
+            <div class="vs-focus__menu" data-menu hidden role="menu">
+              <button type="button" role="menuitem" data-act="pdf">
+                <strong>PDF document</strong>
+                <em>Properly formatted, with a title page. Best for sending or printing.</em>
+              </button>
+              <button type="button" role="menuitem" data-act="fountain">
+                <strong>Fountain</strong>
+                <em>The plain-text source. Opens in Final Draft, Highland and Slugline.</em>
+              </button>
+            </div>
+          </div>
         </div>
       </header>
 
@@ -250,11 +334,39 @@ export function installScreenplayFocus(
 
   // ── input ─────────────────────────────────────────────────────────────────
 
+  /** A menu that does not close when you look away is a menu in the way. */
+  const onDocPointer = (e: Event) => {
+    if (menuEl()?.hidden !== false) return;
+    if (!(e.target as HTMLElement).closest?.('.vs-focus__menu-wrap')) setMenu(false);
+  };
+  document.addEventListener('pointerdown', onDocPointer, true);
+
+  /**
+   * The name commits on Enter and on blur. Escape reverts it and must NOT reach
+   * the mode's own Escape, or cancelling a rename would also leave the script.
+   */
+  el.addEventListener('keydown', e => {
+    const input = nameEl();
+    if (e.target !== input) return;
+    e.stopPropagation();
+    if (e.key === 'Enter') { e.preventDefault(); rename(input!.value); input!.blur(); }
+    if (e.key === 'Escape') { input!.value = screenplayView(board.std).script.title; input!.blur(); }
+  });
+  el.addEventListener('input', e => {
+    const input = nameEl();
+    if (e.target === input) input!.size = Math.max(10, Math.min(40, input!.value.length + 1));
+  });
+  el.addEventListener('focusout', e => {
+    if (e.target === nameEl()) rename(nameEl()!.value);
+  });
+
   el.addEventListener('click', e => {
     const act = (e.target as HTMLElement).closest<HTMLElement>('[data-act]')?.dataset.act;
     if (act === 'close') { close(); return; }
-    if (act === 'pdf') { exportPdf(); return; }
-    if (act === 'fountain') { downloadFountain(); return; }
+    if (act === 'menu') { setMenu(menuEl()?.hidden !== false); return; }
+    // `.catch` because exportPdf is async; the toast has already spoken.
+    if (act === 'pdf') { setMenu(false); exportPdf().catch(() => {}); return; }
+    if (act === 'fountain') { setMenu(false); downloadFountain(); return; }
     if (act === 'write') { startEditing(); return; }
     if (act === 'read') {
       const ta = el.querySelector<HTMLTextAreaElement>('[data-editor]');
@@ -339,6 +451,7 @@ export function installScreenplayFocus(
     print: exportPdf,
     downloadFountain,
     destroy() {
+      document.removeEventListener('pointerdown', onDocPointer, true);
       container.removeEventListener('voidspace-open-screenplay', onOpen);
       close();
       el.remove();

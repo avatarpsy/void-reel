@@ -24,6 +24,7 @@ import { estimateShotCredits, onModelCatalogue, plannedSeconds } from '../shot/m
 import { createShots, readShots } from '../shot/shots';
 import { installBoardFullscreen, installChromeAutohide } from './chrome-autohide';
 import { fitBoard } from './viewport';
+import { requestOpenDocument } from '../document/toolbar';
 import type { MountedBoard } from '../blocksuite/editor';
 
 const ICONS = {
@@ -35,6 +36,8 @@ const ICONS = {
   redo: '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 8H6a3 3 0 0 0 0 6h3"/><path d="M10 5l3 3-3 3"/></svg>',
   // An arrow INTO a frame: the storyboard going somewhere, not a file being
   // exported. Deliberately not a download glyph — nothing leaves the machine.
+  // Stacked lines: a list of documents, not a single page.
+  list: '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2.5 4h11M2.5 8h11M2.5 12h7"/></svg>',
   send: '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8h8"/><path d="M7 5l3 3-3 3"/><path d="M11.5 2.5H14v11h-2.5"/></svg>',
   // A page with lines on it. This is the export for everything that is not a
   // film, so it must not look like the storyboard's arrow.
@@ -74,9 +77,18 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
 
       <div class="vs-board-guide">
         <p class="vs-board-guide__lead">
-          Use the toolbar to add your own. Making a video? Start a storyboard.
+          Use the toolbar to add your own. Writing something? Start a document.
+          Making a video? Start a storyboard.
         </p>
+        <!--
+          A DOCUMENT IS A THING YOU CAN START, and until now it was not: the only
+          ways to one were asking the agent or knowing that a note plus "Open
+          document" made one. A user who came here to write had nothing to press.
+        -->
         <p class="vs-board-guide__lead">
+          <button type="button" class="vs-board-btn" data-act="new-doc">
+            ${ICONS.doc}<span>Write a document</span>
+          </button>
           <button type="button" class="vs-board-btn" data-act="first-shot">
             ${ICONS.plus}<span>Start a storyboard</span>
           </button>
@@ -110,22 +122,38 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
       ${ICONS.fit}<span>Fit</span>
     </button>
     <button type="button" class="vs-board-btn vs-board-icon" data-act="focus" title="Focus mode — fill the screen (Esc to leave)">${ICONS.expand}</button>
+    <span class="vs-board-sep"></span>
     <!--
-      THE WAY OUT FOR WORK THAT IS NOT A FILM.
+      NO "NEW DOCUMENT" BUTTON HERE.
 
-      "Send to editor" is the exit for a storyboard and it appears only when
-      shots exist — so for everything else the board had NO exit at all, and an
-      afternoon of planning or research ended as pixels the user had to retype
-      somewhere else. This one is always here, because thinking is what the
-      board is always doing.
-
-      It opens the page rather than downloading anything: the order comes from
-      where things sit on an infinite canvas, so the first thing anybody wants
-      is to check it read their board the way they meant it.
+      It moved to the canvas right-click, next to the other things you make on a
+      board. It was a standing button for an action almost nobody takes twice in
+      a session, sitting beside "Open document" — two buttons a word apart, one
+      creating and one opening, which is a decision to make before you have any
+      reason to care about either. The empty board still offers it directly,
+      because a blank canvas has nothing to right-click ON.
     -->
-    <button type="button" class="vs-board-btn" data-act="document" title="Read the board as a document — export PDF or .md">
-      ${ICONS.doc}<span>Document</span>
-    </button>
+    <!--
+      THE INDEX. Documents live as notes on an infinite canvas, which is right
+      for editing and hopeless for finding — with three of them you pan around
+      looking for a page you cannot see. Every document tool has a list.
+    -->
+    <button type="button" class="vs-board-btn vs-board-icon" data-act="doc-index" title="All documents — on this board and in your library">${ICONS.list}</button>
+    <!--
+      NO "EXPORT BOARD" HERE ANY MORE.
+
+      It was the board's way out before documents existed on it: a canvas of
+      notes collected into one page. Sound feature, wrong place — as a standing
+      button beside "Open document" it asked every user to tell two similar
+      things apart before they had any reason to care about either, and almost
+      nobody wants to export a whole canvas. What people want is the document
+      they are looking at.
+
+      The capability is untouched: the board_document agent action still does
+      it, so "turn this board into a report" is one sentence to the agent,
+      which is where that job was always going to start.
+      (No backticks in here: this sits inside a template literal.)
+    -->
     <span class="vs-board-sep"></span>
     <div class="vs-board-total" data-total hidden></div>
     <!--
@@ -161,6 +189,29 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
       the selection actually CONTAINS media, because that is the only case where
       the sentence is true.
     -->
+    <!--
+      OPEN THE SELECTED DOCUMENT, FULL SIZE.
+
+      Hidden until exactly one note is selected, and the bar is REVEALED at that
+      moment (see the selection handler below) — the chrome autohides, and
+      selecting something is precisely when it has faded, so a button here was
+      present and invisible at the one moment it was wanted. A browser showed
+      that; nothing in a test could.
+
+      It reads "Open document" and the button above reads "Board as document".
+      Both said "Document" at first, side by side — one meaning "assemble this
+      whole canvas", the other "open this one thing".
+    -->
+    <!--
+      IT OPENS FOCUS MODE, so it says so. "Open document" over a document you
+      are already looking at reads as a no-op, and the one thing it does that
+      the canvas cannot — a full-screen page with its name, its Download menu
+      and real typography — was the part the label left out.
+    -->
+    <button type="button" class="vs-board-btn" data-act="open-note-doc"
+      title="Open this document full screen — rename, write and export it there" hidden>
+      ${ICONS.expand}<span>Open in focus</span>
+    </button>
     <div class="vs-board-sel" data-sel hidden></div>`;
 
   container.append(empty, bar);
@@ -286,6 +337,23 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
   // Both bars fade until the pointer reaches for them; see `chrome-autohide.ts`
   // for why proximity is measured rather than done with a CSS hover strip.
   const chrome = installChromeAutohide(container);
+
+  /**
+   * ── TWO REASONS TO KEEP THE CHROME UP, AND THEY MUST NOT FIGHT ────────────
+   *
+   * `reveal()` was the obvious call and it is the wrong one: it shows the bar
+   * and immediately restarts the fade, so the button appeared and was gone
+   * before it could be read — measured at opacity 0 nine hundred milliseconds
+   * after selecting a document.
+   *
+   * Pinning is the honest state, and there are now two things that want it:
+   * an EMPTY board (nothing for the chrome to be in the way of) and a SELECTED
+   * DOCUMENT (there is an action for it, so the action must be visible). They
+   * are set from different places, so the rule lives here once rather than
+   * each caller overwriting the other's answer.
+   */
+  let docSelected = false;
+  const applyPin = (): void => chrome.setPinned(!hasAnyContent() || docSelected);
   const fullscreen = installBoardFullscreen();
 
   const focusBtn = bar.querySelector<HTMLElement>('[data-act="focus"]')!;
@@ -309,11 +377,46 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
       case 'undo': board.store.undo(); break;
       case 'redo': board.store.redo(); break;
       case 'fit': fitBoard(); break;
+      // The index owns itself; the bar only raises the intent, as everywhere.
+      case 'doc-index':
+        container.dispatchEvent(new CustomEvent('voidspace-open-doc-index', { bubbles: true }));
+        break;
+      /**
+       * A NEW, EMPTY DOCUMENT — the manual way in.
+       *
+       * It opens straight away with the name selected, because the first thing
+       * anybody does with a new document is call it something, and a page that
+       * opens with the caret in the body makes them go looking for where the
+       * name lives.
+       */
+      case 'new-doc':
+        void (async () => {
+          try {
+            const { placeMarkdownDocument } = await import('../document/note-io');
+            // No coordinates: a new page joins the SHELF, beside the documents
+            // already here. Handing it a reserved spot is what used to put it
+            // wherever there happened to be room — see document/layout.ts.
+            const { noteId } = await placeMarkdownDocument(
+              board,
+              '# Untitled document\n\n',
+              { width: 800 },
+            );
+            // The overlay focuses its own name field — see requestOpenDocument.
+            requestOpenDocument(noteId, { focusName: true });
+          } catch (err) {
+            console.error('[board-ui] new document failed:', err);
+          }
+        })();
+        break;
       case 'focus': void fullscreen.toggle(); break;
       // The overlay owns itself; the bar only raises the intent — same
       // arrangement the screenplay card's Focus button uses.
       case 'document':
         container.dispatchEvent(new CustomEvent('voidspace-open-document', { bubbles: true }));
+        break;
+      // Same arrangement: the bar raises the intent, the overlay owns itself.
+      case 'open-note-doc':
+        requestOpenDocument(openDocBtn.dataset.noteId ?? '');
         break;
       /**
        * The card raises intent; the PAGE owns the network.
@@ -385,7 +488,7 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
     // An empty board has nothing to look at, so there is nothing for the
     // chrome to be in the way OF — and hiding the toolbar behind a hover is
     // how a first-time user concludes the board cannot do anything.
-    chrome.setPinned(!has);
+    applyPin();
   }
   /**
    * The total is derived from every shot, so recomputing it on every
@@ -407,9 +510,51 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
    * A note and a shape selected together get no hint, correctly.
    */
   const selEl = bar.querySelector<HTMLElement>('[data-sel]')!;
+  const openDocBtn = bar.querySelector<HTMLElement>('[data-act="open-note-doc"]')!;
+  /**
+   * Which notes are documents, recomputed per selection change.
+   *
+   * Cheap — `listDocuments` walks the page's children and counts words — and a
+   * selection change is a human gesture, not a render loop. Imported lazily so
+   * a board nobody writes on does not pay for the document code.
+   */
+  let docIds = new Set<string>();
+  let listDocs: ((b: MountedBoard) => { noteId: string }[]) | null = null;
+  void import('../document/sections').then((m) => { listDocs = m.listDocuments; });
+  const documentIds = (): Set<string> => {
+    if (listDocs) docIds = new Set(listDocs(board).map((d) => d.noteId));
+    return docIds;
+  };
   const gfx = board.std.get(GfxControllerIdentifier);
   const selectionSub = gfx.selection.slots.updated.subscribe(() => {
-    const media = gfx.selection.selectedIds.filter(id => {
+    const ids = gfx.selection.selectedIds;
+
+    /**
+     * A single DOCUMENT is the one selection this offers to open: two have no
+     * single document to be, and a shape is not prose.
+     *
+     * ── A NOTE IS NOT AUTOMATICALLY A DOCUMENT ────────────────────────────────
+     * It used to be: any single `affine:note` lit this button up, including an
+     * empty sticky someone had just dropped. Pressing it then opened a
+     * full-screen document view over nothing — a blank page, no title, no
+     * content — which reads exactly like the feature being broken. Asking
+     * `listDocuments` instead means the button appears only where there is
+     * something to open, which is also the honest answer to "is this note a
+     * document": it is, once it has words in it.
+     *
+     * Selecting a document is a deliberate act, and showing what you can do
+     * with it is the answer to it — see `applyPin`.
+     */
+    const soleNote = ids.length === 1 && board.store.getBlock(ids[0]!)?.flavour === 'affine:note'
+      && documentIds().has(ids[0]!)
+      ? ids[0]!
+      : null;
+    openDocBtn.hidden = !soleNote;
+    openDocBtn.dataset.noteId = soleNote ?? '';
+    docSelected = !!soleNote;
+    applyPin();
+
+    const media = ids.filter(id => {
       const flavour = board.store.getBlock(id)?.flavour;
       return flavour === 'affine:image' || flavour === 'affine:attachment';
     });

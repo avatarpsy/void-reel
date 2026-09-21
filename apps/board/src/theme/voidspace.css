@@ -1834,6 +1834,15 @@ editor-host {
   font: 400 10.5px/1.4 var(--affine-font-family);
 }
 
+/* Between the three that spend credits and the one that does not. A rule
+   rather than a second heading: the group is two rows tall and a heading over
+   one item is more furniture than the distinction is worth. */
+.vs-canvas-menu__sep {
+  height: 1px;
+  margin: 4px 8px;
+  background: var(--vs-border);
+}
+
 
 /* ══ Pending media ═════════════════════════════════════════════════════════
    A card in the spot a generation will land, for the minute or two it takes.

@@ -40,6 +40,17 @@ export interface BlockMeta {
   createdBy?: 'user' | 'agent';
 
   /**
+   * WHAT A DOCUMENT NOTE CAME FROM — the tag drawn on its corner.
+   *
+   * A board can hold a dropped PDF, an imported Word file and something the
+   * agent wrote, and on the canvas all three are the same white page. Kept here
+   * rather than sniffed from the content because it is the ORIGIN, and origin
+   * is not recoverable from the text: once a PDF is markdown it looks exactly
+   * like markdown.
+   */
+  docKind?: 'pdf' | 'docx' | 'text';
+
+  /**
    * ── WHERE THIS CAME FROM ───────────────────────────────────────────────────
    *
    * THE FIX FOR THE THING THAT ACTUALLY BREAKS ITERATION. Someone generates an

@@ -36,6 +36,47 @@
 }
 [data-theme='dark'] .vs-focus { background: #14161c; }
 
+/* ── THE LIVE VARIANT ─────────────────────────────────────────────────────
+   A document's focus mode does NOT replace the canvas: the thing being
+   written is a real note, edited by BlockSuite itself, so the canvas stays
+   underneath and this overlay only supplies the chrome.
+
+   Which makes pointer-events the load-bearing rule here. Inheriting the shell
+   above would put a full-pane surface over the editor: the document would
+   render perfectly and refuse every click, which is the most frustrating way
+   for this to fail. The middle is transparent to the pointer; the bar takes
+   it back. */
+/* Both selectors, because `[data-theme='dark'] .vs-focus` above is (0,2,0)
+   and a bare `.vs-focus--live` is (0,1,0) — so in dark mode the gutter won
+   and painted an OPAQUE panel over the canvas. Everything underneath
+   rendered perfectly and none of it could be seen; `pointer-events: none`
+   meant it still took no clicks, so it did not even feel like a cover. */
+.vs-focus--live,
+[data-theme='dark'] .vs-focus--live,
+[data-theme='light'] .vs-focus--live {
+  background: transparent;
+  pointer-events: none;
+}
+.vs-focus--live .vs-focus__bar {
+  pointer-events: auto;
+  /* It floats over the canvas rather than sitting above it in flow, so it
+     needs its own ground to stay readable against a document. */
+  background: var(--vs-surface, #fff);
+  border-bottom: 1px solid var(--vs-border, #e3e5ea);
+  box-shadow: 0 1px 12px rgb(0 0 0 / 6%);
+}
+[data-theme='dark'] .vs-focus--live .vs-focus__bar { background: #1b1e26; }
+
+/* A note on a canvas is covered by a mask so that one click SELECTS it and
+   only a double click gives you a caret. That is right for a sticky note and
+   wrong for a document: this mode invites the reader to type, so the mask
+   steps aside and a single click lands in the text. The attribute is on BODY
+   rather than the chrome host because the note lives in the editor host, 
+   which is that host's sibling. */
+body[data-doc-focus] edgeless-note-mask {
+  pointer-events: none;
+}
+
 /* The board underneath is hidden rather than merely covered: its chrome sits in
    the same host and would otherwise still take clicks along the edges. */
 [data-focus-mode] .vs-board-bar,
@@ -85,7 +126,103 @@
   white-space: nowrap;
 }
 
-.vs-focus__actions { flex: none; display: flex; gap: 8px; }
+.vs-focus__actions { flex: none; display: flex; align-items: center; gap: 8px; }
+/* Three buttons labelled .md / Word / PDF say what FORMAT they produce and
+   not what pressing one DOES. One quiet word in front turns the group into
+   a sentence — "Download: .md, Word, PDF" — at no cost in space or noise.
+   Hidden on narrow panes, where the buttons have to speak for themselves. */
+.vs-focus__lead {
+  font-size: 12px;
+  color: var(--vs-text-dim, #8a8f98);
+  margin-right: 2px;
+  white-space: nowrap;
+}
+@media (max-width: 720px) { .vs-focus__lead { display: none; } }
+
+/* ── The document's NAME, editable in place ────────────────────────────────
+   Invisible until you reach for it, which is how every office suite treats a
+   filename: it reads as a title, and the moment the pointer is over it, it
+   reads as a field. A box drawn around it permanently would make the bar look
+   like a form. */
+.vs-focus__name {
+  /* Hugs the name rather than reserving a slab of the bar: the title block is
+     a ROW, so a greedy field pushes the hint beside it out to the middle of
+     the screen and the two stop reading as one thing. Width comes from the
+     `size` attribute, kept in step with the value in document-focus.ts. */
+  width: auto;
+  min-width: 6rem;
+  max-width: 28rem;
+  padding: 3px 8px;
+  margin-left: -8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--vs-text, #e8eaf0);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 640;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+}
+.vs-focus__name:hover { background: var(--vs-hover, rgba(255, 255, 255, 0.06)); }
+.vs-focus__name:focus {
+  outline: none;
+  background: var(--vs-surface, #fff);
+  border-color: var(--vs-accent, #4f7cff);
+}
+[data-theme='dark'] .vs-focus__name:focus { background: #22262f; }
+.vs-focus__name::placeholder { color: currentColor; opacity: 0.42; }
+
+/* ── The Download menu ─────────────────────────────────────────────────────
+   One control in the bar, the formats one click inside it, each with the
+   reason you would choose it — the shape of File > Download everywhere. */
+.vs-focus__menu-wrap { position: relative; }
+.vs-focus__caret { margin-left: 2px; opacity: 0.8; font-size: 10px; }
+
+.vs-focus__menu[hidden] { display: none; }
+.vs-focus__menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 60;
+  min-width: 17rem;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-radius: 10px;
+  border: 1px solid var(--vs-border, #e3e5ea);
+  background: var(--vs-surface, #fff);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 18%);
+}
+[data-theme='dark'] .vs-focus__menu { background: #1b1e26; border-color: #2c313c; }
+
+.vs-focus__menu button {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.vs-focus__menu button:hover,
+.vs-focus__menu button:focus-visible {
+  background: var(--vs-hover, rgba(120, 130, 150, 0.12));
+  outline: none;
+}
+.vs-focus__menu strong { display: block; font-size: 13px; font-weight: 600; }
+.vs-focus__menu em {
+  display: block;
+  margin-top: 1px;
+  font-size: 11.5px;
+  font-style: normal;
+  line-height: 1.35;
+  color: var(--vs-text-dim, #8a8f98);
+}
 .vs-focus__btn {
   appearance: none;
   border: 1px solid var(--vs-border);

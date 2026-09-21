@@ -135,7 +135,19 @@ import { EdgelessAutoConnectViewExtension } from '@blocksuite/affine/widgets/edg
 // widgets; the board is edgeless-only), remote-selection (no multiplayer cursors
 // yet — the board syncs whole snapshots, not awareness).
 
-const VIEW_PROVIDERS = [
+/**
+ * EXPORTED because the same providers answer a second question.
+ *
+ * `boardViewExtensions()` below asks them for the `edgeless` scope, which is
+ * the canvas. The SAME list asked for `page` returns BlockSuite's document
+ * editor — 188 extensions: rich text, lists, tables, the slash menu — and a
+ * second `BlockStdScope` built from it mounts over this same store while the
+ * edgeless scope stays alive (verified, not assumed).
+ *
+ * That is what makes an editable document inside the board something to
+ * CONFIGURE rather than something to write: the editor already ships here.
+ */
+export const VIEW_PROVIDERS = [
   FoundationViewExtension,
   InlinePresetViewExtension,
   LatexViewExtension,

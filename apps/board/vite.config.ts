@@ -100,7 +100,26 @@ export default defineConfig({
           // "Cannot access 'Vx' before initialization" — a minified TDZ error
           // that points at neither the real module nor the real cause.
           if (id.includes('node_modules/@blocksuite')) return 'blocksuite';
-          if (id.includes('node_modules/yjs') || id.includes('node_modules/y-')) return 'vendor-yjs';
+          /**
+           * yjs AND ITS OWN DEPENDENCY, in the same chunk.
+           *
+           * `lib0` is what yjs is built on. Leaving it in the default chunk put
+           * a CYCLE BETWEEN CHUNKS — `index` imports `vendor-yjs`, `vendor-yjs`
+           * imports `lib0` back out of `index` — and which half initialises
+           * first then depends on module order, which changes whenever anything
+           * upstream gains an import. It duly broke on an unrelated edit, with
+           * "Cannot access 'Gn' before initialization" thrown from a minified
+           * vendor file and the board stuck on "Opening board…" forever.
+           *
+           * Exactly the failure the BlockSuite comment above describes, in the
+           * next package along. The rule generalises: a vendor chunk must
+           * contain its own dependencies, or not exist.
+           */
+          if (
+            id.includes('node_modules/yjs')
+            || id.includes('node_modules/y-')
+            || id.includes('node_modules/lib0')
+          ) return 'vendor-yjs';
           if (id.includes('node_modules/lit')) return 'vendor-lit';
           return undefined;
         },

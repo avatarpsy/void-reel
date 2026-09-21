@@ -13,18 +13,30 @@
  * stays exactly where it was on the right, because "reorder that section and
  * then give me the PDF" is one sentence.
  *
- * ── PDF THROUGH THE BROWSER'S OWN PIPELINE ───────────────────────────────────
- * No JS PDF builder, for the reason `screenplay-focus.ts` already worked out:
- * the page on screen is already the document, so a library would add a second,
- * worse implementation of a layout we have plus a megabyte of bundle. `@media
- * print` restates it in real inches and the browser paginates, which also gets
- * widow/orphan control and a paper size the user picks in the dialog.
+ * ── TWO WAYS OUT, AND THEY ARE NOT THE SAME PROMISE ──────────────────────────
+ * `downloadFile` is the real one: it typesets an actual .docx or .pdf ON THIS
+ * DEVICE and puts it on the user's disk. That is what the `Word` and `PDF`
+ * buttons do, and no request is made at all — it works offline and costs the
+ * user no storage.
  *
- * It opens the USER'S print dialog. It never saves a file, and every message
- * about it must say so.
+ * `print` is still here and still uses the browser's own pipeline, for the
+ * reason `screenplay-focus.ts` worked out: the page on screen IS the document,
+ * so `@media print` restates it in real inches and the browser paginates it
+ * with the CSS the user is looking at. But it opens the USER'S print dialog and
+ * SAVES NOTHING, so it cannot answer "send me the file" — which is why it is no
+ * longer a button, only Ctrl+P and the agent's `print` action. Every message
+ * about that path must still say a file was not saved.
+ *
+ * The typesetting lives in `../document`, not here and NOT on the server. It is
+ * heavy work whose cost scales with how many people export at once, which is
+ * the worst thing to put on a shared machine — and the browser already has the
+ * fonts, the arithmetic and an idle CPU. The server is asked for one thing, on
+ * one path: storing the finished bytes when an AGENT needs a URL.
  */
 import { boardDocument, documentMarkdown, type BoardDocument } from '../board/document';
 import { toast } from './toast';
+import { saveDocument, uploadDocument } from '../board/document-export';
+import type { RenderedDocument } from '../document';
 
 import type { MountedBoard } from '../blocksuite/editor';
 
@@ -41,8 +53,21 @@ export interface DocumentView {
   open(title?: string): void;
   close(): void;
   isOpen(): boolean;
-  /** The browser's print dialog — the user chooses "Save as PDF". */
+  /**
+   * The browser's print dialog — the user chooses "Save as PDF", and NOTHING
+   * is saved by us. For an actual file, `downloadFile`.
+   */
   print(title?: string): void;
+  /**
+   * A real .docx or .pdf, typeset on this device and downloaded. The one action
+   * here that produces a file somebody can email; resolves once it has.
+   * Pass `upload` only from an agent, which needs a URL to report back.
+   */
+  downloadFile(
+    format: 'pdf' | 'docx',
+    title?: string,
+    opts?: { upload?: boolean },
+  ): Promise<RenderedDocument & { url?: string }>;
   downloadMarkdown(title?: string): void;
   /** The document as markdown, for a tool result or the clipboard. */
   markdown(title?: string): string;
@@ -173,6 +198,26 @@ export function installDocumentView(
 
   const build = (): BoardDocument => boardDocument(board.std, docTitle);
 
+  /**
+   * What to call this when nobody passed a name.
+   *
+   * The board's name lives on the PARENT, so opening this from the board's own
+   * bar supplies no title and the header read "Untitled document" over a page
+   * whose first line plainly said what it was. Every other document tool falls
+   * back to the first heading; so does this now, and only "a document with no
+   * words in it at all" is genuinely untitled.
+   */
+  const titleOf = (doc: BoardDocument): string => {
+    if (doc.title.trim()) return doc.title.trim();
+    for (const section of doc.sections) {
+      if (section.title.trim()) return section.title.trim();
+      // The heading the markdown itself opens with, if the frame had no name.
+      const heading = section.chunks.join('\n').match(/^\s*#{1,3}\s+(.+)$/m);
+      if (heading?.[1]?.trim()) return heading[1].trim();
+    }
+    return '';
+  };
+
   function wordsIn(doc: BoardDocument): number {
     return doc.sections
       .flatMap(s => s.chunks)
@@ -206,17 +251,27 @@ export function installDocumentView(
           ← Board
         </button>
         <div class="vs-focus__title">
-          <strong>${esc(doc.title || 'Untitled document')}</strong>
+          <strong>${esc(titleOf(doc) || 'Untitled document')}</strong>
           <span>${doc.sections.length} section${doc.sections.length === 1 ? '' : 's'} · ${words} words</span>
         </div>
+        <!-- Three buttons, three different promises: the .md source, a real
+             Word file, a real PDF. Printing is deliberately NOT one of them —
+             the browser already offers Ctrl+P, and a control here that opens a
+             dialog and saves nothing is what users mistook for an export.
+             (No backticks in here: this sits inside a template literal.) -->
         <div class="vs-focus__actions">
+          <span class="vs-focus__lead">Download</span>
           <button type="button" class="vs-focus__btn" data-act="md"
-                  title="Download the plain-text source — opens in Notion, Obsidian, Word, anything">
+                  title="The plain-text source — for Notion, Obsidian or a repo">
             .md
           </button>
+          <button type="button" class="vs-focus__btn" data-act="docx"
+                  title="A real Word document you can edit and comment on">
+            Word
+          </button>
           <button type="button" class="vs-focus__btn vs-focus__btn--primary" data-act="pdf"
-                  title="Opens your print dialog — choose Save as PDF">
-            Export PDF
+                  title="A real PDF — looks the same everywhere">
+            PDF
           </button>
         </div>
       </header>
@@ -230,7 +285,14 @@ export function installDocumentView(
                heading. Ask the agent to lay your thinking out and it will appear here.</p>
              </div>`
           : `<article class="page vs-doc" data-page>
-               ${doc.title ? `<h1 class="vs-doc__title">${esc(doc.title)}</h1>` : ''}
+               <!-- The SUPPLIED title only, never the derived one. The
+                    fallback reads the document's own first heading, which is
+                    the right name for the window and the file and the wrong
+                    thing to print at the top of the page — that heading is
+                    already on the page, so printing it too showed the name
+                    twice. Only a title somebody actually gave us is content.
+                    (No backticks in here: this sits inside a template literal.) -->
+               ${doc.title.trim() ? `<h1 class="vs-doc__title">${esc(doc.title.trim())}</h1>` : ''}
                ${doc.sections.map(s => `
                  <section class="vs-doc__section">
                    ${s.title ? `<h2>${esc(s.title)}</h2>` : ''}
@@ -249,6 +311,63 @@ export function installDocumentView(
 
   // ── exporting ─────────────────────────────────────────────────────────────
 
+  /**
+   * A REAL FILE, typeset HERE.
+   *
+   * This is what `Export PDF` used to mean and did not do: it opened the print
+   * dialog, which belongs to the browser, so nothing was saved unless the user
+   * finished the job themselves and nothing existed for an agent to hand back.
+   *
+   * The markdown it renders is the FULL document — never the capped copy the
+   * `markdown` agent action returns. A document silently missing its later
+   * sections would look finished, which is the worst way to be wrong.
+   *
+   * `upload` is the one thing that touches the network, and only an AGENT sets
+   * it: a tool result has to carry a URL. A user pressing a button gets the
+   * file on their disk and is billed no storage for it.
+   */
+  let exporting = false;
+  async function downloadFile(
+    format: 'pdf' | 'docx',
+    title?: string,
+    opts: { upload?: boolean } = {},
+  ): Promise<RenderedDocument & { url?: string }> {
+    remember(title);
+    const doc = build();
+    if (!doc.sections.some(s => s.chunks.length)) {
+      throw new Error('There is nothing on the canvas to put in a document yet.');
+    }
+    // One at a time. Double-clicking Word used to be free; it is now a second
+    // full typesetting pass while the first is still running.
+    if (exporting) throw new Error('A document is already being made — one moment.');
+    exporting = true;
+    const label = format === 'docx' ? 'Word document' : 'PDF';
+    const buttons = el.querySelectorAll<HTMLButtonElement>('.vs-focus__btn');
+    buttons.forEach(b => { b.disabled = true; });
+    toast(`Making your ${label}…`, 'info');
+    try {
+      const out = await saveDocument(documentMarkdown(doc), titleOf(doc) || 'Document', format);
+      const shared = opts.upload ? await uploadDocument(out) : out;
+      toast(
+        out.droppedGlyphs
+          ? `${out.fileName} — ${out.droppedGlyphs} character${out.droppedGlyphs === 1 ? '' : 's'} `
+            + '(emoji or non-Latin) could not be set in a PDF. Try Word for those.'
+          : `Downloaded ${out.fileName}`,
+        out.droppedGlyphs ? 'error' : 'info',
+      );
+      return shared;
+    } catch (e: any) {
+      toast(e?.message || `That ${label} could not be made.`, 'error');
+      // Rethrown, not swallowed: the button already showed the message, and the
+      // AGENT caller must not be told a file exists when none does.
+      throw e;
+    } finally {
+      exporting = false;
+      buttons.forEach(b => { b.disabled = false; });
+    }
+  }
+
+  /** The browser's print dialog. Kept for the agent's `print` action and Ctrl+P. */
   function exportPdf(title?: string): void {
     remember(title);
     const doc = build();
@@ -279,7 +398,7 @@ export function installDocumentView(
       toast('There is nothing on the canvas to put in a document yet.', 'error');
       return;
     }
-    const name = (doc.title || 'board')
+    const name = (titleOf(doc) || 'board')
       .replace(/[^a-zA-Z0-9 _-]+/g, '').trim().replace(/\s+/g, '-').toLowerCase() || 'board';
     const url = URL.createObjectURL(new Blob([text], { type: 'text/markdown;charset=utf-8' }));
     const a = document.createElement('a');
@@ -296,7 +415,12 @@ export function installDocumentView(
   el.addEventListener('click', e => {
     const act = (e.target as HTMLElement).closest<HTMLElement>('[data-act]')?.dataset.act;
     if (act === 'close') close();
-    else if (act === 'pdf') exportPdf();
+    // `.catch` and not `void`: downloadFile RETHROWS so the agent caller cannot
+    // be told a file exists when none does, and an unhandled rejection here
+    // would surface as a console error for a failure the user already saw as a
+    // toast.
+    else if (act === 'pdf') downloadFile('pdf').catch(() => {});
+    else if (act === 'docx') downloadFile('docx').catch(() => {});
     else if (act === 'md') downloadMarkdown();
   });
 
@@ -357,6 +481,7 @@ export function installDocumentView(
     close,
     isOpen: () => !el.hidden,
     print: exportPdf,
+    downloadFile,
     downloadMarkdown,
     markdown,
     sections: () => build().sections,

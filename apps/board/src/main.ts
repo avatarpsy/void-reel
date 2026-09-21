@@ -33,6 +33,10 @@ import { installParentAuth, getParentToken } from './board/parent-auth';
 import { installBoardRpc, getBoardRev } from './agent/rpc';
 import { installScreenplayFocus } from './ui/screenplay-focus';
 import { installDocumentView } from './ui/document-view';
+import { installDocumentFocus } from './ui/document-focus';
+import { installDocumentDrop } from './document/import-drop';
+import { installDocumentTags } from './document/tags';
+import { installDocumentIndex } from './document/index-panel';
 import { installBoardUi } from './ui/board-ui';
 import { installAssetPanel } from './ui/asset-panel';
 import { installMediaInspector } from './ui/media-inspector';
@@ -214,11 +218,13 @@ async function boot(): Promise<void> {
   let screenplay: ReturnType<typeof installScreenplayFocus> | null = null;
   /** Same lazy-getter arrangement, and for the same reason. */
   let documentView: ReturnType<typeof installDocumentView> | null = null;
+  let documentFocus: ReturnType<typeof installDocumentFocus> | null = null;
 
   installBoardRpc(board, {
     flushCloud: () => cloud.flush(),
     screenplay: () => screenplay,
     document: () => documentView,
+    documentFocus: () => documentFocus,
     pending: () => pending,
   });
 
@@ -318,6 +324,38 @@ async function boot(): Promise<void> {
   // The board as a page. Same host and the same shell class, so the two focus
   // modes cannot drift apart in look or in Esc behaviour.
   documentView = installDocumentView(board, chromeHost);
+  // A single document ON the canvas, at page size. Unlike the two above it
+  // does not replace the canvas — the note being written IS the document, so
+  // this frames the real editor rather than rebuilding one.
+  documentFocus = installDocumentFocus(board, chromeHost);
+  // Dropping a .md or .txt makes a DOCUMENT rather than a file card. Only
+  // the formats that need no parser — see import-drop.ts.
+  // Not stored: this module has no teardown path — the board lives for the
+  // life of the page, which is why nothing else installed here is disposed
+  // either. A disposer kept in a variable nobody calls is worse than none.
+  installDocumentDrop(board, root);
+  // Which box is what: a PDF/DOCX/TEXT/SCREENPLAY tag on each document's
+  // corner. See document/tags.ts for why it is an attribute and not an overlay.
+  installDocumentTags(board, root);
+
+  /**
+   * THE DOCUMENT INDEX — what is on this board, and what is in the Library.
+   *
+   * Importing a library document reuses the drop path's conversion: the bytes
+   * go up to the parent, which owns the only parser, and markdown comes back.
+   * One route in for every document, wherever it came from.
+   */
+  const docIndex = installDocumentIndex(board, chromeHost, async (doc) => {
+    try {
+      const [{ importDocumentFromUrl }] = await Promise.all([
+        import('./document/import-drop'),
+      ]);
+      await importDocumentFromUrl(board, doc.url, doc.label);
+    } catch (err) {
+      console.error('[board] library import failed:', err);
+    }
+  });
+  chromeHost.addEventListener('voidspace-open-doc-index', () => docIndex.open());
 
   // Theme is pushed, never re-navigated — an iframe reload would throw away the
   // in-memory editor state and the user's viewport. Same rule apps/web follows.

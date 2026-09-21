@@ -40,6 +40,9 @@ const ICONS: Record<string, string> = {
   image: '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1.6"/><circle cx="5.6" cy="6.4" r="1.1"/><path d="M2.4 11.6 6 8.4l2.6 2.2L11 8.6l2.6 2.6"/></svg>',
   video: '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="1.8" y="3.4" width="9" height="9.2" rx="1.6"/><path d="m11.4 8 2.9-2.1v6.2L11.4 10z"/></svg>',
   audio: '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M6 12.2V4.4l7-1.5v7.6"/><circle cx="4.3" cy="12.4" r="1.7"/><circle cx="11.3" cy="10.9" r="1.7"/></svg>',
+  // A page with lines on it — the same glyph the document chrome uses, so the
+  // thing you make here and the thing you open later look like each other.
+  doc: '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 1.8h5L12.2 5v9.2H4z"/><path d="M9 1.8V5h3.2"/><path d="M6 8.4h4M6 10.8h3"/></svg>',
 };
 
 /**
@@ -217,7 +220,7 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
   function render(count: number): string {
     const head = count
       ? `<div class="vs-canvas-menu__head">Generate from ${count} image${count === 1 ? '' : 's'}</div>`
-      : '<div class="vs-canvas-menu__head">Add media to the board</div>';
+      : '<div class="vs-canvas-menu__head">Add to the board</div>';
     const rows = KINDS.map(k => `
       <button type="button" class="vs-canvas-menu__item" data-kind="${k.kind}">
         <span class="vs-canvas-menu__icon">${ICONS[k.kind]}</span>
@@ -229,7 +232,33 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
     const note = count
       ? '<div class="vs-canvas-menu__note">Images only — music and voice ignore them.</div>'
       : '<div class="vs-canvas-menu__note">Opens your library, web search and upload too.</div>';
-    return head + rows + note;
+
+    /**
+     * ── WRITING IS ONE OF THE THINGS YOU MAKE HERE ────────────────────────────
+     *
+     * It used to be a standing button in the top bar, beside "Open document" —
+     * two controls a word apart, one creating and one opening, asking every
+     * user to tell them apart before they had a reason to care about either.
+     * Making something on a canvas is a right-click, and this is where the
+     * other three already live.
+     *
+     * ONLY IN THE "add" STATE. With images selected the menu is about THOSE
+     * images, and a document has nothing to do with them; putting it there
+     * would be a fourth row that ignores the selection the head just named.
+     *
+     * Below a separator, because it is genuinely a different act: the three
+     * above spend credits and take time, this one opens an empty page
+     * instantly.
+     */
+    const writing = count ? '' : `
+      <div class="vs-canvas-menu__sep"></div>
+      <button type="button" class="vs-canvas-menu__item" data-make="document">
+        <span class="vs-canvas-menu__icon">${ICONS.doc}</span>
+        <span class="vs-canvas-menu__label">Document</span>
+        <span class="vs-canvas-menu__hint">write a page — export as PDF or Word</span>
+      </button>`;
+
+    return head + rows + note + writing;
   }
 
   const onContextMenu = (e: MouseEvent) => {
@@ -285,7 +314,44 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
   };
 
   const onMenuClick = (e: MouseEvent) => {
-    const kind = (e.target as HTMLElement).closest<HTMLElement>('[data-kind]')?.dataset.kind;
+    const target = e.target as HTMLElement;
+
+    /**
+     * A DOCUMENT IS MADE HERE, not across the frame boundary.
+     *
+     * Unlike the three above it costs nothing and needs no credentials — it is
+     * markdown into a note — so there is no decision to post upward. It goes
+     * straight to `placeMarkdownDocument`, which puts it on the shelf beside
+     * the documents already here, and then opens it FULL SCREEN with the name
+     * field focused: you right-clicked to write, so the next thing you should
+     * be able to do is type the title.
+     *
+     * Deliberately NOT placed at the cursor. A document joins the shelf (see
+     * `document/layout.ts`), and because it opens in focus mode immediately the
+     * user never sees the canvas position anyway — they land in the page.
+     */
+    if (target.closest<HTMLElement>('[data-make="document"]')) {
+      close();
+      void (async () => {
+        try {
+          const [{ placeMarkdownDocument }, { requestOpenDocument }] = await Promise.all([
+            import('../document/note-io'),
+            import('../document/toolbar'),
+          ]);
+          const { noteId } = await placeMarkdownDocument(
+            board,
+            '# Untitled document\n\n',
+            { width: 800 },
+          );
+          requestOpenDocument(noteId, { focusName: true });
+        } catch (err) {
+          console.error('[canvas-menu] new document failed:', err);
+        }
+      })();
+      return;
+    }
+
+    const kind = target.closest<HTMLElement>('[data-kind]')?.dataset.kind;
     if (!kind) return;
     /**
      * The decision crosses the boundary; nothing else does.

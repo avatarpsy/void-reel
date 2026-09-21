@@ -32,6 +32,10 @@ import { GfxControllerIdentifier } from '@blocksuite/std/gfx';
 import { captureBoard, type ShotScope } from './screenshot';
 
 import type { MountedBoard } from '../blocksuite/editor';
+import type { DocumentView } from '../ui/document-view';
+import type { DocumentFocus } from '../ui/document-focus';
+import { saveDocument, uploadDocument } from '../board/document-export';
+import { placeMarkdownDocument } from '../document/note-io';
 import { placeAsset } from '../board/asset-media';
 import {
   COLOR_NAMES, canvasDigest, drawOnCanvas, editCanvas, mediaUrlOf, readCanvas, readSelection,
@@ -183,6 +187,7 @@ export const READ_ONLY_RPC: ReadonlySet<string> = new Set([
   'voidspace:board-canvas-read',
   'voidspace:board-map',
   'voidspace:board-document',
+  'voidspace:board-document-read',
   'voidspace:board-screenshot',
   'voidspace:board-selection',
   'voidspace:board-blocks',
@@ -496,19 +501,25 @@ export interface BoardRpcOptions {
     print(): void;
     downloadFountain(): void;
   } | null;
-  /** The board-as-a-page overlay. Lazy for the same reason as `screenplay`. */
-  document?: () => {
-    open(title?: string): void;
-    close(): void;
-    isOpen(): boolean;
-    print(title?: string): void;
-    downloadMarkdown(title?: string): void;
-    markdown(title?: string): string;
-    sections(): Array<{ title: string; chunks: string[] }>;
-    summary(title?: string): {
-      sections: number; words: number; omittedOwned: number; unframed: boolean;
-    };
-  } | null;
+  /**
+   * The board-as-a-page overlay. Lazy for the same reason as `screenplay`.
+   *
+   * THE REAL TYPE, not a structural copy of it. This used to restate every
+   * method by hand, which meant the view could grow a capability — as it did
+   * when it learned to produce actual .docx and .pdf files — and this file
+   * would keep compiling while quietly being unable to see it. `import type`
+   * is erased at build time, so there is no runtime import and no cycle.
+   */
+  document?: () => DocumentView | null;
+  /**
+   * ONE document on the canvas, at page size. Lazy for the same reason.
+   *
+   * Distinct from `document` above, and the difference is what is being
+   * written: that one projects the WHOLE CANVAS as a read-only page, this one
+   * frames a single editable note. Both are real answers to "make this a
+   * document" and they are not interchangeable.
+   */
+  documentFocus?: () => DocumentFocus | null;
 }
 
 export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {}): () => void {
@@ -2736,10 +2747,14 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
      *
      * `markdown` returns the text to the AGENT, which is the action that makes
      * the rest of the product reachable: it is what gets summarised, rewritten,
-     * pasted into a message, or carried to another surface. `pdf` and `md` act
-     * on the USER'S screen and produce nothing for the model to read.
+     * pasted into a message, or carried to another surface.
+     *
+     * `pdf` and `docx` produce a REAL FILE through the server's renderer and
+     * return its URL — the one path here that yields something the user can
+     * email. `print` opens their print dialog and saves nothing, and
+     * `markdown_file` hands over the source; both act on the user's screen.
      */
-    'voidspace:board-document': args => {
+    'voidspace:board-document': async args => {
       const view = opts.document?.();
       if (!view) return fail('unavailable', 'The document view is not ready yet.');
 
@@ -2829,7 +2844,41 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
         };
       }
 
-      if (action === 'pdf') {
+      /**
+       * A REAL FILE, IN ONE CALL.
+       *
+       * Note what this deliberately does NOT do: round-trip the text through
+       * the model. The `markdown` action is capped at 40k so a huge board
+       * cannot blow up a turn, and a document built from that capped copy would
+       * silently lose its later sections while looking finished. The view holds
+       * the whole thing, so the whole thing is what goes to the renderer.
+       */
+      if (action === 'pdf' || action === 'docx') {
+        // `upload` because a TOOL RESULT has to carry a URL — the model cannot
+        // hand the user a file that only exists in their Downloads folder. The
+        // user gets the download too; both happen from one typesetting pass.
+        const out = await view.downloadFile(action, title, { upload: true });
+        return {
+          ok: true as const,
+          rev,
+          open: view.isOpen(),
+          words: summary.words,
+          sections: summary.sections,
+          url: out.url,
+          fileName: out.fileName,
+          ...(out.pages ? { pages: out.pages } : {}),
+          ...(out.droppedGlyphs ? { droppedGlyphs: out.droppedGlyphs } : {}),
+          note: `Made ${out.fileName} and started the download. Give the user the URL too — it `
+            + 'is a real file they can email or print.'
+            + (out.droppedGlyphs
+              ? ` ${out.droppedGlyphs} character(s) — emoji or non-Latin script — could not be `
+                + 'set in a PDF and were left out; say so, and offer docx instead.'
+              : '')
+            + ` ${shape}${omitted}`,
+        };
+      }
+
+      if (action === 'print') {
         view.print(title);
         return {
           ok: true as const,
@@ -2839,7 +2888,8 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
           sections: summary.sections,
           // NEVER claim to have saved a file — the browser owns this dialog.
           note: 'The print dialog is open on the user’s screen — they choose "Save as PDF" and '
-            + `where it goes. Tell them to look at it. ${shape}${omitted}`,
+            + 'where it goes. Tell them to look at it, and NOTE that no file was saved — for an '
+            + `actual file use the \`pdf\` or \`docx\` action. ${shape}${omitted}`,
         };
       }
 
@@ -2864,6 +2914,247 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
         words: summary.words,
         sections: summary.sections,
         note: `The document is on the user’s screen. ${shape}${omitted}`,
+      };
+    },
+
+    /**
+     * `create_document` — the AGENT'S OWN markdown, typeset into a real file.
+     *
+     * The sibling of `voidspace:board-document`, and the difference is only
+     * where the text comes from: that one reads the canvas, this one takes what
+     * the model wrote. Everything after that is shared — the same block model,
+     * the same two typesetters, the same file names.
+     *
+     * It is here, in the board app, because the typesetting runs ON THIS
+     * DEVICE. The server manages state and does not take workloads; a browser
+     * has the fonts, the arithmetic and an idle CPU, and the finished file
+     * never has to travel except when a tool result needs a URL.
+     *
+     * The user gets the download too. An agent that makes a document and leaves
+     * it only in a link is asking them to go and fetch their own work.
+     */
+    /**
+     * READ a document on the board — outline first, body on demand.
+     *
+     * `list` with no noteId, because a board holds several documents and the
+     * agent must never assume "the" one. Then `outline` (cheap, complete), then
+     * `read` for the sections it actually wants.
+     */
+    'voidspace:board-document-read': async args => {
+      const { listDocuments, outline, readSections } = await import('../document/sections');
+      const noteId = String((args as any)?.noteId ?? '').trim();
+
+      if (!noteId) {
+        const docs = listDocuments(board);
+        return {
+          ok: true as const,
+          rev,
+          documents: docs,
+          note: docs.length
+            ? `${docs.length} document(s) on this board. Pass a noteId for its outline.`
+            : 'No documents on this board yet. create_document makes one.',
+        };
+      }
+      if (!board.store.getBlock(noteId)) {
+        return fail('not_found', 'No document with that noteId is on this board.');
+      }
+
+      /**
+       * SEARCH FIRST, when the caller knows the word. Returned with the section
+       * id of every hit, so a search leads straight into a bounded read or an
+       * edit of exactly the right place — which is the whole point of having
+       * grep rather than paging.
+       */
+      const needle = String((args as any)?.search ?? '').trim();
+      if (needle) {
+        const { searchDocument } = await import('../document/sections');
+        const hits = await searchDocument(board, noteId, needle);
+        return {
+          ok: true as const,
+          rev,
+          noteId,
+          search: needle,
+          hits,
+          note: hits.length
+            ? `${hits.length} match(es). Each carries the section id it is in — read or edit that `
+              + 'section directly rather than walking the document.'
+            : `Nothing matching "${needle}" in this document.`,
+        };
+      }
+
+      const structure = outline(board, noteId);
+      const ids: string[] = Array.isArray((args as any)?.sectionIds)
+        ? (args as any).sectionIds.map(String)
+        : [];
+
+      // The outline alone, which is the cheap call this whole design rests on.
+      if ((args as any)?.outlineOnly === true) {
+        return {
+          ok: true as const,
+          rev,
+          noteId,
+          outline: structure,
+          words: structure.filter(s => s.level <= 1).reduce((n, s) => n + s.words, 0),
+          note: 'Outline only. Ask for the sections you need with sectionIds — their ids are '
+            + 'stable, so you can hold them across edits.',
+        };
+      }
+
+      const { markdown, omitted, words } = await readSections(board, noteId, {
+        ids: ids.length ? ids : undefined,
+        budget: Number((args as any)?.budget) || undefined,
+      });
+      return {
+        ok: true as const,
+        rev,
+        noteId,
+        outline: structure,
+        markdown,
+        words,
+        ...(omitted.length ? { omitted } : {}),
+        note: omitted.length
+          ? `YOU HAVE NOT SEEN ALL OF IT — ${omitted.length} section(s) did not fit: `
+            + `${omitted.slice(0, 6).map(o => o.heading || '(opening)').join(', ')}. `
+            + 'Ask for them by id, and do NOT describe the document as complete.'
+          : 'The whole document.',
+      };
+    },
+
+    /**
+     * EDIT one section of a document.
+     *
+     * Scoped on purpose: the cost of a change is the size of the change, not
+     * the size of the document. Always returns the outline AFTER the edit,
+     * because an edit moves things and a caller holding the old one would
+     * address the wrong section next.
+     */
+    'voidspace:board-document-edit': async args => {
+      const { editSection } = await import('../document/sections');
+      const noteId = String((args as any)?.noteId ?? '').trim();
+      if (!noteId || !board.store.getBlock(noteId)) {
+        return fail('not_found', 'No document with that noteId is on this board.');
+      }
+      const where = String((args as any)?.where ?? 'replace');
+      if (!['replace', 'before', 'after', 'append', 'delete'].includes(where)) {
+        return fail('invalid', `where must be replace, before, after, append or delete — not "${where}".`);
+      }
+      if (where !== 'append' && !String((args as any)?.sectionId ?? '').trim()) {
+        return fail('invalid', 'sectionId is required for everything but append.');
+      }
+
+      try {
+        const { outline: fresh } = await editSection(board, noteId, where as any, {
+          sectionId: String((args as any)?.sectionId ?? '') || undefined,
+          markdown: String((args as any)?.markdown ?? ''),
+        });
+        return {
+          ok: true as const,
+          rev,
+          noteId,
+          outline: fresh,
+          note: `Section ${where}d. The outline above is the document AFTER the edit — use these `
+            + 'ids from now on. The user sees the change immediately; it is their document.',
+        };
+      } catch (e: any) {
+        return fail('failed', e?.message ?? String(e));
+      }
+    },
+
+    'voidspace:board-document-create': async args => {
+      const markdown = String((args as any)?.markdown ?? '');
+      if (!markdown.trim()) {
+        return fail('invalid', 'There is nothing to put in the document — `markdown` is empty.');
+      }
+      const format = ['pdf', 'docx', 'md'].includes(String((args as any)?.format))
+        ? (String((args as any).format) as 'pdf' | 'docx' | 'md')
+        : 'pdf';
+      const title = String((args as any)?.title ?? '').trim();
+
+      /**
+       * ── PUT IT ON THE BOARD, WHERE IT CAN BE CHANGED ──────────────────────
+       *
+       * The default, and the thing that makes this more than a file printer. A
+       * document that arrives only as a download is finished the moment it is
+       * made: the user reads it, wants the second paragraph shorter, and has
+       * nowhere to do that but Word. Landing it as an editable note means the
+       * agent drafts and the person revises, which is the actual division of
+       * labour.
+       *
+       * `place: false` is for the caller that genuinely only wants the file.
+       */
+      const place = (args as any)?.place !== false;
+      let noteId: string | undefined;
+      let droppedNote = '';
+      if (place) {
+        const focus = opts.documentFocus?.();
+        try {
+          // No coordinates. `placeMarkdownDocument` lays a document onto the
+          // SHELF — beside the documents already on this board, and only then
+          // pushed clear of anything standing there. See document/layout.ts.
+          const placed = await placeMarkdownDocument(board, markdown, { width: 800 });
+          noteId = placed.noteId;
+          if (placed.dropped.length) {
+            droppedNote = ` The canvas cannot hold ${placed.dropped.join(' or ')}, so `
+              + 'that part is in the file but not in the editable copy — say so.';
+          }
+          // Open it, for the same reason the storyboard scrolls to a new shot:
+          // work the agent made that the user cannot see reads as nothing
+          // having happened.
+          focus?.open(placed.noteId);
+        } catch (e: any) {
+          // A document that could not be placed is still a document. Report the
+          // file honestly rather than failing the whole call.
+          droppedNote = ` It could not be added to the board — ${e?.message ?? 'unknown error'}`;
+        }
+      }
+
+      let made;
+      try {
+        made = await saveDocument(markdown, title, format, {
+          pageSize: (args as any)?.pageSize === 'letter' ? 'letter' : 'a4',
+          typeface: (args as any)?.typeface === 'sans' ? 'sans' : 'serif',
+        });
+      } catch (e: any) {
+        return fail('failed', e?.message || 'That document could not be laid out.');
+      }
+
+      /**
+       * The upload can fail on its own — no network, no space — and when it
+       * does the FILE STILL EXISTS on the user's machine. Reporting that as a
+       * total failure would send the model looking for a problem the user
+       * cannot see, so it is reported as what it is: made, not shared.
+       */
+      let url: string | undefined;
+      let shareNote = '';
+      try {
+        ({ url } = await uploadDocument(made));
+      } catch (e: any) {
+        shareNote = ` It could not be uploaded, so there is no link — ${e?.message ?? 'unknown error'} `
+          + 'Tell the user it is in their Downloads instead.';
+      }
+
+      return {
+        ok: true as const,
+        rev,
+        fileName: made.fileName,
+        format: made.format,
+        bytes: made.bytes,
+        ...(noteId ? { noteId } : {}),
+        ...(url ? { url } : {}),
+        ...(made.pages ? { pages: made.pages } : {}),
+        ...(made.droppedGlyphs ? { droppedGlyphs: made.droppedGlyphs } : {}),
+        note: `Made ${made.fileName} and downloaded it to the user's machine.`
+          + (noteId
+            ? ' It is also OPEN ON THE BOARD as an editable document — tell them they can '
+              + 'type in it directly and export again from the bar at the top.'
+            : '')
+          + (url ? ' The URL is a copy they can share.' : '')
+          + shareNote
+          + droppedNote
+          + (made.droppedGlyphs
+            ? ` ${made.droppedGlyphs} character(s) — emoji or non-Latin script — could not be set `
+              + 'in a PDF and were left out; say so, and offer docx instead.'
+            : ''),
       };
     },
 

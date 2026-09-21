@@ -36,6 +36,17 @@ interface BoardViewport {
    */
   setRect?(left: number, top: number, width: number, height: number): void;
   /**
+   * Frame ONE bound. `fitToScreen` frames everything, which is the wrong verb
+   * for opening a single document. Optional in the same spirit as `setRect`:
+   * present in 0.22.4, and `focusOnBounds` falls back to centring if a later
+   * version renames it, which is worse but never broken.
+   */
+  setViewportByBound?(
+    bound: { x: number; y: number; w: number; h: number },
+    padding?: [number, number, number, number],
+    smooth?: boolean,
+  ): void;
+  /**
    * BlockSuite CACHES the container's box, and clears the cache in exactly one
    * place: the first line of its own ResizeObserver callback
    * (`Viewport.setShellElement`). Ours can be delivered first — it is, on this
@@ -259,4 +270,30 @@ export function ensureVisible(bounds: { x: number; y: number; w: number; h: numb
     && bounds.y >= visible.top
     && bounds.y + bounds.h <= visible.bottom;
   if (!inside) fitBoard();
+}
+
+/**
+ * Frame ONE thing, filling the pane — how a document is opened.
+ *
+ * `fitBoard` frames the whole canvas, which is the right verb for "show me my
+ * work" and the wrong one for "open this document": the document would end up
+ * one object among many, at whatever zoom the rest of the board dictates.
+ *
+ * The padding is asymmetric on purpose. The focus bar floats over the top of
+ * the canvas, so the top inset clears it; the left inset is zero because focus
+ * mode hides the asset panel, which is what `leftInset` exists to clear.
+ */
+export function focusOnBounds(
+  bounds: { x: number; y: number; w: number; h: number },
+  opts: { smooth?: boolean } = {},
+): void {
+  const viewport = edgelessRoot()?.gfx?.viewport;
+  if (!viewport) return;
+  if (typeof viewport.setViewportByBound === 'function') {
+    viewport.setViewportByBound(bounds, [72, 48, 48, 48], opts.smooth ?? true);
+    return;
+  }
+  // Fallback: centre on it and leave the zoom alone. Not the same thing, but a
+  // document the user can see beats a build that does not compile.
+  viewport.setCenter(bounds.x + bounds.w / 2, bounds.y + bounds.h / 2);
 }
