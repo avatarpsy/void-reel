@@ -15,7 +15,7 @@ import { useUIStore } from '../stores/ui-store';
 import { registerImageRpc, registerImageMutation } from './rpc';
 import { removeLayerBackground } from '../services/background-removal-apply';
 import { exportArtboard } from '../services/export-service';
-import { bakePendingCompositions } from '../services/composition/bake';
+import { settleCompositions as settleAllCompositions } from '../services/composition/bake';
 import { uploadReferenceImage } from '../services/generative-fill';
 import {
   saveImageToVoidspaceLibrary,
@@ -156,7 +156,7 @@ registerImageMutation('voidspace:img-adjust', 'Adjust image', (msg: any) => {
  */
 async function settleCompositions(): Promise<void> {
   try {
-    await bakePendingCompositions();
+    await settleAllCompositions();
   } catch {
     // A bake that cannot run is reported by the export itself, through the
     // layers it had to drop. Failing the whole call here would turn one missing

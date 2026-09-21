@@ -105,3 +105,31 @@ describe('restoring the background the renderer removed', () => {
     expect(backgroundFor({ bg: 'not-a-colour' }, '#root{color:red}')).toBeNull();
   });
 });
+
+/**
+ * THE CONDITION THAT MADE A DECK EXPORT WITH A HOLE IN IT.
+ *
+ * `shouldBake` answers "does this layer NEED a render". A layer whose render is
+ * already running does not — so a sweep run moments after a placement finds
+ * nothing to do, returns instantly, and an export goes ahead without the slide
+ * still being drawn. That is why awaiting the sweep alone did not fix it:
+ * measured in production after that first fix, an export five seconds after
+ * placing still came back `dropped: ["deck-close"]`.
+ *
+ * `settleCompositions` has to wait for work IN FLIGHT as well as work not yet
+ * started. This pins the distinction rather than the implementation: a layer
+ * mid-render is not "pending", and something still has to wait for it.
+ */
+describe('a render already in flight', () => {
+  it('is not reported as needing one — which is why the sweep alone missed it', () => {
+    const c = source();
+    // Mid-flight: the pixels have landed and the hash is current, so nothing
+    // "needs" a bake. The bake promise may still be settling.
+    const midFlight = layer({ sourceId: 'asset-1', composition: { ...c, renderHash: compositionHash(c) } });
+    expect(shouldBake(midFlight)).toBe(false);
+  });
+
+  it('still needs one while the layer has no pixels', () => {
+    expect(shouldBake(layer({ composition: source() }))).toBe(true);
+  });
+});

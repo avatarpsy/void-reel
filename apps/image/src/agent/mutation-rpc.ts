@@ -28,7 +28,7 @@ import { getPopularFonts, loadGoogleFont } from '../services/fonts-service';
 import { libraryImageToAsset, getVoidspaceIdToken } from '../services/voidspace-storage';
 import { createTextDocument, layoutText } from '../tools/text/text-engine';
 import { loadBlock, resolveComposition } from '../services/composition/block-source';
-import { bakeComposition, bakePendingCompositions } from '../services/composition/bake';
+import { bakeComposition, settleCompositions } from '../services/composition/bake';
 import { saveRegionToLibrary } from '../services/library-save';
 import { exportProjectToPdf, exportProjectToPptx, exportFileName } from '../services/pptx-export';
 import { uploadToLibrary } from '@openreel/asset-browser';
@@ -1526,7 +1526,7 @@ registerImageRpc('voidspace:img-export', async (msg: any) => {
    * A failure here is deliberately not fatal — the export reports what it had to
    * leave out, and one unrenderable layer must not cost the whole file.
    */
-  await bakePendingCompositions().catch(() => undefined);
+  await settleCompositions();
 
   // The SAME name the toolbar's Export produces — see exportFileName.
   const fileName = exportFileName(project.name, format);

@@ -301,6 +301,33 @@ export async function bakePendingCompositions(): Promise<BakeResult[]> {
   return out;
 }
 
+/**
+ * WAIT FOR EVERY PICTURE, INCLUDING THE ONES ALREADY BEING MADE.
+ *
+ * `bakePendingCompositions` asks `shouldBake`, which answers "does this layer
+ * NEED a render" — and a layer whose render is already running does not. So a
+ * sweep run moments after a placement skipped the very layer that was still
+ * being drawn, returned immediately, and the export went ahead without it.
+ *
+ * That is the whole of the dropped-slide bug, and it survived a first fix that
+ * awaited the sweep alone: measured after deploying that, an export five
+ * seconds after placing still came back `dropped: ["deck-close"]`, while the
+ * same export a minute later was clean. The sweep was running and correctly
+ * finding nothing to do.
+ *
+ * So both halves are awaited here: the bakes nobody has started, and the bakes
+ * already in flight. The loop matters — finishing one can leave another queued
+ * behind it — and it is bounded so a render that never settles cannot hold an
+ * export open for ever.
+ */
+export async function settleCompositions(): Promise<void> {
+  for (let pass = 0; pass < 4; pass++) {
+    await bakePendingCompositions().catch(() => []);
+    if (!inflight.size) return;
+    await Promise.allSettled([...inflight.values()]);
+  }
+}
+
 /** Test seam: forget which bakes failed, as a reload would. */
 export function resetBakeFailures(): void {
   failedKeys.clear();
