@@ -575,3 +575,21 @@ function blobToDataUrl(blob: Blob): Promise<string> {
     fr.readAsDataURL(blob);
   });
 }
+
+/**
+ * The file name for an exported project — ONE definition.
+ *
+ * The toolbar dialog and the agent's `img_export` both produce a deck from the
+ * same project, and they each had their own sanitiser: different character
+ * classes, different fallbacks ("presentation" vs "deck"). The same project
+ * therefore left the editor under two different names depending on who asked,
+ * which is the kind of difference nobody notices until a user cannot find the
+ * file they just made.
+ *
+ * Keeps letters, digits, spaces, dots and hyphens; everything else goes, so the
+ * result is safe on every OS and still recognisable as what the user named it.
+ */
+export function exportFileName(projectName: string | undefined, format: 'pdf' | 'pptx'): string {
+  const base = String(projectName || '').replace(/[^\w .-]+/g, '').trim() || 'presentation';
+  return `${base}.${format}`;
+}

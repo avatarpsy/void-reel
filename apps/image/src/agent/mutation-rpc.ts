@@ -30,6 +30,7 @@ import { createTextDocument, layoutText } from '../tools/text/text-engine';
 import { loadBlock, resolveComposition } from '../services/composition/block-source';
 import { bakeComposition } from '../services/composition/bake';
 import { saveRegionToLibrary } from '../services/library-save';
+import { exportProjectToPdf, exportProjectToPptx, exportFileName } from '../services/pptx-export';
 import { uploadToLibrary } from '@openreel/asset-browser';
 import type { SlotSpec } from '../services/composition/document';
 import type { Layer, Project, Artboard, MediaAsset, TextLayer, ShapeLayer, ImageLayer, CompositionSource } from '../types/project';
@@ -1457,4 +1458,115 @@ registerImageRpc('voidspace:img-new-project', (msg: any) => {
   };
 });
 
+
+// ── Export: PowerPoint, PDF ──────────────────────────────────────────────────
+/**
+ * `img_export` — the deck leaves the editor as a FILE.
+ *
+ * ── THE CAPABILITY WAS ALREADY WRITTEN, AND NOTHING CALLED IT ────────────────
+ * `exportProjectToPptx` and `exportProjectToPdf` have existed, with `pdf-lib`,
+ * `pptxgenjs` and real tests, and grep found exactly one caller: their own test
+ * file. No button, no tool, no handler. A finished export path that neither a
+ * user nor an agent could reach. This is the handler that reaches it; it adds
+ * no export logic of its own, on purpose.
+ *
+ * ── WHY IT UPLOADS RATHER THAN DOWNLOADS ────────────────────────────────────
+ * A person pressing Export wants a file in their Downloads folder, and the
+ * toolbar does exactly that with `downloadBlob`. An AGENT cannot use a download:
+ * it has to hand the user back something they can open. So this posts to
+ * `/api/studio/upload-attachment` — the endpoint that already decides between
+ * durable storage and temp based on the user's quota, classifies a document,
+ * and writes the ledger row. One upload path, already built, already billed
+ * correctly.
+ *
+ * ── `mode` IS THE ONE DECISION WORTH EXPOSING ───────────────────────────────
+ * `editable` maps layers to real PowerPoint objects, so the recipient can fix a
+ * typo — and anything PowerPoint cannot express is rasterised rather than
+ * approximated. `picture` makes every slide a flat image: pixel-identical
+ * forever, editable never. The export service's own rule is "if it would not
+ * look the same, rasterise it", so `editable` is the right default and
+ * `picture` is for a deck that must not shift.
+ */
+registerImageRpc('voidspace:img-export', async (msg: any) => {
+  const project = useProjectStore.getState().project;
+  if (!project) return fail('no_project', 'No image project is open.');
+
+  const format = String(msg?.format ?? 'pdf').toLowerCase();
+  if (format !== 'pdf' && format !== 'pptx') {
+    return fail('bad_format', `Unknown format "${format}". Use "pdf" or "pptx".`);
+  }
+
+  // Named pages, or all of them. An unknown id is named rather than ignored:
+  // exporting three of four pages silently is worse than refusing.
+  let artboardIds: string[] | undefined;
+  if (Array.isArray(msg?.pageIds) && msg.pageIds.length) {
+    const ids = msg.pageIds.map((x: any) => String(x));
+    const missing = ids.filter((id: string) => !project.artboards.some((a) => a.id === id));
+    if (missing.length) return fail('page_not_found', `unknown pageIds: ${missing.join(', ')}`);
+    artboardIds = ids;
+  }
+
+  const token = await getVoidspaceIdToken().catch(() => null);
+  if (!token) return fail('signed_out', 'Exporting needs the user to be signed in.');
+
+  // The SAME name the toolbar's Export produces — see exportFileName.
+  const fileName = exportFileName(project.name, format);
+
+  let blob: Blob;
+  let dropped: string[] = [];
+  try {
+    if (format === 'pptx') {
+      const r = await exportProjectToPptx(project, {
+        mode: msg?.mode === 'picture' ? 'picture' : 'editable',
+        artboardIds,
+        scale: Number(msg?.scale) || 2,
+      });
+      blob = r.blob;
+      dropped = r.dropped;
+    } else {
+      blob = await exportProjectToPdf(project, { artboardIds, scale: Number(msg?.scale) || 2 });
+    }
+  } catch (e: any) {
+    return fail('export_failed', String(e?.message ?? e) || 'The export failed.');
+  }
+
+  let url = '';
+  try {
+    const form = new FormData();
+    form.append('file', new File([blob], fileName, { type: blob.type }));
+    const res = await fetch('/api/studio/upload-attachment', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    });
+    if (!res.ok) throw new Error(`upload failed (${res.status})`);
+    const j = await res.json();
+    url = String(j?.url ?? '');
+    if (!url) throw new Error('upload returned no url');
+  } catch (e: any) {
+    // The file EXISTS — it just has no address. Say so, because the fix is to
+    // press Export in the toolbar, not to render the deck again.
+    return fail('upload_failed',
+      `The ${format.toUpperCase()} was made but could not be stored (${String(e?.message ?? e)}). `
+      + 'The user can still export it from the editor toolbar.');
+  }
+
+  const pages = artboardIds ? artboardIds.length : project.artboards.length;
+  return {
+    ok: true,
+    url,
+    fileName,
+    format,
+    pages,
+    bytes: blob.size,
+    ...(dropped.length ? { dropped } : {}),
+    note: dropped.length
+      ? `${pages} page(s) exported. ${dropped.length} layer(s) could not be represented and were `
+        + `left out: ${dropped.slice(0, 5).join(', ')}. Tell the user — a hole found while `
+        + 'presenting is worse than one mentioned now.'
+      : `${pages} page(s) exported as ${format.toUpperCase()}.`,
+  };
+});
+
+// Marks this file a module; every handler above registers by side effect.
 export {};

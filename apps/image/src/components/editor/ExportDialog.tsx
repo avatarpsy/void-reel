@@ -356,15 +356,15 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
        * the bundle everyone downloads to open a canvas.
        */
       if (currentFormat.document) {
-        const { exportProjectToPptx, exportProjectToPdf } = await import('../../services/pptx-export');
+        const { exportProjectToPptx, exportProjectToPdf, exportFileName } = await import('../../services/pptx-export');
         const onProgress = (p: number, msg: string) => { setProgress(p); setProgressMessage(msg); };
-        const safeName = (project.name || 'presentation').replace(/[^\w\s-]/g, '').trim() || 'presentation';
+        // One sanitiser, shared with the agent's export — see exportFileName.
 
         if (format === 'pptx') {
           const { blob, dropped } = await exportProjectToPptx(project, {
             scale: effectiveScale, onProgress,
           });
-          downloadBlob(blob, `${safeName}.pptx`);
+          downloadBlob(blob, exportFileName(project.name, 'pptx'));
           // Told, not hidden. A layer missing from slide six is something the
           // user needs to know BEFORE they present it, and the export otherwise
           // reports unqualified success.
@@ -378,7 +378,7 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
           }
         } else {
           const blob = await exportProjectToPdf(project, { scale: effectiveScale, onProgress });
-          downloadBlob(blob, `${safeName}.pdf`);
+          downloadBlob(blob, exportFileName(project.name, 'pdf'));
           showNotification('success', `Exported ${project.artboards.length} pages to PDF`);
         }
         onClose();
