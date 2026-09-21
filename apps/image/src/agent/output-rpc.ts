@@ -176,23 +176,32 @@ registerImageRpc('voidspace:img-render-pages', async (msg: any) => {
   // Pixels first — see settleCompositions.
   await settleCompositions();
 
+  /**
+   * And then RE-READ. The store is immutable: settling produced a new project
+   * object, and `project` above is a snapshot from before the pictures existed.
+   * Rendering from the stale one produces blank slides for anything that was
+   * still being drawn — the same fault that made the PPTX export drop a slide.
+   */
+  const settled = useProjectStore.getState().project ?? project;
+  const settledPages = settled.artboards.filter((a) => pages.some((p) => p.id === a.id));
+
   try {
     const urls: string[] = [];
-    for (let i = 0; i < pages.length; i++) {
-      const blob = await exportArtboard(project, pages[i], {
+    for (let i = 0; i < settledPages.length; i++) {
+      const blob = await exportArtboard(settled, settledPages[i], {
         format: 'jpg', quality: 'high', scale: 1, background: 'include',
       });
       const file = new File([blob], `slide-${i + 1}.jpg`, { type: 'image/jpeg' });
       urls.push(await uploadReferenceImage(file));
     }
-    const first = pages[0];
+    const first = settledPages[0] ?? pages[0];
     return {
       ok: true,
       urls,
-      pageCount: pages.length,
+      pageCount: settledPages.length,
       width: first.size.width,
       height: first.size.height,
-      isCarousel: pages.length > 1,
+      isCarousel: settledPages.length > 1,
       note: 'Pass these to publish as image_urls (comma-separated) with content_type "carousel" for several, "image" for one.',
     };
   } catch (e) {

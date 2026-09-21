@@ -1528,6 +1528,20 @@ registerImageRpc('voidspace:img-export', async (msg: any) => {
    */
   await settleCompositions();
 
+  /**
+   * RE-READ THE PROJECT. The store is immutable, so settling produced a NEW
+   * project object and the one captured at the top of this handler is now a
+   * snapshot of the world BEFORE the pictures existed.
+   *
+   * This is the bug the first two attempts at the dropped-slide fix both had:
+   * the wait was added, the bake genuinely completed, and the export still ran
+   * against the stale snapshot — so the layer's sourceId was still empty and
+   * the slide was still dropped. Measured twice in production, once per
+   * attempt. Waiting for work and then reading the result are two steps, and
+   * only doing the first looks exactly like doing neither.
+   */
+  const settled = useProjectStore.getState().project ?? project;
+
   // The SAME name the toolbar's Export produces — see exportFileName.
   const fileName = exportFileName(project.name, format);
 
@@ -1535,7 +1549,7 @@ registerImageRpc('voidspace:img-export', async (msg: any) => {
   let dropped: string[] = [];
   try {
     if (format === 'pptx') {
-      const r = await exportProjectToPptx(project, {
+      const r = await exportProjectToPptx(settled, {
         mode: msg?.mode === 'picture' ? 'picture' : 'editable',
         artboardIds,
         scale: Number(msg?.scale) || 2,
@@ -1543,7 +1557,7 @@ registerImageRpc('voidspace:img-export', async (msg: any) => {
       blob = r.blob;
       dropped = r.dropped;
     } else {
-      blob = await exportProjectToPdf(project, { artboardIds, scale: Number(msg?.scale) || 2 });
+      blob = await exportProjectToPdf(settled, { artboardIds, scale: Number(msg?.scale) || 2 });
     }
   } catch (e: any) {
     return fail('export_failed', String(e?.message ?? e) || 'The export failed.');
