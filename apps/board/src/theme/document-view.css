@@ -520,6 +520,29 @@ affine-edgeless-note[data-vs-doc-tag] .affine-block-children-container {
   padding: 56px 64px 64px;
 }
 
+/* ── AND ONLY THE OUTER ONE ─────────────────────────────────────────────────
+   There are fourteen of these in one certificate and ELEVEN are nested inside
+   individual paragraphs, where they hold a paragraph's child blocks and are
+   almost always empty. The rule above was giving each of them the page margin:
+   a paragraph whose text is 16px tall became 54px, and the document stretched
+   to roughly three times its proper length. That — not the font, not the
+   colour — is why it did not look like the file it exports.
+
+   Measured, not spotted: the nested container computed `56px 64px 64px 24px`
+   and 39px of height with nothing in it. */
+affine-edgeless-note[data-vs-doc-tag] affine-paragraph .affine-block-children-container,
+affine-edgeless-note[data-vs-doc-tag] affine-list .affine-block-children-container,
+affine-edgeless-note[data-vs-doc-tag] affine-table .affine-block-children-container,
+affine-edgeless-note[data-vs-doc-tag] affine-image .affine-block-children-container {
+  /* BlockSuite's own indent for a nested block, and nothing else. */
+  padding: 0 0 0 24px;
+}
+
+/* An empty one is not a gap. */
+affine-edgeless-note[data-vs-doc-tag] .affine-block-children-container:empty {
+  padding: 0;
+}
+
 /* A table on paper: hairline rules and a shaded header, like the exporter's. */
 affine-edgeless-note[data-vs-doc-tag] affine-table th {
   background-color: #f4f4f2;
