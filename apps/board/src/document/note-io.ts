@@ -44,6 +44,7 @@ import {
 } from './align-marks';
 import {
   countImages,
+  sizeImagesFromHints,
   liftImages,
   restoreImages,
   restoreMarkdownImages,
@@ -246,6 +247,13 @@ export async function placeMarkdownDocument(
     // A missing tag is a cosmetic loss; it must never cost the document.
   }
 
+  /**
+   * The pictures take the size the document asked for. Deliberately NOT
+   * awaited: it measures each picture, and a slow one must not hold up a
+   * document that is already on the canvas and readable.
+   */
+  void sizeImagesFromHints(board, model.id).catch(() => { /* natural size */ });
+
   return { noteId: model.id, dropped: droppedConstructs(text), images: countImages(text) };
 }
 
@@ -370,5 +378,8 @@ export async function insertMarkdownAt(
     await transformer.snapshotToBlock(child, board.store, noteId, at + n);
     n += 1;
   }
+  // Anything inserted by an EDIT gets its sizes too, or a logo replaced by the
+  // agent comes back full width in a document where the old one was right.
+  void sizeImagesFromHints(board, noteId).catch(() => { /* natural size */ });
   return n;
 }

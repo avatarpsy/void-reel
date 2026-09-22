@@ -180,3 +180,68 @@ export function restoreMarkdownImages(markdown: string, images: LiftedImage[]): 
 export function countImages(markdown: string): number {
   return (String(markdown ?? '').match(IMAGE_RE) ?? []).length;
 }
+
+/**
+ * -- A LOGO IS 38 POINTS ON THE PAGE AND WAS FULL WIDTH ON THE CANVAS -------
+ *
+ * `![](logo.png#w=38)` sizes the picture in the exported PDF and the Word
+ * file, because both renderers read the hint. The CANVAS read nothing: the
+ * image block was built with `width: 0`, which BlockSuite renders at the
+ * picture's natural size, so a masthead logo filled the top quarter of the
+ * document the user was looking at while the file it exported was correct.
+ * Two different documents, one of which nobody could see.
+ *
+ * The height cannot be guessed, so it is measured: the browser is going to
+ * load the picture to display it anyway, and the second request is served
+ * from cache. A picture that will not load keeps its natural size, which is
+ * what it did before.
+ */
+export async function sizeImagesFromHints(board: any, noteId: string): Promise<number> {
+  const note = board?.store?.getBlock?.(noteId)?.model;
+  const children: any[] = note?.children ?? [];
+  const images = children.filter((c) => c?.flavour === 'affine:image');
+  if (!images.length) return 0;
+
+  const [{ decodeMediaRef }, { imageHints }] = await Promise.all([
+    import('../board/media-ref'),
+    import('./blocks'),
+  ]);
+
+  let sized = 0;
+  await Promise.all(images.map(async (block: any) => {
+    // Already sized by the user, or by a previous pass. Never overrule that.
+    if (Number(block.props?.width) > 0) return;
+    const src = decodeMediaRef(String(block.props?.sourceId ?? ''))?.src;
+    if (!src) return;
+    const { width } = imageHints(src);
+    if (!width) return;
+
+    // POINTS on the page, pixels on the canvas: 96 per inch against 72.
+    const px = Math.max(8, Math.round(width * (96 / 72)));
+    const aspect = await naturalAspect(src);
+    try {
+      board.store.updateBlock(block, {
+        width: px,
+        height: Math.max(8, Math.round(px * aspect)),
+      });
+      sized += 1;
+    } catch { /* a block that went away mid-flight */ }
+  }));
+  return sized;
+}
+
+/** height / width of the real picture, or 1 if it cannot be measured. */
+function naturalAspect(src: string): Promise<number> {
+  return new Promise((resolve) => {
+    if (typeof Image === 'undefined') { resolve(1); return; }
+    const img = new Image();
+    // A picture that never answers must not hold the import open.
+    const timer = setTimeout(() => resolve(1), 8000);
+    const done = (value: number) => { clearTimeout(timer); resolve(value); };
+    img.onload = () => done(img.naturalWidth > 0
+      ? img.naturalHeight / img.naturalWidth
+      : 1);
+    img.onerror = () => done(1);
+    img.src = src;
+  });
+}

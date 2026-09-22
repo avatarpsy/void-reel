@@ -340,3 +340,107 @@
    it is called, and a floating tag over the page is noise. */
 body[data-doc-focus] [data-vs-doc-tag]::after,
 body[data-focus-mode] [data-vs-doc-tag]::after { display: none; }
+
+/* ══ A DOCUMENT ON THE CANVAS IS A PAGE ══════════════════════════════════════
+
+   The focus overlay above has always looked like paper. The note ON THE CANVAS
+   did not: it took the board's own theme, so a letterhead about to be sent to
+   somebody was white-on-charcoal in Inter, while the PDF it exported was
+   black-on-white in Georgia. Two renderings of one document, and the one being
+   read was the wrong one.
+
+   ── WHY VARIABLES, NOT ELEMENT RULES ────────────────────────────────────────
+   Almost everything here sets a BlockSuite custom property rather than a
+   property on a tag. The note's contents are live editor blocks whose carets,
+   selection highlights, table rules, drag handles and slash menu all read those
+   same variables. Painting `p { color: black }` over the top would leave a white
+   caret on white paper and a selection nobody can see — the classic way a "dark
+   mode fix" makes an editor unusable.
+
+   ── THE ONE `!important`, AND WHY IT IS RIGHT ───────────────────────────────
+   `edgeless-note-background` carries an INLINE `background-color`, written from
+   the note's `background` prop. That prop is a themed palette key — its "White"
+   resolves to rgb(37,37,37) in dark mode — so there is no value it could be set
+   to that means "paper in either theme". An inline style can only be beaten by
+   `!important`, and the alternative is writing a literal colour into the user's
+   document to work around their theme. Overriding the paint is the smaller of
+   the two.
+
+   Scoped to `[data-vs-doc-tag]`, which `document/tags.ts` stamps on notes that
+   really are documents. A sticky note is not a page and keeps the board theme. */
+
+affine-edgeless-note[data-vs-doc-tag] {
+  /* Paper and ink. Very slightly warm: pure #fff against a dark canvas glares,
+     and this is nearer what a laser printer actually puts on the page. */
+  --vs-paper: #fdfdfc;
+  --affine-background-primary-color: var(--vs-paper);
+  --affine-background-secondary-color: #f4f4f2;
+  --affine-background-tertiary-color: #ecece9;
+  --affine-background-code-block: #f4f4f2;
+  --affine-background-overlay-panel-color: #ffffff;
+  --affine-text-primary-color: #17171a;
+  --affine-text-secondary-color: #6b6b73;
+  --affine-text-disable-color: #9a9aa2;
+  --affine-border-color: #e0e0dc;
+  --affine-divider-color: #dededa;
+  --affine-quote-color: #57575e;
+  --affine-link-color: #1a56db;
+  --affine-hover-color: rgba(0, 0, 0, 0.04);
+  --affine-hover-color-filled: rgba(0, 0, 0, 0.06);
+  --affine-icon-color: #6b6b73;
+  --affine-placeholder-color: #a8a8b0;
+
+  /* The face the exporter sets in. A document that reads as Georgia on paper
+     and as the UI sans on screen is two documents. */
+  --affine-font-family: Georgia, 'Iowan Old Style', 'Times New Roman', serif;
+
+  color: var(--affine-text-primary-color);
+}
+
+/* The paper itself — see the note above about the inline style. */
+affine-edgeless-note[data-vs-doc-tag] edgeless-note-background {
+  background-color: var(--vs-paper) !important;
+  /* Paper has an edge. Without one, a pale page on a pale canvas has no
+     boundary and its margin reads as part of the board. */
+  box-shadow: 0 1px 2px rgba(16, 16, 20, 0.18), 0 10px 28px rgba(16, 16, 20, 0.16) !important;
+  border-radius: 3px !important;
+}
+
+/* ── THE TYPE SCALE THE EXPORTER USES ───────────────────────────────────────
+   Not "a bit bigger for headings": these are `H_SIZE` in `document/pdf.ts` —
+   22/16.5/13.5/12pt against an 11pt body — expressed against a 16px body, so
+   the proportions on screen are the ones that come out of the printer. */
+affine-edgeless-note[data-vs-doc-tag] {
+  font-size: 16px;
+  line-height: 1.55;
+}
+affine-edgeless-note[data-vs-doc-tag] h1 { font-size: 2em; line-height: 1.25; }
+affine-edgeless-note[data-vs-doc-tag] h2 { font-size: 1.5em; line-height: 1.3; }
+affine-edgeless-note[data-vs-doc-tag] h3 { font-size: 1.23em; line-height: 1.35; }
+affine-edgeless-note[data-vs-doc-tag] h4,
+affine-edgeless-note[data-vs-doc-tag] h5,
+affine-edgeless-note[data-vs-doc-tag] h6 { font-size: 1.09em; line-height: 1.4; }
+
+/* ── THE MARGIN ─────────────────────────────────────────────────────────────
+   An inch, to scale. The note is 800px wide standing in for a 595pt page, so a
+   72pt margin is about 97px — rounded down, because the canvas is read at a
+   distance and the exported file is where the measurement has to be exact.
+
+   `.affine-block-children-container` is BlockSuite's own class and is stable;
+   the wrappers around it are vanilla-extract hashes that change every build and
+   must never be selected on. */
+affine-edgeless-note[data-vs-doc-tag] .affine-block-children-container {
+  padding: 56px 64px 64px;
+}
+
+/* A table on paper: hairline rules and a shaded header, like the exporter's. */
+affine-edgeless-note[data-vs-doc-tag] affine-table th {
+  background-color: #f4f4f2;
+  font-weight: 600;
+}
+
+/* The corner tag is chrome, not content — it must not inherit the page's serif
+   face, and it needs its own ink now that the page is light in both themes. */
+affine-edgeless-note[data-vs-doc-tag]::after {
+  font-family: var(--vs-ui-font, ui-sans-serif, system-ui, sans-serif);
+}

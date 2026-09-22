@@ -404,7 +404,7 @@ function inlineRuns(tokens: any[] | undefined, inherited: Partial<Inline> = {}):
  * refinement, and refusing to draw a picture because its width was misspelt
  * would be a worse document than one with a big picture in it.
  */
-function imageHints(url: string): { width?: number; align?: DocAlign } {
+export function imageHints(url: string): { width?: number; align?: DocAlign } {
   const hash = url.includes('#') ? url.slice(url.indexOf('#') + 1) : '';
   if (!hash) return {};
   const out: { width?: number; align?: DocAlign } = {};
