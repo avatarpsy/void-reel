@@ -185,3 +185,24 @@ describe('the offline floor', () => {
     expect(withText.blob.size).toBeGreaterThan(empty.blob.size + 40);
   }, 60_000);
 });
+
+describe('line spacing', () => {
+  const md = ['# Report', '', 'A paragraph of the length a real document contains. '.repeat(90)]
+    .join(String.fromCharCode(10));
+
+  /**
+   * Double-spaced is a REQUIREMENT on submitted work, so the only assertion
+   * worth making is the one a marker would make: it takes more pages.
+   */
+  it('double-spaced takes more pages than single', async () => {
+    const single = await pdfOf({ markdown: md, lineSpacing: 1 });
+    const double = await pdfOf({ markdown: md, lineSpacing: 2 });
+    expect(double.pages).toBeGreaterThan(single.pages);
+  }, 90_000);
+
+  it('ignores a value that is not a spacing', async () => {
+    const plain = await pdfOf({ markdown: md });
+    const nonsense = await pdfOf({ markdown: md, lineSpacing: -4 as any });
+    expect(nonsense.pages).toBe(plain.pages);
+  }, 90_000);
+});

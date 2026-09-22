@@ -199,6 +199,14 @@ export type Block =
    * moment anybody edits a sentence above.
    */
   | { kind: 'pagebreak' }
+  /**
+   * Deliberate vertical space — `<!-- space: 48 -->`.
+   *
+   * A signature block is three inches of nothing above a name, and the only
+   * way to ask for it was blank paragraphs, which a markdown parser collapses.
+   * Measured in points, like everything else on the page.
+   */
+  | { kind: 'space'; points: number }
   | {
     kind: 'image'; url: string; alt: string;
     /**
@@ -255,6 +263,12 @@ export interface DocSpec {
    */
   header?: string;
   footer?: string;
+  /**
+   * Multiple of the font size between lines: 1 is single, 1.5 and 2 are what
+   * every word processor puts in the same menu. A submitted document is often
+   * REQUIRED to be double-spaced, which is the whole reason this exists.
+   */
+  lineSpacing?: number;
 }
 
 /**
@@ -270,8 +284,52 @@ export interface DocSpec {
  * A HARD break — two trailing spaces, or `<br>` — is a separate `br` token and
  * still becomes a real newline, so nothing is lost by collapsing these.
  */
+/**
+ * -- HTML ENTITIES, WHICH NOTHING ELSE WAS GOING TO DECODE ------------------
+ *
+ * `&nbsp;` printed as the six characters `&nbsp;` on a certificate. Markdown
+ * decodes entities on its way to HTML, and this pipeline never goes to HTML --
+ * it goes to a PDF and to a Word file -- so the decoding simply never happened.
+ *
+ * Not applied inside a code span, which is CommonMark's rule and the right one:
+ * a snippet showing `&amp;` means to show `&amp;`.
+ */
+const ENTITIES: Record<string, string> = {
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: '\u00a0',
+  mdash: '\u2014', ndash: '\u2013', hellip: '\u2026',
+  lsquo: '\u2018', rsquo: '\u2019', ldquo: '\u201c',
+  rdquo: '\u201d', middot: '\u00b7', bull: '\u2022',
+  times: '\u00d7', divide: '\u00f7', deg: '\u00b0',
+  plusmn: '\u00b1', copy: '\u00a9', reg: '\u00ae',
+  trade: '\u2122', euro: '\u20ac', pound: '\u00a3',
+  yen: '\u00a5', cent: '\u00a2', sect: '\u00a7',
+  laquo: '\u00ab', raquo: '\u00bb', dagger: '\u2020',
+  frac12: '\u00bd', frac14: '\u00bc', frac34: '\u00be',
+};
+
+const RE_ENTITY = /&(#x?[0-9a-f]+|[a-z][a-z0-9]{1,10});/gi;
+
+function decodeEntities(text: string): string {
+  if (!text.includes('&')) return text;
+  return text.replace(RE_ENTITY, (whole, body: string) => {
+    if (body[0] === '#') {
+      const hex = body[1] === 'x' || body[1] === 'X';
+      const code = hex ? parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10);
+      // Outside Unicode, or half of a surrogate pair, is not a character at all:
+      // leaving the source text alone says more than a replacement box does.
+      if (!Number.isFinite(code) || code < 1 || code > 0x10ffff) return whole;
+      if (code >= 0xd800 && code <= 0xdfff) return whole;
+      return String.fromCodePoint(code);
+    }
+    return ENTITIES[body.toLowerCase()] ?? whole;
+  });
+}
+
+const RE_SOFT_BREAK = /[ \t]*\r?\n[ \t]*/g;
+const soften0 = (text: string) => text.replace(RE_SOFT_BREAK, ' ');
+
 function soften(text: unknown): string {
-  return String(text ?? '').replace(/[ \t]*\r?\n[ \t]*/g, ' ');
+  return decodeEntities(soften0(String(text ?? '')));
 }
 
 /** Flatten marked's inline tokens into runs, carrying marks down through nesting. */
@@ -302,7 +360,10 @@ function inlineRuns(tokens: any[] | undefined, inherited: Partial<Inline> = {}):
       case 'strong': out.push(...inlineRuns(t.tokens, { ...inherited, bold: true })); break;
       case 'em': out.push(...inlineRuns(t.tokens, { ...inherited, italic: true })); break;
       case 'del': out.push(...inlineRuns(t.tokens, { ...inherited, strike: true })); break;
-      case 'codespan': push(soften(t.text), { ...inherited, code: true }); break;
+      // `soften0`, not `soften`: a code span keeps its entities, because a
+      // snippet showing `&amp;` is showing exactly those five characters.
+      case 'codespan':
+        push(soften0(String(t.text ?? '')), { ...inherited, code: true }); break;
       case 'link': out.push(...inlineRuns(t.tokens, { ...inherited, link: String(t.href || '') })); break;
       case 'vsUnderline':
         out.push(...inlineRuns(t.tokens, { ...inherited, underline: true })); break;
@@ -481,11 +542,18 @@ export function parseMarkdown(markdown: string, title?: string): Block[] {
    */
   const COLUMNS_COMMENT = /^\s*<!--\s*(?:columns|cols)\s*:\s*([\d.,\s]+?)\s*-->\s*$/i;
   let pendingWidths: number[] | undefined;
+  const SPACE_COMMENT = /^\s*<!--\s*(?:space|gap)\s*:\s*(\d{1,3})\s*-->\s*$/i;
   for (const token of lexer.lexer(md)) {
     const raw = token.type === 'html' || token.type === 'paragraph'
       ? String((token as any).raw ?? '')
       : '';
     if (raw && BREAK_COMMENT.test(raw)) { out.push({ kind: 'pagebreak' }); continue; }
+    const gap = raw ? SPACE_COMMENT.exec(raw) : null;
+    if (gap) {
+      // Capped at a page: more than that is a page break written the long way.
+      out.push({ kind: 'space', points: Math.min(700, Number(gap[1])) });
+      continue;
+    }
     const cols = raw ? COLUMNS_COMMENT.exec(raw) : null;
     if (cols) {
       const parsed = cols[1]!.split(',').map((n) => Number(n.trim()))

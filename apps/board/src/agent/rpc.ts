@@ -130,6 +130,8 @@ function pageSetup(args: any): Record<string, unknown> {
     out.margin = Math.min(200, Math.max(12, Number(margin)));
   }
   if (args?.orientation === 'landscape') out.orientation = 'landscape';
+  const spacing = Number(args?.lineSpacing);
+  if (Number.isFinite(spacing) && spacing > 0) out.lineSpacing = Math.min(3, Math.max(0.8, spacing));
   const header = String(args?.header ?? '').trim();
   const footer = String(args?.footer ?? '').trim();
   if (header) out.header = header.slice(0, 200);

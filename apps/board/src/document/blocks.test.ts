@@ -369,3 +369,53 @@ describe('run formatting', () => {
       .toBe('2 + 2 == 4 and x++ is a language');
   });
 });
+
+/**
+ * HTML ENTITIES. `&nbsp;` printed as six characters on a real certificate —
+ * markdown decodes these on its way to HTML, and this pipeline never goes
+ * through HTML, so nothing had ever decoded them.
+ */
+describe('entities', () => {
+  const textOf = (md: string) =>
+    (parseMarkdown(md)[0] as any).runs.map((r: any) => r.text).join('');
+
+  it('decodes the named ones people actually type', () => {
+    expect(textOf('Tom &amp; Jerry &mdash; &pound;5 &copy; 2026'))
+      .toBe('Tom & Jerry \u2014 \u00a35 \u00a9 2026');
+  });
+
+  it('decodes numeric and hex references, including the rupee', () => {
+    expect(textOf('&#8377;1,200 and &#x20B9;95')).toBe('\u20b91,200 and \u20b995');
+  });
+
+  it('leaves a non-entity ampersand exactly as typed', () => {
+    expect(textOf('R&D spend & margin')).toBe('R&D spend & margin');
+  });
+
+  it('leaves nonsense alone rather than printing a replacement box', () => {
+    expect(textOf('&notareal; &#999999999;')).toBe('&notareal; &#999999999;');
+  });
+
+  /** CommonMark's rule: a snippet showing `&amp;` means to show `&amp;`. */
+  it('does not decode inside a code span', () => {
+    const runs = (parseMarkdown('use `&amp;` in xml')[0] as any).runs;
+    expect(runs.find((r: any) => r.code).text).toBe('&amp;');
+  });
+});
+
+describe('deliberate vertical space', () => {
+  it('reads <!-- space: 48 --> as a measured gap', () => {
+    const out = parseMarkdown(['Sincerely,', '', '<!-- space: 48 -->', '', 'A. Signatory'].join('\n'));
+    expect(out.map((b) => b.kind)).toEqual(['para', 'space', 'para']);
+    expect(out[1]).toMatchObject({ points: 48 });
+  });
+
+  it('caps it at a page, because more than that is a page break', () => {
+    expect(parseMarkdown('<!-- space: 999 -->')[0]).toMatchObject({ kind: 'space', points: 700 });
+  });
+
+  it('is not confused with the other directives', () => {
+    const out = parseMarkdown(['<!-- space: 20 -->', '<!-- pagebreak -->'].join('\n\n'));
+    expect(out.map((b) => b.kind)).toEqual(['space', 'pagebreak']);
+  });
+});

@@ -39,6 +39,17 @@ export async function renderDocx(spec: DocSpec): Promise<Blob> {
   const mono = 'Consolas';
 
   /** `#aabbcc` → `AABBCC`. Word rejects the hash and ignores the colour. */
+  /**
+   * Word measures line spacing in TWENTIETHS OF A POINT, and 240 is single.
+   * 300 has always been this writer's body leading (1.25); `lineSpacing` scales
+   * from single so that 2 means what a university means by double-spaced.
+   */
+  const LINE = 300;
+  const asked = Number(spec.lineSpacing);
+  const line = Number.isFinite(asked) && asked > 0
+    ? Math.round(240 * Math.min(3, Math.max(0.8, asked)))
+    : LINE;
+
   const hex6 = (value: string) => String(value ?? '').replace('#', '').toUpperCase();
 
   const runsOf = (runs: Inline[], font: string, extra: Record<string, unknown> = {}): any[] => {
@@ -134,6 +145,11 @@ export async function renderDocx(spec: DocSpec): Promise<Blob> {
       case 'pagebreak':
         children.push(new Paragraph({ children: [new PageBreak()] }));
         break;
+      case 'space':
+        // An empty paragraph whose HEIGHT is the gap. Word has no other way to
+        // say 'leave this much room' that survives being edited afterwards.
+        children.push(new Paragraph({ text: '', spacing: { before: 0, after: b.points * 20 } }));
+        break;
       case 'heading':
         children.push(new Paragraph({
           heading: HEADING[b.level - 1],
@@ -147,14 +163,14 @@ export async function renderDocx(spec: DocSpec): Promise<Blob> {
       case 'para':
         children.push(new Paragraph({
           children: runsOf(b.runs, body),
-          spacing: { after: 160, line: 300 }, // ~1.25 leading; single reads cramped
+          spacing: { after: 160, line }, // 1.25 leading; single reads cramped
           ...(b.align ? { alignment: alignOf(b.align) } : {}),
         }));
         break;
       case 'list':
         children.push(new Paragraph({
           children: runsOf(b.runs, body),
-          spacing: { after: 80, line: 300 },
+          spacing: { after: 80, line },
           ...(b.ordered
             ? { numbering: { reference: 'vs-ordered', level: Math.min(2, b.level) } }
             : { bullet: { level: Math.min(2, b.level) } }),
@@ -165,7 +181,7 @@ export async function renderDocx(spec: DocSpec): Promise<Blob> {
           children: runsOf(b.runs, body, { italics: true, color: '4A4A4A' }),
           indent: { left: 480 },
           border: { left: { style: BorderStyle.SINGLE, size: 12, space: 12, color: 'BDBDBD' } },
-          spacing: { before: 120, after: 160, line: 300 },
+          spacing: { before: 120, after: 160, line },
         }));
         break;
       case 'code':

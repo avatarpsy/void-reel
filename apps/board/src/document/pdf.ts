@@ -34,7 +34,22 @@ const PAGE = {
 const DEFAULT_MARGIN = 72; // 1 inch
 const FOOTER_GAP = 36;
 const BODY_SIZE = 11;
+/**
+ * Single spacing, as a multiple of the font size. 1.42 rather than 1.2 because
+ * a document is read at arm's length on paper, not on a screen.
+ */
 const LEADING = 1.42;
+
+/**
+ * What `lineSpacing` means in points-per-point. A spec asking for 2 means
+ * DOUBLE the single-spaced leading, which is what a university or a court
+ * means by double-spaced — not twice the font size.
+ */
+function leadingFor(spec: DocSpec): number {
+  const asked = Number(spec.lineSpacing);
+  if (!Number.isFinite(asked) || asked <= 0) return LEADING;
+  return LEADING * Math.min(3, Math.max(0.8, asked));
+}
 const H_SIZE = [20, 15.5, 13, 11.5];
 const H_BEFORE = [0, 20, 16, 14];
 const H_AFTER = [10, 8, 6, 5];
@@ -302,6 +317,7 @@ export async function renderPdf(spec: DocSpec): Promise<PdfResult> {
   /** Reserve vertical space, starting a page when this block will not fit. */
   const need = (h: number) => { if (y - h < floor) newPage(); };
 
+  const leading = leadingFor(spec);
   const ink = rgb(0.09, 0.09, 0.10);
   const muted = rgb(0.42, 0.42, 0.44);
   const hair = rgb(0.82, 0.82, 0.84);
@@ -324,7 +340,7 @@ export async function renderPdf(spec: DocSpec): Promise<PdfResult> {
       // The line's own height, not the block's: one big run has to push the
       // lines apart or it overprints the line above.
       const top = lineSize(line, fontSize);
-      const lineH = top * LEADING;
+      const lineH = top * leading;
       need(lineH);
       /**
        * Centred and right text are set by offsetting the line's own start, so
@@ -388,7 +404,7 @@ export async function renderPdf(spec: DocSpec): Promise<PdfResult> {
          * most obvious sign a document was generated rather than typeset. If it
          * and two lines of what follows will not fit, start the page here.
          */
-        const block = lines.length * fs * LEADING + BODY_SIZE * LEADING * 2;
+        const block = lines.length * fs * leading + BODY_SIZE * leading * 2;
         if (y - block < floor) newPage();
         drawLines(lines, fs, 0, ink, undefined, b.align ?? 'left');
         y -= H_AFTER[b.level - 1]!;
@@ -444,6 +460,14 @@ export async function renderPdf(spec: DocSpec): Promise<PdfResult> {
           y -= lineH;
         }
         y -= 10;
+        break;
+      }
+      case 'space': {
+        // Never at the top of a fresh page: leading a page with blank inches
+        // looks like a fault, and the space was asked for BETWEEN two things.
+        const room = Math.max(0, b.points);
+        if (y < size.h - MARGIN - topOffset) y -= room;
+        if (y < floor) newPage();
         break;
       }
       case 'pagebreak':
