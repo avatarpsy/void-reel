@@ -46,6 +46,9 @@
  * are the numbers `focusOnBounds` pads with, so opening a document and then
  * scrolling it do not disagree about where the page sits.
  */
+/** A note's own box on the board, in model units. */
+export interface FramedBounds { x: number; y: number; w: number; h: number }
+
 const PAD = { top: 72, side: 48, bottom: 48 };
 
 /**
@@ -149,8 +152,14 @@ export function overflow(
  */
 export function frameCanvasOn(
   page: () => Element | null,
-  opts: { armAfterMs?: number; name?: string } = {},
+  opts: {
+    armAfterMs?: number;
+    name?: string;
+    /** The note's own box, for when it is not rendered. */
+    bounds?: () => FramedBounds | null;
+  } = {},
 ): () => void {
+  const bounds = opts.bounds;
   const leave = enterFocusMode(opts.name ?? 'document');
 
   let armed = false;
@@ -173,13 +182,38 @@ export function frameCanvasOn(
   const hold = (toTop = !reading): void => {
     if (!armed || correcting) return;
     const viewport = viewportOf();
-    const el = page();
     const host = document.querySelector('editor-host');
-    if (!viewport || !el || !host) return;
-
-    const zoom = viewport.zoom || 1;
-    const rect = el.getBoundingClientRect();
+    if (!viewport || !host) return;
     const win = host.getBoundingClientRect();
+    const zoom = viewport.zoom || 1;
+
+    /**
+     * ── THE PAGE IS NOT ALWAYS IN THE DOM ─────────────────────────────
+     *
+     * BlockSuite culls notes that are far from the viewport, so the further
+     * the board strays the more certain it is that there is no element to
+     * measure — and the first version of this gave up in exactly that case,
+     * which is the one case the hold exists for. Found on a real board: the
+     * viewport ended up at x=-2456 with no note rendered at all and nothing
+     * pulling it back.
+     *
+     * So when the element is gone, the note's own `xywh` is projected
+     * through the viewport instead. It is a worse measurement — a note's
+     * model height lags its content — but it is good enough to bring the
+     * page back on screen, and once it renders the measured path takes over.
+     */
+    const el = page();
+    const model = el ? null : bounds?.();
+    if (!el && !model) return;
+    const box = el ? el.getBoundingClientRect() : null;
+    const left = box ? box.left
+      : (model!.x - viewport.centerX) * zoom + win.left + win.width / 2;
+    const top = box ? box.top
+      : (model!.y - viewport.centerY) * zoom + win.top + win.height / 2;
+    const width = box ? box.width : model!.w * zoom;
+    const height = box ? box.height : model!.h * zoom;
+    const rect = { left, top, width, height, right: left + width, bottom: top + height };
+
     if (!rect.width || !win.width) return;
 
     correcting = true;

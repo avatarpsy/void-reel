@@ -260,6 +260,15 @@ export function installDocumentFocus(
       () => container.ownerDocument.querySelector(
         `affine-edgeless-note[data-block-id="${id}"]`,
       ),
+      {
+        /**
+         * BlockSuite stops rendering a note that is far from the viewport,
+         * so the further the board strays the more certain it is that there
+         * is nothing to measure. The note's own box is the fallback, and it
+         * is enough to bring the page back on screen.
+         */
+        bounds: () => boundsOf(board, id),
+      },
     );
 
     /**
@@ -268,6 +277,18 @@ export function installDocumentFocus(
      * file the user is about to export.
      */
     titleSub = board.store.slots.blockUpdated.subscribe(() => {
+      /**
+       * A document can go away while it is open — deleted from the index
+       * panel, or undone. The mode used to stay up over an empty canvas,
+       * with a name in its bar and nothing to type into, and the only way
+       * out was Escape. Seen on a real board.
+       *
+       * Checked on the next microtask, not here: the slot fires DURING the
+       * deletion, once per block, and the note is still in the store while
+       * its own event is being delivered. Asking immediately therefore
+       * never saw it gone, and no event followed to ask again.
+       */
+      queueMicrotask(checkStillThere);
       const input = nameEl();
       // NOT while they are typing in it — writing the document's value back
       // into the field mid-edit fights the user for their own cursor.
@@ -302,6 +323,13 @@ export function installDocumentFocus(
       };
       document.addEventListener('keyup', onKey);
     }
+  }
+
+  /** Shut the mode if the document it is framing has been deleted. */
+  function checkStillThere(): void {
+    if (!noteId || board.store.getBlock(noteId)) return;
+    close();
+    toast('That document is not on the board any more.');
   }
 
   function close(): void {

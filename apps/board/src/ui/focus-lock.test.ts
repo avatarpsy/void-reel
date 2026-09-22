@@ -111,3 +111,39 @@ describe('one answer to "is a focus mode open"', () => {
     expect(isCanvasFramed()).toBe(false);
   });
 });
+
+describe('the hold survives the page not being rendered', () => {
+  /**
+   * BlockSuite culls a note that is far from the viewport, so the further
+   * the board strays the more certain it is that there is no element to
+   * measure. The first version gave up in exactly that case — the one case
+   * the hold exists for. Found on a real board: the viewport at x=-2456
+   * with no note rendered and nothing pulling it back.
+   *
+   * The projection is the same arithmetic the clamp uses, written out here
+   * so a change to it has to be deliberate: a note's model box, through the
+   * viewport, lands where the element would have been.
+   */
+  const project = (b: { x: number; w: number }, centerX: number, zoom: number, win: { left: number; width: number }) => {
+    const left = (b.x - centerX) * zoom + win.left + win.width / 2;
+    return { left, right: left + b.w * zoom };
+  };
+
+  it('projects a note that is off screen back to where it belongs', () => {
+    const win = { left: 0, width: 1600 };
+    // The page sits at model x=0..800; the board has wandered 2456 to the left.
+    const seen = project({ x: 0, w: 800 }, -2456, 1, win);
+    // It is far to the RIGHT of the window, which is what the clamp must see.
+    expect(seen.left).toBeGreaterThan(win.width);
+    const d = overflow(seen.left, seen.right, win.left, win.left + win.width, 48, 48);
+    // A correction big enough to bring it back, and in the right direction.
+    expect(d).toBeGreaterThan(1000);
+  });
+
+  it('asks for no correction once the projection lands centred', () => {
+    const win = { left: 0, width: 1600 };
+    // Centred means the viewport centre is the page centre.
+    const seen = project({ x: 0, w: 800 }, 400, 1, win);
+    expect(overflow(seen.left, seen.right, win.left, win.left + win.width, 48, 48)).toBe(0);
+  });
+});

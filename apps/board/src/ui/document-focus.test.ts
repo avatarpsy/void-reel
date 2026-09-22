@@ -403,3 +403,26 @@ describe('opening a brand new document', () => {
     focus.destroy();
   }, 60_000);
 });
+
+describe('a document that goes away while it is open', () => {
+  /**
+   * Deleted from the index panel, or undone. The mode used to stay up over
+   * an empty canvas with a name in its bar and nothing to type into, and
+   * the only way out was Escape. Seen on a real board.
+   */
+  it('closes itself rather than framing nothing', async () => {
+    const { board, noteId } = await boardWithDocument();
+    const focus = installDocumentFocus(board as any, container);
+    focus.open(noteId);
+    expect(focus.isOpen()).toBe(true);
+
+    board.store.deleteBlock(board.store.getBlock(noteId)!.model as any);
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(focus.isOpen()).toBe(false);
+    expect(focus.current()).toBeNull();
+    // And the board is a board again.
+    expect(isCanvasFramed()).toBe(false);
+    focus.destroy();
+  }, 60_000);
+});
