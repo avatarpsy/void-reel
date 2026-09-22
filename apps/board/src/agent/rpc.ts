@@ -219,6 +219,9 @@ export const READ_ONLY_RPC: ReadonlySet<string> = new Set([
   'voidspace:board-map',
   'voidspace:board-document',
   'voidspace:board-document-read',
+  // Writing a file is not a change to the BOARD, so it needs no checkpoint.
+  // `document-open` is not here: it places a note, which is undoable work.
+  'voidspace:board-document-save',
   'voidspace:board-screenshot',
   'voidspace:board-selection',
   'voidspace:board-blocks',
