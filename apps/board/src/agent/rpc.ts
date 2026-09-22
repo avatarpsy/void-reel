@@ -111,6 +111,32 @@ type Reply = (payload: Record<string, unknown>) => void;
  * apart from a normal write. Cheap — one integer per `blockUpdated`.
  */
 let rev = 0;
+
+/**
+ * PAGE SETUP, VALIDATED HERE RATHER THAN TRUSTED.
+ *
+ * These arrive from the model through two hops of plain JSON, so every one is
+ * checked against what the renderer accepts and left out entirely when it is
+ * not. An unknown orientation silently becoming landscape would be worse than
+ * ignoring it, and passing it through would put the guess in the PDF writer,
+ * which is the wrong place to decide what the agent meant.
+ */
+function pageSetup(args: any): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const margin = args?.margin;
+  if (margin === 'normal' || margin === 'narrow' || margin === 'wide') out.margin = margin;
+  else if (Number.isFinite(Number(margin)) && Number(margin) > 0) {
+    // Points. Clamped, because a 400pt margin on A4 leaves no page.
+    out.margin = Math.min(200, Math.max(12, Number(margin)));
+  }
+  if (args?.orientation === 'landscape') out.orientation = 'landscape';
+  const header = String(args?.header ?? '').trim();
+  const footer = String(args?.footer ?? '').trim();
+  if (header) out.header = header.slice(0, 200);
+  if (footer) out.footer = footer.slice(0, 200);
+  return out;
+}
+
 export function getBoardRev(): number {
   return rev;
 }
@@ -3122,6 +3148,7 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
         made = await saveDocument(markdown, title, format, {
           pageSize: (args as any)?.pageSize === 'letter' ? 'letter' : 'a4',
           typeface: (args as any)?.typeface === 'sans' ? 'sans' : 'serif',
+          ...pageSetup(args),
         });
       } catch (e: any) {
         return fail('failed', e?.message || 'That document could not be laid out.');

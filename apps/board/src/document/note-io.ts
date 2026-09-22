@@ -33,6 +33,14 @@
  * is exactly as confusing as it sounds.
  */
 import {
+  breaksToCarrier,
+  breaksToCarrierSnapshot,
+  carrierToBreaks,
+  carrierToMarkdown,
+  commentsFromMarks,
+  marksFromComments,
+} from './align-marks';
+import {
   countImages,
   liftImages,
   restoreImages,
@@ -144,7 +152,9 @@ export async function placeMarkdownDocument(
    * adapter would otherwise download every one of them and store a copy that
    * only this browser can see.
    */
-  const lifted = liftImages(text);
+  // Alignment and page breaks become invisible marks the note can keep —
+  // see `align-marks.ts` for why a comment cannot survive this trip.
+  const lifted = liftImages(breaksToCarrier(marksFromComments(text)));
   const snapshot: any = await adapter.toBlockSnapshot({
     file: lifted.text,
     assets: transformer.assetsManager,
@@ -152,6 +162,7 @@ export async function placeMarkdownDocument(
   if (!snapshot?.children?.length) {
     throw new Error('That document could not be read as markdown.');
   }
+  carrierToBreaks(snapshot);
   if (lifted.images.length) {
     const { nanoid } = await import('@blocksuite/store');
     restoreImages(snapshot, lifted.images, nanoid);
@@ -254,11 +265,12 @@ export async function noteToMarkdown(board: MountedBoard, noteId: string): Promi
   // Library images become `![](url)` rather than `assets/x.png` — a path into a
   // zip that does not exist outside an export, and useless to the agent.
   const images = stripImages(snapshot as any);
+  breaksToCarrierSnapshot(snapshot);
   const { file } = await adapter.fromBlockSnapshot({
     snapshot,
     assets: transformer.assetsManager,
   });
-  return restoreMarkdownImages(String(file ?? ''), images);
+  return commentsFromMarks(carrierToMarkdown(restoreMarkdownImages(String(file ?? ''), images)));
 }
 
 /**
@@ -304,11 +316,12 @@ export async function sliceToMarkdown(board: MountedBoard, models: any[]): Promi
     children,
   };
   const images = stripImages(snapshot);
+  breaksToCarrierSnapshot(snapshot);
   const { file } = await adapter.fromBlockSnapshot({
     snapshot,
     assets: transformer.assetsManager,
   });
-  return restoreMarkdownImages(String(file ?? '').trim(), images);
+  return commentsFromMarks(carrierToMarkdown(restoreMarkdownImages(String(file ?? '').trim(), images)));
 }
 
 /**
@@ -330,7 +343,7 @@ export async function insertMarkdownAt(
   if (!note) throw new Error('That document is not on the board any more.');
 
   const { transformer, adapter } = await adapterFor(board);
-  const lifted = liftImages(String(markdown ?? ''));
+  const lifted = liftImages(breaksToCarrier(marksFromComments(String(markdown ?? ''))));
   const snapshot: any = await adapter.toBlockSnapshot({
     file: lifted.text,
     assets: transformer.assetsManager,
@@ -339,6 +352,7 @@ export async function insertMarkdownAt(
     const { nanoid } = await import('@blocksuite/store');
     restoreImages(snapshot, lifted.images, nanoid);
   }
+  carrierToBreaks(snapshot);
   const children: any[] = snapshot?.children ?? [];
   if (!children.length) throw new Error('That text could not be read as markdown.');
 

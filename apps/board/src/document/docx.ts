@@ -22,7 +22,9 @@ const TWIP_PER_INCH = 1440;
 export async function renderDocx(spec: DocSpec): Promise<Blob> {
   const {
     Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, BorderStyle,
-    Table, TableRow, TableCell, WidthType, ExternalHyperlink, ImageRun, Footer, PageNumber,
+    Table, TableRow, TableCell, TableLayoutType, WidthType, ExternalHyperlink, ImageRun,
+    Footer, Header, PageNumber,
+    PageBreak, PageOrientation,
   } = await import('docx');
 
   const HEADING = [
@@ -36,6 +38,9 @@ export async function renderDocx(spec: DocSpec): Promise<Blob> {
   const display = serif ? 'Georgia' : 'Calibri Light';
   const mono = 'Consolas';
 
+  /** `#aabbcc` → `AABBCC`. Word rejects the hash and ignores the colour. */
+  const hex6 = (value: string) => String(value ?? '').replace('#', '').toUpperCase();
+
   const runsOf = (runs: Inline[], font: string, extra: Record<string, unknown> = {}): any[] => {
     const out: any[] = [];
     for (const r of runs) {
@@ -44,6 +49,16 @@ export async function renderDocx(spec: DocSpec): Promise<Blob> {
         bold: r.bold,
         italics: r.italic,
         strike: r.strike,
+        // docx's own shape: `{}` means a plain single underline, and the key
+        // must be ABSENT rather than false, or Word draws one anyway.
+        ...(r.underline ? { underline: {} } : {}),
+        ...(r.color ? { color: hex6(r.color) } : {}),
+        // Shading is Word's highlight. `highlight` also exists but takes one of
+        // 15 named colours, so it cannot carry an arbitrary hex.
+        ...(r.highlight ? { shading: { fill: hex6(r.highlight) } } : {}),
+        // HALF-POINTS. A 22pt run is `size: 44`; passing 22 sets it at 11pt,
+        // which looks like the size was ignored rather than halved.
+        ...(r.size ? { size: Math.round(r.size * 2) } : {}),
         font: r.code ? mono : font,
         ...(r.code ? { shading: { fill: 'F2F2F2' } } : {}),
         ...extra,
@@ -83,9 +98,42 @@ export async function renderDocx(spec: DocSpec): Promise<Blob> {
     } as any);
   };
 
+  /**
+   * `{page}` and `{pages}` become Word's own FIELDS rather than baked numbers,
+   * so they stay correct when the reader edits the document and the pagination
+   * moves. A number typed into a footer is wrong the moment anybody adds a
+   * paragraph.
+   */
+  const chromeRuns = (text: string): any[] => {
+    const out: any[] = [];
+    for (const part of String(text).split(/(\{page\}|\{pages\})/gi)) {
+      if (!part) continue;
+      const low = part.toLowerCase();
+      if (low === '{page}') {
+        out.push(new TextRun({ children: [PageNumber.CURRENT], font: body, size: 18, color: '8A8A8A' }));
+      } else if (low === '{pages}') {
+        out.push(new TextRun({ children: [PageNumber.TOTAL_PAGES], font: body, size: 18, color: '8A8A8A' }));
+      } else {
+        out.push(new TextRun({ text: part, font: body, size: 18, color: '8A8A8A' }));
+      }
+    }
+    return out;
+  };
+  const headerText = String(spec.header ?? '').trim();
+  const footerText = String(spec.footer ?? '').trim();
+  const docxMargin = typeof spec.margin === 'number'
+    // Points to twips: 20 twips to a point.
+    ? Math.max(360, Math.min(4320, Math.round(spec.margin * 20)))
+    : spec.margin === 'narrow' ? Math.round(TWIP_PER_INCH / 2)
+      : spec.margin === 'wide' ? Math.round(TWIP_PER_INCH * 1.5)
+        : TWIP_PER_INCH;
+
   const children: any[] = [];
   for (const b of blocks as Block[]) {
     switch (b.kind) {
+      case 'pagebreak':
+        children.push(new Paragraph({ children: [new PageBreak()] }));
+        break;
       case 'heading':
         children.push(new Paragraph({
           heading: HEADING[b.level - 1],
@@ -162,21 +210,45 @@ export async function renderDocx(spec: DocSpec): Promise<Blob> {
         break;
       }
       case 'table': {
-        const cell = (runs: Inline[], header: boolean) => new TableCell({
+        const cols = Math.max(b.header.length, ...b.rows.map((r) => r.length), 1);
+        /**
+         * Relative weights, expressed to Word as percentages of the table. Same
+         * normalisation as the PDF writer, so `cols: 3,1,1` produces the same
+         * proportions in both files rather than two tables that look related.
+         */
+        const weights = Array.from({ length: cols }, (_, i) => {
+          const w = Number(b.widths?.[i]);
+          return Number.isFinite(w) && w > 0 ? w : 1;
+        });
+        const sum = weights.reduce((n, w) => n + w, 0);
+        const pct = weights.map((w) => (w / sum) * 100);
+        const cell = (runs: Inline[], header: boolean, i: number) => new TableCell({
           children: [new Paragraph({
             children: runsOf(runs, body, header ? { bold: true } : {}),
             spacing: { before: 60, after: 60 },
+            ...(b.align?.[i] ? { alignment: alignOf(b.align[i]!) } : {}),
           })],
+          width: { size: pct[i] ?? 100 / cols, type: WidthType.PERCENTAGE },
           ...(header ? { shading: { fill: 'F2F2F2' } } : {}),
         });
         const rows: any[] = [];
         if (b.header.length) {
           // `tableHeader` repeats it at the top of every page the table spans.
-          rows.push(new TableRow({ tableHeader: true, children: b.header.map((c) => cell(c, true)) }));
+          rows.push(new TableRow({
+            tableHeader: true, children: b.header.map((c, i) => cell(c, true, i)),
+          }));
         }
-        for (const r of b.rows) rows.push(new TableRow({ children: r.map((c) => cell(c, false)) }));
+        for (const r of b.rows) {
+          rows.push(new TableRow({ children: r.map((c, i) => cell(c, false, i)) }));
+        }
         if (rows.length) {
-          children.push(new Table({ rows, width: { size: 100, type: WidthType.PERCENTAGE } }));
+          children.push(new Table({
+            rows,
+            width: { size: 100, type: WidthType.PERCENTAGE },
+            // Without this Word ignores the per-cell percentages and sizes the
+            // columns to their contents instead.
+            layout: TableLayoutType.FIXED,
+          }));
           children.push(new Paragraph({ text: '', spacing: { after: 200 } }));
         }
         break;
@@ -206,20 +278,42 @@ export async function renderDocx(spec: DocSpec): Promise<Blob> {
     sections: [{
       properties: {
         page: {
-          size: spec.pageSize === 'letter'
-            ? { width: 12240, height: 15840 }   // 8.5 x 11in, in twips
-            : { width: 11906, height: 16838 },  // A4
+          size: {
+            ...(spec.pageSize === 'letter'
+              ? { width: 12240, height: 15840 }   // 8.5 x 11in, in twips
+              : { width: 11906, height: 16838 }), // A4
+            // Word turns the sheet itself; the width/height above stay as the
+            // paper's, which is what every word processor means by landscape.
+            ...(spec.orientation === 'landscape'
+              ? { orientation: PageOrientation.LANDSCAPE }
+              : {}),
+          },
           margin: {
-            top: TWIP_PER_INCH, bottom: TWIP_PER_INCH,
-            left: TWIP_PER_INCH, right: TWIP_PER_INCH,
+            top: docxMargin, bottom: docxMargin, left: docxMargin, right: docxMargin,
           },
         },
       },
+      ...(headerText
+        ? {
+          headers: {
+            default: new Header({
+              children: [new Paragraph({
+                alignment: AlignmentType.CENTER,
+                children: chromeRuns(headerText),
+              })],
+            }),
+          },
+        }
+        : {}),
       footers: {
         default: new Footer({
           children: [new Paragraph({
             alignment: AlignmentType.CENTER,
-            children: [new TextRun({ children: [PageNumber.CURRENT], font: body, size: 18, color: '8A8A8A' })],
+            // A document that supplies its own footer owns it — page numbers go
+            // wherever it puts {page}. Otherwise the bare number stays.
+            children: footerText
+              ? chromeRuns(footerText)
+              : [new TextRun({ children: [PageNumber.CURRENT], font: body, size: 18, color: '8A8A8A' })],
           })],
         }),
       },

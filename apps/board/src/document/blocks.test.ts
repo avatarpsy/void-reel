@@ -274,3 +274,98 @@ describe('block alignment', () => {
     expect(out.every((b) => !b.align)).toBe(true);
   });
 });
+
+/**
+ * PAGE BREAKS — the thing every real document needs and markdown has no word
+ * for. Without one the only way to push a section onto a fresh page was blank
+ * lines and hope, which stops working the moment a sentence above is edited.
+ */
+describe('page breaks', () => {
+  it('reads the directive as a break, in all three spellings', () => {
+    for (const word of ['pagebreak', 'page-break', 'newpage']) {
+      const out = parseMarkdown(['One', '', `<!-- ${word} -->`, '', 'Two'].join('\n'));
+      expect(out.map((b) => b.kind), word).toEqual(['para', 'pagebreak', 'para']);
+    }
+  });
+
+  it('never leaves the directive in the text', () => {
+    const out = parseMarkdown(['One', '', '<!-- pagebreak -->', '', 'Two'].join('\n')) as any[];
+    const text = out.flatMap((b) => b.runs ?? []).map((r: any) => r.text).join(' ');
+    expect(text).not.toMatch(/pagebreak|<!--/);
+  });
+
+  it('is not confused with an alignment directive', () => {
+    const out = parseMarkdown(['<!-- align:center -->', 'Centred'].join('\n')) as any[];
+    expect(out.map((b) => b.kind)).toEqual(['para']);
+    expect(out[0].align).toBe('center');
+  });
+});
+
+/**
+ * THE MARKS MARKDOWN NEVER HAD. A letterhead needs underline; a marked-up draft
+ * needs highlight; a certificate needs one line in the company's red.
+ */
+describe('run formatting', () => {
+  const runsOf = (md: string) => (parseMarkdown(md)[0] as any).runs as any[];
+
+  it('underlines ++text++ and keeps the marker out of the words', () => {
+    const runs = runsOf('a ++under++ b');
+    expect(runs.map((r) => r.text).join('')).toBe('a under b');
+    expect(runs.find((r) => r.underline)?.text).toBe('under');
+  });
+
+  it('highlights ==text== in highlighter yellow', () => {
+    expect(runsOf('a ==hot== b').find((r) => r.highlight)?.text).toBe('hot');
+    expect(runsOf('a ==hot== b').find((r) => r.highlight)?.highlight).toMatch(/^#[0-9a-f]{6}$/);
+  });
+
+  it('nests other marks inside them, rather than cutting them in half', () => {
+    const runs = runsOf('++a **b** c++');
+    expect(runs.every((r) => r.underline)).toBe(true);
+    expect(runs.find((r) => r.bold)?.text).toBe('b');
+  });
+
+  it('reads colour and size off a bracketed span', () => {
+    const [run] = runsOf('[Certificate]{color=#c00 size=22}');
+    expect(run).toMatchObject({ text: 'Certificate', color: '#cc0000', size: 22 });
+  });
+
+  it('accepts a colour by name, and a three-digit hex', () => {
+    expect(runsOf('[x]{color=red}')[0].color).toBe('#cc0000');
+    expect(runsOf('[x]{color=#abc}')[0].color).toBe('#aabbcc');
+  });
+
+  it('ignores a colour that is not one', () => {
+    expect(runsOf('[x]{color=ultraviolet}')[0].color).toBeUndefined();
+  });
+
+  /** A size typo must not produce a document with one letter per page. */
+  it('clamps an absurd size instead of setting it', () => {
+    expect(runsOf('[x]{size=4000}')[0].size).toBe(200);
+    expect(runsOf('[x]{size=0.1}')[0].size).toBe(4);
+  });
+
+  /** THE REGRESSION THAT MATTERS: `[text](url)` is still a link, not a span. */
+  it('leaves real links alone', () => {
+    const [run] = runsOf('[dashboard](https://x.test)');
+    expect(run).toMatchObject({ text: 'dashboard', link: 'https://x.test' });
+  });
+
+  /** A LINK that is also styled — and, before this, braces printed in the prose. */
+  it('styles a link without leaving the braces in the text', () => {
+    const [run] = runsOf('[big red](https://x.test){color=red size=18}');
+    expect(run).toMatchObject({
+      text: 'big red', link: 'https://x.test', color: '#cc0000', size: 18,
+    });
+  });
+
+  it('does not weld two runs that differ only in colour', () => {
+    const runs = runsOf('[a]{color=red}[b]{color=blue}');
+    expect(runs.map((r) => r.color)).toEqual(['#cc0000', '#1a56db']);
+  });
+
+  it('leaves the markers as characters when they are not a pair', () => {
+    expect(runsOf('2 + 2 == 4 and x++ is a language').map((r) => r.text).join(''))
+      .toBe('2 + 2 == 4 and x++ is a language');
+  });
+});

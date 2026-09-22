@@ -21,7 +21,7 @@
  */
 import type { PDFFont, PDFPage } from 'pdf-lib';
 
-import type { Block, DocSpec, Inline } from './blocks';
+import type { Block, DocAlign, DocSpec, Inline } from './blocks';
 import { parseMarkdown } from './blocks';
 import { loadImages } from './images';
 import { loadDocumentFonts, type Style } from './fonts';
@@ -30,7 +30,8 @@ const PAGE = {
   a4: { w: 595.28, h: 841.89 },
   letter: { w: 612, h: 792 },
 };
-const MARGIN = 72; // 1 inch
+/** The default page margin, in points. `DocSpec.margin` overrides it per document. */
+const DEFAULT_MARGIN = 72; // 1 inch
 const FOOTER_GAP = 36;
 const BODY_SIZE = 11;
 const LEADING = 1.42;
@@ -142,7 +143,30 @@ function shapeRun(
   return out;
 }
 
-export interface Piece { text: string; font: PDFFont; width: number; run: Inline }
+/**
+ * One stretch of text, measured, with the size it was measured AT.
+ *
+ * The size is per piece rather than per block because a run may override it
+ * (`[BIG]{size=28}`), and a width measured at one size and drawn at another is
+ * the classic way text ends up overlapping the words after it.
+ */
+export interface Piece { text: string; font: PDFFont; width: number; size: number; run: Inline }
+
+/** The size a run is set at: its own if it asked, else the block's. */
+function sizeOf(run: Inline, blockSize: number): number {
+  const own = Number(run.size);
+  return Number.isFinite(own) && own > 0 ? own : blockSize;
+}
+
+/**
+ * The tallest piece on a line — what its leading must be based on.
+ *
+ * A 28pt word inside 11pt prose needs the line to grow, or it overprints the
+ * line above. Empty lines fall back to the block's size.
+ */
+export function lineSize(line: Piece[], blockSize: number): number {
+  return line.reduce((n, piece) => Math.max(n, piece.size), 0) || blockSize;
+}
 
 /**
  * Greedy line breaking ACROSS runs, so one line can change font part-way —
@@ -156,7 +180,9 @@ export interface Piece { text: string; font: PDFFont; width: number; run: Inline
  * runs, a line that does not break — and testing it directly is far cheaper
  * than parsing a PDF back to find out.
  */
-export function layout(runs: Inline[], f: Fonts, size: number, maxWidth: number, dropped: { n: number }): Piece[][] {
+export function layout(
+  runs: Inline[], f: Fonts, blockSize: number, maxWidth: number, dropped: { n: number },
+): Piece[][] {
   const lines: Piece[][] = [];
   let line: Piece[] = [];
   let width = 0;
@@ -168,6 +194,7 @@ export function layout(runs: Inline[], f: Fonts, size: number, maxWidth: number,
     shapeRun(run.text, styleFor(run), f, dropped).map((part) => ({ ...part, run })));
 
   for (const { run, font, text } of shaped) {
+    const size = sizeOf(run, blockSize);
     // Compared by VALUE once, so a paragraph whose two lines happened to be
     // identical would not have broken between them. The index is what it meant.
     const segments = text.split('\n');
@@ -191,7 +218,7 @@ export function layout(runs: Inline[], f: Fonts, size: number, maxWidth: number,
       const lead = segment.match(/^[^\S\n]+/)?.[0];
       if (lead && line.length) {
         const prev = line[line.length - 1]!;
-        const extra = prev.font.widthOfTextAtSize(lead, size);
+        const extra = prev.font.widthOfTextAtSize(lead, prev.size);
         prev.text += lead;
         prev.width += extra;
         width += extra;
@@ -206,18 +233,18 @@ export function layout(runs: Inline[], f: Fonts, size: number, maxWidth: number,
           let chunk = '';
           for (const ch of word) {
             if (font.widthOfTextAtSize(chunk + ch, size) > maxWidth && chunk) {
-              line.push({ text: chunk, font, width: font.widthOfTextAtSize(chunk, size), run });
+              line.push({ text: chunk, font, width: font.widthOfTextAtSize(chunk, size), size, run });
               flush();
               chunk = ch;
             } else chunk += ch;
           }
           if (chunk) {
-            line.push({ text: chunk, font, width: font.widthOfTextAtSize(chunk, size), run });
+            line.push({ text: chunk, font, width: font.widthOfTextAtSize(chunk, size), size, run });
             width += font.widthOfTextAtSize(chunk, size);
           }
           continue;
         }
-        line.push({ text: word, font, width: w, run });
+        line.push({ text: word, font, width: w, size, run });
         width += w;
       }
     });
@@ -243,13 +270,35 @@ export async function renderPdf(spec: DocSpec): Promise<PdfResult> {
   const f = await loadDocumentFonts(pdf, serif, spec.markdown ?? '');
   const dropped = { n: 0 };
 
-  const size = PAGE[spec.pageSize === 'letter' ? 'letter' : 'a4'];
+  const sheet = PAGE[spec.pageSize === 'letter' ? 'letter' : 'a4'];
+  // Landscape is the same sheet turned, which is what every word processor
+  // means by it — not a different paper size.
+  const size = spec.orientation === 'landscape'
+    ? { w: sheet.h, h: sheet.w }
+    : sheet;
+
+  /**
+   * Shadows the module default on purpose, so every measurement below — the
+   * column, the floor, the image box, the page number — moves together. A
+   * margin that only some of them honoured would be worse than none.
+   */
+  const MARGIN = typeof spec.margin === 'number'
+    ? Math.max(18, Math.min(216, spec.margin))
+    : spec.margin === 'narrow' ? 36 : spec.margin === 'wide' ? 108 : DEFAULT_MARGIN;
+
   const colWidth = size.w - MARGIN * 2;
+  const hasHeader = !!String(spec.header ?? '').trim();
+  // A running header needs room above the text, and a footer line needs room
+  // below the page number that was already there.
+  const topOffset = hasHeader ? 18 : 0;
   const floor = MARGIN + FOOTER_GAP;
 
   let page: PDFPage = pdf.addPage([size.w, size.h]);
-  let y = size.h - MARGIN;
-  const newPage = () => { page = pdf.addPage([size.w, size.h]); y = size.h - MARGIN; };
+  let y = size.h - MARGIN - topOffset;
+  const newPage = () => {
+    page = pdf.addPage([size.w, size.h]);
+    y = size.h - MARGIN - topOffset;
+  };
   /** Reserve vertical space, starting a page when this block will not fit. */
   const need = (h: number) => { if (y - h < floor) newPage(); };
 
@@ -258,13 +307,24 @@ export async function renderPdf(spec: DocSpec): Promise<PdfResult> {
   const hair = rgb(0.82, 0.82, 0.84);
   const linkBlue = rgb(0.13, 0.36, 0.72);
 
+  /** `#rrggbb` → a pdf-lib colour. Anything else keeps the block's ink. */
+  const inkOf = (hex: string | undefined, fallback: typeof ink) => {
+    const m = /^#([0-9a-f]{6})$/i.exec(String(hex ?? ''));
+    if (!m) return fallback;
+    const n = parseInt(m[1]!, 16);
+    return rgb(((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255);
+  };
+
   const drawLines = (
     lines: Piece[][], fontSize: number, indent: number, color = ink,
     firstPrefix?: { text: string; font: PDFFont },
     align: 'left' | 'center' | 'right' = 'left',
   ) => {
-    const lineH = fontSize * LEADING;
     lines.forEach((line, i) => {
+      // The line's own height, not the block's: one big run has to push the
+      // lines apart or it overprints the line above.
+      const top = lineSize(line, fontSize);
+      const lineH = top * LEADING;
       need(lineH);
       /**
        * Centred and right text are set by offsetting the line's own start, so
@@ -282,20 +342,33 @@ export async function renderPdf(spec: DocSpec): Promise<PdfResult> {
         });
       }
       for (const piece of line) {
-        page.drawText(piece.text, {
-          x, y: y - fontSize, size: fontSize, font: piece.font,
-          color: piece.run.link ? linkBlue : color,
-        });
-        if (piece.run.strike) {
-          page.drawLine({
-            start: { x, y: y - fontSize * 0.62 }, end: { x: x + piece.width, y: y - fontSize * 0.62 },
-            thickness: 0.6, color,
+        const fs = piece.size;
+        // Baselines sit on the LINE's baseline, so 11pt and 28pt on one line
+        // rest on the same rule rather than each floating at its own height.
+        const baseline = y - top;
+        /**
+         * Highlight first, under everything: a rectangle from a little below
+         * the baseline to a little above the cap height, which is where a
+         * highlighter pen would actually leave ink.
+         */
+        if (piece.run.highlight) {
+          page.drawRectangle({
+            x: x - 0.5, y: baseline - fs * 0.22, width: piece.width + 1, height: fs * 1.06,
+            color: inkOf(piece.run.highlight, hair),
           });
         }
-        if (piece.run.link) {
+        const own = piece.run.link ? linkBlue : inkOf(piece.run.color, color);
+        page.drawText(piece.text, { x, y: baseline, size: fs, font: piece.font, color: own });
+        if (piece.run.strike) {
           page.drawLine({
-            start: { x, y: y - fontSize - 1.5 }, end: { x: x + piece.width, y: y - fontSize - 1.5 },
-            thickness: 0.5, color: linkBlue,
+            start: { x, y: baseline + fs * 0.28 }, end: { x: x + piece.width, y: baseline + fs * 0.28 },
+            thickness: Math.max(0.5, fs * 0.055), color: own,
+          });
+        }
+        if (piece.run.underline || piece.run.link) {
+          page.drawLine({
+            start: { x, y: baseline - fs * 0.13 }, end: { x: x + piece.width, y: baseline - fs * 0.13 },
+            thickness: Math.max(0.5, fs * 0.05), color: own,
           });
         }
         x += piece.width;
@@ -373,6 +446,15 @@ export async function renderPdf(spec: DocSpec): Promise<PdfResult> {
         y -= 10;
         break;
       }
+      case 'pagebreak':
+        /**
+         * Only when there is something on this page. A break at the very top —
+         * which is what a document opening with one produces — would otherwise
+         * emit a blank first page, and blank pages in a contract look like a
+         * printing fault.
+         */
+        if (y < size.h - MARGIN - topOffset - 1) newPage();
+        break;
       case 'rule':
         need(20);
         y -= 8;
@@ -415,13 +497,42 @@ export async function renderPdf(spec: DocSpec): Promise<PdfResult> {
       }
       case 'table': {
         const cols = Math.max(b.header.length, ...b.rows.map((r) => r.length), 1);
-        const cw = colWidth / cols;
+        /**
+         * ── COLUMN WIDTHS ────────────────────────────────────────────────────
+         *
+         * Relative weights, normalised to the column width. A missing or short
+         * `widths` is padded with 1s rather than rejected, so `cols: 3` on a
+         * three-column table means "first one wide" and does not need the
+         * author to spell out the two that are ordinary.
+         */
+        const weights = Array.from({ length: cols }, (_, i) => {
+          const w = Number(b.widths?.[i]);
+          return Number.isFinite(w) && w > 0 ? w : 1;
+        });
+        const total = weights.reduce((n, w) => n + w, 0);
+        const widths = weights.map((w) => (colWidth * w) / total);
+        const xs = widths.map((_, i) => MARGIN + widths.slice(0, i).reduce((n, w) => n + w, 0));
+        const align = (i: number): DocAlign => b.align?.[i] ?? 'left';
         const fs = 9.5;
+        const PAD = 6;
+
         const drawRow = (cells: Inline[][], header: boolean) => {
           const laid = Array.from({ length: cols }, (_, i) =>
-            layout((cells[i] || []).map((r) => ({ ...r, bold: header || r.bold })), f, fs, cw - 12, dropped));
+            layout((cells[i] || []).map((r) => ({ ...r, bold: header || r.bold })), f, fs,
+              Math.max(12, widths[i]! - PAD * 2), dropped));
           const rowH = Math.max(...laid.map((l) => l.length)) * fs * 1.4 + 8;
-          need(rowH);
+          /**
+           * ── THE HEADER FOLLOWS THE TABLE ONTO THE NEXT PAGE ───────────────
+           *
+           * Word repeats it and so must this: a table that breaks across pages
+           * leaves the reader on page two with four unlabelled columns. The
+           * recursion is safe because the repeat is drawn on a FRESH page,
+           * where it always fits.
+           */
+          if (y - rowH < floor) {
+            newPage();
+            if (!header && b.header.length) drawRow(b.header, true);
+          }
           if (header) {
             page.drawRectangle({
               x: MARGIN, y: y - rowH, width: colWidth, height: rowH, color: rgb(0.955, 0.955, 0.962),
@@ -430,9 +541,30 @@ export async function renderPdf(spec: DocSpec): Promise<PdfResult> {
           laid.forEach((lines, i) => {
             let ly = y - 5;
             for (const line of lines) {
-              let x = MARGIN + i * cw + 6;
+              const lineWidth = line.reduce((n, piece) => n + piece.width, 0);
+              const slack = Math.max(0, widths[i]! - PAD * 2 - lineWidth);
+              const a = align(i);
+              const offset = a === 'center' ? slack / 2 : a === 'right' ? slack : 0;
+              let x = xs[i]! + PAD + offset;
               for (const piece of line) {
-                page.drawText(piece.text, { x, y: ly - fs, size: fs, font: piece.font, color: ink });
+                const cellInk = inkOf(piece.run.color, ink);
+                if (piece.run.highlight) {
+                  page.drawRectangle({
+                    x: x - 0.5, y: ly - fs - piece.size * 0.22,
+                    width: piece.width + 1, height: piece.size * 1.06,
+                    color: inkOf(piece.run.highlight, hair),
+                  });
+                }
+                page.drawText(piece.text, {
+                  x, y: ly - fs, size: piece.size, font: piece.font, color: cellInk,
+                });
+                if (piece.run.underline) {
+                  page.drawLine({
+                    start: { x, y: ly - fs - piece.size * 0.13 },
+                    end: { x: x + piece.width, y: ly - fs - piece.size * 0.13 },
+                    thickness: 0.5, color: cellInk,
+                  });
+                }
                 x += piece.width;
               }
               ly -= fs * 1.4;
@@ -455,14 +587,43 @@ export async function renderPdf(spec: DocSpec): Promise<PdfResult> {
   // Page numbers last, once the count is known. A one-page memo does not get
   // one — nobody numbers a single page.
   const pages = pdf.getPages();
-  if (pages.length > 1) {
-    pages.forEach((p, i) => {
+  /**
+   * ── RUNNING HEADER, FOOTER AND PAGE NUMBER ────────────────────────────────
+   *
+   * Drawn after the body, because `{pages}` cannot be known until the document
+   * has finished paginating — which is exactly why "Page 2 of 7" is worth
+   * having and why a one-pass renderer cannot produce it.
+   *
+   * Every line is set through `shapeRun`, so a header in Hindi works like any
+   * other text rather than being the one place that quietly cannot.
+   */
+  const chrome = (text: string, atY: number, p: PDFPage, total: number, index: number) => {
+    const filled = text
+      .replace(/\{page\}/gi, String(index + 1))
+      .replace(/\{pages\}/gi, String(total));
+    const parts = shapeRun(filled, 'regular', f, dropped);
+    const width = parts.reduce((n, part) => n + part.font.widthOfTextAtSize(part.text, 9), 0);
+    let x = (size.w - width) / 2;
+    for (const part of parts) {
+      p.drawText(part.text, { x, y: atY, size: 9, font: part.font, color: muted });
+      x += part.font.widthOfTextAtSize(part.text, 9);
+    }
+  };
+
+  const headerText = String(spec.header ?? '').trim();
+  const footerText = String(spec.footer ?? '').trim();
+  pages.forEach((p, i) => {
+    if (headerText) chrome(headerText, size.h - MARGIN + 6, p, pages.length, i);
+    if (footerText) chrome(footerText, MARGIN - 30, p, pages.length, i);
+    // The bare page number stays for a multi-page document with no footer of
+    // its own; a document that supplies one can put {page} wherever it likes.
+    if (!footerText && pages.length > 1) {
       const label = String(i + 1);
       const pageFont = f.base('regular');
       const w = pageFont.widthOfTextAtSize(label, 9);
       p.drawText(label, { x: (size.w - w) / 2, y: MARGIN - 18, size: 9, font: pageFont, color: muted });
-    });
-  }
+    }
+  });
 
   pdf.setTitle(spec.title || 'Document');
   pdf.setProducer('Voidspace');
