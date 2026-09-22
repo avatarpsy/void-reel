@@ -209,3 +209,15 @@ export function carrierToMarkdown(markdown: string): string {
   // vanishes when a file is tidied is not a line break.
   return String(markdown ?? '').split(LS).join(BACKSLASH_BREAK);
 }
+
+/**
+ * Text with every mark taken out — for anything a PERSON reads.
+ *
+ * A centred title's text begins with U+2060, and `.trim()` does not remove it
+ * because it is not whitespace. So a document's title, a section's name and
+ * anything else read straight off a block goes through here: invisible is fine
+ * inside the document and not fine in a file name or a heading in a panel.
+ */
+export function withoutMarks(text: unknown): string {
+  return String(text ?? '').split(WJ).join('').split(LS).join(' ');
+}

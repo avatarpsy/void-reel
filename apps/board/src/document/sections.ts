@@ -46,6 +46,8 @@
  * paragraphs before its first heading is common and those paragraphs must be
  * editable.
  */
+import { withoutMarks } from './align-marks';
+
 import type { MountedBoard } from '../blocksuite/editor';
 
 /** Paragraph `type` values that are headings, in depth order. */
@@ -58,7 +60,7 @@ function headingLevel(model: any): number {
 }
 
 function textOf(model: any): string {
-  return String(model?.text?.toString?.() ?? '').trim();
+  return withoutMarks(model?.text?.toString?.()).trim();
 }
 
 function wordsIn(s: string): number {

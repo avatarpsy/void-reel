@@ -37,6 +37,7 @@ import {
   breaksToCarrierSnapshot,
   carrierToBreaks,
   carrierToMarkdown,
+  withoutMarks,
   commentsFromMarks,
   marksFromComments,
 } from './align-marks';
@@ -283,7 +284,7 @@ export async function noteToMarkdown(board: MountedBoard, noteId: string): Promi
 export function documentTitle(board: MountedBoard, noteId: string): string {
   const model: any = board.store.getBlock(noteId)?.model;
   for (const child of model?.children ?? []) {
-    const text = String(child?.text?.toString?.() ?? '').trim();
+    const text = withoutMarks(child?.text?.toString?.()).trim();
     if (text) return text.slice(0, 120);
   }
   return '';

@@ -16,7 +16,7 @@
 import { describe, it, expect } from 'vitest';
 
 import { makeTestBoard } from '../blocksuite/test-board';
-import { placeMarkdownDocument, noteToMarkdown } from './note-io';
+import { placeMarkdownDocument, noteToMarkdown, documentTitle } from './note-io';
 import { parseMarkdown } from './blocks';
 
 const NL = String.fromCharCode(10);
@@ -85,6 +85,22 @@ describe('a letterhead survives the canvas', () => {
     expect(back).toContain('Nalamasa Dinesh');
     expect(back).toMatch(/\*\*Nalamasa Dinesh\*\*/);
     expect(back).toContain('## Annexure');
+  }, 60_000);
+
+  /**
+   * A TITLE IS READ BY A PERSON, so the mark must not be in it.
+   *
+   * `.trim()` does not remove U+2060 — it is not whitespace — so a centred
+   * title carried an invisible character into the file name and into every
+   * panel that shows the document's name.
+   */
+  it('gives a centred title with no invisible character in it', async () => {
+    const board = makeTestBoard();
+    const { noteId } = await placeMarkdownDocument(
+      board as any, ['<!-- align:center -->', '# Certificate of Internship'].join(NL));
+    const title = documentTitle(board as any, noteId);
+    expect(title).toBe('Certificate of Internship');
+    expect(title).not.toMatch(/\u2060/);
   }, 60_000);
 
   /**
