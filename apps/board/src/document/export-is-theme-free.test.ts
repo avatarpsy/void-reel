@@ -41,6 +41,7 @@ async function withPinnedFonts<T>(body: () => Promise<T>): Promise<T> {
   try { return await body(); } finally { globalThis.fetch = before ?? realFetch; }
 }
 import { readFileSync } from 'node:fs';
+import { inflateSync } from 'node:zlib';
 import { join } from 'node:path';
 
 import { renderDocument } from './index';
@@ -72,8 +73,16 @@ describe('the exported file ignores the editor theme', () => {
       dark: await renderUnderTheme('dark'),
     }));
     // pdf-lib writes no timestamp by default, so equal input is equal output.
-    expect(dark.length).toBe(light.length);
-    expect(Buffer.compare(Buffer.from(dark), Buffer.from(light))).toBe(0);
+    /**
+     * The DRAWING, not the bytes. pdf-lib gives every font resource a random
+     * suffix, so two renders of the same document legitimately differ byte for
+     * byte — an earlier version of this asserted byte equality and was flaky,
+     * which is worse than no test because it teaches people to re-run it.
+     *
+     * What must not change is what is painted: the colour operators and the
+     * text-showing operators. Those are compared with the random names removed.
+     */
+    expect(paintOf(dark)).toBe(paintOf(light));
   }, 120_000);
 
   it('produces an identical Word DOCUMENT in light and dark', async () => {
@@ -124,3 +133,31 @@ describe('the exported file ignores the editor theme', () => {
     expect(source).toMatch(/const ink = rgb\([\d.]+, [\d.]+, [\d.]+\)/);
   });
 });
+
+/**
+ * Everything the page PAINTS, with the parts that are allowed to differ taken
+ * out: font resource names carry a random suffix by design.
+ */
+function paintOf(file: Uint8Array): string {
+  const buf = Buffer.from(file);
+  const text = buf.toString('latin1');
+  const out: string[] = [];
+  let i = 0;
+  while (true) {
+    const s = text.indexOf('stream', i);
+    if (s < 0) break;
+    let start = s + 6;
+    if (buf[start] === 13) start++;
+    if (buf[start] === 10) start++;
+    const e = text.indexOf('endstream', start);
+    if (e < 0) break;
+    try {
+      const body = inflateSync(buf.subarray(start, e)).toString('latin1');
+      if (/Tj|TJ|rg/.test(body)) {
+        out.push(body.replace(/\/([A-Za-z]+-[A-Za-z]+)-\d+/g, '/$1'));
+      }
+    } catch { /* not a deflated stream */ }
+    i = e + 9;
+  }
+  return out.join('|');
+}
