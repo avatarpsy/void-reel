@@ -117,10 +117,21 @@ export function installDocumentTags(board: MountedBoard, container: HTMLElement)
  * round-trip — see `withDrawnWidth`.
  */
 function stampImageAlignment(board: MountedBoard, container: HTMLElement): void {
-  const nodes = container.querySelectorAll<HTMLElement>('affine-image[data-block-id]');
+  /**
+   * Scoped to pictures INSIDE a document. This whole pass re-runs on every
+   * frame in which anything changed — which, while somebody is typing, is most
+   * of them — so it queries only what the CSS below can act on rather than
+   * every picture on the board.
+   */
+  const nodes = container.querySelectorAll<HTMLElement>(
+    'affine-edgeless-note[data-vs-doc-tag] affine-image[data-block-id]',
+  );
   for (const el of nodes) {
     const id = el.dataset.blockId;
     const align = id ? alignOfImage(board, id) : '';
+    // Written only when it CHANGED. An attribute set to the value it already
+    // has is still a DOM write, and this runs a lot.
+    if (align === (el.dataset.vsImgAlign ?? '')) continue;
     if (align) el.dataset.vsImgAlign = align;
     else delete el.dataset.vsImgAlign;
   }
