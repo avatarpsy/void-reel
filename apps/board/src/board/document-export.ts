@@ -142,6 +142,54 @@ function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   ]);
 }
 
+/**
+ * Bytes in, a URL out, through the door the whole studio uses.
+ *
+ * Split out of `uploadDocument` when the IMPORT side needed it: a Word file
+ * carries its pictures inside itself, and a document on the board has to point
+ * at somewhere they can be fetched from. Two copies of the retry, the token
+ * refresh and the quota messages would have drifted within a week.
+ */
+export async function uploadBlob(blob: Blob, fileName: string): Promise<string> {
+  const form = new FormData();
+  form.append('file', blob, fileName);
+
+  let last: Response | null = null;
+  for (const force of [false, true]) {
+    const token = await withTimeout(getParentToken(force), TOKEN_WAIT_MS, 'token timeout')
+      .catch(() => null);
+    let res: Response;
+    try {
+      res = await withTimeout(
+        fetch(`${defaultApiBase()}/api/studio/upload-attachment`, {
+          method: 'POST',
+          // NO Content-Type: the browser must set the multipart boundary itself.
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          body: form,
+        }),
+        UPLOAD_WAIT_MS,
+        'upload timeout',
+      );
+    } catch {
+      throw new Error('That could not be uploaded. Check your connection.');
+    }
+    last = res;
+    if (res.ok) {
+      const json = await res.json().catch(() => null);
+      if (!json?.url) throw new Error('It was stored but came back without a link.');
+      return String(json.url);
+    }
+    if (res.status !== 401 || !token) break;
+  }
+
+  if (last?.status === 401) throw new Error('Sign in to Voidspace to store files.');
+  if (last && (last.status === 507 || last.status === 413)) {
+    const msg = await last.text().catch(() => '');
+    throw new Error(msg || 'There is not enough space in your account for this.');
+  }
+  throw new Error('That could not be uploaded.');
+}
+
 export async function uploadDocument(doc: RenderedDocument): Promise<UploadedDocument> {
   const form = new FormData();
   form.append('file', doc.blob, doc.fileName);

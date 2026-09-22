@@ -134,7 +134,7 @@ describe('what it leaves alone', () => {
     await settle();
     expect(e.defaultPrevented, 'it should take the drop and convert it').toBe(true);
     expect(listDocuments(board)).toHaveLength(0);
-    expect(toasts.at(-1)?.[0]).toMatch(/could not be converted here/i);
+    expect(toasts.at(-1)?.[0]).toMatch(/could not be (read|converted) here/i);
     expect(toasts.at(-1)?.[0]).toMatch(/Ask the agent to read it/i);
   }, 60_000);
 

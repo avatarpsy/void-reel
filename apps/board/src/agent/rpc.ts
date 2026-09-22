@@ -121,6 +121,9 @@ let rev = 0;
  * ignoring it, and passing it through would put the guess in the PDF writer,
  * which is the wrong place to decide what the agent meant.
  */
+/** The blank line between an injected title and the document under it. */
+const nl2 = String.fromCharCode(10, 10);
+
 function pageSetup(args: any): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   const margin = args?.margin;
@@ -2977,6 +2980,126 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
      * agent must never assume "the" one. Then `outline` (cheap, complete), then
      * `read` for the sections it actually wants.
      */
+    /**
+     * OPEN an uploaded file as an editable document on the board.
+     *
+     * The difference between this and `read_file` is the difference between
+     * reading a contract and having it. `read_file` gives a model the words;
+     * this puts the user's own document on their canvas with its headings, its
+     * table, its colours and its letterhead, ready to be changed and exported
+     * again as the same kind of file it arrived as.
+     *
+     * A .docx keeps everything, because Word stores it. A PDF is REBUILT from
+     * where its glyphs sit, and the reply says so in `notes` -- the user is
+     * entitled to know which parts of their document are our reading of it.
+     */
+    'voidspace:board-document-open': async args => {
+      const url = String((args as any)?.url ?? '').trim();
+      if (!url) return fail('bad_request', 'Pass the url of the file to open.');
+
+      const { importFromUrl } = await import('../document/import');
+      let imported;
+      try {
+        imported = await importFromUrl(url, String((args as any)?.name ?? '') || undefined);
+      } catch (e: any) {
+        return fail('failed', e?.message || 'That file could not be opened.');
+      }
+      if (!imported.markdown.trim()) {
+        return fail('empty', 'There is no text in that file. If it is a scan, its pages are pictures of writing.');
+      }
+
+      const { placeMarkdownDocument } = await import('../document/note-io');
+      const title = String((args as any)?.title ?? '').trim();
+      let placed;
+      try {
+        placed = await placeMarkdownDocument(
+          board,
+          title ? `# ${title}${nl2}${imported.markdown}` : imported.markdown,
+          { kind: imported.kind },
+        );
+      } catch (e: any) {
+        return fail('failed', e?.message || 'That document could not be placed on the board.');
+      }
+
+      // Open it: a document the user cannot see reads as nothing having
+      // happened, which is the same reason the storyboard scrolls to a new shot.
+      try { opts.documentFocus?.()?.open(placed.noteId); }
+      catch { /* opening is a courtesy, never the point */ }
+
+      const { outline } = await import('../document/sections');
+      return {
+        ok: true as const,
+        rev,
+        noteId: placed.noteId,
+        kind: imported.kind,
+        images: imported.images,
+        pageSetup: imported.spec,
+        notes: imported.notes,
+        outline: await outline(board, placed.noteId),
+        note: 'It is on the board and editable. Use document_edit to change a section, '
+          + 'and document_save to write it back out as a file.',
+      };
+    },
+
+    /**
+     * SAVE a document that is on the board, as a real file.
+     *
+     * The other half of opening one. Without it the agent could edit a
+     * document and had no way to hand it back -- `create_document` makes a NEW
+     * one from markdown it composes, which is a different act and produces a
+     * different file with a different name.
+     *
+     * `title` is how the user says "save a copy": same document, new name, the
+     * original left alone on the board.
+     */
+    'voidspace:board-document-save': async args => {
+      const noteId = String((args as any)?.noteId ?? '').trim();
+      if (!noteId) return fail('bad_request', 'Pass the noteId of the document to save.');
+      if (!board.store.getBlock(noteId)) {
+        return fail('not_found', 'No document with that noteId is on this board.');
+      }
+
+      const format = ((args as any)?.format === 'docx' ? 'docx'
+        : (args as any)?.format === 'md' ? 'md' : 'pdf') as 'pdf' | 'docx' | 'md';
+
+      const { noteToMarkdown, documentTitle } = await import('../document/note-io');
+      const markdown = await noteToMarkdown(board, noteId);
+      if (!markdown.trim()) return fail('empty', 'That document is empty.');
+
+      const title = String((args as any)?.title ?? '').trim() || documentTitle(board, noteId)
+        || 'document';
+
+      const { saveDocument, uploadDocument } = await import('../board/document-export');
+      let made;
+      try {
+        made = await saveDocument(markdown, title, format, pageSetup(args));
+      } catch (e: any) {
+        return fail('failed', e?.message || 'That document could not be laid out.');
+      }
+
+      let url: string | undefined;
+      let shareNote = '';
+      try {
+        ({ url } = await uploadDocument(made));
+      } catch (e: any) {
+        // The FILE STILL EXISTS on the user's machine; reporting a failed
+        // upload as a failed save sends them looking for the wrong problem.
+        shareNote = ` It could not be uploaded, so there is no link — ${e?.message ?? 'unknown error'}.`
+          + ' Tell the user it is in their Downloads.';
+      }
+
+      return {
+        ok: true as const,
+        rev,
+        url,
+        fileName: made.fileName,
+        format: made.format,
+        bytes: made.bytes,
+        pages: (made as any).pages,
+        droppedGlyphs: (made as any).droppedGlyphs,
+        note: `Saved as ${made.fileName} and downloaded to their machine.${shareNote}`,
+      };
+    },
     'voidspace:board-document-read': async args => {
       const { listDocuments, outline, readSections } = await import('../document/sections');
       const noteId = String((args as any)?.noteId ?? '').trim();

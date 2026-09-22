@@ -31,6 +31,8 @@ import { toast } from '../ui/toast';
 import { placeMarkdownDocument } from './note-io';
 import { requestOpenDocument } from './toolbar';
 
+import type { PdfPageLayout } from './pdf-import';
+
 import type { MountedBoard } from '../blocksuite/editor';
 
 /**
@@ -59,6 +61,14 @@ interface Converted {
   images: number;
   /** Pictures that were in the file and did not make it. */
   imagesDropped: number;
+  /**
+   * A PDF's positioned text, when the app was new enough to send it.
+   *
+   * Its absence is not an error — an older shell replies with `markdown` alone,
+   * and flat text is what this feature had before the geometry existed. The
+   * import falls back to it rather than refusing the file.
+   */
+  pages?: PdfPageLayout[];
 }
 
 function convertViaParent(file: File): Promise<Converted | null> {
@@ -70,12 +80,14 @@ function convertViaParent(file: File): Promise<Converted | null> {
       const d = e.data as any;
       if (d?.type !== 'voidspace:board-doc-converted' || d?.requestId !== requestId) return;
       cleanup();
-      resolve(d.markdown
+      const pages = Array.isArray(d.pages) ? d.pages as PdfPageLayout[] : undefined;
+      resolve(d.markdown || pages?.length
         ? {
-          markdown: String(d.markdown),
+          markdown: String(d.markdown ?? ''),
           lossy: !!d.lossy,
           images: Number(d.images) || 0,
           imagesDropped: Number(d.imagesDropped) || 0,
+          pages,
         }
         : null);
     };
@@ -118,6 +130,9 @@ function importMessage(
   const lost = [...dropped];
   // A PDF's "layout" is not a loss worth naming twice; it is what the format is.
   if (conv.lossy) lost.push('layout');
+  // What the importer itself wants said — what it guessed, what it could not
+  // carry over. It knows things this function cannot work out from counts.
+  for (const note of (conv as any).notes ?? []) lost.push(String(note));
   const missing = Number(conv.imagesDropped) || 0;
   if (missing) lost.push(`${missing} picture${missing === 1 ? '' : 's'}`);
 
@@ -219,22 +234,74 @@ export function installDocumentDrop(board: MountedBoard, container: HTMLElement)
      * If the parent cannot convert (older shell, timeout), the file falls back
      * to being an attachment, exactly as it was before.
      */
+    /**
+     * ── .docx IS READ HERE; .pdf IS INFERRED FROM WHAT THE APP MEASURES ──────
+     *
+     * Word carries its formatting in its own XML and the reader for that has no
+     * dependency at all, so it runs in this tab and the parent is not involved.
+     * It used to go up to mammoth, which discards direct formatting by design —
+     * the file came back with its words and none of its letterhead.
+     *
+     * A PDF has no formatting to read. The app extracts where every run sits
+     * and `importDocument` infers the document back from that. An older shell
+     * that only sends text still works: the text is placed and the toast says
+     * the layout could not be recovered.
+     */
     for (const file of rich) {
       try {
         toast(`Reading ${file.name}…`, 'info');
-        const out = await convertViaParent(file);
-        if (!out?.markdown.trim()) {
-          toast(
-            `${file.name} could not be converted here — it is on the board as a file. `
-            + 'Ask the agent to read it.',
-            'error',
+        const { importDocument } = await import('./import');
+        const isPdf = /\.pdf$/i.test(file.name);
+
+        let conv: Converted | null = null;
+        if (isPdf) {
+          conv = await convertViaParent(file);
+          if (!conv) {
+            toast(
+              `${file.name} could not be read here — it is on the board as a file. `
+              + 'Ask the agent to read it.',
+              'error',
+            );
+            continue;
+          }
+        }
+
+        let markdown: string;
+        let notes: string[] = [];
+        let placed = 0;
+        if (isPdf && !conv?.pages?.length) {
+          // The app could not measure it. Its flat text is still a document.
+          if (!conv?.markdown.trim()) {
+            toast(`${file.name} has no text in it — if it is a scan, the pages are pictures.`, 'error');
+            continue;
+          }
+          markdown = conv.markdown;
+          notes = ['the layout could not be recovered'];
+        } else {
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          const out = await importDocument(
+            { name: file.name, bytes },
+            { pdfLayout: async () => conv!.pages! },
           );
+          markdown = out.markdown;
+          notes = out.notes;
+          placed = out.images.stored;
+        }
+
+        if (!markdown.trim()) {
+          toast(`${file.name} came back empty.`, 'error');
           continue;
         }
-        await place(out.markdown, file, out);
+        await place(markdown, file, {
+          lossy: false,
+          images: placed,
+          imagesDropped: 0,
+          notes,
+        } as any);
       } catch (err) {
         console.error('[import-drop] convert failed:', err);
-        toast(`${file.name} could not be imported.`, 'error');
+        const why = err instanceof Error && err.message ? ` — ${err.message}` : '.';
+        toast(`${file.name} could not be imported${why}`, 'error');
       }
     }
   };

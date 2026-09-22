@@ -32,6 +32,7 @@
  * with the view provider it silently produces a note with zero children, which
  * is exactly as confusing as it sounds.
  */
+import { attributesToMarkers, markersToAttributes, unescapeSpans } from './inline-marks';
 import {
   breaksToCarrier,
   breaksToCarrierSnapshot,
@@ -164,6 +165,7 @@ export async function placeMarkdownDocument(
     throw new Error('That document could not be read as markdown.');
   }
   carrierToBreaks(snapshot);
+  markersToAttributes(snapshot);
   if (lifted.images.length) {
     const { nanoid } = await import('@blocksuite/store');
     restoreImages(snapshot, lifted.images, nanoid);
@@ -267,11 +269,12 @@ export async function noteToMarkdown(board: MountedBoard, noteId: string): Promi
   // zip that does not exist outside an export, and useless to the agent.
   const images = stripImages(snapshot as any);
   breaksToCarrierSnapshot(snapshot);
+  attributesToMarkers(snapshot);
   const { file } = await adapter.fromBlockSnapshot({
     snapshot,
     assets: transformer.assetsManager,
   });
-  return commentsFromMarks(carrierToMarkdown(restoreMarkdownImages(String(file ?? ''), images)));
+  return commentsFromMarks(unescapeSpans(carrierToMarkdown(restoreMarkdownImages(String(file ?? ''), images))));
 }
 
 /**
@@ -318,11 +321,12 @@ export async function sliceToMarkdown(board: MountedBoard, models: any[]): Promi
   };
   const images = stripImages(snapshot);
   breaksToCarrierSnapshot(snapshot);
+  attributesToMarkers(snapshot);
   const { file } = await adapter.fromBlockSnapshot({
     snapshot,
     assets: transformer.assetsManager,
   });
-  return commentsFromMarks(carrierToMarkdown(restoreMarkdownImages(String(file ?? '').trim(), images)));
+  return commentsFromMarks(unescapeSpans(carrierToMarkdown(restoreMarkdownImages(String(file ?? '').trim(), images))));
 }
 
 /**
@@ -354,6 +358,7 @@ export async function insertMarkdownAt(
     restoreImages(snapshot, lifted.images, nanoid);
   }
   carrierToBreaks(snapshot);
+  markersToAttributes(snapshot);
   const children: any[] = snapshot?.children ?? [];
   if (!children.length) throw new Error('That text could not be read as markdown.');
 
