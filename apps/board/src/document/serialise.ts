@@ -63,6 +63,13 @@ function escapeLineStart(line: string): string {
  * to be unwrapped again on the way back in.
  */
 function runToMarkdown(run: Inline): string {
+  /**
+   * A footnote mark is written as the REFERENCE alone — `[^1]`. The note's
+   * words are collected by `toMarkdown` and written once at the foot of the
+   * file, because that is where markdown puts them and because a definition
+   * repeated at every reference would come back as several notes.
+   */
+  if (run.footnote) return `[^${String(run.text ?? '').trim() || '1'}]`;
   let text = run.code ? String(run.text ?? '') : escapeText(run.text);
   if (!text) return '';
 
@@ -228,5 +235,40 @@ export function toMarkdown(blocks: Block[]): string {
     out.push(...lines);
     previous = b;
   }
+  /**
+   * The notes themselves, after the body — markdown's own arrangement, and
+   * the one the parser reads back. Written from the marks rather than from a
+   * list held beside them, so a paragraph that was deleted on the board takes
+   * its note with it instead of leaving an entry pointing at nothing.
+   */
+  const notes = footnotesOf(blocks);
+  if (notes.length) {
+    /**
+     * A BLANK LINE BETWEEN THEM, which markdown does not require and this
+     * document does. Written adjacent, the two definitions are one paragraph
+     * with a line break in it — and they come back off the canvas that way,
+     * welded, the second note's label buried mid-paragraph where nothing will
+     * read it as a definition again. One note per paragraph, always.
+     */
+    for (const [label, runs] of notes) out.push('', `[^${label}]: ${runsToMarkdown(runs)}`);
+  }
   return out.join(NL).replace(/\n{3,}/g, NL + NL).trim() + NL;
+}
+
+/** Every footnote in the document, in reading order, as `[label, note]`. */
+function footnotesOf(blocks: Block[]): Array<[string, Inline[]]> {
+  const out: Array<[string, Inline[]]> = [];
+  const take = (runs: Inline[] | undefined) => {
+    for (const run of runs ?? []) {
+      if (run.footnote) out.push([String(run.text ?? '').trim() || String(out.length + 1), run.footnote]);
+    }
+  };
+  for (const b of blocks) {
+    if ('runs' in b) take(b.runs);
+    if (b.kind === 'table') {
+      b.header.forEach(take);
+      for (const row of b.rows) row.forEach(take);
+    }
+  }
+  return out;
 }

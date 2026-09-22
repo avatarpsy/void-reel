@@ -61,6 +61,21 @@ export interface Inline {
   highlight?: string;
   /** Points, overriding the block's size. Absent means "whatever the block is". */
   size?: number;
+  /**
+   * A FOOTNOTE. This run is the reference mark — its `text` is the number the
+   * reader sees raised in the prose — and these are the note's own words.
+   *
+   * The note travels WITH its reference rather than in a list beside the
+   * blocks, because that is the only arrangement in which it cannot be
+   * orphaned: delete the sentence and the note goes with it, move the
+   * paragraph and the note follows, and neither exporter has to reconcile two
+   * structures that a hand-edit could have put out of step.
+   *
+   * Numbering is NOT authored. `[^a]`, `[^ref]` and `[^1]` all come back as
+   * 1, 2, 3 in the order they are read, which is what a reader expects and
+   * what an author cannot maintain by hand across an edit.
+   */
+  footnote?: Inline[];
 }
 
 /**
@@ -100,6 +115,27 @@ function spanMarks(body: string): Partial<Inline> {
 }
 
 const MARK_EXTENSIONS = [
+  {
+    /**
+     * `[^1]` — a footnote reference, in markdown's own long-standing syntax.
+     *
+     * Registered BEFORE `vsSpan`, which also starts at `[`. It cannot actually
+     * collide (that one needs a `{` after the bracket) but the order is the
+     * cheap way to keep it that way.
+     *
+     * The label is carried, not the note: the definition may appear anywhere
+     * in the document, including after this line, so it is resolved in
+     * `parseMarkdown` once the whole file has been read.
+     */
+    name: 'vsFootnote',
+    level: 'inline' as const,
+    start: (src: string) => src.indexOf('[^'),
+    tokenizer(this: any, src: string) {
+      const m = /^\[\^([^\]\s]+)\]/.exec(src);
+      if (!m) return undefined;
+      return { type: 'vsFootnote', raw: m[0], label: m[1]!, tokens: [] };
+    },
+  },
   {
     name: 'vsUnderline',
     level: 'inline' as const,
@@ -352,6 +388,35 @@ function soften(text: unknown): string {
 }
 
 /** Flatten marked's inline tokens into runs, carrying marks down through nesting. */
+/**
+ * The footnote definitions of the file currently being parsed.
+ *
+ * Module-level because a reference is read long before — or long after — its
+ * definition, and threading a map through every `inlineRuns` call site to
+ * serve one token type would cost more than it explains. Set and cleared by
+ * `parseMarkdown`, which is the only caller; `inside` stops a note that cites
+ * itself from recursing forever.
+ */
+let FOOTNOTES: { defs: Map<string, string>; inside: Set<string> } | null = null;
+
+/** A definition's words, as runs — or `undefined` if nothing defines it. */
+function footnoteText(label: string): Inline[] | undefined {
+  const source = FOOTNOTES?.defs.get(label);
+  if (source === undefined || FOOTNOTES!.inside.has(label)) return undefined;
+  FOOTNOTES!.inside.add(label);
+  try {
+    // Through the BLOCK lexer, so a note reads by exactly the same rules as
+    // the prose around it — including this file's own `++`, `==` and `[…]{…}`.
+    const tokens = (lexer.lexer(source) as any[]).flatMap((t) => t.tokens ?? []);
+    const runs = inlineRuns(tokens);
+    return runs.length ? runs : [{ text: source }];
+  } catch {
+    return [{ text: source }];
+  } finally {
+    FOOTNOTES!.inside.delete(label);
+  }
+}
+
 function inlineRuns(tokens: any[] | undefined, inherited: Partial<Inline> = {}): Inline[] {
   const out: Inline[] = [];
   const push = (text: string, marks: Partial<Inline>) => {
@@ -359,7 +424,10 @@ function inlineRuns(tokens: any[] | undefined, inherited: Partial<Inline> = {}):
     const last = out[out.length - 1];
     // Merge adjacent runs with identical marks — fewer, longer runs wrap better
     // and produce far smaller .docx XML.
-    if (last && !!last.bold === !!marks.bold && !!last.italic === !!marks.italic
+    // A footnote mark is never merged into its neighbours: it carries a note
+    // of its own, and two of them are two notes however alike the text looks.
+    if (last && !last.footnote && !marks.footnote
+      && !!last.bold === !!marks.bold && !!last.italic === !!marks.italic
       && !!last.code === !!marks.code && !!last.strike === !!marks.strike
       && !!last.underline === !!marks.underline && last.color === marks.color
       && last.highlight === marks.highlight && last.size === marks.size
@@ -391,6 +459,19 @@ function inlineRuns(tokens: any[] | undefined, inherited: Partial<Inline> = {}):
         break;
       case 'vsSpan':
         out.push(...inlineRuns(t.tokens, { ...inherited, ...(t.marks ?? {}) })); break;
+      case 'vsFootnote': {
+        /**
+         * A reference with no definition is NOT a footnote — it is the
+         * characters the author typed, and printing `[^1]` is far better than
+         * printing a raised number that points at nothing. This is the same
+         * rule that keeps an unreferenced definition in the body as prose.
+         */
+        const note = footnoteText(String(t.label ?? ''));
+        if (!note) { push(String(t.raw ?? ''), inherited); break; }
+        // The number is filled in later, in document order — see `numberFootnotes`.
+        out.push({ ...inherited, text: '', footnote: note });
+        break;
+      }
       case 'br': push('\n', inherited); break;
       case 'image': push(soften(t.text || t.href), inherited); break;
       case 'escape': push(String(t.text ?? ''), inherited); break;
@@ -398,7 +479,9 @@ function inlineRuns(tokens: any[] | undefined, inherited: Partial<Inline> = {}):
       default: push(soften(t.raw ?? t.text), inherited); break;
     }
   }
-  return out.filter((r) => r.text !== '');
+  // A footnote mark is deliberately textless here — its number is assigned
+  // later, in reading order — so it is the one empty run worth keeping.
+  return out.filter((r) => r.text !== '' || !!r.footnote);
 }
 
 /** Paragraphs that contain nothing but one image become image blocks. */
@@ -650,6 +733,103 @@ export function wantsNumbering(spec: DocSpec, blocks: Block[]): boolean {
 }
 
 export function parseMarkdown(markdown: string, title?: string): Block[] {
+  const source = String(markdown ?? '');
+  const { body: md, defs } = liftFootnotes(source);
+  FOOTNOTES = { defs, inside: new Set() };
+  try {
+    return numberFootnotes(parseBody(md, title));
+  } finally {
+    FOOTNOTES = null;
+  }
+}
+
+/**
+ * ── FOOTNOTES, IN MARKDOWN'S OWN SYNTAX ──────────────────────────────────────
+ *
+ *     The rate is fixed for the term.[^1]
+ *
+ *     [^1]: Clause 4.2 of the master agreement.
+ *
+ * Definitions are lifted out of the text before anything else reads it, for
+ * one reason: this document is ALSO an editable page on the board, so the
+ * definitions have to be real lines the user can see and change — a carrier
+ * mark would hide them, and hiding a footnote's text makes it uneditable.
+ * Lifting them here is what stops those lines becoming body paragraphs.
+ *
+ * A definition NOBODY REFERENCES is left exactly where it was and set as
+ * prose. That is the conservative reading of an ambiguous line, and it is
+ * what stops a stray bracket silently deleting a sentence.
+ */
+function liftFootnotes(source: string): { body: string; defs: Map<string, string> } {
+  if (!source.includes('[^')) return { body: source, defs: new Map() };
+  const lines = source.split(/\r?\n/);
+  const DEF = /^ {0,3}\[\^([^\]\s]+)\]:[ \t]*(.*)$/;
+  const found: Array<{ at: number; label: string; text: string[] }> = [];
+  let open: { at: number; label: string; text: string[] } | null = null;
+  lines.forEach((line, at) => {
+    const m = DEF.exec(line);
+    if (m) {
+      /**
+       * A TRAILING BACKSLASH IS A LINE BREAK, not part of the note. Two
+       * definitions that shared a paragraph on the canvas come back as one
+       * markdown line ending in `\` followed by the next — so without this,
+       * the first note ends in a stray backslash. Boards written before the
+       * notes were split into their own paragraphs still read this way.
+       */
+      open = { at, label: m[1]!, text: [m[2]!.replace(/\\$/, '').trimEnd()] };
+      found.push(open);
+      return;
+    }
+    // A note may run on, the way markdown's do: an indented continuation line.
+    if (open && /^(?: {4,}|\t)\S/.test(line)) { open.text.push(line.trim()); return; }
+    if (line.trim() !== '') open = null;
+  });
+  if (!found.length) return { body: source, defs: new Map() };
+
+  /** Referenced anywhere OUTSIDE a definition line of its own. */
+  const referenced = new Set<string>();
+  const defLines = new Set(found.flatMap((d) => [d.at, ...d.text.slice(1).map((_, i) => d.at + i + 1)]));
+  lines.forEach((line, at) => {
+    if (defLines.has(at)) return;
+    for (const m of line.matchAll(/\[\^([^\]\s]+)\]/g)) referenced.add(m[1]!);
+  });
+
+  const defs = new Map<string, string>();
+  const drop = new Set<number>();
+  for (const d of found) {
+    if (!referenced.has(d.label) || defs.has(d.label)) continue;
+    defs.set(d.label, d.text.join(' ').trim());
+    d.text.forEach((_, i) => drop.add(d.at + i));
+  }
+  const body = lines.filter((_, at) => !drop.has(at)).join('\n');
+  return { body, defs };
+}
+
+/**
+ * The number the reader sees, assigned in READING ORDER over the finished
+ * blocks rather than as each reference is parsed.
+ *
+ * It has to be a second pass: a note's own text is itself parsed through
+ * `inlineRuns`, so counting during the parse would number the notes inside
+ * notes as well, and would number them at the moment they were resolved
+ * instead of at the place they appear.
+ */
+function numberFootnotes(blocks: Block[]): Block[] {
+  let n = 0;
+  const mark = (runs: Inline[] | undefined) => {
+    for (const run of runs ?? []) if (run.footnote) run.text = String(++n);
+  };
+  for (const b of blocks) {
+    if ('runs' in b) mark(b.runs);
+    if (b.kind === 'table') {
+      b.header.forEach(mark);
+      for (const row of b.rows) row.forEach(mark);
+    }
+  }
+  return blocks;
+}
+
+function parseBody(markdown: string, title?: string): Block[] {
   const md = String(markdown ?? '');
   const out: Block[] = [];
   /**

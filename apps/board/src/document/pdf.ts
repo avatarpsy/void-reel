@@ -181,10 +181,21 @@ function shapeRun(
  */
 export interface Piece { text: string; font: PDFFont; width: number; size: number; run: Inline }
 
+/**
+ * A footnote mark is set small and raised — the superscript every typesetter
+ * has used for it. Relative to the surrounding text rather than a fixed size,
+ * so a mark in a heading grows with the heading instead of shrinking to
+ * nothing beside it.
+ */
+const SUP_SCALE = 0.72;
+/** How far above the baseline the mark sits, as a fraction of ITS OWN size. */
+const SUP_RISE = 0.42;
+
 /** The size a run is set at: its own if it asked, else the block's. */
 function sizeOf(run: Inline, blockSize: number): number {
   const own = Number(run.size);
-  return Number.isFinite(own) && own > 0 ? own : blockSize;
+  const base = Number.isFinite(own) && own > 0 ? own : blockSize;
+  return run.footnote ? base * SUP_SCALE : base;
 }
 
 /**
@@ -392,12 +403,64 @@ async function renderPass(
     return out;
   };
 
+  /**
+   * ══════════════════════════════════════════════════════════════════════
+   * FOOTNOTES — THE ONE THING THAT READS BACKWARDS
+   * ══════════════════════════════════════════════════════════════════════
+   *
+   * Every other block is set top-down: take the space, move the pen, carry
+   * on. A footnote is the exception. Its mark is somewhere in the middle of
+   * a page and its text belongs at the FOOT of that same page — so the room
+   * for it has to be taken out of the page BEFORE the line carrying the mark
+   * is set, at a moment when nothing yet knows the page will need it.
+   *
+   * That is the whole design, and it is why the floor moves:
+   *
+   *   floor ─────────────── fixed: margin plus the footer's own band
+   *   floor + notesHeight ─ where the BODY actually stops, today
+   *
+   * `notesHeight` grows as marks are read and resets when the page turns.
+   * Get it wrong in the cheap direction — reserve after drawing — and the
+   * note lands on the following page, pointing back at a mark the reader has
+   * already passed, which is the classic broken footnote.
+   *
+   * Word does none of this: it is told the words and reserves the space
+   * itself. `docx.ts` is four lines for the same feature.
+   */
+  const NOTE_SIZE = 8.5;
+  const NOTE_LEADING = 1.28;
+  /** Air above the separator rule, and between the rule and the first note. */
+  const NOTE_RULE_GAP = 10;
+  const NOTE_TEXT_GAP = 6;
+  /** Between one note and the next. */
+  const NOTE_GAP = 3;
+  /** The mark hangs in this much space to the left of the note's own text. */
+  const NOTE_INDENT = 13;
+  /** The rule and its air — taken once, by the first note on a page. */
+  const NOTE_CHROME = NOTE_RULE_GAP + NOTE_TEXT_GAP + 1;
+
+  let notes: Array<{ mark: string; lines: Piece[][] }> = [];
+  let notesHeight = 0;
+  /**
+   * Which marks have already been accounted for. By run IDENTITY, because
+   * `shapeRun` can cut one run into several pieces and two notes reading the
+   * same words are still two notes.
+   */
+  const counted = new Set<Inline>();
+
   const newPage = () => {
+    flushNotes();
     page = pdf.addPage([size.w, size.h]);
     y = size.h - MARGIN - topOffset;
   };
+  /**
+   * Where the body stops. NOT `floor`: the notes taken on this page already
+   * own the bottom of it. Every page-break test in this file goes through
+   * here, so one page cannot forget what another remembered.
+   */
+  const bodyFloor = () => floor + notesHeight;
   /** Reserve vertical space, starting a page when this block will not fit. */
-  const need = (h: number) => { if (y - h < floor) newPage(); };
+  const need = (h: number) => { if (y - h < bodyFloor()) newPage(); };
 
   const leading = leadingFor(spec);
   const ink = rgb(0.09, 0.09, 0.10);
@@ -422,6 +485,91 @@ async function renderPass(
    */
   const ranged = (a?: DocAlign): DocAlign => (a === 'justify' ? 'left' : a ?? 'left');
 
+  /**
+   * What this line's new footnotes would cost at the foot of the page.
+   *
+   * MEASURED, NOT ESTIMATED — the note is set through the same `layout` that
+   * will draw it, at the same size and measure, so the number of lines is the
+   * number of lines. Nothing is marked as counted here: the caller may yet
+   * turn the page, and the note has to follow its mark.
+   */
+  const noteCost = (line: Piece[]) => {
+    const add: Array<{ mark: string; lines: Piece[][] }> = [];
+    let height = 0;
+    for (const piece of line) {
+      const run = piece.run;
+      if (!run.footnote || counted.has(run)) continue;
+      const lines = layout(run.footnote, f, NOTE_SIZE, colWidth - NOTE_INDENT, dropped);
+      add.push({ mark: String(run.text ?? ''), lines });
+      height += lines.length * NOTE_SIZE * NOTE_LEADING + NOTE_GAP;
+    }
+    return { add, height, chrome: add.length && !notes.length ? NOTE_CHROME : 0 };
+  };
+
+  /**
+   * Hand the measured notes to whichever page we ended up on.
+   *
+   * Called AFTER `need`, deliberately: if the line moved to a new page the
+   * notes must move with it, and the rule's own height is re-decided there —
+   * a fresh page has always taken it, a page that already had notes never
+   * takes it twice.
+   */
+  const holdNotes = (add: Array<{ mark: string; lines: Piece[][] }>, runs: Inline[]) => {
+    if (!add.length) return;
+    if (!notes.length) notesHeight += NOTE_CHROME;
+    for (const note of add) {
+      notes.push(note);
+      notesHeight += note.lines.length * NOTE_SIZE * NOTE_LEADING + NOTE_GAP;
+    }
+    for (const run of runs) counted.add(run);
+  };
+
+  /**
+   * Set the page's notes along its bottom edge, above the footer band.
+   *
+   * Runs on the page being LEFT, from inside `newPage`, and once more after
+   * the last block — a document whose final page carries a note has no page
+   * turn left to trigger it, which is the way this feature quietly loses its
+   * last note.
+   */
+  function flushNotes() {
+    if (!notes.length) return;
+    const pending = notes;
+    const height = notesHeight;
+    notes = [];
+    notesHeight = 0;
+
+    let ny = floor + height - NOTE_RULE_GAP;
+    // The short rule Word draws above its notes — about two inches, not the
+    // full measure, which would read as a section break instead.
+    page.drawLine({
+      start: { x: MARGIN, y: ny }, end: { x: MARGIN + Math.min(colWidth, 144), y: ny },
+      thickness: 0.6, color: hair,
+    });
+    ny -= NOTE_TEXT_GAP;
+    for (const note of pending) {
+      note.lines.forEach((line, i) => {
+        const baseline = ny - NOTE_SIZE;
+        if (i === 0 && note.mark) {
+          page.drawText(note.mark, {
+            x: MARGIN, y: baseline + NOTE_SIZE * SUP_RISE * 0.55,
+            size: NOTE_SIZE * SUP_SCALE, font: f.base('regular'), color: muted,
+          });
+        }
+        let x = MARGIN + NOTE_INDENT;
+        for (const piece of line) {
+          page.drawText(piece.text, {
+            x, y: baseline, size: piece.size, font: piece.font,
+            color: piece.run.link ? linkBlue : inkOf(piece.run.color, muted),
+          });
+          x += piece.width;
+        }
+        ny -= NOTE_SIZE * NOTE_LEADING;
+      });
+      ny -= NOTE_GAP;
+    }
+  }
+
   const drawLines = (
     lines: Piece[][], fontSize: number, indent: number, color = ink,
     firstPrefix?: { text: string; font: PDFFont },
@@ -432,7 +580,14 @@ async function renderPass(
       // lines apart or it overprints the line above.
       const top = lineSize(line, fontSize);
       const lineH = top * leading;
-      need(lineH);
+      /**
+       * The line AND the notes it brings with it, asked for together. Asking
+       * for them separately is the bug this is written to avoid: the line
+       * fits, the note does not, and the note is pushed to the next page.
+       */
+      const { add, height, chrome } = noteCost(line);
+      need(lineH + height + chrome);
+      holdNotes(add, line.filter((p) => p.run.footnote).map((p) => p.run));
       /**
        * Centred and right text are set by offsetting the line's own start, so
        * every piece after it follows — the pieces already carry their measured
@@ -478,7 +633,8 @@ async function renderPass(
         const drawnWidth = piece.width + grown;
         // Baselines sit on the LINE's baseline, so 11pt and 28pt on one line
         // rest on the same rule rather than each floating at its own height.
-        const baseline = y - top;
+        // A footnote mark is the one thing deliberately lifted off it.
+        const baseline = y - top + (piece.run.footnote ? fs * SUP_RISE : 0);
         /**
          * Highlight first, under everything: a rectangle from a little below
          * the baseline to a little above the cap height, which is where a
@@ -547,7 +703,7 @@ async function renderPass(
          * and two lines of what follows will not fit, start the page here.
          */
         const block = lines.length * fs * leading + BODY_SIZE * leading * 2;
-        if (y - block < floor) newPage();
+        if (y - block < bodyFloor()) newPage();
         // Recorded AFTER the widow check, so the page is the one the
         // heading actually prints on rather than the one it was about to
         // overflow — which is the off-by-one a contents page shows up.
@@ -676,7 +832,7 @@ async function renderPass(
         // looks like a fault, and the space was asked for BETWEEN two things.
         const room = Math.max(0, b.points);
         if (y < size.h - MARGIN - topOffset) y -= room;
-        if (y < floor) newPage();
+        if (y < bodyFloor()) newPage();
         break;
       }
       case 'pagebreak':
@@ -713,7 +869,7 @@ async function renderPass(
           const h = embedded.height * scale;
           // A picture taller than the text column gets its own page rather than
           // being cut in half.
-          if (y - h < floor) newPage();
+          if (y - h < bodyFloor()) newPage();
           const fit = Math.min(1, (size.h - MARGIN - floor) / h);
           const drawW = w * fit;
           const x = b.align === 'left'
@@ -762,10 +918,21 @@ async function renderPass(
            * recursion is safe because the repeat is drawn on a FRESH page,
            * where it always fits.
            */
-          if (y - rowH < floor) {
+          /**
+           * A CELL CAN CARRY A FOOTNOTE TOO — and this is the one place that
+           * draws its own text instead of going through `drawLines`, so it is
+           * the one place that has to ask for the room itself. Found by
+           * reading a rendered invoice: the mark was set in the cell and its
+           * note was simply not at the foot of the page, because nothing had
+           * ever told the page it existed.
+           */
+          const cellPieces = laid.flat().flat();
+          const { add, height, chrome } = noteCost(cellPieces);
+          if (y - rowH - height - chrome < bodyFloor()) {
             newPage();
             if (!header && b.header.length) drawRow(b.header, true);
           }
+          holdNotes(add, cellPieces.filter((p) => p.run.footnote).map((p) => p.run));
           if (header) {
             page.drawRectangle({
               x: MARGIN, y: y - rowH, width: colWidth, height: rowH, color: rgb(0.955, 0.955, 0.962),
@@ -789,7 +956,10 @@ async function renderPass(
                   });
                 }
                 page.drawText(piece.text, {
-                  x, y: ly - fs, size: piece.size, font: piece.font, color: cellInk,
+                  x,
+                  // Raised, like every other footnote mark in the document.
+                  y: ly - fs + (piece.run.footnote ? piece.size * SUP_RISE : 0),
+                  size: piece.size, font: piece.font, color: cellInk,
                 });
                 if (piece.run.underline) {
                   page.drawLine({
@@ -816,6 +986,13 @@ async function renderPass(
       }
     }
   }
+
+  /**
+   * The last page has no page turn left to set its notes, so it is done here.
+   * Leaving this out loses exactly one note, on exactly the last page, which
+   * is the kind of thing a short test never reaches.
+   */
+  flushNotes();
 
   // Page numbers last, once the count is known. A one-page memo does not get
   // one — nobody numbers a single page.

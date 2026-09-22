@@ -127,13 +127,87 @@ function markLine(line: string, mark: string): string {
 }
 
 /**
+ * ══════════════════════════════════════════════════════════════════════════
+ * FOOTNOTES, SHIELDED FROM BLOCKSUITE'S OWN READING OF THEM
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * BlockSuite's markdown adapter knows the footnote syntax and has its own
+ * plans for it. Measured, on a real note:
+ *
+ *     The rate is fixed.[^1]              →   The rate is fixed.
+ *     [^1]: Clause 4.2.                       ###### Sources
+ *                                             Clause 4.2.
+ *
+ * The MARKS ARE GONE and the notes are a heading called Sources. Nothing
+ * errors; the document simply stops having footnotes the first time anybody
+ * opens it on the board, and the next export writes that heading out as if
+ * the author had asked for it.
+ *
+ * So the bracket is broken up with the same invisible character the marks
+ * above are made of — `[^1]` becomes `[⁠^1]`. The adapter no longer sees
+ * footnote syntax, the reader sees `[^1]` because a word joiner has no width,
+ * and the line stays ordinary editable text. Taken out again on the way to a
+ * file or to the agent, so nothing outside the canvas ever meets it.
+ *
+ * Why not a mark like the others: a note's TEXT has to remain visible and
+ * editable on the canvas. Hiding it inside a carrier would make a footnote
+ * the one thing in the document the user cannot change.
+ */
+const FOOTNOTE_REF = /\[\^/g;
+/**
+ * Both halves are optional, and each is there for a different author.
+ *
+ * THE BACKSLASH, because the adapter adds one on the way out: having been
+ * persuaded that `[⁠^1]` is not footnote syntax, it decides the bracket is
+ * worth escaping and writes `\[⁠^1]`.
+ *
+ * THE SHIELD, because a footnote the USER TYPES on the canvas never had one.
+ * They type `[^3]`, it is stored as they typed it, and it comes back `\[^3]`
+ * — escaped, so the parser reads a literal bracket and the footnote they just
+ * wrote is not one. Accepting the bare escaped form is what makes a footnote
+ * something a person can add by hand rather than only receive.
+ *
+ * Over-matching costs nothing: a bracket with no matching definition stays
+ * exactly the characters it was, because `liftFootnotes` will not invent one.
+ */
+const SHIELDED_REF = new RegExp(`\\\\?\\[${WJ}?\\^`, 'g');
+
+/** `[^x]: …` at the start of a line — a definition, in markdown's own form. */
+const DEFINITION = /^ {0,3}\\?\[\^[^\]\s]+\]:/;
+
+export function shieldFootnotes(markdown: string): string {
+  const lines = String(markdown ?? '').split('\n');
+  const out: string[] = [];
+  for (const line of lines) {
+    /**
+     * ONE NOTE, ONE PARAGRAPH. Markdown lets definitions sit on adjacent
+     * lines, and a file written that way arrives on the canvas as a single
+     * paragraph with a break in it — two notes the user cannot move, reorder
+     * or delete separately, and which come back welded with a stray hard
+     * break where the second label begins. A blank line between them is what
+     * makes each one a block of its own.
+     */
+    if (DEFINITION.test(line) && out.length && out[out.length - 1]!.trim() !== '') out.push('');
+    out.push(line);
+  }
+  return out.join('\n').replace(FOOTNOTE_REF, `[${WJ}^`);
+}
+
+export function unshieldFootnotes(markdown: string): string {
+  return String(markdown ?? '').replace(SHIELDED_REF, '[^');
+}
+
+/**
  * Comments → marks, for markdown about to become a note.
  *
  * A directive applies to the next line with something on it, which is what the
  * comment means when you read it and what the exporters already do with it.
  */
 export function marksFromComments(markdown: string): string {
-  const lines = String(markdown ?? '').split('\n');
+  // Composed rather than left to each caller: this function MEANS "prepare
+  // for the canvas", and a call site that forgot the shield would lose its
+  // footnotes with nothing at all to show that it had.
+  const lines = shieldFootnotes(String(markdown ?? '')).split('\n');
   const out: string[] = [];
   let pending = '';
   for (const line of lines) {
@@ -209,7 +283,14 @@ export function commentsFromMarks(markdown: string): string {
     spaceUnits = 0;
   };
 
-  for (const line of String(markdown ?? '').split('\n')) {
+  /**
+   * UNSHIELDED FIRST, not last. `readMark` ends by stripping any word joiner
+   * it did not recognise as an instruction — correct, and it was eating the
+   * shield: the bracket came back escaped and the footnote was gone. The
+   * shield has to stop being a word joiner before anything goes looking for
+   * stray ones.
+   */
+  for (const line of unshieldFootnotes(String(markdown ?? '')).split('\n')) {
     const prefix = SYNTAX.exec(line)?.[1] ?? '';
     const rest = line.slice(prefix.length);
     const mark = readMark(rest);

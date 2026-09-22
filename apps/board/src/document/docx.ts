@@ -24,8 +24,19 @@ export async function renderDocx(spec: DocSpec): Promise<Blob> {
     Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, BorderStyle,
     Table, TableRow, TableCell, TableLayoutType, WidthType, ExternalHyperlink, ImageRun,
     Footer, Header, PageNumber,
-    PageBreak, PageOrientation, TableOfContents, LevelFormat,
+    PageBreak, PageOrientation, TableOfContents, LevelFormat, FootnoteReferenceRun,
   } = await import('docx');
+
+  /**
+   * The notes, by the number their mark carries.
+   *
+   * Word owns footnotes properly: it reserves the space at the foot of
+   * whichever page the mark lands on, splits a long note across pages, and
+   * RENUMBERS when the reader inserts one. So the file carries the note's
+   * words and nothing about where they go — which is why this is the easy
+   * side and `pdf.ts` is the hard one.
+   */
+  const notes = new Map<number, Inline[]>();
 
   const HEADING = [
     HeadingLevel.HEADING_1, HeadingLevel.HEADING_2, HeadingLevel.HEADING_3, HeadingLevel.HEADING_4,
@@ -68,6 +79,12 @@ export async function renderDocx(spec: DocSpec): Promise<Blob> {
   const runsOf = (runs: Inline[], font: string, extra: Record<string, unknown> = {}): any[] => {
     const out: any[] = [];
     for (const r of runs) {
+      if (r.footnote) {
+        const id = Number(r.text) || notes.size + 1;
+        notes.set(id, r.footnote);
+        out.push(new FootnoteReferenceRun(id));
+        continue;
+      }
       const base = {
         text: r.text,
         bold: r.bold,
@@ -360,6 +377,21 @@ export async function renderDocx(spec: DocSpec): Promise<Blob> {
     creator: 'Voidspace',
     description: spec.title ? `${spec.title} — created in Voidspace` : 'Created in Voidspace',
     styles: { default: { document: { run: { font: body, size: BODY_HALF_PT } } } },
+    /**
+     * Built by the run walker above, so this reads whatever the body actually
+     * referenced. Omitted entirely when there are none — an empty `footnotes`
+     * still writes the part and the relationship into the package.
+     */
+    ...(notes.size
+      ? {
+        footnotes: Object.fromEntries([...notes].map(([id, runs]) => [
+          String(id),
+          // 9pt — the size Word sets its own notes at, so an exported file
+          // matches one a person typed in Word rather than looking oversized.
+          { children: [new Paragraph({ children: runsOf(runs, body, { size: 18 }) })] },
+        ])),
+      }
+      : {}),
     numbering: {
       config: [{
         reference: 'vs-ordered',
