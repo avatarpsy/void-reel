@@ -126,6 +126,15 @@ const ALIGN: Record<string, DocAlign> = {
 
 /* ── runs ──────────────────────────────────────────────────────────────────── */
 
+/**
+ * The body size of the document being read, in half-points.
+ *
+ * Module-level because it is a property of the FILE and every run in that
+ * file needs it; threading it through six call sites would be six chances to
+ * forget. Set once per import, before anything is read.
+ */
+let defaultHalfPoints = 22;
+
 function runProps(rPr: Element | null, link?: string): Partial<Inline> {
   if (!rPr) return link ? { link } : {};
   const marks: Partial<Inline> = {};
@@ -140,10 +149,22 @@ function runProps(rPr: Element | null, link?: string): Partial<Inline> {
   const colour = colourOf(val(kid(rPr, 'color')));
   if (colour) marks.color = colour;
 
-  // Half-points. A 22pt run is `<w:sz w:val="44"/>`, and reading it as 44 would
-  // set every imported document at twice its real size.
+  /**
+   * ── A SIZE THAT IS THE DEFAULT IS NOT A SIZE ─────────────────────────────
+   *
+   * Word writes `w:sz` on very nearly every run, so reading each one as an
+   * override turned a real document into `[A: The philosophy...]{size=12}`
+   * on every paragraph -- noise to read, noise for the agent to edit around,
+   * and a size pinned onto text that should simply follow the document.
+   * Only a size that DIFFERS from the file's own default is an override.
+   *
+   * Half-points, so a 22pt run is 44 and reading it as 44 would set every
+   * imported document at twice its real size.
+   */
   const sz = Number(val(kid(rPr, 'sz')));
-  if (Number.isFinite(sz) && sz > 0) marks.size = Math.min(200, Math.max(4, sz / 2));
+  if (Number.isFinite(sz) && sz > 0 && Math.abs(sz - defaultHalfPoints) > 0.5) {
+    marks.size = Math.min(200, Math.max(4, sz / 2));
+  }
 
   // Two ways to highlight: a named colour, or cell shading behind the run.
   const highlight = val(kid(rPr, 'highlight'));
@@ -170,7 +191,15 @@ const BREAK = String.fromCharCode(10);
 /** One `w:r`, as runs — a run can produce several when it contains breaks. */
 function runsOf(r: Element, marks: Partial<Inline>, ctx: Ctx): Inline[] {
   const out: Inline[] = [];
-  const push = (text: string) => { if (text) out.push({ text, ...marks }); };
+  /**
+   * Marks are not put on whitespace. A run holding nothing but a line break
+   * came out as `[**\n**]{size=12}` -- a span wrapped around nothing, which
+   * is unreadable and, worse, changes where the bold starts and ends.
+   */
+  const push = (text: string) => {
+    if (!text) return;
+    out.push(text.trim() ? { text, ...marks } : { text });
+  };
   for (const node of Array.from(r.children)) {
     switch (node.localName) {
       case 't': push(node.textContent ?? ''); break;
@@ -235,7 +264,7 @@ function paragraphRuns(p: Element, ctx: Ctx): Inline[] {
     }
   };
   walk(p);
-  return mergeRuns(out);
+  return trimBreaks(mergeRuns(out));
 }
 
 /** Adjacent runs with identical marks become one — smaller and wraps better. */
@@ -244,6 +273,15 @@ function mergeRuns(runs: Inline[]): Inline[] {
   for (const run of runs) {
     if (!run.text) continue;
     const last = out[out.length - 1];
+    /**
+     * A run of pure whitespace joins whatever came before it, whatever its
+     * own marks are. Word splits `Voidspace AI` into three runs — word, space,
+     * word — and treating the space as a distinct thing produced
+     * `[**Voidspace**]{size=14} [**AI**]{size=14}`: two spans where the file
+     * has one phrase, and a document that grows a little more markup every
+     * time it goes round.
+     */
+    if (last && !run.text.trim()) { last.text += run.text; continue; }
     if (last
       && !!last.bold === !!run.bold && !!last.italic === !!run.italic
       && !!last.underline === !!run.underline && !!last.strike === !!run.strike
@@ -253,6 +291,22 @@ function mergeRuns(runs: Inline[]): Inline[] {
     } else out.push({ ...run });
   }
   return out;
+}
+
+/**
+ * A line break at the very start or end of a paragraph is not a line break.
+ *
+ * Word uses them for spacing, and carrying them through produced a paragraph
+ * that began with a stray `\` in the markdown and an empty first line on the
+ * page. The gap between paragraphs is the renderer's job.
+ */
+function trimBreaks(runs: Inline[]): Inline[] {
+  const out = runs.map((r) => ({ ...r }));
+  const first = out[0];
+  if (first) first.text = first.text.replace(/^[\n\r]+/, '');
+  const last = out[out.length - 1];
+  if (last) last.text = last.text.replace(/[\n\r]+$/, '');
+  return out.filter((r) => r.text !== '');
 }
 
 /* ── paragraphs ────────────────────────────────────────────────────────────── */
@@ -488,6 +542,10 @@ function chromeText(doc: Document | null): string | undefined {
   if (!doc) return undefined;
   let out = '';
   for (const el of Array.from(doc.getElementsByTagName('*'))) {
+    // `mc:Fallback` is the SAME content again, drawn the old way for readers
+    // that cannot do the new way. Counting both is why a real letterhead's
+    // footer came back with its address and email in it twice.
+    if (insideFallback(el)) continue;
     if (el.localName === 't') out += el.textContent ?? '';
     if (el.localName === 'instrText') {
       const code = (el.textContent ?? '').trim().toUpperCase();
@@ -497,6 +555,14 @@ function chromeText(doc: Document | null): string | undefined {
   }
   const text = out.replace(/\s+/g, ' ').trim();
   return text || undefined;
+}
+
+/** True for an element inside an `mc:Fallback` — a duplicate of its sibling. */
+function insideFallback(el: Element): boolean {
+  for (let at: Element | null = el; at; at = at.parentElement) {
+    if (at.localName === 'Fallback') return true;
+  }
+  return false;
 }
 
 /* ── the whole file ────────────────────────────────────────────────────────── */
@@ -544,14 +610,36 @@ function relationships(doc: Document | null): Map<string, string> {
   return map;
 }
 
+/** `docDefaults` -> `rPr` -> `sz`, in half-points. 22 is Word's own default. */
+function defaultSize(styles: Document | null): number {
+  if (!styles) return 22;
+  for (const el of Array.from(styles.getElementsByTagName('*'))) {
+    if (el.localName !== 'docDefaults') continue;
+    for (const inner of Array.from(el.getElementsByTagName('*'))) {
+      if (inner.localName !== 'sz') continue;
+      const n = Number(val(inner));
+      if (Number.isFinite(n) && n > 0) return n;
+    }
+  }
+  return 22;
+}
+
 export async function importDocx(bytes: Uint8Array): Promise<ImportedDocument> {
   const files = await readZipMap(bytes, (name) => (
     name === 'word/document.xml'
     || name === 'word/numbering.xml'
+    || name === 'word/styles.xml'
     || name === 'word/_rels/document.xml.rels'
     || /^word\/(header|footer)\d*\.xml$/.test(name)
     || name.startsWith('word/media/')
   ));
+
+  /**
+   * The document's own default type size, from `docDefaults`. Falls back to
+   * 11pt, which is Word's default and what a file that says nothing means.
+   */
+  const styles = parseXml(files.get('word/styles.xml'));
+  defaultHalfPoints = defaultSize(styles);
 
   const document = parseXml(files.get('word/document.xml'));
   if (!document) throw new Error('That Word file could not be read — its document part is missing or damaged.');

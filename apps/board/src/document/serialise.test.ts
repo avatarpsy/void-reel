@@ -154,6 +154,21 @@ describe('the corners, which is where a serialiser actually fails', () => {
     const back = parseMarkdown(toMarkdown(blocks as any)) as any[];
     expect(back[0].runs[0]).toMatchObject({ text: '5 * 3', bold: true, underline: true });
   });
+  /**
+   * A MARK THAT SPANS A LINE BREAK, which a real letterhead has: the company
+   * name and its second line are one bold run with a hard break in the middle.
+   */
+  it('keeps a mark that spans a hard break', () => {
+    const blocks: any[] = [{
+      kind: 'para',
+      runs: [{ text: 'Voidspace AI' + NL + 'A division of Amaya Comics', bold: true }],
+    }];
+    const back = parseMarkdown(toMarkdown(blocks as any)) as any[];
+    const text = back[0].runs.map((r: any) => r.text).join('');
+    expect(text).toBe('Voidspace AI' + NL + 'A division of Amaya Comics');
+    expect(back[0].runs.every((r: any) => r.bold)).toBe(true);
+  });
+
   /** A run that is BOTH a link and coloured has to keep both. */
   it('keeps a link that also carries a colour', () => {
     const { twice } = stable('[the dashboard](https://x.test){color=navy size=14}');
