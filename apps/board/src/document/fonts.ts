@@ -39,26 +39,26 @@
 import type { PDFDocument, PDFFont } from 'pdf-lib';
 
 /** Sans — Noto Sans. */
-import sansLatin400 from '@fontsource/noto-sans/files/noto-sans-latin-400-normal.woff2?url';
-import sansLatin700 from '@fontsource/noto-sans/files/noto-sans-latin-700-normal.woff2?url';
-import sansLatin400i from '@fontsource/noto-sans/files/noto-sans-latin-400-italic.woff2?url';
-import sansLatin700i from '@fontsource/noto-sans/files/noto-sans-latin-700-italic.woff2?url';
-import sansLatinExt400 from '@fontsource/noto-sans/files/noto-sans-latin-ext-400-normal.woff2?url';
-import sansLatinExt700 from '@fontsource/noto-sans/files/noto-sans-latin-ext-700-normal.woff2?url';
-import sansCyr400 from '@fontsource/noto-sans/files/noto-sans-cyrillic-400-normal.woff2?url';
-import sansGreek400 from '@fontsource/noto-sans/files/noto-sans-greek-400-normal.woff2?url';
-import sansDeva400 from '@fontsource/noto-sans/files/noto-sans-devanagari-400-normal.woff2?url';
-import sansDeva700 from '@fontsource/noto-sans/files/noto-sans-devanagari-700-normal.woff2?url';
-import sansViet400 from '@fontsource/noto-sans/files/noto-sans-vietnamese-400-normal.woff2?url';
+import sansLatin400 from '@fontsource/noto-sans/files/noto-sans-latin-400-normal.woff?url';
+import sansLatin700 from '@fontsource/noto-sans/files/noto-sans-latin-700-normal.woff?url';
+import sansLatin400i from '@fontsource/noto-sans/files/noto-sans-latin-400-italic.woff?url';
+import sansLatin700i from '@fontsource/noto-sans/files/noto-sans-latin-700-italic.woff?url';
+import sansLatinExt400 from '@fontsource/noto-sans/files/noto-sans-latin-ext-400-normal.woff?url';
+import sansLatinExt700 from '@fontsource/noto-sans/files/noto-sans-latin-ext-700-normal.woff?url';
+import sansCyr400 from '@fontsource/noto-sans/files/noto-sans-cyrillic-400-normal.woff?url';
+import sansGreek400 from '@fontsource/noto-sans/files/noto-sans-greek-400-normal.woff?url';
+import sansDeva400 from '@fontsource/noto-sans/files/noto-sans-devanagari-400-normal.woff?url';
+import sansDeva700 from '@fontsource/noto-sans/files/noto-sans-devanagari-700-normal.woff?url';
+import sansViet400 from '@fontsource/noto-sans/files/noto-sans-vietnamese-400-normal.woff?url';
 
 /** Serif — Noto Serif, for the scripts it ships. */
-import serifLatin400 from '@fontsource/noto-serif/files/noto-serif-latin-400-normal.woff2?url';
-import serifLatin700 from '@fontsource/noto-serif/files/noto-serif-latin-700-normal.woff2?url';
-import serifLatin400i from '@fontsource/noto-serif/files/noto-serif-latin-400-italic.woff2?url';
-import serifLatin700i from '@fontsource/noto-serif/files/noto-serif-latin-700-italic.woff2?url';
-import serifLatinExt400 from '@fontsource/noto-serif/files/noto-serif-latin-ext-400-normal.woff2?url';
-import serifCyr400 from '@fontsource/noto-serif/files/noto-serif-cyrillic-400-normal.woff2?url';
-import serifGreek400 from '@fontsource/noto-serif/files/noto-serif-greek-400-normal.woff2?url';
+import serifLatin400 from '@fontsource/noto-serif/files/noto-serif-latin-400-normal.woff?url';
+import serifLatin700 from '@fontsource/noto-serif/files/noto-serif-latin-700-normal.woff?url';
+import serifLatin400i from '@fontsource/noto-serif/files/noto-serif-latin-400-italic.woff?url';
+import serifLatin700i from '@fontsource/noto-serif/files/noto-serif-latin-700-italic.woff?url';
+import serifLatinExt400 from '@fontsource/noto-serif/files/noto-serif-latin-ext-400-normal.woff?url';
+import serifCyr400 from '@fontsource/noto-serif/files/noto-serif-cyrillic-400-normal.woff?url';
+import serifGreek400 from '@fontsource/noto-serif/files/noto-serif-greek-400-normal.woff?url';
 
 /**
  * India's own scripts, each its own Noto family.
@@ -68,14 +68,14 @@ import serifGreek400 from '@fontsource/noto-serif/files/noto-serif-greek-400-nor
  * Each is fetched only when the text contains that script, so a document in
  * English costs nothing for any of it.
  */
-import indTelugu400 from '@fontsource/noto-sans-telugu/files/noto-sans-telugu-telugu-400-normal.woff2?url';
-import indTelugu700 from '@fontsource/noto-sans-telugu/files/noto-sans-telugu-telugu-700-normal.woff2?url';
-import indTamil400 from '@fontsource/noto-sans-tamil/files/noto-sans-tamil-tamil-400-normal.woff2?url';
-import indTamil700 from '@fontsource/noto-sans-tamil/files/noto-sans-tamil-tamil-700-normal.woff2?url';
-import indBengali400 from '@fontsource/noto-sans-bengali/files/noto-sans-bengali-bengali-400-normal.woff2?url';
-import indBengali700 from '@fontsource/noto-sans-bengali/files/noto-sans-bengali-bengali-700-normal.woff2?url';
-import indGujarati400 from '@fontsource/noto-sans-gujarati/files/noto-sans-gujarati-gujarati-400-normal.woff2?url';
-import indKannada400 from '@fontsource/noto-sans-kannada/files/noto-sans-kannada-kannada-400-normal.woff2?url';
+import indTelugu400 from '@fontsource/noto-sans-telugu/files/noto-sans-telugu-telugu-400-normal.woff?url';
+import indTelugu700 from '@fontsource/noto-sans-telugu/files/noto-sans-telugu-telugu-700-normal.woff?url';
+import indTamil400 from '@fontsource/noto-sans-tamil/files/noto-sans-tamil-tamil-400-normal.woff?url';
+import indTamil700 from '@fontsource/noto-sans-tamil/files/noto-sans-tamil-tamil-700-normal.woff?url';
+import indBengali400 from '@fontsource/noto-sans-bengali/files/noto-sans-bengali-bengali-400-normal.woff?url';
+import indBengali700 from '@fontsource/noto-sans-bengali/files/noto-sans-bengali-bengali-700-normal.woff?url';
+import indGujarati400 from '@fontsource/noto-sans-gujarati/files/noto-sans-gujarati-gujarati-400-normal.woff?url';
+import indKannada400 from '@fontsource/noto-sans-kannada/files/noto-sans-kannada-kannada-400-normal.woff?url';
 
 export type Style = 'regular' | 'bold' | 'italic' | 'boldItalic' | 'mono';
 

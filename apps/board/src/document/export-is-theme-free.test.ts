@@ -13,6 +13,33 @@
  * somebody printed a contract and got white text on white paper.
  */
 import { describe, it, expect } from 'vitest';
+
+/**
+ * THIS FILE CONTROLS ITS OWN NETWORK.
+ *
+ * `pdf-fonts.test.ts` stubs `fetch` to serve real font files, and vitest may
+ * put both files in the same worker — so whether a render here got web fonts
+ * or the base-14 depended on which file was mid-flight. Two renders that are
+ * supposed to be byte-identical then differed for a reason that had nothing to
+ * do with the theme.
+ *
+ * Pinned to 404 for the whole file: both renders use the same faces, so a
+ * difference between them can only be the thing under test.
+ */
+const realFetch = globalThis.fetch;
+
+/**
+ * Run `body` with the network pinned, and pin it INSIDE the test rather than in
+ * a `beforeAll`: vitest may put this file and `pdf-fonts.test.ts` in the same
+ * worker, and whichever hook ran last owned `globalThis.fetch`. Two renders
+ * that must be byte-identical then differed depending on file order, which is a
+ * flaky test — worse than no test, because it teaches people to re-run it.
+ */
+async function withPinnedFonts<T>(body: () => Promise<T>): Promise<T> {
+  const before = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(null, { status: 404 })) as typeof fetch;
+  try { return await body(); } finally { globalThis.fetch = before ?? realFetch; }
+}
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -40,8 +67,10 @@ async function renderUnderTheme(theme: 'light' | 'dark'): Promise<Uint8Array> {
 
 describe('the exported file ignores the editor theme', () => {
   it('produces byte-identical PDFs in light and dark', async () => {
-    const light = await renderUnderTheme('light');
-    const dark = await renderUnderTheme('dark');
+    const { light, dark } = await withPinnedFonts(async () => ({
+      light: await renderUnderTheme('light'),
+      dark: await renderUnderTheme('dark'),
+    }));
     // pdf-lib writes no timestamp by default, so equal input is equal output.
     expect(dark.length).toBe(light.length);
     expect(Buffer.compare(Buffer.from(dark), Buffer.from(light))).toBe(0);
@@ -66,7 +95,11 @@ describe('the exported file ignores the editor theme', () => {
       return new TextDecoder().decode(files.get('word/document.xml')!);
     };
 
-    expect(await partOf(await make('dark'))).toBe(await partOf(await make('light')));
+    const { light, dark } = await withPinnedFonts(async () => ({
+      light: await make('light'),
+      dark: await make('dark'),
+    }));
+    expect(await partOf(dark)).toBe(await partOf(light));
   }, 120_000);
   /**
    * The writers must contain no reference to the theme at all. Read as TEXT,
