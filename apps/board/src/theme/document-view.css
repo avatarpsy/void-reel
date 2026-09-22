@@ -435,19 +435,78 @@ affine-edgeless-note[data-vs-doc-tag] edgeless-note-background {
 }
 
 /* ── THE TYPE SCALE THE EXPORTER USES ───────────────────────────────────────
-   Not "a bit bigger for headings": these are `H_SIZE` in `document/pdf.ts` —
-   22/16.5/13.5/12pt against an 11pt body — expressed against a 16px body, so
-   the proportions on screen are the ones that come out of the printer. */
+
+   Not "a bit bigger for headings". These are the numbers in `document/pdf.ts` —
+   BODY_SIZE 11pt, H_SIZE 20/15.5/13/11.5, H_BEFORE 0/20/16/14, LEADING 1.42,
+   and 7pt after a paragraph — expressed against a 16px body, so what is on the
+   canvas is in the same proportions as what comes out of the printer.
+
+   ── THE SELECTORS ARE NOT THE OBVIOUS ONES ─────────────────────────────────
+   A heading in BlockSuite is NOT an <h2>. It is
+   `div.affine-paragraph-rich-text-wrapper.h2`, and an earlier version of this
+   file styled `h1, h2, h3` and therefore styled nothing at all: the document
+   looked untouched and the CSS looked correct. Read off the live DOM.
+
+   Sizes are set on `.affine-block-component` as well as on the note, because
+   that element carries its own `font-size` and simply ignores what the note
+   inherits down to it — the same reason the face had to be set as a property
+   rather than only as a variable. */
+
 affine-edgeless-note[data-vs-doc-tag] {
+  --affine-font-base: 16px;
   font-size: 16px;
-  line-height: 1.55;
+  /* 1.45 rather than the exporter's exact 1.42: a hair more air is easier to
+     put a caret into, and the difference is invisible beside the print. */
+  line-height: 1.45;
 }
-affine-edgeless-note[data-vs-doc-tag] h1 { font-size: 2em; line-height: 1.25; }
-affine-edgeless-note[data-vs-doc-tag] h2 { font-size: 1.5em; line-height: 1.3; }
-affine-edgeless-note[data-vs-doc-tag] h3 { font-size: 1.23em; line-height: 1.35; }
-affine-edgeless-note[data-vs-doc-tag] h4,
-affine-edgeless-note[data-vs-doc-tag] h5,
-affine-edgeless-note[data-vs-doc-tag] h6 { font-size: 1.09em; line-height: 1.4; }
+
+affine-edgeless-note[data-vs-doc-tag] .affine-block-component {
+  font-size: 16px;
+  line-height: 1.45;
+}
+
+/* 7pt after a paragraph is 10px at this body size, which is what BlockSuite
+   already uses — stated here so it is deliberate rather than a coincidence
+   that a future version could quietly change. */
+affine-edgeless-note[data-vs-doc-tag] .affine-block-component {
+  margin: 10px 0;
+}
+
+/* 20pt, 15.5pt, 13pt, 11.5pt against an 11pt body, and bold like the exporter
+   sets them — BlockSuite's own 600 reads as a lighter document than the file. */
+affine-edgeless-note[data-vs-doc-tag] .affine-paragraph-rich-text-wrapper.h1 {
+  font-size: 1.82em;
+  font-weight: 700;
+  line-height: 1.25;
+  margin: 0 0 10px;
+}
+affine-edgeless-note[data-vs-doc-tag] .affine-paragraph-rich-text-wrapper.h2 {
+  font-size: 1.41em;
+  font-weight: 700;
+  line-height: 1.3;
+  margin: 29px 0 10px;
+}
+affine-edgeless-note[data-vs-doc-tag] .affine-paragraph-rich-text-wrapper.h3 {
+  font-size: 1.18em;
+  font-weight: 700;
+  line-height: 1.35;
+  margin: 23px 0 8px;
+}
+affine-edgeless-note[data-vs-doc-tag] .affine-paragraph-rich-text-wrapper.h4,
+affine-edgeless-note[data-vs-doc-tag] .affine-paragraph-rich-text-wrapper.h5,
+affine-edgeless-note[data-vs-doc-tag] .affine-paragraph-rich-text-wrapper.h6 {
+  font-size: 1.05em;
+  font-weight: 700;
+  line-height: 1.4;
+  margin: 20px 0 8px;
+}
+
+/* A heading that OPENS the document has nothing above it to be separated from,
+   and the exporter says so too: H_BEFORE[0] is zero. */
+affine-edgeless-note[data-vs-doc-tag] .affine-block-component:first-child
+  .affine-paragraph-rich-text-wrapper {
+  margin-top: 0;
+}
 
 /* ── THE MARGIN ─────────────────────────────────────────────────────────────
    An inch, to scale. The note is 800px wide standing in for a 595pt page, so a
