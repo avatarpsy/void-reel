@@ -369,9 +369,22 @@ body[data-focus-mode] [data-vs-doc-tag]::after { display: none; }
    Scoped to `[data-vs-doc-tag]`, which `document/tags.ts` stamps on notes that
    really are documents. A sticky note is not a page and keeps the board theme. */
 
+/* ── THE PAGE FOLLOWS THE THEME; THE FILE NEVER DOES ────────────────────────
+
+   A document on the canvas is being EDITED, and a sheet of blazing white in a
+   dark editor is the thing people turn dark mode on to avoid. So the page takes
+   the theme: paper in light, a dark sheet in dark.
+
+   What is exported does not move. `document/pdf.ts` and `document/docx.ts`
+   contain no reference to the theme at all — their ink is a constant and their
+   paper is the page — so a PDF made at midnight is the same file as one made at
+   noon. That is pinned by a test rather than left to inspection, because it is
+   exactly the kind of thing a later "use the theme colour" refactor would break
+   without anyone noticing until a customer printed one. */
+
 affine-edgeless-note[data-vs-doc-tag] {
-  /* Paper and ink. Very slightly warm: pure #fff against a dark canvas glares,
-     and this is nearer what a laser printer actually puts on the page. */
+  /* Paper and ink. Very slightly warm: pure #fff glares even in light mode, and
+     this is nearer what a laser printer actually puts on the page. */
   --vs-paper: #fdfdfc;
   --affine-background-primary-color: var(--vs-paper);
   --affine-background-secondary-color: #f4f4f2;
@@ -423,6 +436,44 @@ affine-edgeless-note[data-vs-doc-tag] affine-table {
 affine-edgeless-note[data-vs-doc-tag] code,
 affine-edgeless-note[data-vs-doc-tag] affine-code {
   font-family: var(--affine-font-code-family, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+
+/* ── THE SAME PAGE, IN THE DARK ─────────────────────────────────────────────
+   A dark SHEET, not the canvas: it stays a shade lighter than the board behind
+   it so the page still has an edge, and the ink stays a little under pure white
+   because white-on-black at document sizes buzzes.
+
+   Only the colours change. The face, the type scale, the margins and the
+   rhythm are the document's and are the same in both themes — those are what
+   make it the same document as the file. */
+[data-theme='dark'] affine-edgeless-note[data-vs-doc-tag] {
+  --vs-paper: #1f1f23;
+  --affine-background-secondary-color: #27272c;
+  --affine-background-tertiary-color: #2e2e34;
+  --affine-background-code-block: #27272c;
+  --affine-background-overlay-panel-color: #27272c;
+  --affine-text-primary-color: #e9e9ec;
+  --affine-text-secondary-color: #a0a0aa;
+  --affine-text-disable-color: #6e6e78;
+  --affine-border-color: #35353c;
+  --affine-divider-color: #35353c;
+  --affine-quote-color: #b6b6c0;
+  --affine-link-color: #7aa2f7;
+  --affine-hover-color: rgba(255, 255, 255, 0.06);
+  --affine-hover-color-filled: rgba(255, 255, 255, 0.09);
+  --affine-icon-color: #a0a0aa;
+  --affine-placeholder-color: #6e6e78;
+}
+
+/* A dark shadow on a dark canvas is invisible, so the edge is a hairline. */
+[data-theme='dark'] affine-edgeless-note[data-vs-doc-tag] edgeless-note-background {
+  box-shadow: 0 0 0 1px #33333a, 0 10px 30px rgba(0, 0, 0, 0.45) !important;
+}
+
+/* The table header reads as a band on paper and has to be a band in the dark
+   too — the light grey would be a bright stripe across the page. */
+[data-theme='dark'] affine-edgeless-note[data-vs-doc-tag] affine-table th {
+  background-color: #27272c;
 }
 
 /* The paper itself — see the note above about the inline style. */
@@ -545,7 +596,7 @@ affine-edgeless-note[data-vs-doc-tag] .affine-block-children-container:empty {
 
 /* A table on paper: hairline rules and a shaded header, like the exporter's. */
 affine-edgeless-note[data-vs-doc-tag] affine-table th {
-  background-color: #f4f4f2;
+  background-color: var(--affine-background-secondary-color);
   font-weight: 600;
 }
 
