@@ -168,13 +168,19 @@ export function breaksToCarrier(markdown: string): string {
     .replace(/[ \t]{2,}\r?\n(?=[^\s])/g, LS);
 }
 
-/** Every text delta in a block snapshot, so a swap reaches nested blocks too. */
-function eachDelta(node: any, visit: (delta: any[]) => void): void {
+/**
+ * Every text delta in a block snapshot, however deeply it is nested.
+ *
+ * EXPORTED because `inline-marks.ts` walks the same snapshots for the same
+ * reason, and two copies of a recursive walk over an untyped tree is two
+ * chances to miss a container. A table keeps its cell text off to the side
+ * rather than in `children`, which is why this walks every value rather than
+ * just the block tree — a fact worth knowing once, not twice.
+ */
+export function eachDelta(node: any, visit: (delta: any[], owner: any) => void): void {
   if (!node || typeof node !== 'object') return;
   const delta = node?.props?.text?.delta;
-  if (Array.isArray(delta)) visit(delta);
-  // A table keeps its cell text off to the side rather than in `children`, so
-  // the whole object is walked instead of just the block tree.
+  if (Array.isArray(delta)) visit(delta, node.props.text);
   for (const value of Object.values(node)) {
     if (Array.isArray(value)) value.forEach((v) => eachDelta(v, visit));
     else if (value && typeof value === 'object') eachDelta(value, visit);

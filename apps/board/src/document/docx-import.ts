@@ -33,6 +33,8 @@
  * than left to notice.
  */
 import type { Block, DocAlign, DocSpec, Inline } from './blocks';
+import { mergeRuns } from './blocks';
+import { normaliseColour } from './colour';
 import { readZipMap } from './zip';
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
@@ -109,14 +111,6 @@ const fromEmu = (raw: string | null | undefined): number | undefined => {
   return Number.isFinite(n) ? (n / 914400) * 72 : undefined;
 };
 
-function colourOf(raw: string | null): string | undefined {
-  const hex = String(raw ?? '').trim().toLowerCase();
-  // `auto` means "whatever the theme says", which is the default ink — carrying
-  // it as a colour would pin black onto text that should follow the document.
-  if (!/^[0-9a-f]{6}$/.test(hex) || hex === 'auto') return undefined;
-  return `#${hex}`;
-}
-
 const ALIGN: Record<string, DocAlign> = {
   center: 'center', right: 'right', end: 'right', left: 'left', start: 'left',
   // `both` is justified. The model has no justification, and LEFT is what it
@@ -146,7 +140,7 @@ function runProps(rPr: Element | null, link?: string): Partial<Inline> {
   // `none` is Word switching underline off, and it is not the same as absent.
   if (u && val(u) !== 'none') marks.underline = true;
 
-  const colour = colourOf(val(kid(rPr, 'color')));
+  const colour = normaliseColour(val(kid(rPr, 'color')));
   if (colour) marks.color = colour;
 
   /**
@@ -169,7 +163,7 @@ function runProps(rPr: Element | null, link?: string): Partial<Inline> {
   // Two ways to highlight: a named colour, or cell shading behind the run.
   const highlight = val(kid(rPr, 'highlight'));
   const shd = kid(rPr, 'shd');
-  const shading = colourOf(shd?.getAttributeNS(W, 'fill') ?? shd?.getAttribute('w:fill') ?? null);
+  const shading = normaliseColour(shd?.getAttributeNS(W, 'fill') ?? shd?.getAttribute('w:fill') ?? null);
   if (highlight && highlight !== 'none') marks.highlight = NAMED_HIGHLIGHT[highlight] ?? '#fff3a3';
   else if (shading && shading !== '#ffffff') marks.highlight = shading;
 
@@ -187,6 +181,8 @@ const NAMED_HIGHLIGHT: Record<string, string> = {
 };
 
 const BREAK = String.fromCharCode(10);
+/** A backslash, for regexes built as strings so no build step can eat it. */
+const BS = String.fromCharCode(92);
 
 /** One `w:r`, as runs — a run can produce several when it contains breaks. */
 function runsOf(r: Element, marks: Partial<Inline>, ctx: Ctx): Inline[] {
@@ -267,45 +263,20 @@ function paragraphRuns(p: Element, ctx: Ctx): Inline[] {
   return trimBreaks(mergeRuns(out));
 }
 
-/** Adjacent runs with identical marks become one — smaller and wraps better. */
-function mergeRuns(runs: Inline[]): Inline[] {
-  const out: Inline[] = [];
-  for (const run of runs) {
-    if (!run.text) continue;
-    const last = out[out.length - 1];
-    /**
-     * A run of pure whitespace joins whatever came before it, whatever its
-     * own marks are. Word splits `Voidspace AI` into three runs — word, space,
-     * word — and treating the space as a distinct thing produced
-     * `[**Voidspace**]{size=14} [**AI**]{size=14}`: two spans where the file
-     * has one phrase, and a document that grows a little more markup every
-     * time it goes round.
-     */
-    if (last && !run.text.trim()) { last.text += run.text; continue; }
-    if (last
-      && !!last.bold === !!run.bold && !!last.italic === !!run.italic
-      && !!last.underline === !!run.underline && !!last.strike === !!run.strike
-      && last.color === run.color && last.highlight === run.highlight
-      && last.size === run.size && last.link === run.link) {
-      last.text += run.text;
-    } else out.push({ ...run });
-  }
-  return out;
-}
-
 /**
  * A line break at the very start or end of a paragraph is not a line break.
  *
  * Word uses them for spacing, and carrying them through produced a paragraph
- * that began with a stray `\` in the markdown and an empty first line on the
- * page. The gap between paragraphs is the renderer's job.
+ * that began with a stray backslash in the markdown and an empty first line on
+ * the page. The gap between paragraphs is the renderer's job.
  */
 function trimBreaks(runs: Inline[]): Inline[] {
   const out = runs.map((r) => ({ ...r }));
+  const BREAKS = new RegExp('[' + BS + 'r' + BS + 'n]+');
   const first = out[0];
-  if (first) first.text = first.text.replace(/^[\n\r]+/, '');
+  if (first) first.text = first.text.replace(new RegExp('^' + BREAKS.source), '');
   const last = out[out.length - 1];
-  if (last) last.text = last.text.replace(/[\n\r]+$/, '');
+  if (last) last.text = last.text.replace(new RegExp(BREAKS.source + '$'), '');
   return out.filter((r) => r.text !== '');
 }
 

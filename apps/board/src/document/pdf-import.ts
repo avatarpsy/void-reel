@@ -38,6 +38,7 @@
  * that is slightly flat is far better than one confidently wrong.
  */
 import type { Block, DocAlign, Inline } from './blocks';
+import { mergeRuns } from './blocks';
 
 /** The shape `pdfLayout` in the app returns. Declared, not imported: the board
  * must not depend on the website's module graph. */
@@ -274,7 +275,7 @@ export function importPdfLayout(pages: PdfPageLayout[]): ImportedPdf {
   let open: { runs: Inline[]; align?: DocAlign } | null = null;
   const flush = () => {
     if (open && open.runs.length) {
-      blocks.push({ kind: 'para', runs: merge(open.runs), ...(open.align ? { align: open.align } : {}) });
+      blocks.push({ kind: 'para', runs: mergeRuns(open.runs), ...(open.align ? { align: open.align } : {}) });
     }
     open = null;
   };
@@ -388,17 +389,6 @@ export function importPdfLayout(pages: PdfPageLayout[]): ImportedPdf {
 
   inferred.add('paragraphs from line spacing');
   return { blocks: tidy(blocks), inferred: [...inferred], pages: pages.length };
-}
-
-/** Adjacent runs with the same marks become one. */
-function merge(runs: Inline[]): Inline[] {
-  const out: Inline[] = [];
-  for (const run of runs) {
-    const last = out[out.length - 1];
-    if (last && !!last.bold === !!run.bold && !!last.italic === !!run.italic) last.text += run.text;
-    else out.push({ ...run });
-  }
-  return out.filter((r) => r.text !== '');
 }
 
 /** Trailing page breaks and empty paragraphs, which no document wants. */

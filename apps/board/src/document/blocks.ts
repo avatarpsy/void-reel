@@ -31,6 +31,7 @@
 import { Marked } from 'marked';
 
 import { isOnlyMarks, readMark } from './align-marks';
+import { HIGHLIGHT_DEFAULT, normaliseColour } from './colour';
 
 /**
  * A stretch of text with its marks. `link` carries an href, not a style.
@@ -97,27 +98,6 @@ function spanMarks(body: string): Partial<Inline> {
   }
   return marks;
 }
-
-/** The 16 CSS names worth supporting, plus `#abc` and `#aabbcc`. */
-const NAMED_COLOURS: Record<string, string> = {
-  black: '#000000', white: '#ffffff', red: '#cc0000', green: '#107c10',
-  blue: '#1a56db', yellow: '#f5c400', orange: '#e06c00', purple: '#6b21a8',
-  grey: '#666666', gray: '#666666', navy: '#1b2a4a', teal: '#0f6e6e',
-  maroon: '#7a1f1f', olive: '#5c6b16', silver: '#b8b8b8', lime: '#3fb618',
-};
-
-function normaliseColour(value: string): string | undefined {
-  const raw = String(value ?? '').trim().toLowerCase();
-  const named = NAMED_COLOURS[raw];
-  if (named) return named;
-  const hex = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/.exec(raw);
-  if (!hex) return undefined;
-  const digits = hex[1]!;
-  return `#${digits.length === 3 ? digits.split('').map((c) => c + c).join('') : digits}`;
-}
-
-/** What `==this==` means when no colour is named: the highlighter yellow. */
-const HIGHLIGHT_DEFAULT = '#fff3a3';
 
 const MARK_EXTENSIONS = [
   {
@@ -508,6 +488,35 @@ function blockFor(token: any, out: Block[], level = 0): void {
   }
 }
 
+/**
+ * Adjacent runs with identical marks become one.
+ *
+ * Smaller, wraps better, and produces far less .docx XML. Shared by both
+ * importers: the Word reader merges what Word split at its spaces, and the
+ * PDF reader merges what the extractor split at its positions. Two copies
+ * drifted the moment a mark was added to one and not the other.
+ *
+ * Whitespace joins whatever came before it whatever its own marks are —
+ * `Voidspace AI` arrives as word, space, word, and treating the space as a
+ * distinct thing produces two spans where the document has one phrase.
+ */
+export function mergeRuns(runs: Inline[]): Inline[] {
+  const out: Inline[] = [];
+  for (const run of runs) {
+    if (!run.text) continue;
+    const last = out[out.length - 1];
+    if (last && !run.text.trim()) { last.text += run.text; continue; }
+    if (last
+      && !!last.bold === !!run.bold && !!last.italic === !!run.italic
+      && !!last.underline === !!run.underline && !!last.strike === !!run.strike
+      && !!last.code === !!run.code
+      && last.color === run.color && last.highlight === run.highlight
+      && last.size === run.size && last.link === run.link) {
+      last.text += run.text;
+    } else out.push({ ...run });
+  }
+  return out;
+}
 export function parseMarkdown(markdown: string, title?: string): Block[] {
   const md = String(markdown ?? '');
   const out: Block[] = [];

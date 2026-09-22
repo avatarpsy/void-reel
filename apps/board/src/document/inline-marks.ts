@@ -28,8 +28,8 @@
  * the tool guidance tells the model, so it can keep load-bearing things off it.
  */
 
-/** What `==this==` means: the highlighter yellow, same as `blocks.ts`. */
-const HIGHLIGHT_DEFAULT = '#fff3a3';
+import { eachDelta } from './align-marks';
+import { HIGHLIGHT_DEFAULT, NAMED_COLOURS, normaliseColour } from './colour';
 
 interface Attrs {
   underline?: true;
@@ -48,30 +48,14 @@ const SPAN = /\[([^\]\n]+)\]\{([^}\n]*)\}/;
 const UNDERLINE = /\+\+(?=\S)([\s\S]*?\S)\+\+/;
 const HIGHLIGHT = /==(?=\S)([\s\S]*?\S)==/;
 
-const NAMED: Record<string, string> = {
-  black: '#000000', white: '#ffffff', red: '#cc0000', green: '#107c10',
-  blue: '#1a56db', yellow: '#f5c400', orange: '#e06c00', purple: '#6b21a8',
-  grey: '#666666', gray: '#666666', navy: '#1b2a4a', teal: '#0f6e6e',
-  maroon: '#7a1f1f', olive: '#5c6b16', silver: '#b8b8b8', lime: '#3fb618',
-};
-
-function colourOf(raw: string): string | undefined {
-  const value = raw.trim().toLowerCase();
-  if (NAMED[value]) return NAMED[value];
-  const hex = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/.exec(value);
-  if (!hex) return undefined;
-  const digits = hex[1]!;
-  return `#${digits.length === 3 ? digits.split('').map((c) => c + c).join('') : digits}`;
-}
-
 /** `{color=#c00 highlight=yellow}` → the attributes BlockSuite understands. */
 function spanAttrs(body: string): Attrs {
   const out: Attrs = {};
   for (const [, key, value] of body.matchAll(/(\w+)\s*=\s*"?([^\s"}]+)"?/g)) {
     const name = String(key).toLowerCase();
-    if (name === 'color' || name === 'colour') out.color = colourOf(String(value));
+    if (name === 'color' || name === 'colour') out.color = normaliseColour(String(value));
     else if (name === 'highlight' || name === 'background' || name === 'bg') {
-      out.background = colourOf(String(value));
+      out.background = normaliseColour(String(value));
     } else if (name === 'underline' && value !== 'false') out.underline = true;
     // `size` is deliberately not here — see the note at the top of the file.
   }
@@ -105,17 +89,6 @@ function split(text: string, inherited: Attrs): Array<{ text: string; attrs: Att
     ];
   }
   return text ? [{ text, attrs: inherited }] : [];
-}
-
-/** Every text delta in a snapshot, however deeply it is nested. */
-function eachDelta(node: any, visit: (delta: any[], owner: any) => void): void {
-  if (!node || typeof node !== 'object') return;
-  const delta = node?.props?.text?.delta;
-  if (Array.isArray(delta)) visit(delta, node.props.text);
-  for (const value of Object.values(node)) {
-    if (Array.isArray(value)) value.forEach((v) => eachDelta(v, visit));
-    else if (value && typeof value === 'object') eachDelta(value, visit);
-  }
 }
 
 /**
@@ -212,7 +185,7 @@ function tokenName(value: string): string | undefined {
   if (/^#[0-9a-f]{3,6}$/i.test(value)) return undefined;
   const m = /(?:foreground|background|highlight)-([a-z]+)\s*\)?\s*$/i.exec(value);
   const name = m?.[1]?.toLowerCase();
-  return name && NAMED[name] ? name : undefined;
+  return name && NAMED_COLOURS[name] ? name : undefined;
 }
 
 /** The span as the adapter leaves it: the opening bracket escaped. */
