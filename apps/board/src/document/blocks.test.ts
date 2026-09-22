@@ -145,3 +145,84 @@ describe('a title the document already carries', () => {
       .toEqual(['Q4 Plan', 'Overview']);
   });
 });
+
+/**
+ * A LETTERHEAD NEEDS A SMALL PICTURE.
+ *
+ * Markdown cannot size an image, so every picture was drawn at the full text
+ * column — which reads a 1024px logo as 1024 POINTS and sets it 450pt wide.
+ * Measured on a real certificate: two pages, the first one entirely logo.
+ *
+ * The hint rides on the url fragment because this document is ALSO an editable
+ * page on the board: a marker in the prose would survive the round trip as
+ * visible text the user has to delete, and a fragment is never displayed and
+ * never sent to a server.
+ */
+describe('image size and placement hints', () => {
+  const imageBlock = (md: string) =>
+    parseMarkdown(md).find((b) => b.kind === 'image') as
+      Extract<ReturnType<typeof parseMarkdown>[number], { kind: 'image' }>;
+
+  it('reads a width off the url fragment', () => {
+    const b = imageBlock('![](https://x.test/logo.png#w=120)');
+    expect(b.width).toBe(120);
+  });
+
+  it('accepts the long spelling, and an alignment beside it', () => {
+    const b = imageBlock('![](https://x.test/logo.png#width=96&align=left)');
+    expect(b.width).toBe(96);
+    expect(b.align).toBe('left');
+  });
+
+  it('leaves the url intact, fragment and all — fetch drops it anyway', () => {
+    const b = imageBlock('![](https://x.test/logo.png#w=120)');
+    expect(b.url).toBe('https://x.test/logo.png#w=120');
+  });
+
+  it('has no opinion when nothing was asked for', () => {
+    const b = imageBlock('![](https://x.test/chart.png)');
+    expect(b.width).toBeUndefined();
+    expect(b.align).toBeUndefined();
+  });
+
+  it('ignores a hint it cannot read rather than refusing the picture', () => {
+    const b = imageBlock('![](https://x.test/logo.png#w=wide&align=diagonal&nonsense)');
+    expect(b.kind).toBe('image');
+    expect(b.width).toBeUndefined();
+    expect(b.align).toBeUndefined();
+  });
+
+  it('caps an absurd width instead of trusting it', () => {
+    expect(imageBlock('![](https://x.test/logo.png#w=99999)').width).toBe(2000);
+  });
+
+  it('still keeps the alt text as the caption', () => {
+    const b = imageBlock('![Revenue by month](https://x.test/c.png#w=300)');
+    expect(b.alt).toBe('Revenue by month');
+    expect(b.width).toBe(300);
+  });
+});
+
+describe('a document that opens with a picture', () => {
+  it('keeps its own masthead instead of a heading above the logo', () => {
+    const out = parseMarkdown(
+      [
+        '![](https://x.test/logo.png#w=70&align=left)',
+        '',
+        '**Voidspace AI**',
+        '',
+        '## CERTIFICATE',
+      ].join('\n'),
+      'Internship Completion Certificate',
+    );
+    // The logo is still first: no file name stamped over the letterhead.
+    expect(out[0]!.kind).toBe('image');
+    const headings = out.filter((b) => b.kind === 'heading');
+    expect(headings.map((h: any) => h.runs.map((r: any) => r.text).join(''))).toEqual(['CERTIFICATE']);
+  });
+
+  it('still titles an ordinary document that opens with prose', () => {
+    const out = parseMarkdown('Just a paragraph.', 'Quarterly Review');
+    expect(out[0]!.kind).toBe('heading');
+  });
+});

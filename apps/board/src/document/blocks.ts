@@ -47,8 +47,18 @@ export type Block =
   | { kind: 'quote'; runs: Inline[] }
   | { kind: 'code'; text: string; lang?: string }
   | { kind: 'rule' }
-  | { kind: 'image'; url: string; alt: string }
+  | {
+    kind: 'image'; url: string; alt: string;
+    /**
+     * How wide to draw it, in points. Absent means "as wide as the column",
+     * which is right for a chart and catastrophic for a logo.
+     */
+    width?: number;
+    align?: DocAlign;
+  }
   | { kind: 'table'; header: Inline[][]; rows: Inline[][][] };
+
+export type DocAlign = 'left' | 'center' | 'right';
 
 export type DocFormat = 'pdf' | 'docx' | 'md';
 
@@ -117,10 +127,52 @@ function inlineRuns(tokens: any[] | undefined, inherited: Partial<Inline> = {}):
 }
 
 /** Paragraphs that contain nothing but one image become image blocks. */
-function loneImage(tokens: any[] | undefined): { url: string; alt: string } | null {
+/**
+ * ── HOW BIG, AND WHERE — WRITTEN ON THE URL ──────────────────────────────────
+ *
+ * `![logo](https://…/logo.png#w=120&align=left)`
+ *
+ * Markdown cannot size an image, and every document with a letterhead needs to:
+ * a company mark is 100 points wide, not 450. Without this the renderer scaled
+ * every picture to the full text column, so a logo took a whole page — measured,
+ * on a real certificate: two pages, the first one entirely logo.
+ *
+ * WHY THE URL FRAGMENT rather than a marker in the text. This document is also
+ * an EDITABLE PAGE on the board, and it goes markdown -> BlockSuite -> markdown
+ * whenever anyone touches it. A `::center::` or `{w=120}` marker in the prose
+ * survives that round trip as VISIBLE TEXT the user then has to delete. A
+ * fragment rides on the image's own src, is never displayed, and is never sent
+ * to a server either — `fetch` strips it — so the same url still resolves.
+ *
+ * Unknown or malformed hints are ignored rather than rejected: a hint is a
+ * refinement, and refusing to draw a picture because its width was misspelt
+ * would be a worse document than one with a big picture in it.
+ */
+function imageHints(url: string): { width?: number; align?: DocAlign } {
+  const hash = url.includes('#') ? url.slice(url.indexOf('#') + 1) : '';
+  if (!hash) return {};
+  const out: { width?: number; align?: DocAlign } = {};
+  for (const part of hash.split('&')) {
+    const [rawKey, rawValue] = part.split('=');
+    const key = String(rawKey ?? '').trim().toLowerCase();
+    const value = String(rawValue ?? '').trim().toLowerCase();
+    if (key === 'w' || key === 'width') {
+      const n = Number(value);
+      if (Number.isFinite(n) && n > 0) out.width = Math.min(2000, n);
+    } else if (key === 'align') {
+      if (value === 'left' || value === 'center' || value === 'right') out.align = value;
+    }
+  }
+  return out;
+}
+
+function loneImage(
+  tokens: any[] | undefined,
+): { url: string; alt: string; width?: number; align?: DocAlign } | null {
   const real = (tokens || []).filter((t) => !(t.type === 'text' && !String(t.text ?? '').trim()));
   if (real.length === 1 && real[0].type === 'image' && real[0].href) {
-    return { url: String(real[0].href), alt: String(real[0].text || '') };
+    const url = String(real[0].href);
+    return { url, alt: String(real[0].text || ''), ...imageHints(url) };
   }
   return null;
 }
@@ -224,7 +276,20 @@ export function parseMarkdown(markdown: string, title?: string): Block[] {
     const sameWords = firstReal?.kind === 'heading'
       && firstReal.runs.map((r) => r.text).join('').trim().toLowerCase() === t.toLowerCase();
     const already = firstReal?.kind === 'heading' && (firstReal.level === 1 || sameWords);
-    if (!already) out.unshift({ kind: 'heading', level: 1, runs: [{ text: t }] });
+    /**
+     * ── A DOCUMENT THAT OPENS WITH A PICTURE HAS ITS OWN MASTHEAD ─────────────
+     *
+     * The title is injected so a document is never untitled. But a LETTERHEAD
+     * opens with a logo, and shoving the file name above it produced exactly
+     * what a letterhead must not look like: a big black heading, then the
+     * company mark, then the real title. Observed on a real certificate.
+     *
+     * An author who began with an image has composed their own opening, so the
+     * title stops being a heading and remains what it also is — the name of the
+     * file they download.
+     */
+    const ownMasthead = firstReal?.kind === 'image';
+    if (!already && !ownMasthead) out.unshift({ kind: 'heading', level: 1, runs: [{ text: t }] });
   }
   return out;
 }

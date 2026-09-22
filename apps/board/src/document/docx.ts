@@ -60,10 +60,13 @@ export async function renderDocx(spec: DocSpec): Promise<Blob> {
     return out;
   };
 
-  const picture = (img: LoadedImage) => {
-    // Fit the text column — 6.5in at 1in margins — and never upscale.
+  const picture = (img: LoadedImage, requested?: number) => {
+    // Fit the text column — 6.5in at 1in margins. An explicit width wins, so a
+    // logo can be a logo; without one this fell back to the column and set a
+    // letterhead mark the width of the page. See `imageHints` in blocks.ts.
     const maxW = 624; // px at 96dpi
-    const scale = Math.min(1, maxW / Math.max(1, img.width));
+    const target = requested ? Math.min(requested, maxW) : Math.min(img.width, maxW);
+    const scale = target / Math.max(1, img.width);
     return new ImageRun({
       data: img.bytes,
       type: img.png ? 'png' : 'jpg',
@@ -131,16 +134,19 @@ export async function renderDocx(spec: DocSpec): Promise<Blob> {
         break;
       case 'image': {
         const img = images.get(b.url);
+        const imgAlign = b.align === 'left' ? AlignmentType.LEFT
+          : b.align === 'right' ? AlignmentType.RIGHT
+            : AlignmentType.CENTER;
         if (img) {
           children.push(new Paragraph({
-            alignment: AlignmentType.CENTER,
+            alignment: imgAlign,
             spacing: { before: 160, after: 80 },
-            children: [picture(img)],
+            children: [picture(img, b.width)],
           }));
         }
         if (b.alt) {
           children.push(new Paragraph({
-            alignment: AlignmentType.CENTER,
+            alignment: imgAlign,
             children: [new TextRun({ text: b.alt, font: body, size: 18, italics: true, color: '6A6A6A' })],
             spacing: { after: 200 },
           }));

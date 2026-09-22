@@ -313,16 +313,30 @@ export async function renderPdf(spec: DocSpec): Promise<PdfResult> {
         const img = images.get(b.url);
         if (img) {
           const embedded = img.png ? await pdf.embedPng(img.bytes) : await pdf.embedJpg(img.bytes);
-          const scale = Math.min(1, colWidth / embedded.width);
+          /**
+           * AN EXPLICIT WIDTH WINS, capped to the column.
+           *
+           * Without one this fell back to the column width for everything,
+           * which reads a 1024px logo as 1024 POINTS and draws it 450pt wide —
+           * a letterhead mark the size of the page. See `imageHints`.
+           */
+          const target = b.width
+            ? Math.min(b.width, colWidth)
+            : Math.min(embedded.width, colWidth);
+          const scale = target / Math.max(1, embedded.width);
           const w = embedded.width * scale;
           const h = embedded.height * scale;
           // A picture taller than the text column gets its own page rather than
           // being cut in half.
           if (y - h < floor) newPage();
           const fit = Math.min(1, (size.h - MARGIN - floor) / h);
-          page.drawImage(embedded, {
-            x: MARGIN + (colWidth - w * fit) / 2, y: y - h * fit, width: w * fit, height: h * fit,
-          });
+          const drawW = w * fit;
+          const x = b.align === 'left'
+            ? MARGIN
+            : b.align === 'right'
+              ? MARGIN + colWidth - drawW
+              : MARGIN + (colWidth - drawW) / 2;
+          page.drawImage(embedded, { x, y: y - h * fit, width: drawW, height: h * fit });
           y -= h * fit + 6;
         }
         if (b.alt) drawLines(layout([{ text: b.alt, italic: true }], f, 9, colWidth, dropped), 9, 0, muted);
