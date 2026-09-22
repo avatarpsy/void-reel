@@ -260,3 +260,50 @@ describe('pictures', () => {
     expect(inferred.join(' ')).toMatch(/pictures placed where they sat/);
   });
 });
+
+describe('letter-spaced text', () => {
+  /**
+   * A designer who tracks a title apart leaves the glyphs in separate runs with
+   * a small, EVEN gap between them. A fixed threshold reads every one of those
+   * as a space and the title comes out `S A I N I H A R`.
+   *
+   * The line's own median gap is the reference: tracking sits at the median, a
+   * real word gap is well above it.
+   */
+  it('does not put a space between tracked letters', () => {
+    const letters = 'VOIDSPACE'.split('');
+    const items = letters.map((ch, i) => ({
+      text: ch, x: MARGIN + i * 14, y: 100, width: 10, size: 18, font: 'Georgia',
+    }));
+    expect(textOf(importPdfLayout([{ ...PAGE, items }]).blocks)).toBe('VOIDSPACE');
+  });
+
+  it('still finds the gap BETWEEN two tracked words', () => {
+    // Four points between letters, twelve between words.
+    const spec = [['V', 0], ['O', 14], ['I', 28], ['D', 42], ['A', 64], ['I', 78]] as const;
+    const items = spec.map(([ch, dx]) => ({
+      text: ch, x: MARGIN + dx, y: 100, width: 10, size: 18, font: 'Georgia',
+    }));
+    expect(textOf(importPdfLayout([{ ...PAGE, items }]).blocks)).toBe('VOID AI');
+  });
+
+  /** Ordinary prose, where the extractor already includes the spaces. */
+  it('leaves normal text exactly as it was', () => {
+    const items = [
+      run('The positioning is that ', MARGIN, 100),
+      run('creators win.', MARGIN + 120, 100),
+    ];
+    expect(textOf(importPdfLayout([{ ...PAGE, items }]).blocks))
+      .toBe('The positioning is that creators win.');
+  });
+
+  /**
+   * WHAT CANNOT BE RECOVERED, recorded so nobody goes looking for it: when the
+   * spaces are real characters in the file — the author typed them — the word
+   * boundaries are gone at the source. Adobe's own PDF-to-Word does the same.
+   */
+  it('cannot un-space text whose spaces are really in the file', () => {
+    const items = [run('S A I  N I H A R', MARGIN, 100, 17)];
+    expect(textOf(importPdfLayout([{ ...PAGE, items }]).blocks)).toContain('S A I');
+  });
+});

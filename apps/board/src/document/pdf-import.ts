@@ -127,12 +127,13 @@ const ITALIC = /(italic|oblique|[-,]it\b)/i;
  */
 function lineRuns(line: Line): Inline[] {
   const out: Inline[] = [];
+  const threshold = spaceThreshold(line);
   let previous: PdfTextItem | undefined;
   for (const item of line.items) {
     let text = item.text;
     if (previous) {
       const gap = item.x - (previous.x + previous.width);
-      const needsSpace = gap > item.size * 0.18
+      const needsSpace = gap > threshold
         && !/\s$/.test(previous.text) && !/^\s/.test(text);
       if (needsSpace) text = ` ${text}`;
     }
@@ -147,6 +148,40 @@ function lineRuns(line: Line): Inline[] {
     previous = item;
   }
   return out.filter((r) => r.text.trim() !== '' || out.length === 1);
+}
+
+/**
+ * -- HOW WIDE A GAP HAS TO BE, ON THIS LINE ---------------------------------
+ *
+ * A fixed fraction of the type size is right for ordinary prose and wrong for
+ * LETTER-SPACED text, where the designer has pushed every character apart. A
+ * real resume came out as
+ *
+ *     # S A I N I H A R T A D I C H E T T Y
+ *
+ * because each of those gaps cleared the fixed threshold.
+ *
+ * Letter-spacing has a signature: the gaps come in two sizes, a small one
+ * between letters and a large one between words. So the line's own MEDIAN gap
+ * is the reference — a real space is well above it, and tracking is not. For
+ * ordinary text, where the extractor hands back whole words with their spaces
+ * already in them, the gaps are near zero and this is the fixed rule again.
+ */
+function spaceThreshold(line: Line): number {
+  const size = line.size || 11;
+  const fixed = size * 0.18;
+  if (line.items.length < 4) return fixed;
+
+  const gaps: number[] = [];
+  for (let i = 1; i < line.items.length; i++) {
+    const previous = line.items[i - 1]!;
+    gaps.push(line.items[i]!.x - (previous.x + previous.width));
+  }
+  gaps.sort((a, b) => a - b);
+  const median = gaps[Math.floor(gaps.length / 2)] ?? 0;
+  // 1.6x, so a word gap in letter-spaced text still counts and a letter gap
+  // does not. Never BELOW the fixed rule, or ordinary prose loses its spaces.
+  return Math.max(fixed, median * 1.6);
 }
 
 /* ── the document's own measurements ───────────────────────────────────────── */

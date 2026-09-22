@@ -37,7 +37,21 @@ function escapeText(text: string): string {
     // The pipe is NOT here: it is only special inside a table, and escaping it
     // twice — once here and once in the cell — produced `x \| y`, which reads
     // back as a cell containing a backslash and then a new column.
-    .replace(/([*_`~[\]<>#+])/g, '\\$1');
+    // `#`, `>`, `+` and `-` are only markup at the START of a line, and a
+    // phone number written `\+91` is what escaping them everywhere looks like.
+    // The line-start case is handled by `escapeLineStart` below.
+    .replace(/([*_`~[\]<>])/g, '\\$1');
+}
+
+/**
+ * A line that would be read back as a list, a heading or a quote.
+ *
+ * Applied to the finished LINE rather than to each run, because whether a
+ * character is markup depends on where it is: `# ` opens a heading at the
+ * start of a line and is a hash anywhere else.
+ */
+function escapeLineStart(line: string): string {
+  return line.replace(/^(\s*)([-+>#]|\d+[.)])(\s)/, '$1\\$2$3');
 }
 
 /**
@@ -124,7 +138,7 @@ function blockToLines(b: Block): string[] {
       return [...alignComment(b.align), `${'#'.repeat(b.level)} ${runsToMarkdown(b.runs)}`];
 
     case 'para':
-      return [...alignComment(b.align), runsToMarkdown(b.runs)];
+      return [...alignComment(b.align), escapeLineStart(runsToMarkdown(b.runs))];
 
     case 'list': {
       const indent = '  '.repeat(Math.max(0, b.level));
