@@ -119,3 +119,38 @@ describe('a letterhead survives the canvas', () => {
     expect(text).not.toContain('TechnologiesVoid');
   }, 60_000);
 });
+
+/**
+ * THE OTHER DIRECTION: what the USER types on the canvas, coming out.
+ *
+ * Everything above starts from markdown. These start from the note, because
+ * that is what a hand-edit produces and it is the half that cannot be checked
+ * by reading the markdown the agent wrote.
+ */
+describe('what the user types on the canvas survives leaving it', () => {
+  it('keeps a shift+Enter line break as a hard break', async () => {
+    const board = makeTestBoard();
+    const { noteId } = await placeMarkdownDocument(board as any, 'placeholder');
+    const note: any = board.store.getBlock(noteId)!.model;
+    const para: any = note.children.find((c: any) => c.flavour === 'affine:paragraph');
+    // Exactly what the inline editor stores for shift+Enter.
+    para.props.text.replace(0, para.props.text.length, 'first' + NL + 'second');
+
+    const back = await noteToMarkdown(board as any, noteId);
+    const text = (parseMarkdown(back)[0] as any).runs.map((r: any) => r.text).join('');
+    expect(text).toBe('first' + NL + 'second');
+    expect(text).not.toBe('firstsecond');
+  }, 60_000);
+
+  it('keeps underline and colour, which the note stores natively', async () => {
+    const board = makeTestBoard();
+    const { noteId } = await placeMarkdownDocument(board as any, 'plain words here');
+    const note: any = board.store.getBlock(noteId)!.model;
+    const para: any = note.children.find((c: any) => c.flavour === 'affine:paragraph');
+    para.props.text.format(0, 5, { underline: true });
+
+    // Read back off the model, which is what an export of the note sees.
+    const delta = para.props.text.yText.toDelta();
+    expect(delta[0].attributes).toMatchObject({ underline: true });
+  }, 60_000);
+});

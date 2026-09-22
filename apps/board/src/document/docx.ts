@@ -50,6 +50,9 @@ export async function renderDocx(spec: DocSpec): Promise<Blob> {
     ? Math.round(240 * Math.min(3, Math.max(0.8, asked)))
     : LINE;
 
+  /** The newline a hard break becomes in the block model. */
+  const BREAK = String.fromCharCode(10);
+
   const hex6 = (value: string) => String(value ?? '').replace('#', '').toUpperCase();
 
   const runsOf = (runs: Inline[], font: string, extra: Record<string, unknown> = {}): any[] => {
@@ -74,13 +77,28 @@ export async function renderDocx(spec: DocSpec): Promise<Blob> {
         ...(r.code ? { shading: { fill: 'F2F2F2' } } : {}),
         ...extra,
       };
-      if (r.link) {
-        out.push(new ExternalHyperlink({
-          link: r.link,
-          children: [new TextRun({ ...base, style: 'Hyperlink' })],
-        }));
-      } else {
-        out.push(new TextRun(base));
+      /**
+       * ── A HARD BREAK INSIDE A RUN ─────────────────────────────────────────
+       *
+       * The PDF splits on the newline and sets two lines. Word has no newline
+       * inside a run at all: the character is simply not rendered, so an
+       * address block came out as one welded line — found by unzipping the
+       * .docx and looking for `<w:br/>`, which was not there.
+       *
+       * `break: 1` puts the break BEFORE that run's text, so the pieces after
+       * the first each carry one.
+       */
+      const pieces = String(base.text ?? '').split(BREAK);
+      const parts = pieces.map((text, i) => ({ ...base, text, ...(i ? { break: 1 } : {}) }));
+      for (const part of parts) {
+        if (r.link) {
+          out.push(new ExternalHyperlink({
+            link: r.link,
+            children: [new TextRun({ ...part, style: 'Hyperlink' })],
+          }));
+        } else {
+          out.push(new TextRun(part));
+        }
       }
     }
     return out;
