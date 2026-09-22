@@ -22,6 +22,7 @@
  * per document, rewritten when the canvas changes.
  */
 import { readBlockMeta } from '../board/board-meta';
+import { readMark } from './align-marks';
 import { listDocuments } from './sections';
 
 import type { MountedBoard } from '../blocksuite/editor';
@@ -78,7 +79,7 @@ export function installDocumentTags(board: MountedBoard, container: HTMLElement)
       if (tag) el.dataset.vsDocTag = tag;
       else delete el.dataset.vsDocTag;
     }
-    stampImageAlignment(board, container);
+    stampAlignment(board, container);
   };
 
   const schedule = (): void => {
@@ -100,51 +101,76 @@ export function installDocumentTags(board: MountedBoard, container: HTMLElement)
 }
 
 /**
- * -- A CENTRED LOGO IS CENTRED ON THE CANVAS TOO ----------------------------
+ * -- THE CANVAS SHOWS THE ALIGNMENT THE FILE WILL USE ----------------------
  *
- * `#align=center` centres the picture in the exported PDF and in Word, because
- * both renderers read the hint. BlockSuite's image block has no alignment prop
- * at all — its schema is caption, sourceId, width, height, index, xywh, rotate
- * — so the canvas drew every picture hard left while the file centred it.
+ * Two mismatches, both of which made a document on the board look like a
+ * different document from the one it exported:
  *
- * The alignment therefore lives where it already survives: on the URL. This
- * copies it onto the ELEMENT so CSS can act on it, which is the same trick the
- * document tag next door uses and runs in the same pass.
+ *   A PICTURE. `#align=left` left-aligns the logo in the PDF and in Word;
+ *   BlockSuite CENTRES images in a note by default and has no alignment prop
+ *   at all, so a left-aligned masthead sat in the middle of the canvas.
  *
- * Honest about the limit: there is nowhere to STORE an alignment a user
- * changes by hand, so the canvas can show it and cannot edit it. Dragging the
- * picture wider, which is the change people actually make, is stored and does
- * round-trip — see `withDrawnWidth`.
+ *   A PARAGRAPH. `<!-- align:right -->` right-aligns the date in the file.
+ *   The alignment rides on the canvas as an invisible mark in the
+ *   paragraph's own text (see `align-marks.ts`) because there is nowhere
+ *   else to keep it — and nothing was READING that mark back to draw it, so
+ *   the date sat on the left.
+ *
+ * Both are solved the same way: the alignment is copied onto the ELEMENT, in
+ * the pass that already stamps the document tag, and CSS acts on it. Left is
+ * stamped too, explicitly, because for a picture left is not the default —
+ * it is a correction.
  */
-function stampImageAlignment(board: MountedBoard, container: HTMLElement): void {
+function stampAlignment(board: MountedBoard, container: HTMLElement): void {
   /**
-   * Scoped to pictures INSIDE a document. This whole pass re-runs on every
-   * frame in which anything changed — which, while somebody is typing, is most
-   * of them — so it queries only what the CSS below can act on rather than
-   * every picture on the board.
+   * Scoped to what is INSIDE a document, and to the two flavours that can
+   * carry an alignment. This re-runs on every frame in which anything changed
+   * — which, while somebody is typing, is most of them.
    */
   const nodes = container.querySelectorAll<HTMLElement>(
-    'affine-edgeless-note[data-vs-doc-tag] affine-image[data-block-id]',
+    'affine-edgeless-note[data-vs-doc-tag] affine-image[data-block-id],'
+    + 'affine-edgeless-note[data-vs-doc-tag] affine-paragraph[data-block-id]',
   );
   for (const el of nodes) {
     const id = el.dataset.blockId;
-    const align = id ? alignOfImage(board, id) : '';
-    // Written only when it CHANGED. An attribute set to the value it already
+    const align = id ? alignOfBlock(board, id) : '';
+    // Written only when it CHANGED: an attribute set to the value it already
     // has is still a DOM write, and this runs a lot.
-    if (align === (el.dataset.vsImgAlign ?? '')) continue;
-    if (align) el.dataset.vsImgAlign = align;
-    else delete el.dataset.vsImgAlign;
+    if (align === (el.dataset.vsAlign ?? '')) continue;
+    if (align) el.dataset.vsAlign = align;
+    else delete el.dataset.vsAlign;
   }
 }
 
-/** `center` or `right` from the picture's own url, or '' for the default. */
-function alignOfImage(board: MountedBoard, blockId: string): string {
+/**
+ * What alignment a block carries, whichever way it carries it.
+ *
+ * A picture keeps it on its url, because that survives the round trip. A
+ * paragraph keeps it as an invisible prefix in its text, because a paragraph
+ * has no property to put it in. Neither is a design anybody would choose from
+ * scratch; both are what BlockSuite leaves available.
+ */
+function alignOfBlock(board: MountedBoard, blockId: string): string {
   const model: any = board.store.getBlock(blockId)?.model;
-  if (model?.flavour !== 'affine:image') return '';
-  const source = String(model?.props?.sourceId ?? '');
-  // The url is inside the media ref; a plain `#align=` on the raw value is
-  // enough to read without decoding it, and costs nothing when it is absent.
-  const hit = /align%3D(center|centre|right)|align=(center|centre|right)/i.exec(source);
-  const value = (hit?.[1] ?? hit?.[2] ?? '').toLowerCase();
-  return value === 'centre' ? 'center' : value;
+  if (!model) return '';
+
+  if (model.flavour === 'affine:image') {
+    const source = String(model?.props?.sourceId ?? '');
+    // The url sits inside the media ref; reading `align=` off the raw value
+    // needs no decoding and costs nothing when it is absent.
+    const hit = /align(?:%3D|=)(center|centre|right|left)/i.exec(source);
+    const value = (hit?.[1] ?? '').toLowerCase();
+    // LEFT is stamped for a picture: BlockSuite centres one by default, so
+    // left has to be asked for rather than assumed.
+    if (value === 'centre') return 'center';
+    return value || 'left';
+  }
+
+  if (model.flavour === 'affine:paragraph') {
+    const text = String(model?.text?.toString?.() ?? '');
+    const { align } = readMark(text);
+    return align && align !== 'left' ? align : '';
+  }
+  return '';
 }
+

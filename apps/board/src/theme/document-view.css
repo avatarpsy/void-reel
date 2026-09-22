@@ -516,11 +516,58 @@ affine-edgeless-note[data-vs-doc-tag] .affine-block-component {
   line-height: 1.45;
 }
 
-/* 7pt after a paragraph is 10px at this body size, which is what BlockSuite
-   already uses — stated here so it is deliberate rather than a coincidence
-   that a future version could quietly change. */
-affine-edgeless-note[data-vs-doc-tag] .affine-block-component {
+/* ── THE GAP BETWEEN BLOCKS ─────────────────────────────────────────────────
+   7pt after a paragraph is 10px at this body size, stated here so it is
+   deliberate rather than a coincidence a future version could change.
+
+   NOT applied to a divider. A divider carries its own vertical room, and
+   flattening it to 10px drew the rule straight through the line above it — the
+   masthead's hairline sat on top of "Registration Number". A blanket margin on
+   every block is exactly the kind of rule that looks tidy and breaks the one
+   block that was not a paragraph. */
+affine-edgeless-note[data-vs-doc-tag] affine-paragraph > .affine-block-component,
+affine-edgeless-note[data-vs-doc-tag] affine-list > .affine-block-component,
+affine-edgeless-note[data-vs-doc-tag] affine-image > .affine-block-component {
   margin: 10px 0;
+}
+
+/* ── THE RULE ───────────────────────────────────────────────────────────────
+   The exporter's `rule` case drops 8pt, draws the hairline, then drops 14pt —
+   asymmetric, and deliberately so: a rule belongs to what follows it. Against
+   an 11pt body those are 12px and 20px here. */
+affine-edgeless-note[data-vs-doc-tag] affine-divider > .affine-block-component {
+  margin: 12px 0 20px;
+}
+affine-edgeless-note[data-vs-doc-tag] affine-divider hr,
+affine-edgeless-note[data-vs-doc-tag] affine-divider .affine-divider-block-container {
+  margin: 0;
+  border-color: var(--affine-divider-color);
+}
+
+/* ── ALIGNMENT, WHICH THE CANVAS COULD NOT SHOW UNTIL IT WAS STAMPED ────────
+   `document/tags.ts` copies the alignment onto the element; this draws it. A
+   paragraph aligns its text; a picture is a block-level custom element, so
+   `text-align` does nothing to it and the margins do the work.
+
+   LEFT is spelled out for a picture because BlockSuite centres one by default:
+   for a paragraph left is the default, for a picture it is a correction. */
+affine-edgeless-note[data-vs-doc-tag] affine-paragraph[data-vs-align='center'] {
+  text-align: center;
+}
+affine-edgeless-note[data-vs-doc-tag] affine-paragraph[data-vs-align='right'] {
+  text-align: right;
+}
+affine-edgeless-note[data-vs-doc-tag] affine-image[data-vs-align='left'] {
+  display: block;
+  margin-inline: 0 auto;
+}
+affine-edgeless-note[data-vs-doc-tag] affine-image[data-vs-align='center'] {
+  display: block;
+  margin-inline: auto;
+}
+affine-edgeless-note[data-vs-doc-tag] affine-image[data-vs-align='right'] {
+  display: block;
+  margin-inline: auto 0;
 }
 
 /* 20pt, 15.5pt, 13pt, 11.5pt against an 11pt body, and bold like the exporter
@@ -614,14 +661,6 @@ affine-edgeless-note[data-vs-doc-tag]::after {
 
    `margin-inline` rather than `text-align`: the image block is a block-level
    custom element, so the text property does nothing to it. */
-affine-edgeless-note[data-vs-doc-tag] affine-image[data-vs-img-align='center'] {
-  display: block;
-  margin-inline: auto;
-}
-affine-edgeless-note[data-vs-doc-tag] affine-image[data-vs-img-align='right'] {
-  display: block;
-  margin-inline: auto 0;
-}
 
 /* ── ROOM TO BREATHE, AND SOMETHING TO GRAB ─────────────────────────────────
    A picture flush against the paragraph under it reads as part of it. The
