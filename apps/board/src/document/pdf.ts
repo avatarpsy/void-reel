@@ -22,7 +22,7 @@
 import type { PDFFont, PDFPage } from 'pdf-lib';
 
 import type { Block, DocAlign, DocSpec, Inline } from './blocks';
-import { parseMarkdown } from './blocks';
+import { headingNumbers, parseMarkdown, wantsNumbering } from './blocks';
 import { loadImages } from './images';
 import { loadDocumentFonts, type Style } from './fonts';
 
@@ -51,6 +51,20 @@ function leadingFor(spec: DocSpec): number {
   return LEADING * Math.min(3, Math.max(0.8, asked));
 }
 const H_SIZE = [20, 15.5, 13, 11.5];
+
+/**
+ * How deep a contents page goes.
+ *
+ * Three levels is what a report or a contract lists. Listing every h4 as
+ * well produces a contents page longer than the section it describes,
+ * which is the commonest way one stops being useful.
+ */
+const TOC_DEPTH = 3;
+
+/** A heading's words, with no marks — what a contents line reads as. */
+function plain(runs: Inline[]): string {
+  return runs.map((r) => r.text).join('').replace(/\s+/g, ' ').trim();
+}
 const H_BEFORE = [0, 20, 16, 14];
 const H_AFTER = [10, 8, 6, 5];
 
@@ -270,10 +284,43 @@ export function layout(
 
 export interface PdfResult { blob: Blob; pages: number; droppedGlyphs: number }
 
+/**
+ * ══════════════════════════════════════════════════════════════════════
+ * A CONTENTS PAGE NEEDS THE DOCUMENT TO ALREADY EXIST
+ * ══════════════════════════════════════════════════════════════════════
+ *
+ * "Payment ............ 4" cannot be written until it is known that
+ * Payment fell on page 4 — and where it falls depends on how long the
+ * contents page is, which depends on how many headings there are. So the
+ * document is set TWICE: once to find out, once for real.
+ *
+ * The two passes paginate identically because the contents page occupies
+ * the same lines in both — the entries are known from the headings before
+ * either pass, and only the NUMBERS are missing the first time. Getting
+ * that wrong is the classic way a contents page ends up off by one.
+ *
+ * Only ever two passes, and only when the document asks for contents. A
+ * 61-page document sets in ~540ms, so the honest cost is about a second
+ * for the documents long enough to want one.
+ */
 export async function renderPdf(spec: DocSpec): Promise<PdfResult> {
+  const wantsToc = parseMarkdown(spec.markdown, spec.title)
+    .some((b) => b.kind === 'toc');
+  if (!wantsToc) return renderPass(spec, null);
+  const probe = await renderPass(spec, null);
+  return renderPass(spec, probe.headingPages);
+}
+
+/** One setting of the document. `known` fills the contents page. */
+async function renderPass(
+  spec: DocSpec,
+  known: Map<number, number> | null,
+): Promise<PdfResult & { headingPages: Map<number, number> }> {
   const { PDFDocument, rgb } = await import('pdf-lib');
 
   const blocks = parseMarkdown(spec.markdown, spec.title);
+  // One answer for both writers — see `wantsNumbering`.
+  const numbered = wantsNumbering(spec, blocks);
   const images = await loadImages(blocks);
   const pdf = await PDFDocument.create();
   const serif = spec.typeface !== 'sans';
@@ -284,7 +331,9 @@ export async function renderPdf(spec: DocSpec): Promise<PdfResult> {
    */
   const f = await loadDocumentFonts(pdf, serif, spec.markdown ?? '');
   const dropped = { n: 0 };
-
+  /** Which page each heading landed on, by its order in the document. */
+  const headingPages = new Map<number, number>();
+  let headingIndex = 0;
   const sheet = PAGE[spec.pageSize === 'letter' ? 'letter' : 'a4'];
   // Landscape is the same sheet turned, which is what every word processor
   // means by it — not a different paper size.
@@ -310,6 +359,39 @@ export async function renderPdf(spec: DocSpec): Promise<PdfResult> {
 
   let page: PDFPage = pdf.addPage([size.w, size.h]);
   let y = size.h - MARGIN - topOffset;
+
+  const numbers = headingNumbers(blocks as Block[], numbered);
+
+  /**
+   * The contents entries, in document order.
+   *
+   * Read from the BLOCKS rather than from what has been drawn so far,
+   * because the contents page comes before the headings it lists — on
+   * both passes it has to know the whole shape up front, or the first pass
+   * would reserve the wrong number of lines and the second would
+   * repaginate.
+   */
+  const tocEntries = (all: Block[]) => {
+    const out: Array<{ index: number; level: number; text: string }> = [];
+    let i = 0;
+    for (const block of all) {
+      if (block.kind !== 'heading') continue;
+      const index = i;
+      i += 1;
+      // The title of the document is not an entry in its own contents.
+      if (index === 0 && block.level === 1) continue;
+      if (block.level > TOC_DEPTH) continue;
+      // The SAME number the body will print — see `headingNumbers`.
+      const label = numbers.get(index)?.number;
+      out.push({
+        index,
+        level: block.level,
+        text: `${label ? `${label} ` : ''}${plain(block.runs)}`,
+      });
+    }
+    return out;
+  };
+
   const newPage = () => {
     page = pdf.addPage([size.w, size.h]);
     y = size.h - MARGIN - topOffset;
@@ -448,7 +530,17 @@ export async function renderPdf(spec: DocSpec): Promise<PdfResult> {
       case 'heading': {
         const fs = H_SIZE[b.level - 1]!;
         y -= H_BEFORE[b.level - 1]!;
-        const lines = layout(b.runs.map((r) => ({ ...r, bold: true })), f, fs, colWidth, dropped);
+        /**
+         * The clause number, when the document asked to be numbered.
+         * Counted here rather than written into the text, so inserting a
+         * section renumbers everything after it instead of nothing.
+         */
+        const label = numbers.get(headingIndex)?.number ?? '';
+        const runs = b.runs.map((r) => ({ ...r, bold: true }));
+        const lines = layout(
+          label ? [{ text: `${label} `, bold: true }, ...runs] : runs,
+          f, fs, colWidth, dropped,
+        );
         /**
          * WIDOW CONTROL — a heading alone at the foot of a page is the single
          * most obvious sign a document was generated rather than typeset. If it
@@ -456,9 +548,75 @@ export async function renderPdf(spec: DocSpec): Promise<PdfResult> {
          */
         const block = lines.length * fs * leading + BODY_SIZE * leading * 2;
         if (y - block < floor) newPage();
+        // Recorded AFTER the widow check, so the page is the one the
+        // heading actually prints on rather than the one it was about to
+        // overflow — which is the off-by-one a contents page shows up.
+        headingPages.set(headingIndex, pdf.getPageCount());
+        headingIndex += 1;
         // A heading is ranged or centred, never justified — see `DocAlign`.
         drawLines(lines, fs, 0, ink, undefined, ranged(b.align));
         y -= H_AFTER[b.level - 1]!;
+        break;
+      }
+
+      case 'toc': {
+        /**
+         * ── THE CONTENTS PAGE ────────────────────────────────────────
+         *
+         * Entry, leader dots, page number. The dots are what make a long
+         * title and a short one both readable across the measure, and
+         * they are why a contents page looks like one rather than like a
+         * list: the eye follows them to the number.
+         *
+         * On the FIRST pass the numbers are not known yet, so the space
+         * is drawn and left blank. The lines are identical either way,
+         * which is what keeps the two passes paginating the same.
+         */
+        const entries = tocEntries(blocks as Block[]);
+        if (!entries.length) break;
+        const titleFs = H_SIZE[1]!;
+        y -= H_BEFORE[1]!;
+        drawLines(layout([{ text: 'Contents', bold: true }], f, titleFs, colWidth, dropped),
+          titleFs, 0, ink);
+        y -= H_AFTER[1]!;
+        const fs = BODY_SIZE;
+        const lineH = fs * leading;
+        entries.forEach((entry, n) => {
+          need(lineH);
+          // Indented by level, so the shape of the document is visible.
+          const indent = (entry.level - 1) * 16;
+          const at = known?.get(entry.index);
+          const number = at ? String(at) : '';
+          const numberFont = f.base('regular');
+          const numberW = numberFont.widthOfTextAtSize(number, fs);
+          const parts = shapeRun(entry.text, entry.level === 1 ? 'bold' : 'regular', f, dropped);
+          const baseline = y - fs;
+          let x = MARGIN + indent;
+          for (const part of parts) {
+            page.drawText(part.text, { x, y: baseline, size: fs, font: part.font, color: ink });
+            x += part.font.widthOfTextAtSize(part.text, fs);
+          }
+          const right = MARGIN + colWidth;
+          if (number) {
+            page.drawText(number, {
+              x: right - numberW, y: baseline, size: fs, font: numberFont, color: ink,
+            });
+            // Leader dots, stopping short of both ends so nothing collides.
+            const from = x + 6;
+            const to = right - numberW - 6;
+            if (to > from) {
+              const dot = numberFont.widthOfTextAtSize('.', fs);
+              const count = Math.floor((to - from) / (dot * 2));
+              for (let d = 0; d < count; d++) {
+                page.drawText('.', {
+                  x: from + d * dot * 2, y: baseline, size: fs, font: numberFont, color: hair,
+                });
+              }
+            }
+          }
+          y -= lineH;
+          if (n === entries.length - 1) y -= 10;
+        });
         break;
       }
       case 'para':
@@ -709,5 +867,6 @@ export async function renderPdf(spec: DocSpec): Promise<PdfResult> {
     blob: new Blob([bytes as unknown as BlobPart], { type: 'application/pdf' }),
     pages: pages.length,
     droppedGlyphs: dropped.n,
+    headingPages,
   };
 }

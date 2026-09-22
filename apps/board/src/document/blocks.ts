@@ -180,6 +180,26 @@ export type Block =
    */
   | { kind: 'pagebreak' }
   /**
+   * A CONTENTS PAGE, written `<!-- toc -->` where it should sit.
+   *
+   * Derived, never authored: the entries are the document's own headings
+   * and the page numbers are wherever they land, so it cannot go stale the
+   * way a hand-typed list does. That is also why it is a marker rather
+   * than text — on the canvas it shows as a labelled rule, because
+   * generating an editable list there would put a second, forkable copy of
+   * the structure into the document.
+   */
+  | { kind: 'toc' }
+  /**
+   * `<!-- numbered -->` — number the headings from here on.
+   *
+   * A directive rather than an option, so it lives IN the document. The
+   * option alone was lost the moment the user edited the contract on the
+   * board and exported it again: the agent knew it was numbered, the
+   * document did not, and the second export came back as plain headings.
+   */
+  | { kind: 'numbering' }
+  /**
    * Deliberate vertical space — `<!-- space: 48 -->`.
    *
    * A signature block is three inches of nothing above a name, and the only
@@ -258,6 +278,16 @@ export interface DocSpec {
    * REQUIRED to be double-spaced, which is the whole reason this exists.
    */
   lineSpacing?: number;
+  /**
+   * Number the headings — 1, 1.1, 1.1.1 — the way a contract, a policy or
+   * a specification numbers its clauses, so a reader can be pointed at
+   * "3.2" and find it.
+   *
+   * COMPUTED, not typed into the text. An author who writes "## 1.1 Scope"
+   * has to renumber the whole document by hand the moment a section is
+   * inserted; these renumber themselves, in both writers.
+   */
+  numberHeadings?: boolean;
 }
 
 /**
@@ -557,6 +587,68 @@ function mergeSpace(blocks: Block[]): void {
   }
 }
 
+/**
+ * Is this document numbered?
+ *
+ * Either the caller asked for it or the document says so itself. ONE
+ * answer, read by both writers, so a PDF and a Word file made from the
+ * same source can never disagree about whether clause 3.2 exists.
+ */
+/**
+ * ══════════════════════════════════════════════════════════════════════
+ * THE CLAUSE NUMBER OF EVERY HEADING, COMPUTED ONCE
+ * ══════════════════════════════════════════════════════════════════════
+ *
+ * Once, because it was twice: the body counted as it drew and the contents
+ * counted again as it listed, and the two disagreed the first time a real
+ * contract went through — the body said "1.1 Interpretation" and the
+ * contents said "0.1 Interpretation". A reader pointed at clause 3.2 has
+ * to find 3.2.
+ *
+ * ── THE TITLE IS NOT CLAUSE 1 ─────────────────────────────────────────
+ * A document opens with its name, and that name is not the first clause of
+ * itself. So an opening h1 is skipped, and the levels below it shift up:
+ * in a contract written `# Agreement` / `## Interpretation` /
+ * `### Defined terms`, Interpretation is 1 and Defined terms is 1.1.
+ *
+ * The shift is measured from the SHALLOWEST heading that is actually
+ * numbered rather than assumed to be h2, so a document that opens straight
+ * into `## ` numbers from 1 just the same.
+ */
+export function headingNumbers(
+  all: Block[],
+  on: boolean,
+): Map<number, { number: string; depth: number }> {
+  const numbers = new Map<number, { number: string; depth: number }>();
+  if (!on) return numbers;
+
+  const headings: Array<{ index: number; level: number }> = [];
+  let index = 0;
+  for (const b of all) {
+    if (b.kind !== 'heading') continue;
+    headings.push({ index, level: b.level });
+    index += 1;
+  }
+  // Only an OPENING h1 is the document's name. One in the middle is a part
+  // heading and is numbered like anything else.
+  const clauses = headings[0]?.level === 1 ? headings.slice(1) : headings;
+  if (!clauses.length) return numbers;
+
+  const base = Math.min(...clauses.map((h) => h.level));
+  const counters = [0, 0, 0, 0, 0, 0];
+  for (const h of clauses) {
+    const depth = Math.max(1, h.level - base + 1);
+    counters[depth - 1] = (counters[depth - 1] ?? 0) + 1;
+    for (let deeper = depth; deeper < counters.length; deeper++) counters[deeper] = 0;
+    numbers.set(h.index, { number: counters.slice(0, depth).join('.'), depth });
+  }
+  return numbers;
+}
+
+export function wantsNumbering(spec: DocSpec, blocks: Block[]): boolean {
+  return !!spec.numberHeadings || blocks.some((b) => b.kind === 'numbering');
+}
+
 export function parseMarkdown(markdown: string, title?: string): Block[] {
   const md = String(markdown ?? '');
   const out: Block[] = [];
@@ -582,6 +674,10 @@ export function parseMarkdown(markdown: string, title?: string): Block[] {
   let pending: DocAlign | undefined;
   const ALIGN_COMMENT = /^\s*<!--\s*align\s*:\s*(left|center|centre|right|justify|justified)\s*-->\s*$/i;
   const BREAK_COMMENT = /^\s*<!--\s*(?:pagebreak|page-break|newpage)\s*-->\s*$/i;
+  /** `<!-- toc -->` — a contents page, built from the headings that follow. */
+  const TOC_COMMENT = /^\s*<!--\s*(?:toc|contents|table[- ]of[- ]contents)\s*-->\s*$/i;
+  /** `<!-- numbered -->` — clause numbering for the whole document. */
+  const NUMBERED_COMMENT = /^\s*<!--\s*(?:numbered|number[- ]headings)\s*-->\s*$/i;
   /**
    * `<!-- columns: 3,1,1 -->` before a table.
    *
@@ -597,6 +693,8 @@ export function parseMarkdown(markdown: string, title?: string): Block[] {
       ? String((token as any).raw ?? '')
       : '';
     if (raw && BREAK_COMMENT.test(raw)) { out.push({ kind: 'pagebreak' }); continue; }
+    if (raw && TOC_COMMENT.test(raw)) { out.push({ kind: 'toc' }); continue; }
+    if (raw && NUMBERED_COMMENT.test(raw)) { out.push({ kind: 'numbering' }); continue; }
     const gap = raw ? SPACE_COMMENT.exec(raw) : null;
     if (gap) {
       // Capped at a page: more than that is a page break written the long way.
@@ -634,6 +732,15 @@ export function parseMarkdown(markdown: string, title?: string): Block[] {
       const head = runs?.[0];
       if (!head) continue;
       const mark = readMark(head.text);
+      if (mark.numbering && isOnlyMarks(runs!.map((r) => r.text).join(''))) {
+        out.splice(i, 1, { kind: 'numbering' });
+        continue;
+      }
+      if (mark.toc && isOnlyMarks(runs!.map((r) => r.text).join(''))) {
+        // A paragraph that is nothing but the mark IS the contents page.
+        out.splice(i, 1, { kind: 'toc' });
+        continue;
+      }
       if (mark.space && isOnlyMarks(runs!.map((r) => r.text).join(''))) {
         // One mark is one unit of gap; a run of them is summed below.
         out.splice(i, 1, { kind: 'space', points: SPACE_UNIT });

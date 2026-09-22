@@ -12,7 +12,7 @@
  * are resolved on the reader's machine, not embedded by us.
  */
 import type { Block, DocAlign, DocSpec, Inline } from './blocks';
-import { parseMarkdown } from './blocks';
+import { headingNumbers, parseMarkdown, wantsNumbering } from './blocks';
 import { loadImages, type LoadedImage } from './images';
 
 /** Word measures in half-points; 22 is the 11pt a report is expected to be. */
@@ -24,7 +24,7 @@ export async function renderDocx(spec: DocSpec): Promise<Blob> {
     Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, BorderStyle,
     Table, TableRow, TableCell, TableLayoutType, WidthType, ExternalHyperlink, ImageRun,
     Footer, Header, PageNumber,
-    PageBreak, PageOrientation,
+    PageBreak, PageOrientation, TableOfContents, LevelFormat,
   } = await import('docx');
 
   const HEADING = [
@@ -32,6 +32,16 @@ export async function renderDocx(spec: DocSpec): Promise<Blob> {
   ] as const;
 
   const blocks = parseMarkdown(spec.markdown, spec.title);
+  // One answer for both writers — see `wantsNumbering`.
+  const numbered = wantsNumbering(spec, blocks);
+  /**
+   * The SAME numbering the PDF prints — see `headingNumbers`. Word is told
+   * the level and counts for itself, so it gets the DEPTH rather than the
+   * digits; a heading the rule does not number (the document's own title)
+   * gets no numbering property at all.
+   */
+  const numbers = headingNumbers(blocks, numbered);
+  let headingIndex = 0;
   const images = await loadImages(blocks);
   const serif = spec.typeface !== 'sans';
   const body = serif ? 'Georgia' : 'Calibri';
@@ -173,6 +183,28 @@ export async function renderDocx(spec: DocSpec): Promise<Blob> {
       case 'pagebreak':
         children.push(new Paragraph({ children: [new PageBreak()] }));
         break;
+
+      case 'toc':
+        /**
+         * Word's OWN contents field, not a list we typed.
+         *
+         * It is built from the heading styles already in the document, so
+         * it renumbers and repaginates itself when the reader edits — which
+         * a list of our own page numbers could not, and would be wrong the
+         * first time they added a paragraph.
+         *
+         * The cost is honest and worth saying: Word populates the field
+         * when it opens the file, and until it does the reader may see
+         * "Right-click to update". Some lightweight viewers show it empty.
+         * The PDF has a real, already-set contents page for that reason.
+         */
+        children.push(new Paragraph({
+          children: [new TextRun({ text: 'Contents', bold: true, size: 31 })],
+          spacing: { before: 280, after: 140 },
+        }));
+        // `1-3`: the same three levels the PDF lists.
+        children.push(new TableOfContents('Contents', { hyperlink: true, headingStyleRange: '1-3' }));
+        break;
       case 'space':
         /**
          * An empty paragraph whose HEIGHT IS the gap. Word has no other way to
@@ -190,7 +222,9 @@ export async function renderDocx(spec: DocSpec): Promise<Blob> {
           spacing: { before: 0, after: 0, line: Math.round(b.points * 20), lineRule: 'exact' },
         }));
         break;
-      case 'heading':
+      case 'heading': {
+        const headingDepth = numbers.get(headingIndex)?.depth;
+        headingIndex += 1;
         children.push(new Paragraph({
           heading: HEADING[b.level - 1],
           children: runsOf(b.runs, display),
@@ -198,10 +232,15 @@ export async function renderDocx(spec: DocSpec): Promise<Blob> {
           // Ranged or centred, never justified — a heading has too few
           // words to spread slack across. See `DocAlign`.
           ...(b.align ? { alignment: alignOf(ranged(b.align)) } : {}),
+          // Word counts these itself, so they survive the reader editing.
+          ...(headingDepth !== undefined
+            ? { numbering: { reference: 'vs-heading-numbers', level: headingDepth - 1 } }
+            : {}),
           // Word's own rule: a heading never sits alone at the foot of a page.
           keepNext: true,
         }));
         break;
+      }
       case 'para':
         children.push(new Paragraph({
           children: runsOf(b.runs, body),
@@ -330,6 +369,26 @@ export async function renderDocx(spec: DocSpec): Promise<Blob> {
           text: `%${level + 1}.`,
           alignment: AlignmentType.START,
           style: { paragraph: { indent: { left: 720 * (level + 1), hanging: 360 } } },
+        })),
+      }, {
+        /**
+         * NUMBERED HEADINGS — 1, 1.1, 1.1.1 — as Word's own multilevel list.
+         *
+         * Not text we wrote into the heading: Word renumbers this when the
+         * reader inserts a section, which is the entire reason a contract
+         * or a policy numbers its clauses in the first place. A literal
+         * "3.2" typed into the words is wrong the moment anybody edits.
+         *
+         * `%1.%2` and `%1.%2.%3` are Word's own syntax for "the counters
+         * above me, then mine".
+         */
+        reference: 'vs-heading-numbers',
+        levels: [0, 1, 2, 3].map((level) => ({
+          level,
+          format: LevelFormat.DECIMAL,
+          text: Array.from({ length: level + 1 }, (_, n) => `%${n + 1}`).join('.'),
+          alignment: AlignmentType.START,
+          style: { paragraph: { indent: { left: 0, hanging: 360 } } },
         })),
       }],
     },

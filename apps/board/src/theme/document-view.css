@@ -787,7 +787,9 @@ affine-edgeless-note[data-vs-doc-tag] affine-image figcaption {
 
    `::after` rather than a border, so the label sits ON the rule, and
    `contenteditable` never sees a child it thinks it owns. */
-affine-edgeless-note[data-vs-doc-tag] affine-paragraph[data-vs-mark='pagebreak'] {
+affine-edgeless-note[data-vs-doc-tag] affine-paragraph[data-vs-mark='pagebreak'],
+affine-edgeless-note[data-vs-doc-tag] affine-paragraph[data-vs-mark='toc'],
+affine-edgeless-note[data-vs-doc-tag] affine-paragraph[data-vs-mark='numbering'] {
   position: relative;
   /* The rule replaces the line rather than adding to it: a break costs no
      height in the export either, it just ends the page. */
@@ -795,6 +797,23 @@ affine-edgeless-note[data-vs-doc-tag] affine-paragraph[data-vs-mark='pagebreak']
 }
 affine-edgeless-note[data-vs-doc-tag] affine-paragraph[data-vs-mark='pagebreak']::after {
   content: 'Page break';
+}
+/* ── AND WHERE THE CONTENTS PAGE WILL GO ───────────────────────────────────
+   A MARKER, not a list. The entries come from the document's own headings at
+   export, so drawing them here would put a second, editable copy of the
+   structure on the canvas — stale the moment either one changed, with no way
+   to tell which was meant. Word shows an unrefreshed field much the same way,
+   and for the same reason. The label says so rather than leaving a blank line
+   the user would take for a mistake. */
+affine-edgeless-note[data-vs-doc-tag] affine-paragraph[data-vs-mark='toc']::after {
+  content: 'Contents — built when you export';
+}
+/* Clause numbering, which applies to the whole document from here. */
+affine-edgeless-note[data-vs-doc-tag] affine-paragraph[data-vs-mark='numbering']::after {
+  content: 'Headings numbered 1, 1.1, 1.1.1';
+}
+affine-edgeless-note[data-vs-doc-tag] affine-paragraph[data-vs-mark='pagebreak']::after,
+affine-edgeless-note[data-vs-doc-tag] affine-paragraph[data-vs-mark='toc']::after {
   position: absolute;
   inset: 0;
   display: flex;
@@ -816,7 +835,8 @@ affine-edgeless-note[data-vs-doc-tag] affine-paragraph[data-vs-mark='pagebreak']
     0 0 4px var(--vs-paper), 0 0 4px var(--vs-paper),
     0 0 8px var(--vs-paper), 0 0 8px var(--vs-paper);
 }
-[data-theme='dark'] affine-edgeless-note[data-vs-doc-tag] affine-paragraph[data-vs-mark='pagebreak']::after {
+[data-theme='dark'] affine-edgeless-note[data-vs-doc-tag] affine-paragraph[data-vs-mark='pagebreak']::after,
+[data-theme='dark'] affine-edgeless-note[data-vs-doc-tag] affine-paragraph[data-vs-mark='toc']::after {
   --vs-doc-break: rgb(255 255 255 / 42%);
   --vs-doc-break-line: rgb(255 255 255 / 20%);
 }

@@ -58,6 +58,17 @@ export const MARK = {
    * read before the shorter ones whose prefix they share.
    */
   justify: WJ + WJ + WJ + WJ + WJ,
+  /**
+   * A paragraph that is ONLY this is where the contents page goes.
+   *
+   * A marker, not the contents: the entries are derived at export from the
+   * headings, so putting a real list on the canvas would be a second,
+   * editable copy of the document's structure — stale the moment either
+   * one changed, and no way to tell which was meant.
+   */
+  toc: WJ + WJ + WJ + WJ + WJ + WJ,
+  /** A paragraph that is ONLY this turns on clause numbering. */
+  numbering: WJ + WJ + WJ + WJ + WJ + WJ + WJ,
   /** A paragraph that is ONLY this is a page break — invisible, like a blank line. */
   pagebreak: WJ + WJ + WJ + WJ,
 } as const;
@@ -85,7 +96,9 @@ export const SPACE_UNIT = 12;
  * One table so there is one place to get it right, rather than a chain of
  * `if`s whose order is load-bearing and invisible.
  */
-const MARKS: Array<[string, 'justify' | 'pagebreak' | 'space' | 'right' | 'center']> = [
+const MARKS: Array<[string, 'numbering' | 'toc' | 'justify' | 'pagebreak' | 'space' | 'right' | 'center']> = [
+  [MARK.numbering, 'numbering'],
+  [MARK.toc, 'toc'],
   [MARK.justify, 'justify'],
   [MARK.pagebreak, 'pagebreak'],
   [MARK.space, 'space'],
@@ -95,6 +108,8 @@ const MARKS: Array<[string, 'justify' | 'pagebreak' | 'space' | 'right' | 'cente
 
 const ALIGN_COMMENT = /^[ \t]*<!--[ \t]*align[ \t]*:[ \t]*(left|center|centre|right|justify|justified)[ \t]*-->[ \t]*$/i;
 const SPACE_COMMENT = /^[ \t]*<!--[ \t]*(?:space|gap)[ \t]*:[ \t]*(\d{1,3})[ \t]*-->[ \t]*$/i;
+const NUMBERED_COMMENT = /^[ \t]*<!--[ \t]*(?:numbered|number[- ]headings)[ \t]*-->[ \t]*$/i;
+const TOC_COMMENT = /^[ \t]*<!--[ \t]*(?:toc|contents|table[- ]of[- ]contents)[ \t]*-->[ \t]*$/i;
 const BREAK_COMMENT = /^[ \t]*<!--[ \t]*(?:pagebreak|page-break|newpage)[ \t]*-->[ \t]*$/i;
 
 /**
@@ -138,6 +153,8 @@ export function marksFromComments(markdown: string): string {
       for (let i = 0; i < units; i++) out.push(MARK.space, '');
       continue;
     }
+    if (NUMBERED_COMMENT.test(line)) { out.push(MARK.numbering, ''); continue; }
+    if (TOC_COMMENT.test(line)) { out.push(MARK.toc, ''); continue; }
     if (BREAK_COMMENT.test(line)) {
       // Its own paragraph, so it survives as a block rather than attaching to
       // whatever happens to follow it.
@@ -157,11 +174,13 @@ export function marksFromComments(markdown: string): string {
 /** What a marked line says, and the line without it. */
 export function readMark(
   text: string,
-): { align?: DocAlign; pagebreak?: boolean; space?: boolean; text: string } {
+): { align?: DocAlign; pagebreak?: boolean; space?: boolean; toc?: boolean; numbering?: boolean; text: string } {
   const raw = String(text ?? '');
   for (const [mark, kind] of MARKS) {
     if (!raw.startsWith(mark)) continue;
     const text = raw.slice(mark.length);
+    if (kind === 'numbering') return { numbering: true, text };
+    if (kind === 'toc') return { toc: true, text };
     if (kind === 'pagebreak') return { pagebreak: true, text };
     if (kind === 'space') return { space: true, text };
     return { align: kind, text };
@@ -194,6 +213,8 @@ export function commentsFromMarks(markdown: string): string {
     const prefix = SYNTAX.exec(line)?.[1] ?? '';
     const rest = line.slice(prefix.length);
     const mark = readMark(rest);
+    if (mark.numbering && !mark.text.trim()) { out.push('<!-- numbered -->'); continue; }
+    if (mark.toc && !mark.text.trim()) { out.push('<!-- toc -->'); continue; }
     if (mark.pagebreak) {
       out.push('<!-- pagebreak -->');
       if (mark.text.trim()) out.push(prefix + mark.text);

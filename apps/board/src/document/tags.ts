@@ -192,6 +192,13 @@ function readBlock(board: MountedBoard, blockId: string): { align: string; mark:
   const read = readMark(text);
   const align = read.align && read.align !== 'left' ? read.align : '';
   if (!isOnlyMarks(text)) return { align, mark: '' };
-  return { align, mark: read.pagebreak ? 'pagebreak' : read.space ? 'space' : '' };
+  return {
+    align,
+    mark: read.numbering ? 'numbering'
+      : read.toc ? 'toc'
+      : read.pagebreak ? 'pagebreak'
+        : read.space ? 'space'
+          : '',
+  };
 }
 

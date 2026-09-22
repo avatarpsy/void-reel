@@ -174,6 +174,12 @@ function blockToLines(b: Block): string[] {
     case 'pagebreak':
       return ['<!-- pagebreak -->'];
 
+    case 'toc':
+      return ['<!-- toc -->'];
+
+    case 'numbering':
+      return ['<!-- numbered -->'];
+
     case 'space':
       return [`<!-- space: ${Math.round(b.points)} -->`];
 
