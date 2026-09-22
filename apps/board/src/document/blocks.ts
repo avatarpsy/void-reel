@@ -214,7 +214,16 @@ export type Block =
     widths?: number[];
   };
 
-export type DocAlign = 'left' | 'center' | 'right';
+/**
+ * How a block sits in its column.
+ *
+ * `justify` sets both edges flush by stretching the spaces between words,
+ * which is what a contract, a report or a book looks like and what ragged
+ * right does not. It applies to FLOWING text only — a heading or a caption
+ * is centred or ranged, never justified, because stretching three words
+ * across a column is the most obvious sign of a machine setting type.
+ */
+export type DocAlign = 'left' | 'center' | 'right' | 'justify';
 
 export type DocFormat = 'pdf' | 'docx' | 'md';
 
@@ -571,7 +580,7 @@ export function parseMarkdown(markdown: string, title?: string): Block[] {
    * broken one.
    */
   let pending: DocAlign | undefined;
-  const ALIGN_COMMENT = /^\s*<!--\s*align\s*:\s*(left|center|centre|right)\s*-->\s*$/i;
+  const ALIGN_COMMENT = /^\s*<!--\s*align\s*:\s*(left|center|centre|right|justify|justified)\s*-->\s*$/i;
   const BREAK_COMMENT = /^\s*<!--\s*(?:pagebreak|page-break|newpage)\s*-->\s*$/i;
   /**
    * `<!-- columns: 3,1,1 -->` before a table.
@@ -604,7 +613,9 @@ export function parseMarkdown(markdown: string, title?: string): Block[] {
     const hit = raw ? ALIGN_COMMENT.exec(raw) : null;
     if (hit) {
       const word = hit[1]!.toLowerCase();
-      pending = word === 'centre' ? 'center' : word as DocAlign;
+      pending = word === 'centre' ? 'center'
+        : word === 'justified' ? 'justify'
+        : word as DocAlign;
       continue;
     }
     const before = out.length;

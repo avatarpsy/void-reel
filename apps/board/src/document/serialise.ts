@@ -106,11 +106,22 @@ function cellToMarkdown(runs: Inline[] | undefined): string {
     .trim() || ' ';
 }
 
-const ALIGN_ROW: Record<DocAlign, string> = {
+/**
+ * A markdown table column can be ranged left, centred or ranged right, and
+ * that is the whole vocabulary — there is no justified column in the
+ * syntax. Typed to the three that exist rather than given a fourth entry
+ * that would be a lie, and coerced where it is read.
+ */
+const ALIGN_ROW: Record<'left' | 'center' | 'right', string> = {
   left: ':---',
   center: ':---:',
   right: '---:',
 };
+
+/** A cell has no justified setting; anything else falls back to ranged left. */
+function cellAlign(a?: DocAlign | null): 'left' | 'center' | 'right' {
+  return a === 'center' || a === 'right' ? a : 'left';
+}
 
 function alignComment(align: DocAlign | undefined): string[] {
   return align && align !== 'left' ? [`<!-- align:${align} -->`] : [];
@@ -178,7 +189,7 @@ function blockToLines(b: Block): string[] {
       if (b.widths?.length) out.push(`<!-- columns: ${b.widths.map((w) => Math.round(w * 100) / 100).join(',')} -->`);
       const row = (cells: Inline[][]) => `| ${Array.from({ length: cols }, (_, i) => cellToMarkdown(cells[i])).join(' | ')} |`;
       out.push(row(b.header.length ? b.header : []));
-      out.push(`| ${Array.from({ length: cols }, (_, i) => ALIGN_ROW[b.align?.[i] ?? 'left']).join(' | ')} |`);
+      out.push(`| ${Array.from({ length: cols }, (_, i) => ALIGN_ROW[cellAlign(b.align?.[i])]).join(' | ')} |`);
       for (const r of b.rows) out.push(row(r));
       return out;
     }

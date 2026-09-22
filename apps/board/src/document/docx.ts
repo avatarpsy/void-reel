@@ -11,7 +11,7 @@
  * the standard fonts cannot set Japanese or emoji; this can, because the fonts
  * are resolved on the reader's machine, not embedded by us.
  */
-import type { Block, DocSpec, Inline } from './blocks';
+import type { Block, DocAlign, DocSpec, Inline } from './blocks';
 import { parseMarkdown } from './blocks';
 import { loadImages, type LoadedImage } from './images';
 
@@ -104,11 +104,21 @@ export async function renderDocx(spec: DocSpec): Promise<Blob> {
     return out;
   };
 
-  /** The one mapping from our word to Word's, so the two cannot disagree. */
-  const alignOf = (a?: 'left' | 'center' | 'right') =>
+  /** A heading is ranged or centred, never justified — see `DocAlign`. */
+  const ranged = (a?: DocAlign): DocAlign => (a === 'justify' ? 'left' : a ?? 'left');
+
+  /**
+   * The one mapping from our word to Word's, so the two cannot disagree.
+   *
+   * `justify` is free here: Word has set both edges flush since it existed,
+   * and its own hyphenation and spacing rules are better than anything we
+   * would write. The PDF has to do the work itself — see `drawLines`.
+   */
+  const alignOf = (a?: DocAlign) =>
     a === 'center' ? AlignmentType.CENTER
       : a === 'right' ? AlignmentType.RIGHT
-        : AlignmentType.LEFT;
+        : a === 'justify' ? AlignmentType.JUSTIFIED
+          : AlignmentType.LEFT;
 
   const picture = (img: LoadedImage, requested?: number) => {
     // Fit the text column — 6.5in at 1in margins. An explicit width wins, so a
@@ -185,7 +195,9 @@ export async function renderDocx(spec: DocSpec): Promise<Blob> {
           heading: HEADING[b.level - 1],
           children: runsOf(b.runs, display),
           spacing: { before: b.level === 1 ? 0 : 280, after: 140 },
-          ...(b.align ? { alignment: alignOf(b.align) } : {}),
+          // Ranged or centred, never justified — a heading has too few
+          // words to spread slack across. See `DocAlign`.
+          ...(b.align ? { alignment: alignOf(ranged(b.align)) } : {}),
           // Word's own rule: a heading never sits alone at the foot of a page.
           keepNext: true,
         }));

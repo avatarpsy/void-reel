@@ -331,10 +331,19 @@ export async function renderPdf(spec: DocSpec): Promise<PdfResult> {
     return rgb(((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255);
   };
 
+  /**
+   * A heading, a caption or a table cell is RANGED, never justified.
+   *
+   * Justification needs a paragraph's worth of lines to spread slack
+   * across. On three words it pulls them to opposite ends of the column,
+   * which is the most recognisable sign of a machine setting type badly.
+   */
+  const ranged = (a?: DocAlign): DocAlign => (a === 'justify' ? 'left' : a ?? 'left');
+
   const drawLines = (
     lines: Piece[][], fontSize: number, indent: number, color = ink,
     firstPrefix?: { text: string; font: PDFFont },
-    align: 'left' | 'center' | 'right' = 'left',
+    align: DocAlign = 'left',
   ) => {
     lines.forEach((line, i) => {
       // The line's own height, not the block's: one big run has to push the
@@ -349,6 +358,25 @@ export async function renderPdf(spec: DocSpec): Promise<PdfResult> {
        */
       const lineWidth = line.reduce((n, piece) => n + piece.width, 0);
       const slack = Math.max(0, colWidth - indent - lineWidth);
+      /**
+       * ── JUSTIFICATION ────────────────────────────────────────────────
+       *
+       * Both edges flush, by growing the spaces between words rather than
+       * the gaps between letters — which is what a typesetter does and
+       * what makes a contract or a report look set rather than typed.
+       *
+       * NEVER THE LAST LINE of a paragraph. Stretching four words across
+       * a full column is the single most recognisable sign of a machine
+       * doing this badly, so a final line is simply ranged left.
+       *
+       * A line with no spaces in it (one long word, a URL) is left alone
+       * too: there is nothing to grow, and letter-spacing it would look
+       * worse than the ragged edge it replaced.
+       */
+      const spaces = align === 'justify' && i < lines.length - 1
+        ? line.reduce((n, piece) => n + (piece.text.match(/ /g)?.length ?? 0), 0)
+        : 0;
+      const perSpace = spaces > 0 ? slack / spaces : 0;
       const offset = align === 'center' ? slack / 2 : align === 'right' ? slack : 0;
       let x = MARGIN + indent + offset;
       if (i === 0 && firstPrefix) {
@@ -359,6 +387,13 @@ export async function renderPdf(spec: DocSpec): Promise<PdfResult> {
       }
       for (const piece of line) {
         const fs = piece.size;
+        /**
+         * How wide this piece ends up once its own spaces have grown. The
+         * decorations below are drawn across THIS, not the measured width,
+         * or a highlight would stop short of the words it is behind.
+         */
+        const grown = perSpace * (piece.text.match(/ /g)?.length ?? 0);
+        const drawnWidth = piece.width + grown;
         // Baselines sit on the LINE's baseline, so 11pt and 28pt on one line
         // rest on the same rule rather than each floating at its own height.
         const baseline = y - top;
@@ -369,25 +404,40 @@ export async function renderPdf(spec: DocSpec): Promise<PdfResult> {
          */
         if (piece.run.highlight) {
           page.drawRectangle({
-            x: x - 0.5, y: baseline - fs * 0.22, width: piece.width + 1, height: fs * 1.06,
+            x: x - 0.5, y: baseline - fs * 0.22, width: drawnWidth + 1, height: fs * 1.06,
             color: inkOf(piece.run.highlight, hair),
           });
         }
         const own = piece.run.link ? linkBlue : inkOf(piece.run.color, color);
-        page.drawText(piece.text, { x, y: baseline, size: fs, font: piece.font, color: own });
+        if (grown > 0) {
+          // Word by word, so each space can be wider than the font says.
+          let wx = x;
+          const parts = piece.text.split(' ');
+          parts.forEach((part, pi) => {
+            if (part) {
+              page.drawText(part, { x: wx, y: baseline, size: fs, font: piece.font, color: own });
+              wx += piece.font.widthOfTextAtSize(part, fs);
+            }
+            if (pi < parts.length - 1) {
+              wx += piece.font.widthOfTextAtSize(' ', fs) + perSpace;
+            }
+          });
+        } else {
+          page.drawText(piece.text, { x, y: baseline, size: fs, font: piece.font, color: own });
+        }
         if (piece.run.strike) {
           page.drawLine({
-            start: { x, y: baseline + fs * 0.28 }, end: { x: x + piece.width, y: baseline + fs * 0.28 },
+            start: { x, y: baseline + fs * 0.28 }, end: { x: x + drawnWidth, y: baseline + fs * 0.28 },
             thickness: Math.max(0.5, fs * 0.055), color: own,
           });
         }
         if (piece.run.underline || piece.run.link) {
           page.drawLine({
-            start: { x, y: baseline - fs * 0.13 }, end: { x: x + piece.width, y: baseline - fs * 0.13 },
+            start: { x, y: baseline - fs * 0.13 }, end: { x: x + drawnWidth, y: baseline - fs * 0.13 },
             thickness: Math.max(0.5, fs * 0.05), color: own,
           });
         }
-        x += piece.width;
+        x += drawnWidth;
       }
       y -= lineH;
     });
@@ -406,7 +456,8 @@ export async function renderPdf(spec: DocSpec): Promise<PdfResult> {
          */
         const block = lines.length * fs * leading + BODY_SIZE * leading * 2;
         if (y - block < floor) newPage();
-        drawLines(lines, fs, 0, ink, undefined, b.align ?? 'left');
+        // A heading is ranged or centred, never justified — see `DocAlign`.
+        drawLines(lines, fs, 0, ink, undefined, ranged(b.align));
         y -= H_AFTER[b.level - 1]!;
         break;
       }

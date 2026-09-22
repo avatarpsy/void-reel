@@ -53,6 +53,11 @@ export const MARK = {
    * ARE three blank lines, which is what the exported page will have.
    */
   space: WJ + WJ + WJ,
+  /**
+   * Justified — both edges flush. Fifth, so the longer marks are still
+   * read before the shorter ones whose prefix they share.
+   */
+  justify: WJ + WJ + WJ + WJ + WJ,
   /** A paragraph that is ONLY this is a page break — invisible, like a blank line. */
   pagebreak: WJ + WJ + WJ + WJ,
 } as const;
@@ -67,10 +72,28 @@ export const MARK = {
  */
 export const SPACE_UNIT = 12;
 
-/** Longest first: `\u2060\u2060` must not be read as centre followed by text. */
-const ORDER: Array<[string, DocAlign]> = [[MARK.right, 'right'], [MARK.center, 'center']];
+/**
+ * EVERY mark, longest first — and that order is the whole correctness
+ * argument, not a detail.
+ *
+ * The marks are runs of the same character, so each one BEGINS WITH every
+ * shorter one: five word joiners start with four, which start with three.
+ * Read in any other order, a justified paragraph is a page break, a page
+ * break is a gap, and a gap is a centred line — silently, on the way back
+ * out of a note somebody edited.
+ *
+ * One table so there is one place to get it right, rather than a chain of
+ * `if`s whose order is load-bearing and invisible.
+ */
+const MARKS: Array<[string, 'justify' | 'pagebreak' | 'space' | 'right' | 'center']> = [
+  [MARK.justify, 'justify'],
+  [MARK.pagebreak, 'pagebreak'],
+  [MARK.space, 'space'],
+  [MARK.right, 'right'],
+  [MARK.center, 'center'],
+];
 
-const ALIGN_COMMENT = /^[ \t]*<!--[ \t]*align[ \t]*:[ \t]*(left|center|centre|right)[ \t]*-->[ \t]*$/i;
+const ALIGN_COMMENT = /^[ \t]*<!--[ \t]*align[ \t]*:[ \t]*(left|center|centre|right|justify|justified)[ \t]*-->[ \t]*$/i;
 const SPACE_COMMENT = /^[ \t]*<!--[ \t]*(?:space|gap)[ \t]*:[ \t]*(\d{1,3})[ \t]*-->[ \t]*$/i;
 const BREAK_COMMENT = /^[ \t]*<!--[ \t]*(?:pagebreak|page-break|newpage)[ \t]*-->[ \t]*$/i;
 
@@ -102,7 +125,11 @@ export function marksFromComments(markdown: string): string {
     const align = ALIGN_COMMENT.exec(line);
     if (align) {
       const word = align[1]!.toLowerCase();
-      pending = word === 'right' ? MARK.right : word === 'left' ? '' : MARK.center;
+      // Left is the default and needs no mark; everything else gets its own.
+      pending = word === 'right' ? MARK.right
+        : word === 'left' ? ''
+          : word === 'justify' || word === 'justified' ? MARK.justify
+            : MARK.center;
       continue;
     }
     const gap = SPACE_COMMENT.exec(line);
@@ -132,16 +159,12 @@ export function readMark(
   text: string,
 ): { align?: DocAlign; pagebreak?: boolean; space?: boolean; text: string } {
   const raw = String(text ?? '');
-  // LONGEST FIRST: four word joiners start with three, so a page break read
-  // as a space would silently become a gap.
-  if (raw.startsWith(MARK.pagebreak)) {
-    return { pagebreak: true, text: raw.slice(MARK.pagebreak.length) };
-  }
-  if (raw.startsWith(MARK.space)) {
-    return { space: true, text: raw.slice(MARK.space.length) };
-  }
-  for (const [mark, align] of ORDER) {
-    if (raw.startsWith(mark)) return { align, text: raw.slice(mark.length) };
+  for (const [mark, kind] of MARKS) {
+    if (!raw.startsWith(mark)) continue;
+    const text = raw.slice(mark.length);
+    if (kind === 'pagebreak') return { pagebreak: true, text };
+    if (kind === 'space') return { space: true, text };
+    return { align: kind, text };
   }
   // A mark that ended up anywhere else is invisible junk, not an instruction.
   return { text: raw.replace(new RegExp(WJ, 'g'), '') };

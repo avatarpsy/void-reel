@@ -616,6 +616,14 @@ affine-edgeless-note[data-vs-doc-tag] affine-paragraph[data-vs-align='center'] {
 affine-edgeless-note[data-vs-doc-tag] affine-paragraph[data-vs-align='right'] {
   text-align: right;
 }
+/* Both edges flush, the way the file will set it. `text-align-last: left`
+   is the part people forget: without it the browser stretches the LAST
+   line of a paragraph too, which is exactly the look justification is
+   supposed to avoid — and is what the PDF deliberately does not do. */
+affine-edgeless-note[data-vs-doc-tag] affine-paragraph[data-vs-align='justify'] {
+  text-align: justify;
+  text-align-last: left;
+}
 /* ── A PICTURE MOVES WITH `align-items`, BECAUSE ITS FLEX IS A COLUMN ─────
    `affine-page-image` is `display: flex; flex-direction: column`, so the
    HORIZONTAL axis is the CROSS axis: `align-items` moves the picture across
