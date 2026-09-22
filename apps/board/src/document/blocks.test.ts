@@ -226,3 +226,51 @@ describe('a document that opens with a picture', () => {
     expect(out[0]!.kind).toBe('heading');
   });
 });
+
+/**
+ * ALIGNMENT, FOR THE PARTS OF A LETTERHEAD THAT NEED IT.
+ *
+ * Markdown has none, and a letterhead's footer is centred while its date is
+ * often right. The directive is an HTML COMMENT because this document is also
+ * an editable page on the board: anything written in the prose comes back from
+ * that round trip as characters the user has to delete, and BlockSuite's
+ * markdown adapter drops a comment rather than rendering it.
+ */
+describe('block alignment', () => {
+  const first = (md: string) => parseMarkdown(md)[0]! as any;
+
+  it('centres the block that follows the directive', () => {
+    const b = first(['<!-- align:center -->', 'Secunderabad, Telangana'].join('\n'));
+    expect(b.kind).toBe('para');
+    expect(b.align).toBe('center');
+  });
+
+  it('applies to that block only, not the rest of the document', () => {
+    const out = parseMarkdown(
+      ['<!-- align:center -->', 'Centred line', '', 'Ordinary line'].join('\n'),
+    ) as any[];
+    expect(out[0].align).toBe('center');
+    expect(out[1].align).toBeUndefined();
+  });
+
+  it('aligns a heading too', () => {
+    const b = first(['<!-- align:center -->', '## CERTIFICATE'].join('\n'));
+    expect(b.kind).toBe('heading');
+    expect(b.align).toBe('center');
+  });
+
+  it('takes the British spelling, because someone will write it', () => {
+    expect(first(['<!-- align:centre -->', 'Text'].join('\n')).align).toBe('center');
+  });
+
+  it('never leaves the directive in the document as text', () => {
+    const out = parseMarkdown(['<!-- align:right -->', 'Date: 22 September 2026'].join('\n')) as any[];
+    const text = out.flatMap((b) => b.runs ?? []).map((r: any) => r.text).join('');
+    expect(text).not.toMatch(/align|<!--/);
+  });
+
+  it('leaves everything unaligned when the direction is not one', () => {
+    const out = parseMarkdown(['<!-- align:diagonal -->', 'Text'].join('\n')) as any[];
+    expect(out.every((b) => !b.align)).toBe(true);
+  });
+});

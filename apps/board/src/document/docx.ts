@@ -60,6 +60,12 @@ export async function renderDocx(spec: DocSpec): Promise<Blob> {
     return out;
   };
 
+  /** The one mapping from our word to Word's, so the two cannot disagree. */
+  const alignOf = (a?: 'left' | 'center' | 'right') =>
+    a === 'center' ? AlignmentType.CENTER
+      : a === 'right' ? AlignmentType.RIGHT
+        : AlignmentType.LEFT;
+
   const picture = (img: LoadedImage, requested?: number) => {
     // Fit the text column — 6.5in at 1in margins. An explicit width wins, so a
     // logo can be a logo; without one this fell back to the column and set a
@@ -85,6 +91,7 @@ export async function renderDocx(spec: DocSpec): Promise<Blob> {
           heading: HEADING[b.level - 1],
           children: runsOf(b.runs, display),
           spacing: { before: b.level === 1 ? 0 : 280, after: 140 },
+          ...(b.align ? { alignment: alignOf(b.align) } : {}),
           // Word's own rule: a heading never sits alone at the foot of a page.
           keepNext: true,
         }));
@@ -93,6 +100,7 @@ export async function renderDocx(spec: DocSpec): Promise<Blob> {
         children.push(new Paragraph({
           children: runsOf(b.runs, body),
           spacing: { after: 160, line: 300 }, // ~1.25 leading; single reads cramped
+          ...(b.align ? { alignment: alignOf(b.align) } : {}),
         }));
         break;
       case 'list':
@@ -134,9 +142,9 @@ export async function renderDocx(spec: DocSpec): Promise<Blob> {
         break;
       case 'image': {
         const img = images.get(b.url);
-        const imgAlign = b.align === 'left' ? AlignmentType.LEFT
-          : b.align === 'right' ? AlignmentType.RIGHT
-            : AlignmentType.CENTER;
+        // An image with no stated alignment stays centred, which is right for a
+        // figure; a letterhead says `align=left` and gets it.
+        const imgAlign = b.align ? alignOf(b.align) : AlignmentType.CENTER;
         if (img) {
           children.push(new Paragraph({
             alignment: imgAlign,

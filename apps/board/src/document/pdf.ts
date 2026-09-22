@@ -202,11 +202,20 @@ export async function renderPdf(spec: DocSpec): Promise<PdfResult> {
   const drawLines = (
     lines: Piece[][], fontSize: number, indent: number, color = ink,
     firstPrefix?: { text: string; font: PDFFont },
+    align: 'left' | 'center' | 'right' = 'left',
   ) => {
     const lineH = fontSize * LEADING;
     lines.forEach((line, i) => {
       need(lineH);
-      let x = MARGIN + indent;
+      /**
+       * Centred and right text are set by offsetting the line's own start, so
+       * every piece after it follows — the pieces already carry their measured
+       * widths, which is what makes this exact rather than approximate.
+       */
+      const lineWidth = line.reduce((n, piece) => n + piece.width, 0);
+      const slack = Math.max(0, colWidth - indent - lineWidth);
+      const offset = align === 'center' ? slack / 2 : align === 'right' ? slack : 0;
+      let x = MARGIN + indent + offset;
       if (i === 0 && firstPrefix) {
         const w = firstPrefix.font.widthOfTextAtSize(firstPrefix.text, fontSize);
         page.drawText(firstPrefix.text, {
@@ -249,12 +258,12 @@ export async function renderPdf(spec: DocSpec): Promise<PdfResult> {
          */
         const block = lines.length * fs * LEADING + BODY_SIZE * LEADING * 2;
         if (y - block < floor) newPage();
-        drawLines(lines, fs, 0);
+        drawLines(lines, fs, 0, ink, undefined, b.align ?? 'left');
         y -= H_AFTER[b.level - 1]!;
         break;
       }
       case 'para':
-        drawLines(layout(b.runs, f, BODY_SIZE, colWidth, dropped), BODY_SIZE, 0);
+        drawLines(layout(b.runs, f, BODY_SIZE, colWidth, dropped), BODY_SIZE, 0, ink, undefined, b.align ?? 'left');
         y -= 7;
         break;
       case 'list': {

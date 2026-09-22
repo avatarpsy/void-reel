@@ -41,8 +41,8 @@ export interface Inline {
 }
 
 export type Block =
-  | { kind: 'heading'; level: 1 | 2 | 3 | 4; runs: Inline[] }
-  | { kind: 'para'; runs: Inline[] }
+  | { kind: 'heading'; level: 1 | 2 | 3 | 4; runs: Inline[]; align?: DocAlign }
+  | { kind: 'para'; runs: Inline[]; align?: DocAlign }
   | { kind: 'list'; ordered: boolean; level: number; index: number; runs: Inline[] }
   | { kind: 'quote'; runs: Inline[] }
   | { kind: 'code'; text: string; lang?: string }
@@ -250,7 +250,45 @@ function blockFor(token: any, out: Block[], level = 0): void {
 export function parseMarkdown(markdown: string, title?: string): Block[] {
   const md = String(markdown ?? '');
   const out: Block[] = [];
-  for (const token of marked.lexer(md)) blockFor(token, out);
+  /**
+   * ── ALIGNMENT, WRITTEN AS A COMMENT ───────────────────────────────────────
+   *
+   *     <!-- align:center -->
+   *     9/3/448, Rezimental Bazaar, Secunderabad
+   *
+   * Markdown has no alignment and a letterhead needs it: the footer is centred,
+   * the date is often right. The comment applies to the NEXT block and nothing
+   * after it, so it reads like the instruction it is.
+   *
+   * WHY A COMMENT AND NOT A MARKER. This document is also an editable page on
+   * the board, and anything in the prose — `::center::`, `->text<-` — comes back
+   * from that round trip as characters the user has to delete. BlockSuite's
+   * markdown adapter DROPS an HTML comment instead of rendering it, so nothing
+   * is ever shown. The honest cost: alignment does not survive a hand-edit on
+   * the board, because `affine:paragraph` has no alignment prop to keep it in —
+   * the document reverts to left, which is a plain document rather than a
+   * broken one.
+   */
+  let pending: DocAlign | undefined;
+  const ALIGN_COMMENT = /^\s*<!--\s*align\s*:\s*(left|center|centre|right)\s*-->\s*$/i;
+  for (const token of marked.lexer(md)) {
+    const raw = token.type === 'html' || token.type === 'paragraph'
+      ? String((token as any).raw ?? '')
+      : '';
+    const hit = raw ? ALIGN_COMMENT.exec(raw) : null;
+    if (hit) {
+      const word = hit[1]!.toLowerCase();
+      pending = word === 'centre' ? 'center' : word as DocAlign;
+      continue;
+    }
+    const before = out.length;
+    blockFor(token, out);
+    if (pending && out.length > before) {
+      const b = out[before]!;
+      if (b.kind === 'para' || b.kind === 'heading' || b.kind === 'image') b.align = pending;
+      pending = undefined;
+    }
+  }
 
   /**
    * A title supplied by the caller becomes the document's H1 — but only when
