@@ -12,19 +12,21 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { PDFDocument, StandardFonts } from 'pdf-lib';
 
-import { layout, type Fonts } from './pdf';
+import { layout, fixedFonts, type Fonts } from './pdf';
 import type { Inline } from './blocks';
 
 let f: Fonts;
 beforeAll(async () => {
   const pdf = await PDFDocument.create();
-  f = {
+  // The standard faces, wrapped in the same interface the real renderer uses.
+  // What is under test is where the line breaks, not which file a glyph is in.
+  f = fixedFonts({
     regular: await pdf.embedFont(StandardFonts.TimesRoman),
     bold: await pdf.embedFont(StandardFonts.TimesRomanBold),
     italic: await pdf.embedFont(StandardFonts.TimesRomanItalic),
     boldItalic: await pdf.embedFont(StandardFonts.TimesRomanBoldItalic),
     mono: await pdf.embedFont(StandardFonts.Courier),
-  };
+  });
 });
 
 /** What the page would actually read, line by line. */
@@ -77,7 +79,7 @@ describe('breaking', () => {
     const lines = render([{ text: 'word '.repeat(60) }], 200);
     expect(lines.length).toBeGreaterThan(1);
     for (const line of lines) {
-      expect(f.regular.widthOfTextAtSize(line.trimEnd(), 11)).toBeLessThanOrEqual(200);
+      expect(f.base('regular').widthOfTextAtSize(line.trimEnd(), 11)).toBeLessThanOrEqual(200);
     }
   });
 

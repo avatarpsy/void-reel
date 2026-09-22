@@ -24,6 +24,7 @@ import type { PDFFont, PDFPage } from 'pdf-lib';
 import type { Block, DocSpec, Inline } from './blocks';
 import { parseMarkdown } from './blocks';
 import { loadImages } from './images';
+import { loadDocumentFonts, type Style } from './fonts';
 
 const PAGE = {
   a4: { w: 595.28, h: 841.89 },
@@ -75,14 +76,70 @@ export function winAnsi(s: string, dropped: { n: number }): string {
   return out;
 }
 
-export interface Fonts { regular: PDFFont; bold: PDFFont; italic: PDFFont; boldItalic: PDFFont; mono: PDFFont }
+/**
+ * ── THE SHAPE `layout` NEEDS, WHICHEVER FONTS BACK IT ────────────────────────
+ *
+ * Kept as an interface rather than the concrete `DocumentFonts` so the line
+ * breaker can still be driven by the tests with five plain standard fonts. The
+ * thing under test is where the line breaks, not which file the glyph came from.
+ */
+export interface Fonts {
+  pick(style: Style, codePoint: number): PDFFont | null;
+  base(style: Style): PDFFont;
+}
 
-function fontFor(r: Inline, f: Fonts): PDFFont {
-  if (r.code) return f.mono;
-  if (r.bold && r.italic) return f.boldItalic;
-  if (r.bold) return f.bold;
-  if (r.italic) return f.italic;
-  return f.regular;
+/** The five standard faces, wrapped in the interface above. */
+export function fixedFonts(faces: Record<Style, PDFFont>): Fonts {
+  return { pick: (style) => faces[style] ?? faces.regular, base: (style) => faces[style] ?? faces.regular };
+}
+
+function styleFor(r: Inline): Style {
+  if (r.code) return 'mono';
+  if (r.bold && r.italic) return 'boldItalic';
+  if (r.bold) return 'bold';
+  if (r.italic) return 'italic';
+  return 'regular';
+}
+
+/**
+ * Cut a run into stretches that share ONE font.
+ *
+ * A PDF text operation draws with a single font, so text mixing scripts — a
+ * Hindi name in an English sentence — has to be split before it can be set. A
+ * character no loaded face can set is transliterated if there is an obvious
+ * ASCII stand-in and counted as dropped otherwise, which is the same contract
+ * `winAnsi` had and the only part of it worth keeping.
+ */
+function shapeRun(
+  text: string,
+  style: Style,
+  fonts: Fonts,
+  dropped: { n: number },
+): Array<{ text: string; font: PDFFont }> {
+  const out: Array<{ text: string; font: PDFFont }> = [];
+  const fallback = fonts.base(style);
+  const push = (ch: string, font: PDFFont) => {
+    const last = out[out.length - 1];
+    if (last && last.font === font) last.text += ch;
+    else out.push({ text: ch, font });
+  };
+
+  for (const ch of String(text ?? '')) {
+    // A hard break is structure, not a glyph: it must survive to the splitter
+    // below and must never be counted as an unrepresentable character.
+    if (ch === '\n') { push(ch, fallback); continue; }
+    if (ch === '\t') { push('    ', fallback); continue; }
+    const cp = ch.codePointAt(0)!;
+    const font = fonts.pick(style, cp);
+    if (font) { push(ch, font); continue; }
+    const stand = TRANSLIT[ch];
+    if (stand !== undefined) {
+      for (const c of stand) push(c, fonts.pick(style, c.codePointAt(0)!) ?? fallback);
+      continue;
+    }
+    dropped.n++;
+  }
+  return out;
 }
 
 export interface Piece { text: string; font: PDFFont; width: number; run: Inline }
@@ -105,9 +162,12 @@ export function layout(runs: Inline[], f: Fonts, size: number, maxWidth: number,
   let width = 0;
   const flush = () => { lines.push(line); line = []; width = 0; };
 
-  for (const run of runs) {
-    const font = fontFor(run, f);
-    const text = winAnsi(run.text, dropped);
+  // One pass per run becomes one pass per SAME-FONT stretch of that run, so a
+  // sentence that changes script mid-way is set rather than half-dropped.
+  const shaped = runs.flatMap((run) =>
+    shapeRun(run.text, styleFor(run), f, dropped).map((part) => ({ ...part, run })));
+
+  for (const { run, font, text } of shaped) {
     // Compared by VALUE once, so a paragraph whose two lines happened to be
     // identical would not have broken between them. The index is what it meant.
     const segments = text.split('\n');
@@ -169,19 +229,18 @@ export function layout(runs: Inline[], f: Fonts, size: number, maxWidth: number,
 export interface PdfResult { blob: Blob; pages: number; droppedGlyphs: number }
 
 export async function renderPdf(spec: DocSpec): Promise<PdfResult> {
-  const { PDFDocument, StandardFonts, rgb } = await import('pdf-lib');
+  const { PDFDocument, rgb } = await import('pdf-lib');
 
   const blocks = parseMarkdown(spec.markdown, spec.title);
   const images = await loadImages(blocks);
   const pdf = await PDFDocument.create();
   const serif = spec.typeface !== 'sans';
-  const f: Fonts = {
-    regular: await pdf.embedFont(serif ? StandardFonts.TimesRoman : StandardFonts.Helvetica),
-    bold: await pdf.embedFont(serif ? StandardFonts.TimesRomanBold : StandardFonts.HelveticaBold),
-    italic: await pdf.embedFont(serif ? StandardFonts.TimesRomanItalic : StandardFonts.HelveticaOblique),
-    boldItalic: await pdf.embedFont(serif ? StandardFonts.TimesRomanBoldItalic : StandardFonts.HelveticaBoldOblique),
-    mono: await pdf.embedFont(StandardFonts.Courier),
-  };
+  /**
+   * Real embedded faces, chosen from what the document actually says — see
+   * fonts.ts. This is what lets a PDF carry a Hindi name, a rupee sign or a
+   * Polish surname; the base-14 fonts it replaced could not, and dropped them.
+   */
+  const f = await loadDocumentFonts(pdf, serif, spec.markdown ?? '');
   const dropped = { n: 0 };
 
   const size = PAGE[spec.pageSize === 'letter' ? 'letter' : 'a4'];
@@ -272,7 +331,9 @@ export async function renderPdf(spec: DocSpec): Promise<PdfResult> {
         drawLines(
           layout(b.runs, f, BODY_SIZE, colWidth - indent, dropped), BODY_SIZE, indent, ink,
           // A continuation paragraph under a bullet gets no marker of its own.
-          b.index === 0 && !b.ordered && b.level > 0 ? undefined : { text: marker, font: f.regular },
+          b.index === 0 && !b.ordered && b.level > 0
+            ? undefined
+            : { text: marker, font: f.base('regular') },
         );
         y -= 3;
         break;
@@ -305,7 +366,7 @@ export async function renderPdf(spec: DocSpec): Promise<PdfResult> {
             color: rgb(0.965, 0.965, 0.972),
           });
           page.drawText(winAnsi(raw, dropped), {
-            x: MARGIN + 8, y: y - fs, size: fs, font: f.mono, color: rgb(0.16, 0.18, 0.22),
+            x: MARGIN + 8, y: y - fs, size: fs, font: f.base('mono'), color: rgb(0.16, 0.18, 0.22),
           });
           y -= lineH;
         }
@@ -397,8 +458,9 @@ export async function renderPdf(spec: DocSpec): Promise<PdfResult> {
   if (pages.length > 1) {
     pages.forEach((p, i) => {
       const label = String(i + 1);
-      const w = f.regular.widthOfTextAtSize(label, 9);
-      p.drawText(label, { x: (size.w - w) / 2, y: MARGIN - 18, size: 9, font: f.regular, color: muted });
+      const pageFont = f.base('regular');
+      const w = pageFont.widthOfTextAtSize(label, 9);
+      p.drawText(label, { x: (size.w - w) / 2, y: MARGIN - 18, size: 9, font: pageFont, color: muted });
     });
   }
 

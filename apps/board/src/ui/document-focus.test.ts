@@ -151,6 +151,27 @@ describe('exporting', () => {
     focus.destroy();
   }, 60_000);
 
+
+/**
+ * ── "NO REQUEST" MEANS NO DOCUMENT SERVICE, NOT NO FETCH ─────────────────────
+ *
+ * These used to assert `fetch` was never called, which said the right thing
+ * until the renderer began embedding real fonts: it now loads its own bundled
+ * woff2 files, and that is still the document being typeset ON THIS DEVICE.
+ *
+ * What the test is actually protecting is that no CONTENT leaves — nothing is
+ * posted anywhere, nothing is rendered by a server. So it checks what was asked
+ * for rather than whether anything was asked for at all.
+ */
+function assertOnlyLocalAssets(spy: any): void {
+  for (const call of (spy?.mock?.calls ?? [])) {
+    const url = String(call?.[0] ?? '');
+    const init = call?.[1] ?? {};
+    expect(String(init.method ?? 'GET').toUpperCase()).toBe('GET');
+    expect(url, `unexpected request to ${url}`).toMatch(/\.woff2?($|\?)|^blob:|^data:/);
+  }
+}
+
   it('makes a real PDF from the live note, on this device', async () => {
     const { board, noteId } = await boardWithDocument();
     const focus = installDocumentFocus(board as any, container);
@@ -169,7 +190,7 @@ describe('exporting', () => {
     const head = new Uint8Array(await out.blob.arrayBuffer()).subarray(0, 5);
     expect(String.fromCharCode(...head)).toBe('%PDF-');
     // The user's own export never touches the network.
-    expect(fetchSpy).not.toHaveBeenCalled();
+    assertOnlyLocalAssets(fetchSpy);
 
     vi.unstubAllGlobals();
     focus.destroy();

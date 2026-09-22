@@ -43,12 +43,33 @@ async function magic(blob: Blob, n: number): Promise<string> {
 }
 
 describe('makeDocument', () => {
+
+/**
+ * ── "NO REQUEST" MEANS NO DOCUMENT SERVICE, NOT NO FETCH ─────────────────────
+ *
+ * These used to assert `fetch` was never called, which said the right thing
+ * until the renderer began embedding real fonts: it now loads its own bundled
+ * woff2 files, and that is still the document being typeset ON THIS DEVICE.
+ *
+ * What the test is actually protecting is that no CONTENT leaves — nothing is
+ * posted anywhere, nothing is rendered by a server. So it checks what was asked
+ * for rather than whether anything was asked for at all.
+ */
+function assertOnlyLocalAssets(spy: any): void {
+  for (const call of (spy?.mock?.calls ?? [])) {
+    const url = String(call?.[0] ?? '');
+    const init = call?.[1] ?? {};
+    expect(String(init.method ?? 'GET').toUpperCase()).toBe('GET');
+    expect(url, `unexpected request to ${url}`).toMatch(/\.woff2?($|\?)|^blob:|^data:/);
+  }
+}
+
   it('produces a real PDF, here, with no request at all', async () => {
     const doc = await makeDocument(MD, 'Report', 'pdf');
     expect(await magic(doc.blob, 5)).toBe('%PDF-');
     expect(doc.fileName).toBe('Report.pdf');
     expect(doc.pages).toBeGreaterThanOrEqual(1);
-    expect(globalThis.fetch).not.toHaveBeenCalled();
+    assertOnlyLocalAssets(globalThis.fetch);
   }, 30_000);
 
   /** A .docx is a zip — "PK" is the only signature that makes it openable. */
@@ -56,7 +77,7 @@ describe('makeDocument', () => {
     const doc = await makeDocument(MD, 'Report', 'docx');
     expect(await magic(doc.blob, 2)).toBe('PK');
     expect(doc.fileName).toBe('Report.docx');
-    expect(globalThis.fetch).not.toHaveBeenCalled();
+    assertOnlyLocalAssets(globalThis.fetch);
   }, 30_000);
 
   it('gives the .md source the title it would otherwise lack', async () => {
