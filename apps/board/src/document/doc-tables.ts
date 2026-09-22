@@ -34,6 +34,22 @@ import { parseMarkdown } from './blocks';
 const PAGE_MARGIN = 64;
 
 /**
+ * What a column costs BEYOND the width it is given.
+ *
+ * BlockSuite draws each cell 4px wider than its column's `width` and the
+ * table 8px wider than its columns — borders, and they are outside the
+ * number. Spending the whole content width on the widths themselves
+ * therefore overflowed the page and CLIPPED the last column, which is worse
+ * than the default it replaced.
+ *
+ * Measured rather than derived: asking 100, 150 and 200 per column on a
+ * three-column table gave tables of 320, 470 and 620 — a constant 20 over,
+ * every time.
+ */
+const COLUMN_BORDER = 4;
+const TABLE_BORDER = 8;
+
+/**
  * The column weights of every table in a document, in the order they appear.
  *
  * Parsed with the document parser rather than a regex of its own, so the
@@ -69,7 +85,7 @@ export function applyTableWidths(
   const tables = (note?.children ?? []).filter((c: any) => c?.flavour === 'affine:table');
   if (!tables.length) return 0;
 
-  const content = contentWidth(note);
+  const content = contentWidth(note, noteId);
   let sized = 0;
   tables.forEach((table: any, i: number) => {
     const asked = weights[i];
@@ -86,10 +102,15 @@ export function applyTableWidths(
       return Number.isFinite(n) && n > 0 ? n : 1;
     });
     const total = w.reduce((a, b) => a + b, 0);
+    // What is left for the widths once the borders have been paid for.
+    const budget = Math.max(
+      ids.length * 48,
+      content - ids.length * COLUMN_BORDER - TABLE_BORDER,
+    );
     try {
       board.store.updateBlock(table, () => {
         ids.forEach((id, c) => {
-          table.props.columns[id].width = Math.max(48, Math.round((content * w[c]!) / total));
+          table.props.columns[id].width = Math.max(48, Math.round((budget * w[c]!) / total));
         });
       });
       sized += 1;
@@ -101,17 +122,65 @@ export function applyTableWidths(
 }
 
 /**
- * The room a table has, in the note's own layout pixels.
+ * The same, once there is something to measure.
  *
- * Read from the model rather than the DOM on purpose: the edgeless canvas is
- * under a transform, so every `getBoundingClientRect` comes back multiplied by
- * the zoom, and a width measured at 1.14× and then stored would grow a little
- * every time a document was opened at a different zoom.
+ * A note is inserted before it is laid out, so a synchronous call finds no
+ * element and falls back to the page margin — which is the number that made
+ * the table overflow in the first place. This waits for the paragraph that
+ * gives the text column its width, and gives up after a handful of frames
+ * rather than spinning: a table sized from the fallback is slightly wide, a
+ * loop that never ends is a hung tab.
  */
-function contentWidth(note: any): number {
+export function applyTableWidthsWhenReady(
+  board: any,
+  noteId: string,
+  weights: Array<number[] | null>,
+  frames = 20,
+): void {
+  if (!weights.some(Boolean)) return;
+  const tick = (left: number) => {
+    const el = typeof document !== 'undefined'
+      ? document.querySelector(`affine-edgeless-note[data-block-id="${noteId}"]`)
+      : null;
+    const ready = !!el?.querySelector('.affine-paragraph-rich-text-wrapper');
+    if (ready || left <= 0) {
+      applyTableWidths(board, noteId, weights);
+      return;
+    }
+    requestAnimationFrame(() => tick(left - 1));
+  };
+  tick(frames);
+}
+
+/**
+ * The room a table has, in the note's own layout units.
+ *
+ * MEASURED off a paragraph, not computed from the page margin. The margin in
+ * `document-view.css` is 64px a side, which gives 672 on an 800-wide note —
+ * but the text column is 624, because BlockSuite insets the rich text inside
+ * the block as well. A table built to 672 aligned with the block and ran 47px
+ * past the words beside it, clipping its last column against the edge of the
+ * page. In the PDF the table spans the TEXT width, so it must here too.
+ *
+ * The ratio of two screen measurements cancels the canvas zoom, so nothing
+ * here has to know what the viewport is doing. If the note has not been laid
+ * out yet there is nothing to measure and the page margin is the fallback,
+ * which is close and never clips by much.
+ */
+function contentWidth(note: any, noteId: string): number {
   const xywh = String(note?.props?.xywh ?? '');
   const parts = xywh.replace(/[[\]]/g, '').split(',').map((n) => Number(n.trim()));
   const width = Number.isFinite(parts[2]) && parts[2]! > 0 ? parts[2]! : 752;
+
+  const el = typeof document !== 'undefined'
+    ? document.querySelector(`affine-edgeless-note[data-block-id="${noteId}"]`)
+    : null;
+  const text = el?.querySelector('.affine-paragraph-rich-text-wrapper');
+  const noteBox = el?.getBoundingClientRect().width ?? 0;
+  const textBox = text?.getBoundingClientRect().width ?? 0;
+  if (noteBox > 0 && textBox > 0) {
+    return Math.max(160, Math.round(width * (textBox / noteBox)));
+  }
   return Math.max(160, Math.round(width - PAGE_MARGIN * 2));
 }
 

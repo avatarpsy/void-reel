@@ -56,10 +56,15 @@ describe('writing them onto the note', () => {
   it('spends the content width in the ratio asked for', () => {
     const board = fakeBoard(THREE);
     expect(applyTableWidths(board, 'n1', [[3, 1, 1]])).toBe(1);
-    // 752 less the 64px page margin on both sides.
+    /**
+     * 752 less the 64px page margin on both sides is 624 of content, less
+     * 4px of border per column and 8 for the table = 604 to spend.
+     */
     const widths = Object.values(board.table.props.columns).map((c: any) => c.width);
-    expect(widths).toEqual([374, 125, 125]);
-    expect(widths.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(624);
+    expect(widths).toEqual([362, 121, 121]);
+    // And what is DRAWN still fits the page, which is the point.
+    const drawn = widths.reduce((a, b) => a + b, 0) + widths.length * 4 + 8;
+    expect(drawn).toBeLessThanOrEqual(624);
   });
 
   it('pads a short hint with ones, like the PDF writer does', () => {
@@ -67,7 +72,7 @@ describe('writing them onto the note', () => {
     const board = fakeBoard(THREE);
     applyTableWidths(board, 'n1', [[3]]);
     const [a, b, c] = Object.values(board.table.props.columns).map((x: any) => x.width);
-    expect(a).toBe(374);
+    expect(a).toBe(362);
     expect(b).toBe(c);
   });
 

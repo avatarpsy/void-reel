@@ -42,7 +42,7 @@ import {
   commentsFromMarks,
   marksFromComments,
 } from './align-marks';
-import { applyTableWidths, tableWeights, weightsOfNote, withColumnComments }
+import { applyTableWidthsWhenReady, tableWeights, weightsOfNote, withColumnComments }
   from './doc-tables';
 import {
   countImages,
@@ -257,12 +257,12 @@ export async function placeMarkdownDocument(
   void sizeImagesFromHints(board, model.id).catch(() => { /* natural size */ });
 
   /**
-   * And the tables take the column widths it asked for. Synchronous and
-   * cheap — it is a property write per column, with nothing to measure — so
-   * unlike the pictures there is no reason to let the first paint win the
-   * race and show the wrong ratio first.
+   * And the tables take the column widths it asked for, once the page has
+   * been laid out far enough to measure its text column — see
+   * `doc-tables.ts`, where the page margin turned out not to be the width a
+   * table actually has.
    */
-  applyTableWidths(board, model.id, tableWeights(text));
+  applyTableWidthsWhenReady(board, model.id, tableWeights(text));
 
   return { noteId: model.id, dropped: droppedConstructs(text), images: countImages(text) };
 }
