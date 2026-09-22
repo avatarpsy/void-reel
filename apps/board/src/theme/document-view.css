@@ -516,31 +516,90 @@ affine-edgeless-note[data-vs-doc-tag] .affine-block-component {
   line-height: 1.45;
 }
 
-/* ── THE GAP BETWEEN BLOCKS ─────────────────────────────────────────────────
-   7pt after a paragraph is 10px at this body size, stated here so it is
-   deliberate rather than a coincidence a future version could change.
+/* ═══════════════════════════════════════════════════════════════════════════
+   THE GAP BETWEEN BLOCKS, IN THE EXPORTER'S OWN POINTS
+   ═══════════════════════════════════════════════════════════════════════════
 
-   NOT applied to a divider. A divider carries its own vertical room, and
-   flattening it to 10px drew the rule straight through the line above it — the
-   masthead's hairline sat on top of "Registration Number". A blanket margin on
-   every block is exactly the kind of rule that looks tidy and breaks the one
-   block that was not a paragraph. */
-affine-edgeless-note[data-vs-doc-tag] affine-paragraph > .affine-block-component,
-affine-edgeless-note[data-vs-doc-tag] affine-list > .affine-block-component,
+   ── WHY THE OLD RULES HERE DID NOTHING ───────────────────────────────
+   They set `margin` on `.affine-block-component`, and BlockSuite sets that
+   margin as an INLINE STYLE — `margin: var(--affine-paragraph-margin, 10px 0)`
+   — which no stylesheet rule can outrank without `!important`. The old value
+   happened to be the same 10px as the fallback, so the rules read as correct,
+   measured as correct, and were in fact never applied. Found by asking the
+   browser which rule won rather than by reading the file.
+
+   The variable in that fallback is the intended hook, so that is what these
+   set. The divider has no inline margin at all, which is why its own rule
+   below is written the ordinary way.
+
+   ── WHY THE GAPS MUST SUM ─────────────────────────────────────────
+   The exporter takes the room AFTER a block and then the room BEFORE the next
+   one, so the gap between them is the two ADDED. CSS margins between siblings
+   collapse to the larger instead, which is right for a paragraph following a
+   paragraph (7 and 0) and wrong everywhere it matters: a heading after a
+   paragraph should open 27pt and collapsed to 20pt. Flex items do not
+   collapse, so the page column is a flex column and the arithmetic is the
+   exporter's. */
+affine-edgeless-note[data-vs-doc-tag] .affine-block-children-container {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+/* One exporter point, in canvas pixels. The body is 11pt in the file and 16px
+   here — a document is read on a screen from further away than paper — so
+   every measurement below is written in the points the exporter uses and
+   converted once. Read side by side with `H_BEFORE` / `H_AFTER` in `pdf.ts`. */
+affine-edgeless-note[data-vs-doc-tag] {
+  --vs-pt: calc(16 / 11 * 1px);
+}
+
+/* `y -= 7` after a paragraph, and the same after a quote. */
+affine-edgeless-note[data-vs-doc-tag] affine-paragraph {
+  --affine-paragraph-margin: 0 0 calc(7 * var(--vs-pt));
+}
+/* H_BEFORE / H_AFTER, level by level. Selected with `:has()` because the
+   heading level lives on a wrapper INSIDE the element whose margin this is. */
+affine-edgeless-note[data-vs-doc-tag]
+  affine-paragraph:has(> .affine-block-component .affine-paragraph-rich-text-wrapper.h1) {
+  --affine-paragraph-margin: 0 0 calc(10 * var(--vs-pt));
+}
+affine-edgeless-note[data-vs-doc-tag]
+  affine-paragraph:has(> .affine-block-component .affine-paragraph-rich-text-wrapper.h2) {
+  --affine-paragraph-margin: calc(20 * var(--vs-pt)) 0 calc(8 * var(--vs-pt));
+}
+affine-edgeless-note[data-vs-doc-tag]
+  affine-paragraph:has(> .affine-block-component .affine-paragraph-rich-text-wrapper.h3) {
+  --affine-paragraph-margin: calc(16 * var(--vs-pt)) 0 calc(6 * var(--vs-pt));
+}
+affine-edgeless-note[data-vs-doc-tag]
+  affine-paragraph:has(> .affine-block-component .affine-paragraph-rich-text-wrapper.h4) {
+  --affine-paragraph-margin: calc(14 * var(--vs-pt)) 0 calc(5 * var(--vs-pt));
+}
+/* `y -= 3` after a list item — a list is tighter than running text. */
+affine-edgeless-note[data-vs-doc-tag] affine-list {
+  --affine-list-margin: 0 0 calc(3 * var(--vs-pt));
+}
+/* A picture is spaced like the paragraph it stands in for. */
 affine-edgeless-note[data-vs-doc-tag] affine-image > .affine-block-component {
-  margin: 10px 0;
+  margin: 0 0 calc(7 * var(--vs-pt));
 }
 
 /* ── THE RULE ───────────────────────────────────────────────────────────────
    The exporter's `rule` case drops 8pt, draws the hairline, then drops 14pt —
    asymmetric, and deliberately so: a rule belongs to what follows it. Against
-   an 11pt body those are 12px and 20px here. */
+   a rule belongs to what follows it. */
 affine-edgeless-note[data-vs-doc-tag] affine-divider > .affine-block-component {
-  margin: 12px 0 20px;
+  margin: calc(8 * var(--vs-pt)) 0 calc(14 * var(--vs-pt));
 }
 affine-edgeless-note[data-vs-doc-tag] affine-divider hr,
 affine-edgeless-note[data-vs-doc-tag] affine-divider .affine-divider-block-container {
   margin: 0;
+  /* BlockSuite pads this by 18px top and bottom, which is room the exporter
+     does not leave: the rule's own spacing is the 8pt and 14pt above, and
+     adding 36px more made every rule on the canvas sit in twice the space it
+     occupies in the file. */
+  padding: 0;
   border-color: var(--affine-divider-color);
 }
 
@@ -557,23 +616,16 @@ affine-edgeless-note[data-vs-doc-tag] affine-paragraph[data-vs-align='center'] {
 affine-edgeless-note[data-vs-doc-tag] affine-paragraph[data-vs-align='right'] {
   text-align: right;
 }
-/* ── AND THE PICTURE IS CENTRED BY A FLEX, NOT BY ITS MARGINS ───────────────
-   `affine-page-image` is `display: flex; justify-content: center`, so the block
-   is full width and the picture is centred INSIDE it. Setting margins on the
-   block therefore did nothing visible: the attribute said `left`, the box was
-   at the left margin, and the logo still sat in the middle of the page.
-
-   Measured on the live board rather than reasoned about — the block reported
-   474px wide at the page margin while the 39px image reported x=284. */
-/* ── `align-items`, BECAUSE THE FLEX IS A COLUMN ────────────────────────────
+/* ── A PICTURE MOVES WITH `align-items`, BECAUSE ITS FLEX IS A COLUMN ─────
    `affine-page-image` is `display: flex; flex-direction: column`, so the
-   HORIZONTAL axis is the cross axis: `align-items` moves the picture across the
-   page and `justify-content` moves it up and down. Setting justify-content read
-   correctly in the computed style, did nothing visible, and would have nudged
-   the picture vertically if the container had ever been taller than it.
+   HORIZONTAL axis is the CROSS axis: `align-items` moves the picture across
+   the page and `justify-content` moves it up and down.
 
-   Measured: the flex box sat at x=65 with justify-content: flex-start, and the
-   38px picture inside it still reported x=277 — the centre of a 592px note. */
+   Both wrong answers read back correctly in the computed style and did
+   nothing visible, so both were measured on the live board rather than
+   reasoned about: margins on the block left the 39px logo at x=284 in a
+   474px block, and `justify-content: flex-start` left it at x=277 — the
+   centre of a 592px note — with the flex box itself correctly at x=65. */
 affine-edgeless-note[data-vs-doc-tag] affine-image[data-vs-align='left'] affine-page-image {
   align-items: flex-start;
 }
@@ -628,24 +680,26 @@ affine-edgeless-note[data-vs-doc-tag] .affine-block-component:first-child
    `.affine-block-children-container` is BlockSuite's own class and is stable;
    the wrappers around it are vanilla-extract hashes that change every build and
    must never be selected on. */
-affine-edgeless-note[data-vs-doc-tag] .affine-block-children-container {
-  padding: 56px 64px 64px;
-}
-
-/* ── AND ONLY THE OUTER ONE ─────────────────────────────────────────────────
+/* ── THE NESTED ONES ARE NOT PAGES, AND ARE THE DEFAULT ─────────────────
    There are fourteen of these in one certificate and ELEVEN are nested inside
-   individual paragraphs, where they hold a paragraph's child blocks and are
-   almost always empty. The rule above was giving each of them the page margin:
-   a paragraph whose text is 16px tall became 54px, and the document stretched
-   to roughly three times its proper length. That — not the font, not the
-   colour — is why it did not look like the file it exports.
+   a single block, where they hold that block's children and are almost always
+   empty. Given the page margin, a paragraph whose text is 16px tall became
+   54px and the document ran three times too long.
 
-   Measured, not spotted: the nested container computed `56px 64px 64px 24px`
-   and 39px of height with nothing in it. */
-affine-edgeless-note[data-vs-doc-tag] affine-paragraph .affine-block-children-container,
-affine-edgeless-note[data-vs-doc-tag] affine-list .affine-block-children-container,
-affine-edgeless-note[data-vs-doc-tag] affine-table .affine-block-children-container,
-affine-edgeless-note[data-vs-doc-tag] affine-image .affine-block-children-container {
+   This used to be an ALLOWLIST — paragraph, list, table, image — and
+   `affine-divider` was never added to it, which broke the divider in a way
+   nobody would guess from the symptom: BlockSuite's divider container is
+   `height: 1px; display: flex; flex-direction: column; justify-content:
+   center`, so its children are centred on a one-pixel line. The nested
+   container, inflated to 137px by a page margin it should never have had,
+   overflowed that line by 136px — and centring split the overflow evenly,
+   lifting the `hr` 68px ABOVE its own block, where it drew a hairline
+   straight through the last line of the paragraph above it.
+
+   So the default is now the nested case and the page column is the exception,
+   named by where it sits rather than by what is above it. A structural rule
+   cannot fall out of sync with a list of block types; the allowlist did. */
+affine-edgeless-note[data-vs-doc-tag] .affine-block-children-container {
   /* BlockSuite's own indent for a nested block, and nothing else. */
   padding: 0 0 0 24px;
 }
@@ -653,6 +707,15 @@ affine-edgeless-note[data-vs-doc-tag] affine-image .affine-block-children-contai
 /* An empty one is not a gap. */
 affine-edgeless-note[data-vs-doc-tag] .affine-block-children-container:empty {
   padding: 0;
+}
+
+/* ── AND THE PAGE COLUMN IS THE ONE THE NOTE ITSELF OPENS WITH ──────────
+   Last, and matched by position: `.affine-note-block-container` is the note's
+   own wrapper, so its direct child is the page column and every other
+   container in the document is nested inside a block. */
+affine-edgeless-note[data-vs-doc-tag]
+  .affine-note-block-container > .affine-block-children-container {
+  padding: 56px 64px 64px;
 }
 
 /* A table on paper: hairline rules and a shaded header, like the exporter's. */
@@ -699,4 +762,94 @@ affine-edgeless-note[data-vs-doc-tag] affine-image figcaption {
   font-size: 0.82em;
   color: var(--affine-text-secondary-color);
   text-align: center;
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   WHERE THE NEXT PAGE STARTS
+   ════════════════════════════════════════════════════════════════════════════
+
+   A note is one continuous surface — it is not paginated, and pretending it
+   were would mean re-typesetting the document in the browser on every
+   keystroke to know where the pages fall. So the break is drawn the way
+   Word draws it in draft view: a labelled rule saying the file breaks HERE.
+
+   The paragraph itself holds four word joiners and no visible character, so
+   without this the board showed a blank line indistinguishable from the
+   blank line above it — and a user had no way to tell which one to delete.
+
+   `::after` rather than a border, so the label sits ON the rule, and
+   `contenteditable` never sees a child it thinks it owns. */
+affine-edgeless-note[data-vs-doc-tag] affine-paragraph[data-vs-mark='pagebreak'] {
+  position: relative;
+  /* The rule replaces the line rather than adding to it: a break costs no
+     height in the export either, it just ends the page. */
+  margin: 10px 0;
+}
+affine-edgeless-note[data-vs-doc-tag] affine-paragraph[data-vs-mark='pagebreak']::after {
+  content: 'Page break';
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Sits over an empty line, so it must not swallow the caret the user
+     needs in order to delete it. */
+  pointer-events: none;
+  font-size: 0.62em;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--vs-doc-break, rgb(0 0 0 / 38%));
+  background:
+    linear-gradient(var(--vs-doc-break-line, rgb(0 0 0 / 16%)), var(--vs-doc-break-line, rgb(0 0 0 / 16%)))
+    0 50% / 100% 1px no-repeat;
+  /* The label needs the paper behind it, not the rule drawn through it. */
+  text-shadow:
+    0 0 4px var(--vs-paper), 0 0 4px var(--vs-paper),
+    0 0 8px var(--vs-paper), 0 0 8px var(--vs-paper);
+}
+[data-theme='dark'] affine-edgeless-note[data-vs-doc-tag] affine-paragraph[data-vs-mark='pagebreak']::after {
+  --vs-doc-break: rgb(255 255 255 / 42%);
+  --vs-doc-break-line: rgb(255 255 255 / 20%);
+}
+
+/* ── AND A UNIT OF GAP IS EXACTLY A UNIT OF GAP ──────────────────────
+   `SPACE_UNIT` is 12pt, and the body here is 16px standing in for the
+   exporter's 11pt — so a unit is 12/11 em. Left alone, each mark cost a full
+   blank line instead: 20.3px of line box plus 10px of collapsed paragraph
+   margin, measured, which is nearly 20pt. A three-unit gap therefore drew
+   87px on the board where the file leaves 36pt, and the preview of a
+   signature block was half a line out.
+
+   The line box is shrunk rather than the box clipped: the paragraph holds
+   only word joiners, so there is nothing to crop, and a clip would have put
+   the caret outside the element the user has to click to delete it. */
+affine-edgeless-note[data-vs-doc-tag] affine-paragraph[data-vs-mark='space'] {
+  /* The WHOLE height of the mark is the unit — no margin around it, or three
+     units of gap would carry four gaps' worth of paragraph spacing. */
+  --affine-paragraph-margin: 0;
+}
+affine-edgeless-note[data-vs-doc-tag] affine-paragraph[data-vs-mark='space']
+  > .affine-block-component {
+  line-height: calc(12 * var(--vs-pt));
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   HIGHLIGHTED TEXT KEEPS ITS DARK INK IN THE DARK
+   ════════════════════════════════════════════════════════════════════════════
+
+   A highlight is a PRINT colour: it has to come out of the printer yellow, so
+   unlike every other colour here it does not follow the theme. In the dark
+   the page ink turned near-white and sat on that yellow, which rendered the
+   highlighted words — the ones the author marked as the ones to notice —
+   effectively invisible.
+
+   The exporter draws that run in the document's dark ink over the swatch, so
+   this is the export's answer, not a dark-mode special case.
+
+   An inline `color` on the same run still wins, because BlockSuite writes one
+   as an inline style and this is a stylesheet rule — which is the right way
+   round: a colour the author asked for beats a colour we inferred. */
+[data-theme='dark'] affine-edgeless-note[data-vs-doc-tag] span[style*='background-color'] {
+  color: var(--vs-ink-on-highlight, #17171a);
 }

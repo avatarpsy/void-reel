@@ -30,7 +30,7 @@
  */
 import { Marked } from 'marked';
 
-import { isOnlyMarks, readMark } from './align-marks';
+import { SPACE_UNIT, isOnlyMarks, readMark } from './align-marks';
 import { HIGHLIGHT_DEFAULT, normaliseColour } from './colour';
 
 /**
@@ -517,6 +517,37 @@ export function mergeRuns(runs: Inline[]): Inline[] {
   }
   return out;
 }
+/**
+ * Neighbouring gaps are one gap.
+ *
+ * A gap reaches the parser two ways and they have to agree. From a FILE it
+ * is one `<!-- space: 36 -->` comment, which is already one block. From the
+ * CANVAS it is three empty paragraphs each carrying a space mark, because a
+ * BlockSuite note cannot hold a number anywhere the user will not see it —
+ * so the amount is carried by repetition (see `align-marks.ts`).
+ *
+ * Summing them here is what makes the two identical: the same document
+ * exports the same file whether the agent wrote it or the user has been
+ * editing it on the board. Without this the round trip turned one gap into
+ * three consecutive comments, which re-imported to the same height but made
+ * every saved copy of a document different from the last.
+ *
+ * Zero-point gaps are dropped rather than summed: they are the Word
+ * importer's marker for a single blank paragraph, which is not a gap.
+ */
+function mergeSpace(blocks: Block[]): void {
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const b = blocks[i]!;
+    if (b.kind !== 'space') continue;
+    if (b.points <= 0) { blocks.splice(i, 1); continue; }
+    const next = blocks[i + 1];
+    if (next?.kind === 'space' && next.points > 0) {
+      b.points = Math.min(700, b.points + next.points);
+      blocks.splice(i + 1, 1);
+    }
+  }
+}
+
 export function parseMarkdown(markdown: string, title?: string): Block[] {
   const md = String(markdown ?? '');
   const out: Block[] = [];
@@ -592,6 +623,11 @@ export function parseMarkdown(markdown: string, title?: string): Block[] {
       const head = runs?.[0];
       if (!head) continue;
       const mark = readMark(head.text);
+      if (mark.space && isOnlyMarks(runs!.map((r) => r.text).join(''))) {
+        // One mark is one unit of gap; a run of them is summed below.
+        out.splice(i, 1, { kind: 'space', points: SPACE_UNIT });
+        continue;
+      }
       if (mark.pagebreak) {
         // A paragraph that is nothing but the mark IS the break.
         if (isOnlyMarks(runs!.map((r) => r.text).join(''))) {
@@ -639,6 +675,8 @@ export function parseMarkdown(markdown: string, title?: string): Block[] {
    * the TEXT catches it at any level while still letting a document that opens
    * "## Overview" under the title "Q4 Plan" keep both, which is correct.
    */
+  mergeSpace(out);
+
   const t = String(title ?? '').trim();
   if (t) {
     const firstReal = out.find((b) => b.kind !== 'rule');

@@ -22,7 +22,7 @@
  * per document, rewritten when the canvas changes.
  */
 import { readBlockMeta } from '../board/board-meta';
-import { readMark } from './align-marks';
+import { isOnlyMarks, readMark } from './align-marks';
 import { listDocuments } from './sections';
 
 import type { MountedBoard } from '../blocksuite/editor';
@@ -133,26 +133,47 @@ function stampAlignment(board: MountedBoard, container: HTMLElement): void {
   );
   for (const el of nodes) {
     const id = el.dataset.blockId;
-    const align = id ? alignOfBlock(board, id) : '';
+    /**
+     * ONE read per block, not two. Alignment and mark both come from the
+     * same model and, for a paragraph, from the same string — and this runs
+     * on every frame in which anything on the board changed, so on a long
+     * document that was two `getBlock` calls and two yjs text conversions
+     * per paragraph per keystroke to answer one question twice.
+     */
+    const { align, mark } = id ? readBlock(board, id) : EMPTY;
     // Written only when it CHANGED: an attribute set to the value it already
     // has is still a DOM write, and this runs a lot.
-    if (align === (el.dataset.vsAlign ?? '')) continue;
-    if (align) el.dataset.vsAlign = align;
-    else delete el.dataset.vsAlign;
+    if (align !== (el.dataset.vsAlign ?? '')) {
+      if (align) el.dataset.vsAlign = align;
+      else delete el.dataset.vsAlign;
+    }
+    if (mark !== (el.dataset.vsMark ?? '')) {
+      if (mark) el.dataset.vsMark = mark;
+      else delete el.dataset.vsMark;
+    }
   }
 }
 
+const EMPTY = { align: '', mark: '' } as const;
+
 /**
- * What alignment a block carries, whichever way it carries it.
+ * What a block carries: how it is aligned, and whether it IS a mark.
  *
- * A picture keeps it on its url, because that survives the round trip. A
- * paragraph keeps it as an invisible prefix in its text, because a paragraph
- * has no property to put it in. Neither is a design anybody would choose from
- * scratch; both are what BlockSuite leaves available.
+ * A picture keeps its alignment on its url, because that survives the round
+ * trip. A paragraph keeps everything as an invisible prefix in its own text,
+ * because a paragraph has no property to put it in — `prop:align` is accepted
+ * by `updateBlock` and reads back, but never reaches yjs, so it is gone on
+ * the next load. Neither is a design anybody would choose from scratch; both
+ * are what BlockSuite leaves available.
+ *
+ * `mark` is only set for a paragraph holding NOTHING BUT marks. One that
+ * begins with a mark and then says something is a line of text with an
+ * instruction on the front: the instruction is honoured, the paragraph is not
+ * the mark.
  */
-function alignOfBlock(board: MountedBoard, blockId: string): string {
+function readBlock(board: MountedBoard, blockId: string): { align: string; mark: string } {
   const model: any = board.store.getBlock(blockId)?.model;
-  if (!model) return '';
+  if (!model) return EMPTY;
 
   if (model.flavour === 'affine:image') {
     const source = String(model?.props?.sourceId ?? '');
@@ -162,15 +183,15 @@ function alignOfBlock(board: MountedBoard, blockId: string): string {
     const value = (hit?.[1] ?? '').toLowerCase();
     // LEFT is stamped for a picture: BlockSuite centres one by default, so
     // left has to be asked for rather than assumed.
-    if (value === 'centre') return 'center';
-    return value || 'left';
+    return { align: value === 'centre' ? 'center' : value || 'left', mark: '' };
   }
 
-  if (model.flavour === 'affine:paragraph') {
-    const text = String(model?.text?.toString?.() ?? '');
-    const { align } = readMark(text);
-    return align && align !== 'left' ? align : '';
-  }
-  return '';
+  if (model.flavour !== 'affine:paragraph') return EMPTY;
+  const text = String(model?.text?.toString?.() ?? '');
+  if (!text) return EMPTY;
+  const read = readMark(text);
+  const align = read.align && read.align !== 'left' ? read.align : '';
+  if (!isOnlyMarks(text)) return { align, mark: '' };
+  return { align, mark: read.pagebreak ? 'pagebreak' : read.space ? 'space' : '' };
 }
 

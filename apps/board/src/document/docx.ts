@@ -164,9 +164,21 @@ export async function renderDocx(spec: DocSpec): Promise<Blob> {
         children.push(new Paragraph({ children: [new PageBreak()] }));
         break;
       case 'space':
-        // An empty paragraph whose HEIGHT is the gap. Word has no other way to
-        // say 'leave this much room' that survives being edited afterwards.
-        children.push(new Paragraph({ text: '', spacing: { before: 0, after: b.points * 20 } }));
+        /**
+         * An empty paragraph whose HEIGHT IS the gap. Word has no other way to
+         * say 'leave this much room' that survives being edited afterwards.
+         *
+         * EXACT line spacing, not `after`. Spacing-after is added to the
+         * paragraph's own line, and an empty paragraph still has one — so a
+         * 36pt gap came out of Word at about 49pt while the PDF gave 36pt,
+         * and the same document did not match itself across the two formats.
+         * An exact line makes the paragraph's whole height the number asked
+         * for. Twentieths of a point, which is what `w:line` counts.
+         */
+        children.push(new Paragraph({
+          text: '',
+          spacing: { before: 0, after: 0, line: Math.round(b.points * 20), lineRule: 'exact' },
+        }));
         break;
       case 'heading':
         children.push(new Paragraph({

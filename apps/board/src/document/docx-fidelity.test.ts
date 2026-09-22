@@ -118,8 +118,19 @@ describe('the page', () => {
     expect(body()).toContain('w:type="page"');
   });
 
-  it('carries the deliberate space, in twentieths of a point', () => {
-    expect(body()).toContain('w:after="1440"'); // 72pt
+  /**
+   * The gap is the paragraph's HEIGHT, not space added after it.
+   *
+   * Spacing-after stacks on top of the empty paragraph's own line, so a 72pt
+   * gap left Word at about 85pt while the PDF left 72pt — the same document
+   * not matching itself across two formats. An exact line rule makes the
+   * whole paragraph the height asked for.
+   */
+  it('carries the deliberate space as an exact height, in twentieths of a point', () => {
+    expect(body()).toContain('w:line="1440"'); // 72pt
+    expect(body()).toContain('w:lineRule="exact"');
+    // And nothing is added on top of it.
+    expect(body()).not.toContain('w:after="1440"');
   });
 
   it('is landscape', () => {

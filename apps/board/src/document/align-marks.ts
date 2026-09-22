@@ -42,14 +42,36 @@ const WJ = '\u2060';
 export const MARK = {
   center: WJ,
   right: WJ + WJ,
+  /**
+   * A paragraph that is ONLY this is deliberate space, worth `SPACE_UNIT`
+   * points. Several in a row are several units — which is why the amount is
+   * carried by REPETITION rather than by a number: a paragraph can hold a
+   * mark or it can hold text, and an encoded digit would be text the user
+   * could see and delete.
+   *
+   * It also means the canvas shows the gap honestly: three empty paragraphs
+   * ARE three blank lines, which is what the exported page will have.
+   */
+  space: WJ + WJ + WJ,
   /** A paragraph that is ONLY this is a page break — invisible, like a blank line. */
   pagebreak: WJ + WJ + WJ + WJ,
 } as const;
+
+/**
+ * What one space mark is worth.
+ *
+ * Twelve points is one blank line at an 11pt body, so the count and the
+ * appearance agree. A gap is rounded to the nearest unit: the alternative was
+ * encoding an exact number into invisible characters, which is unreadable in
+ * the file and impossible to edit on the canvas.
+ */
+export const SPACE_UNIT = 12;
 
 /** Longest first: `\u2060\u2060` must not be read as centre followed by text. */
 const ORDER: Array<[string, DocAlign]> = [[MARK.right, 'right'], [MARK.center, 'center']];
 
 const ALIGN_COMMENT = /^[ \t]*<!--[ \t]*align[ \t]*:[ \t]*(left|center|centre|right)[ \t]*-->[ \t]*$/i;
+const SPACE_COMMENT = /^[ \t]*<!--[ \t]*(?:space|gap)[ \t]*:[ \t]*(\d{1,3})[ \t]*-->[ \t]*$/i;
 const BREAK_COMMENT = /^[ \t]*<!--[ \t]*(?:pagebreak|page-break|newpage)[ \t]*-->[ \t]*$/i;
 
 /**
@@ -83,6 +105,12 @@ export function marksFromComments(markdown: string): string {
       pending = word === 'right' ? MARK.right : word === 'left' ? '' : MARK.center;
       continue;
     }
+    const gap = SPACE_COMMENT.exec(line);
+    if (gap) {
+      const units = Math.max(1, Math.min(40, Math.round(Number(gap[1]) / SPACE_UNIT)));
+      for (let i = 0; i < units; i++) out.push(MARK.space, '');
+      continue;
+    }
     if (BREAK_COMMENT.test(line)) {
       // Its own paragraph, so it survives as a block rather than attaching to
       // whatever happens to follow it.
@@ -100,10 +128,17 @@ export function marksFromComments(markdown: string): string {
 }
 
 /** What a marked line says, and the line without it. */
-export function readMark(text: string): { align?: DocAlign; pagebreak?: boolean; text: string } {
+export function readMark(
+  text: string,
+): { align?: DocAlign; pagebreak?: boolean; space?: boolean; text: string } {
   const raw = String(text ?? '');
+  // LONGEST FIRST: four word joiners start with three, so a page break read
+  // as a space would silently become a gap.
   if (raw.startsWith(MARK.pagebreak)) {
     return { pagebreak: true, text: raw.slice(MARK.pagebreak.length) };
+  }
+  if (raw.startsWith(MARK.space)) {
+    return { space: true, text: raw.slice(MARK.space.length) };
   }
   for (const [mark, align] of ORDER) {
     if (raw.startsWith(mark)) return { align, text: raw.slice(mark.length) };
@@ -125,6 +160,13 @@ export function isOnlyMarks(text: string): boolean {
  */
 export function commentsFromMarks(markdown: string): string {
   const out: string[] = [];
+  let spaceUnits = 0;
+  /** Write the gap that has been accumulating, if any. */
+  const flushSpace = () => {
+    if (spaceUnits > 0) out.push(`<!-- space: ${spaceUnits * SPACE_UNIT} -->`, '');
+    spaceUnits = 0;
+  };
+
   for (const line of String(markdown ?? '').split('\n')) {
     const prefix = SYNTAX.exec(line)?.[1] ?? '';
     const rest = line.slice(prefix.length);
@@ -134,9 +176,25 @@ export function commentsFromMarks(markdown: string): string {
       if (mark.text.trim()) out.push(prefix + mark.text);
       continue;
     }
+    if (mark.space && !mark.text.trim()) {
+      // Counted here, written once below: a run of marks is ONE gap.
+      spaceUnits += 1;
+      continue;
+    }
+    /**
+     * A BLANK LINE DOES NOT END A GAP.
+     *
+     * Each mark is its own paragraph, so markdown separates them with an
+     * empty line — which meant a three-unit gap came back as three separate
+     * twelve-point comments. They re-imported to the same height, so nothing
+     * looked wrong; the file just grew a line every time it was saved.
+     */
+    if (spaceUnits > 0 && !line.trim()) continue;
+    flushSpace();
     if (mark.align) out.push(`<!-- align:${mark.align} -->`);
     out.push(prefix + mark.text);
   }
+  flushSpace();
   return out.join('\n');
 }
 
