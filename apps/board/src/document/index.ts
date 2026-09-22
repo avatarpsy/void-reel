@@ -32,7 +32,9 @@
  * use, in its own module, so a session that exports nothing downloads neither,
  * and choosing PDF never pulls in the Word writer.
  */
-import { documentFileName, DOC_CONTENT_TYPE, type DocFormat, type DocSpec } from './blocks';
+import {
+  documentFileName, parseMarkdown, DOC_CONTENT_TYPE, type DocFormat, type DocSpec,
+} from './blocks';
 
 export type { Block, Inline, DocFormat, DocSpec } from './blocks';
 export { parseMarkdown, documentFileName, DOC_CONTENT_TYPE } from './blocks';
@@ -55,6 +57,9 @@ export interface RenderedDocument {
  * what stops the same document being called two different things depending on
  * which button produced it.
  */
+/** The blank line between the injected title and the document under it. */
+const BLANK_LINE = String.fromCharCode(10, 10);
+
 export async function renderDocument(spec: DocSpec, format: DocFormat): Promise<RenderedDocument> {
   const title = String(spec.title ?? '').trim();
   const fileName = documentFileName(title, format);
@@ -71,7 +76,20 @@ export async function renderDocument(spec: DocSpec, format: DocFormat): Promise<
     return { blob, fileName, format, bytes: blob.size, pages, droppedGlyphs };
   }
 
-  const heading = title && !/^\s*#\s/.test(spec.markdown) ? `# ${title}\n\n` : '';
+  /**
+   * -- THE SAME TITLE RULE THE OTHER TWO USE --------------------------------
+   *
+   * This path had its OWN rule -- prepend the title unless the markdown starts
+   * with a hash -- and it disagreed with `parseMarkdown`, which also declines
+   * when the document opens with a picture, because that is a masthead the
+   * author composed. So one certificate came out with a heading above the logo
+   * in .md and without one in .pdf. Asking the block model is the fix: one
+   * rule, in the place that already owns it.
+   */
+  const first = parseMarkdown(spec.markdown).find((b) => b.kind !== 'rule');
+  const ownsItsOpening = first?.kind === 'image'
+    || (first?.kind === 'heading' && first.level === 1);
+  const heading = title && !ownsItsOpening ? `# ${title}${BLANK_LINE}` : '';
   const blob = new Blob([heading + spec.markdown], { type: DOC_CONTENT_TYPE.md });
   return { blob, fileName, format: 'md', bytes: blob.size };
 }
