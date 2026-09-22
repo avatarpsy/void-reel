@@ -557,17 +557,22 @@ affine-edgeless-note[data-vs-doc-tag] affine-paragraph[data-vs-align='center'] {
 affine-edgeless-note[data-vs-doc-tag] affine-paragraph[data-vs-align='right'] {
   text-align: right;
 }
-affine-edgeless-note[data-vs-doc-tag] affine-image[data-vs-align='left'] {
-  display: block;
-  margin-inline: 0 auto;
+/* ── AND THE PICTURE IS CENTRED BY A FLEX, NOT BY ITS MARGINS ───────────────
+   `affine-page-image` is `display: flex; justify-content: center`, so the block
+   is full width and the picture is centred INSIDE it. Setting margins on the
+   block therefore did nothing visible: the attribute said `left`, the box was
+   at the left margin, and the logo still sat in the middle of the page.
+
+   Measured on the live board rather than reasoned about — the block reported
+   474px wide at the page margin while the 39px image reported x=284. */
+affine-edgeless-note[data-vs-doc-tag] affine-image[data-vs-align='left'] affine-page-image {
+  justify-content: flex-start;
 }
-affine-edgeless-note[data-vs-doc-tag] affine-image[data-vs-align='center'] {
-  display: block;
-  margin-inline: auto;
+affine-edgeless-note[data-vs-doc-tag] affine-image[data-vs-align='center'] affine-page-image {
+  justify-content: center;
 }
-affine-edgeless-note[data-vs-doc-tag] affine-image[data-vs-align='right'] {
-  display: block;
-  margin-inline: auto 0;
+affine-edgeless-note[data-vs-doc-tag] affine-image[data-vs-align='right'] affine-page-image {
+  justify-content: flex-end;
 }
 
 /* 20pt, 15.5pt, 13pt, 11.5pt against an 11pt body, and bold like the exporter
