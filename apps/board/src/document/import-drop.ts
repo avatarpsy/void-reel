@@ -253,50 +253,59 @@ export function installDocumentDrop(board: MountedBoard, container: HTMLElement)
         const { importDocument } = await import('./import');
         const isPdf = /\.pdf$/i.test(file.name);
 
-        let conv: Converted | null = null;
-        if (isPdf) {
-          conv = await convertViaParent(file);
-          if (!conv) {
-            toast(
-              `${file.name} could not be read here — it is on the board as a file. `
-              + 'Ask the agent to read it.',
-              'error',
-            );
-            continue;
-          }
-        }
-
-        let markdown: string;
-        let notes: string[] = [];
-        let placed = 0;
-        if (isPdf && !conv?.pages?.length) {
-          // The app could not measure it. Its flat text is still a document.
-          if (!conv?.markdown.trim()) {
-            toast(`${file.name} has no text in it — if it is a scan, the pages are pictures.`, 'error');
-            continue;
-          }
-          markdown = conv.markdown;
-          notes = ['the layout could not be recovered'];
-        } else {
-          const bytes = new Uint8Array(await file.arrayBuffer());
-          const out = await importDocument(
-            { name: file.name, bytes },
-            { pdfLayout: async () => conv!.pages! },
+        /**
+         * ── ONE PATH, AND AN HONEST ANSWER WHEN IT FAILS ──────────────────
+         *
+         * There used to be a second route here: if the geometry did not come
+         * back, place the flat text instead. That is not a fallback, it is a
+         * WORSE IMPORTER kept alive — the user gets a document with no
+         * headings, no lists and no pictures, and is told only that \'the
+         * layout could not be recovered\', which reads like a detail rather
+         * than the difference between a document and a wall of text.
+         *
+         * A PDF that cannot be measured cannot be imported, and saying so is
+         * the useful answer: it is almost always a scan, and the user needs to
+         * know that their pages are pictures of writing.
+         */
+        const converted = isPdf ? await convertViaParent(file) : null;
+        /**
+         * TWO different failures, and they are not the same sentence. Nobody
+         * answering is a problem with Voidspace; answering with nothing in it
+         * is a fact about their file, and telling a user their scan is empty
+         * when the app simply did not reply sends them to the wrong place.
+         */
+        if (isPdf && !converted) {
+          toast(
+            `${file.name} could not be read here — it is on the board as a file. `
+            + 'Ask the agent to read it.',
+            'error',
           );
-          markdown = out.markdown;
-          notes = out.notes;
-          placed = out.images.stored;
+          continue;
+        }
+        const pages = converted?.pages;
+        if (isPdf && !pages?.length) {
+          toast(
+            `${file.name} has no readable text — if it is a scan, its pages are `
+            + 'pictures of writing. It is on the board as a file.',
+            'error',
+          );
+          continue;
         }
 
-        if (!markdown.trim()) {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const out = await importDocument(
+          { name: file.name, bytes },
+          { pdfLayout: async () => pages! },
+        );
+        if (!out.markdown.trim()) {
           toast(`${file.name} came back empty.`, 'error');
           continue;
         }
-        await place(markdown, file, {
+        await place(out.markdown, file, {
           lossy: false,
-          images: placed,
-          imagesDropped: 0,
-          notes,
+          images: out.images.stored,
+          imagesDropped: Math.max(0, out.images.found - out.images.stored),
+          notes: out.notes,
         } as any);
       } catch (err) {
         console.error('[import-drop] convert failed:', err);
@@ -355,14 +364,17 @@ export async function importDocumentFromUrl(
 ): Promise<string | null> {
   const name = label || url.split('/').pop() || 'document';
   try {
-    let res = await fetch(url).catch(() => null);
-    if (!res?.ok) {
-      const { defaultApiBase } = await import('@openreel/asset-browser');
-      res = await fetch(`${defaultApiBase()}/api/studio/media-proxy?url=${encodeURIComponent(url)}`);
-    }
-    if (!res.ok) throw new Error('could not be fetched');
-
-    const blob = await res.blob();
+    /**
+     * THE BOARD'S OWN FETCHER, not a second one.
+     *
+     * This used to try a bare `fetch` and fall back to the media proxy, which
+     * is a worse copy of what `fetchMediaBlob` already does — and it did not
+     * carry the session token, so a document in the user's own private storage
+     * came back 401 and was reported as 'could not be fetched'.
+     */
+    const { fetchMediaBlob } = await import('../board/media-fetch');
+    const blob = await fetchMediaBlob(url);
+    if (!blob) throw new Error('could not be fetched');
     if (blob.size > MAX_BYTES) {
       toast(`${name} is too large to open here.`, 'error');
       return null;
@@ -385,19 +397,31 @@ export async function importDocumentFromUrl(
       const { importDocument } = await import('./import');
       const bytes = new Uint8Array(await file.arrayBuffer());
       const isPdf = /\.pdf$/i.test(name);
-      // Only a PDF needs the app: Word is read here, and asking the parent
-      // for a layout it will not produce is a wasted round trip.
-      const pages = isPdf ? (await convertViaParent(file))?.pages : undefined;
-      if (isPdf && !pages?.length) {
-        // The app could not measure it; its flat text is still a document.
-        const out = await convertViaParent(file);
-        markdown = out?.markdown ?? '';
-        conv = { ...(out ?? {}), notes: ['the layout could not be recovered'] } as any;
-      } else {
-        const out = await importDocument({ name, bytes }, { pdfLayout: async () => pages! });
-        markdown = out.markdown;
-        conv = { images: out.images.stored, notes: out.notes } as any;
+      // ONE round trip, and the same single path the drop handler takes: a
+      // PDF whose geometry cannot be read is a scan, and saying so beats
+      // placing a wall of text and calling it a document.
+      const converted = isPdf ? await convertViaParent(file) : null;
+      // Same two failures, same two sentences — see the drop handler.
+      if (isPdf && !converted) {
+        toast(`${name} could not be read here. Ask the agent to read it.`, 'error');
+        return null;
       }
+      const pages = converted?.pages;
+      if (isPdf && !pages?.length) {
+        toast(
+          `${name} has no readable text — if it is a scan, its pages are pictures `
+          + 'of writing.',
+          'error',
+        );
+        return null;
+      }
+      const out = await importDocument({ name, bytes }, { pdfLayout: async () => pages! });
+      markdown = out.markdown;
+      conv = {
+        images: out.images.stored,
+        imagesDropped: Math.max(0, out.images.found - out.images.stored),
+        notes: out.notes,
+      } as any;
     }
     if (!markdown.trim()) {
       toast(`${name} could not be opened as a document.`, 'error');
