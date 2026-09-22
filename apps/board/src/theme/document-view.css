@@ -390,11 +390,39 @@ affine-edgeless-note[data-vs-doc-tag] {
   --affine-icon-color: #6b6b73;
   --affine-placeholder-color: #a8a8b0;
 
-  /* The face the exporter sets in. A document that reads as Georgia on paper
-     and as the UI sans on screen is two documents. */
+  /* ── THE FACE THE EXPORTER SETS IN ────────────────────────────────────────
+     A document that reads as Georgia on paper and as the UI sans on screen is
+     two documents.
+
+     BOTH the variable and the property, and the property is the one that does
+     the work. Setting the variable alone changed nothing: `--affine-font-family`
+     is read by a rule on an ancestor of this note, and everything inside simply
+     INHERITS the computed value — so there was no rule left below to re-resolve
+     it. Verified in the browser, where the variable read Georgia and the
+     paragraph still computed Inter.
+
+     The variable is kept because BlockSuite's own widgets — the slash menu, the
+     format bar — read it, and they should match the page they are editing. */
   --affine-font-family: Georgia, 'Iowan Old Style', 'Times New Roman', serif;
+  font-family: var(--affine-font-family);
 
   color: var(--affine-text-primary-color);
+}
+
+/* The editor's own text layers set the face again further down; they have to
+   follow the page, not the UI. */
+affine-edgeless-note[data-vs-doc-tag] rich-text,
+affine-edgeless-note[data-vs-doc-tag] v-line,
+affine-edgeless-note[data-vs-doc-tag] affine-paragraph,
+affine-edgeless-note[data-vs-doc-tag] affine-list,
+affine-edgeless-note[data-vs-doc-tag] affine-table {
+  font-family: var(--affine-font-family);
+}
+
+/* Except code, which is code wherever it appears. */
+affine-edgeless-note[data-vs-doc-tag] code,
+affine-edgeless-note[data-vs-doc-tag] affine-code {
+  font-family: var(--affine-font-code-family, ui-monospace, SFMono-Regular, Menlo, monospace);
 }
 
 /* The paper itself — see the note above about the inline style. */
