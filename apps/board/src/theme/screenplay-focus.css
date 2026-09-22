@@ -67,14 +67,33 @@
 }
 [data-theme='dark'] .vs-focus--live .vs-focus__bar { background: #1b1e26; }
 
-/* A note on a canvas is covered by a mask so that one click SELECTS it and
-   only a double click gives you a caret. That is right for a sticky note and
-   wrong for a document: this mode invites the reader to type, so the mask
-   steps aside and a single click lands in the text. The attribute is on BODY
-   rather than the chrome host because the note lives in the editor host, 
-   which is that host's sibling. */
+/* ═══════════════════════════════════════════════════════════════════════════
+   THE MASK GOES AWAY, AND WITH IT EVERY WAY TO GRAB THE PAGE
+   ═══════════════════════════════════════════════════════════════════════════
+
+   A note on a canvas is covered by a transparent mask so that one click
+   SELECTS it and only a double click gives a caret. Right for a sticky note
+   on a board. Wrong for a page: this mode's own header says "Type anywhere",
+   and the mask is also the handle the note is DRAGGED by — so a user aiming
+   at a word could shove the document across the board instead.
+
+   ── WHY `display: none` AND NOT `pointer-events` ────────────────────
+   This rule used to set `pointer-events: none` on the mask host, and it had
+   never once worked. `pointer-events` on a parent does not settle the
+   question — a child may opt back in — and BlockSuite writes
+   `pointer-events: auto` onto the div inside as an INLINE style, which no
+   stylesheet rule can outrank. So the mode whose header invites typing could
+   not be typed into at all: a click produced no caret and the keystrokes went
+   nowhere. Measured, not guessed — `elementFromPoint` in the middle of a
+   paragraph returned `div.affine-note-mask[pe=auto]`, and typing XYZZY into
+   an open document left the text byte-identical.
+
+   `display: none` on the HOST takes the whole subtree out of hit testing, so
+   there is nothing left for a child to opt back into. The mask paints
+   nothing, so hiding it costs no pixels. The attribute is on BODY because the
+   note lives in the editor host, which is the chrome host's sibling. */
 body[data-doc-focus] edgeless-note-mask {
-  pointer-events: none;
+  display: none;
 }
 
 /* The board underneath is hidden rather than merely covered: its chrome sits in

@@ -30,6 +30,7 @@
  * AT that line (`offsetOfLine`), Escape puts you back on the page at the same
  * scroll position. So it behaves like one document that happens to render.
  */
+import { enterFocusMode } from './focus-lock';
 import { offsetOfLine } from '../shot/fountain';
 import { screenplayBlock, writeScript } from '../shot/screenplay-doc';
 import { rowClass, screenplayView } from '../shot/screenplay-view';
@@ -51,6 +52,10 @@ export interface ScreenplayFocus {
   downloadFountain(): void;
   destroy(): void;
 }
+
+/** Released on close, so one definition of "a focus mode is open" holds
+ *  for every mode — see `focus-lock.ts`. */
+let leaveFocus: (() => void) | null = null;
 
 export function installScreenplayFocus(
   board: MountedBoard,
@@ -394,7 +399,8 @@ ${text}`;
     // The board underneath must not take keys or pointer events while a modal
     // surface is over it — and `inert` is the one line that guarantees both,
     // including for the toolbar buttons the canvas renders into the same host.
-    document.documentElement.dataset.focusMode = 'screenplay';
+    leaveFocus?.();
+    leaveFocus = enterFocusMode('screenplay');
 
     /**
      * Repaint when the SCRIPT changes underneath — which is the common case
@@ -431,7 +437,8 @@ ${text}`;
     }
     el.hidden = true;
     editing = false;
-    delete document.documentElement.dataset.focusMode;
+    leaveFocus?.();
+    leaveFocus = null;
     docSub?.unsubscribe?.();
     docSub = null;
     if (onKey) document.removeEventListener('keydown', onKey, true);

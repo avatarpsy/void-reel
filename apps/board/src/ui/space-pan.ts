@@ -48,6 +48,8 @@
  */
 import { GfxControllerIdentifier } from '@blocksuite/std/gfx';
 
+import { isCanvasFramed } from './focus-lock';
+
 import type { MountedBoard } from '../blocksuite/editor';
 
 /** True when the keystroke belongs to something the user is writing in. */
@@ -82,7 +84,12 @@ export function installSpacePan(board: MountedBoard, container: HTMLElement): ()
   }
 
   const onKeyDown = (e: KeyboardEvent) => {
-    if (e.code !== 'Space' || isTyping()) return;
+    /**
+     * Not while a document is in focus. This gesture exists to move around
+     * a BOARD, and inside a document there is no board to move around —
+     * using it there could only take the page off screen.
+     */
+    if (e.code !== 'Space' || isTyping() || isCanvasFramed()) return;
     /**
      * Space scrolls a document by default. There is nothing to scroll here, but
      * the default also produces a keypress the canvas would rather not see, and

@@ -33,6 +33,7 @@ import { GfxControllerIdentifier } from '@blocksuite/std/gfx';
 import { Text } from '@blocksuite/store';
 
 import { toast } from './toast';
+import { frameCanvasOn } from './focus-lock';
 import { focusOnBounds } from './viewport';
 import { noteToMarkdown, documentTitle } from '../document/note-io';
 import { OPEN_DOCUMENT_EVENT } from '../document/toolbar';
@@ -196,6 +197,9 @@ export function installDocumentFocus(
       </header>`;
   }
 
+  /** Releases the viewport hold — see `focus-lock.ts`. */
+  let unframe: (() => void) | null = null;
+
   function open(id: string, opts: { focusName?: boolean } = {}): void {
     const bounds = boundsOf(board, id);
     if (!bounds) {
@@ -205,9 +209,11 @@ export function installDocumentFocus(
     noteId = id;
     paint();
     el.hidden = false;
-    // Hides the board's own chrome — the same attribute the screenplay's focus
-    // mode uses, so the two modes cannot drift apart in what they conceal.
-    container.setAttribute('data-focus-mode', 'document');
+    // The attribute that hides the board's own chrome is set by
+    // `frameCanvasOn` below, in the one place all three modes set it.
+    // It used to be written here on the CHROME HOST and on
+    // `documentElement` by the other two, which is how `document-view.css`
+    // came to carry a `body[data-focus-mode]` rule that matched nothing.
     /**
      * ── AND ON THE BODY, WHICH IS NOT REDUNDANT ───────────────────────────
      *
@@ -236,6 +242,25 @@ export function installDocumentFocus(
     } catch { /* selection is a nicety here; never block opening over it */ }
 
     focusOnBounds(bounds);
+
+    /**
+     * ── AND IT STAYS THERE ───────────────────────────────────────────────
+     *
+     * This mode frames the live canvas rather than replacing it, which is
+     * what lets the real editor do the editing — and, until this, also let
+     * every board gesture carry the page away. The canvas becomes a page
+     * viewer for as long as the document is open: scrolling within it works
+     * as it always did, leaving it stops at the edge. See `focus-lock.ts`.
+     */
+    unframe?.();
+    unframe = frameCanvasOn(
+      // Looked up each time, not captured: the element is replaced when the
+      // note re-renders, and a stale one would hold the board on a rectangle
+      // that is no longer the page.
+      () => container.ownerDocument.querySelector(
+        `affine-edgeless-note[data-block-id="${id}"]`,
+      ),
+    );
 
     /**
      * Repaint the header as the document is typed into. The title IS the first
@@ -283,7 +308,9 @@ export function installDocumentFocus(
     setMenu(false);
     el.hidden = true;
     noteId = null;
-    container.removeAttribute('data-focus-mode');
+    // The board is a board again.
+    unframe?.();
+    unframe = null;
     document.body.removeAttribute('data-doc-focus');
     titleSub?.unsubscribe?.();
     titleSub = null;
@@ -398,8 +425,11 @@ export function installDocumentFocus(
       if (onKey) document.removeEventListener('keyup', onKey);
       onKey = null;
       titleSub?.unsubscribe?.();
-      container.removeAttribute('data-focus-mode');
-      document.body.removeAttribute('data-doc-focus');
+      // Torn down mid-focus, the hold would outlive the mode that owns it
+      // and the board would stay pinned to a document nobody is reading.
+      unframe?.();
+      unframe = null;
+        document.body.removeAttribute('data-doc-focus');
       el.remove();
     },
   };

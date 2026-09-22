@@ -21,6 +21,7 @@ vi.mock('./toast', () => ({ toast: (m: string, k: string) => { toasts.push([m, k
 
 import { makeTestBoard } from '../blocksuite/test-board';
 import { placeMarkdownDocument, documentTitle } from '../document/note-io';
+import { isCanvasFramed } from './focus-lock';
 import { installDocumentFocus } from './document-focus';
 
 const MD = '# Field Notes\n\nA paragraph.\n\n- one\n- two\n';
@@ -51,10 +52,19 @@ describe('opening', () => {
     expect(focus.isOpen()).toBe(true);
     expect(focus.current()).toBe(noteId);
     expect(focusOnBounds).toHaveBeenCalledWith({ x: 10, y: 20, w: 800, h: 1120 });
-    // The same attribute the screenplay's focus mode sets, so the two cannot
-    // drift apart in what board chrome they conceal.
-    expect(container.getAttribute('data-focus-mode')).toBe('document');
+    /**
+     * On the ROOT, which is the one host all three focus modes now share.
+     * It used to be written here on the chrome host and on `documentElement`
+     * by the other two — which is how `document-view.css` came to carry a
+     * `body[data-focus-mode]` rule that matched nothing at all.
+     */
+    expect(document.documentElement.dataset.focusMode).toBe('document');
+    expect(container.hasAttribute('data-focus-mode')).toBe(false);
+    // And board gestures are refused while it is up — see `focus-lock.ts`.
+    expect(isCanvasFramed()).toBe(true);
     focus.destroy();
+    expect(isCanvasFramed()).toBe(false);
+    expect(document.documentElement.dataset.focusMode).toBeUndefined();
   }, 60_000);
 
   /**

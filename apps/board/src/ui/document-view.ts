@@ -33,6 +33,7 @@
  * fonts, the arithmetic and an idle CPU. The server is asked for one thing, on
  * one path: storing the finished bytes when an AGENT needs a URL.
  */
+import { enterFocusMode } from './focus-lock';
 import { boardDocument, documentMarkdown, type BoardDocument } from '../board/document';
 import { toast } from './toast';
 import { saveDocument, uploadDocument } from '../board/document-export';
@@ -172,6 +173,10 @@ function blockHtml(md: string): string {
   closeQuote();
   return out.join('\n');
 }
+
+/** Released on close, so one definition of "a focus mode is open" holds
+ *  for every mode — see `focus-lock.ts`. */
+let leaveFocus: (() => void) | null = null;
 
 export function installDocumentView(
   board: MountedBoard,
@@ -429,7 +434,11 @@ export function installDocumentView(
     if (!el.hidden) { render(); return; }
     render();
     el.hidden = false;
-    document.documentElement.dataset.focusMode = 'document';
+    leaveFocus?.();
+    // 'board-page', not 'document': this is the whole BOARD read as a page,
+    // and `document-focus.ts` is one note. Both used to report 'document',
+    // which made the attribute useless for telling them apart.
+    leaveFocus = enterFocusMode('board-page');
 
     /**
      * Repaint as the board changes underneath: the chat is still on screen so
@@ -463,7 +472,8 @@ export function installDocumentView(
   function close(): void {
     if (el.hidden) return;
     el.hidden = true;
-    delete document.documentElement.dataset.focusMode;
+    leaveFocus?.();
+    leaveFocus = null;
     docSub?.unsubscribe?.();
     docSub = null;
     // A pending repaint would rebuild the document for a page nobody is looking

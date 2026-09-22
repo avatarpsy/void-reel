@@ -339,7 +339,7 @@
 /* In focus mode the document IS the screen — its own header already says what
    it is called, and a floating tag over the page is noise. */
 body[data-doc-focus] [data-vs-doc-tag]::after,
-body[data-focus-mode] [data-vs-doc-tag]::after { display: none; }
+[data-focus-mode] [data-vs-doc-tag]::after { display: none; }
 
 /* ══ A DOCUMENT ON THE CANVAS IS A PAGE ══════════════════════════════════════
 
