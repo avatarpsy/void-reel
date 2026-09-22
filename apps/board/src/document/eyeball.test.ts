@@ -10,7 +10,23 @@
  * It does nothing at all without the environment variables, so it costs a
  * normal run one skipped test.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+
+/**
+ * The bench has no network, so a document with a logo renders its ALT TEXT and
+ * the one thing you wanted to look at is the one thing missing. `VS_DOC_IMAGE`
+ * points at a file on disk and every picture in the document is served from
+ * it — enough to judge size, placement and the space around it, which is what
+ * a masthead is made of.
+ */
+vi.mock('../board/media-fetch', () => ({
+  fetchMediaBlob: async () => {
+    const path = process.env.VS_DOC_IMAGE;
+    if (!path) throw new Error('no image');
+    const { readFileSync } = await import('node:fs');
+    return new Blob([readFileSync(path)], { type: 'image/png' });
+  },
+}));
 
 import { renderDocument } from './index';
 

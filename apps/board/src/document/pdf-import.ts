@@ -50,10 +50,21 @@ export interface PdfTextItem {
   font: string;
 }
 
+/** A picture the app lifted off the page, with the box it occupied. */
+export interface PdfImageRef {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Where it was stored. An image with no url never made it and is dropped. */
+  url?: string;
+}
+
 export interface PdfPageLayout {
   width: number;
   height: number;
   items: PdfTextItem[];
+  images?: PdfImageRef[];
 }
 
 export interface ImportedPdf {
@@ -186,6 +197,27 @@ function alignOf(line: Line, left: number, pageWidth: number, right: number): Do
   return undefined;
 }
 
+/**
+ * Where a picture sits across the page.
+ *
+ * The same question as for a line of text and a different answer: a picture
+ * has real edges, so its centre can be compared with the page's directly.
+ * Left is the common case and is left unsaid, because saying it would pin a
+ * left that the document never asked for.
+ */
+function alignOfBox(
+  box: { x: number; width: number },
+  pageWidth: number,
+  columnLeft: number,
+): { align: DocAlign } | undefined {
+  const slack = 8;
+  if (Math.abs(box.x - columnLeft) <= slack) return undefined;
+  const centre = box.x + box.width / 2;
+  if (Math.abs(centre - pageWidth / 2) <= slack * 2) return { align: 'center' };
+  if (box.x > pageWidth / 2) return { align: 'right' };
+  return undefined;
+}
+
 const BULLET = /^\s*([•●▪·⁃−-]|\*)\s+/;
 const NUMBERED = /^\s*(\d{1,3})[.)]\s+/;
 
@@ -215,9 +247,40 @@ export function importPdfLayout(pages: PdfPageLayout[]): ImportedPdf {
   pages.forEach((page, pageIndex) => {
     if (pageIndex > 0) { flush(); blocks.push({ kind: 'pagebreak' }); }
     const lines = toLines(page.items);
+    /**
+     * ── PICTURES GO BACK WHERE THEY WERE ────────────────────────────────
+     *
+     * Sorted with the lines by their top edge, so a masthead's logo comes
+     * out ABOVE the company name rather than in a heap at the end of the
+     * page. This is the whole reason the extractor reports a box: a picture
+     * without one can only be appended, and an appended letterhead is not a
+     * letterhead.
+     */
+    const pictures = [...(page.images ?? [])]
+      .filter((p) => !!p.url)
+      .sort((a, b) => a.y - b.y);
+    let pictureAt = 0;
+    const placePicturesAbove = (y: number) => {
+      while (pictureAt < pictures.length && pictures[pictureAt]!.y <= y) {
+        const picture = pictures[pictureAt]!;
+        pictureAt += 1;
+        flush();
+        blocks.push({
+          kind: 'image',
+          url: picture.url!,
+          alt: '',
+          width: Math.round(picture.width),
+          ...(alignOfBox(picture, page.width, left) ?? {}),
+        });
+        inferred.add('pictures placed where they sat on the page');
+      }
+    };
+
     let previous: Line | undefined;
 
     for (const line of lines) {
+      // Anything that sat ABOVE this line belongs before it.
+      placePicturesAbove(line.y);
       const text = line.items.map((i) => i.text).join('').trim();
       if (!text) { previous = line; continue; }
 
@@ -283,6 +346,8 @@ export function importPdfLayout(pages: PdfPageLayout[]): ImportedPdf {
       open!.runs.push(...runs);
       previous = line;
     }
+    // Anything below the last line of text still belongs on this page.
+    placePicturesAbove(Number.POSITIVE_INFINITY);
   });
   flush();
 

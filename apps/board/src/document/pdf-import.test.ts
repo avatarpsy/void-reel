@@ -197,3 +197,66 @@ describe('pages', () => {
     expect(inferred).toContain('paragraphs from line spacing');
   });
 });
+
+describe('pictures', () => {
+  const logo = (over: Partial<any> = {}) => ({
+    x: MARGIN, y: 60, width: 38, height: 38, url: 'https://x.test/logo.png', ...over,
+  });
+
+  /**
+   * THE WHOLE POINT OF EXTRACTING A BOX. A picture with no position can only be
+   * appended, and a letterhead whose logo is at the BOTTOM is not a letterhead.
+   */
+  it('puts a masthead logo above the company name', () => {
+    const { blocks } = importPdfLayout([{
+      ...PAGE,
+      items: [run('Voidspace AI', MARGIN, 120, 13), run('A division of Amaya Comics', MARGIN, 140)],
+      images: [logo()],
+    }]);
+    expect(blocks[0]).toMatchObject({ kind: 'image', width: 38 });
+    expect((blocks[1] as any).runs[0].text).toContain('Voidspace AI');
+  });
+
+  it('puts a picture between the paragraphs it sat between', () => {
+    const { blocks } = importPdfLayout([{
+      ...PAGE,
+      items: [run('Above the chart.', MARGIN, 100), run('Below the chart.', MARGIN, 400)],
+      images: [logo({ y: 200, width: 400, height: 150 })],
+    }]);
+    expect(blocks.map((b) => b.kind)).toEqual(['para', 'image', 'para']);
+  });
+
+  it('keeps a picture that sat below all of the text', () => {
+    const { blocks } = importPdfLayout([{
+      ...PAGE,
+      items: [run('Signed,', MARGIN, 100)],
+      images: [logo({ y: 300, width: 120, height: 60 })],
+    }]);
+    expect(blocks.map((b) => b.kind)).toEqual(['para', 'image']);
+  });
+
+  it('drops a picture that could not be stored rather than leaving a hole', () => {
+    const { blocks } = importPdfLayout([{
+      ...PAGE,
+      items: [run('Body.', MARGIN, 100)],
+      images: [{ x: MARGIN, y: 60, width: 38, height: 38 }],
+    }]);
+    expect(blocks.some((b) => b.kind === 'image')).toBe(false);
+  });
+
+  it('reads a centred picture as centred', () => {
+    const { blocks } = importPdfLayout([{
+      ...PAGE,
+      items: [run('Caption below.', MARGIN, 300)],
+      images: [logo({ x: (595 - 200) / 2, y: 100, width: 200, height: 100 })],
+    }]);
+    expect(blocks[0]).toMatchObject({ kind: 'image', align: 'center' });
+  });
+
+  it('says that it placed them by position', () => {
+    const { inferred } = importPdfLayout([{
+      ...PAGE, items: [run('Body.', MARGIN, 200)], images: [logo()],
+    }]);
+    expect(inferred.join(' ')).toMatch(/pictures placed where they sat/);
+  });
+});

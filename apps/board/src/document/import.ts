@@ -114,12 +114,19 @@ function fromPdfLayout(pages: PdfPageLayout[]): ImportedFile {
     // to know which parts of their document are a guess.
     notes.push(`a PDF has no structure to read, so this was rebuilt from the page: ${inferred.join(', ')}`);
   }
+  const found = pages.reduce((n, p) => n + (p.images?.length ?? 0), 0);
+  const stored = blocks.filter((b) => b.kind === 'image').length;
+  if (found > stored) {
+    const lost = found - stored;
+    notes.push(`${lost} picture${lost === 1 ? '' : 's'} could not be stored`);
+  }
+
   return {
     markdown: toMarkdown(blocks as Block[]),
     kind: 'pdf',
     spec: {},
     notes,
-    images: { found: 0, stored: 0 },
+    images: { found, stored },
   };
 }
 
