@@ -31,6 +31,7 @@
 import { GfxControllerIdentifier } from '@blocksuite/std/gfx';
 import { captureBoard, type ShotScope } from './screenshot';
 
+import { listDocuments, outline, readSections } from '../document/sections';
 import type { MountedBoard } from '../blocksuite/editor';
 import type { DocumentView } from '../ui/document-view';
 import type { DocumentFocus } from '../ui/document-focus';
@@ -290,6 +291,20 @@ function digest(board: MountedBoard) {
     boardId: board.workspace.id,
     surfaceId: board.surfaceId,
     shotCount: shots.length,
+    /**
+     * THE DOCUMENTS ON THIS BOARD, one line each.
+     *
+     * A board read used to describe the shots and the screenplay and say
+     * NOTHING about documents — so an agent asked what was on a board that
+     * held a signed certificate and three pages of notes answered that the
+     * board was empty. They are first-class content; they belong in the
+     * per-turn read like everything else.
+     *
+     * Title, words and sections only. The text of any of them is one
+     * `board-document-read` away, which is what keeps a board of long
+     * documents the same per-turn cost as a board of short ones.
+     */
+    documents: listDocuments(board).slice(0, 40),
     /**
      * THE SCRIPT AS A MAP, NOT AS A DOCUMENT.
      *
@@ -3104,7 +3119,6 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
       };
     },
     'voidspace:board-document-read': async args => {
-      const { listDocuments, outline, readSections } = await import('../document/sections');
       const noteId = String((args as any)?.noteId ?? '').trim();
 
       if (!noteId) {
