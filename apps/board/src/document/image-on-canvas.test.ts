@@ -166,3 +166,51 @@ describe('a picture resized by hand', () => {
     expect(back).toContain('chart.png');
   }, 60_000);
 });
+
+/**
+ * DOCUMENTS THAT WERE ALREADY THERE.
+ *
+ * The sizing pass runs when a document is PLACED, which fixes everything made
+ * from then on and nothing that already exists — those blocks still carry
+ * width 0 and still render at the picture's natural size. A board opened the
+ * next day would show the same full-width logo, and the fix would look like it
+ * had never shipped.
+ */
+describe('a board that already has documents', () => {
+  it('sizes the pictures in every document on it', async () => {
+    stubImage(1);
+    const board = makeTestBoard();
+    const a = await placeMarkdownDocument(
+      board as any, '# One' + NL + NL + '![](https://x.test/a.png#w=38)' + NL + NL + 'Body.');
+    const b = await placeMarkdownDocument(
+      board as any, '# Two' + NL + NL + '![](https://x.test/b.png#w=120)' + NL + NL + 'Body.');
+
+    // Back to how they load from storage: no width on either.
+    for (const id of [a.noteId, b.noteId]) {
+      for (const image of imagesOf(board, id)) {
+        board.store.updateBlock(image, { width: 0, height: 0 });
+      }
+    }
+
+    const { sizeAllDocumentImages } = await import('./doc-images');
+    await sizeAllDocumentImages(board as any);
+
+    expect(imagesOf(board, a.noteId)[0].props.width).toBeGreaterThan(45);
+    expect(imagesOf(board, b.noteId)[0].props.width).toBeGreaterThan(150);
+  }, 90_000);
+
+  /** Safe to repeat: a second mount must not overrule a size dragged by hand. */
+  it('leaves a hand-set size alone on a second pass', async () => {
+    stubImage(1);
+    const board = makeTestBoard();
+    const { noteId } = await placeMarkdownDocument(
+      board as any, '![](https://x.test/logo.png#w=38)' + NL + NL + 'Body.');
+
+    const [image] = imagesOf(board, noteId);
+    board.store.updateBlock(image, { width: 260, height: 260 });
+
+    const { sizeAllDocumentImages } = await import('./doc-images');
+    await sizeAllDocumentImages(board as any);
+    expect(image.props.width).toBe(260);
+  }, 60_000);
+});

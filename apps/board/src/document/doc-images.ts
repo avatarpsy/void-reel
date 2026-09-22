@@ -289,3 +289,30 @@ function naturalAspect(src: string): Promise<number> {
     img.src = src;
   });
 }
+
+/**
+ * -- EVERY DOCUMENT ALREADY ON THE BOARD ------------------------------------
+ *
+ * `sizeImagesFromHints` runs when a document is PLACED, which fixes documents
+ * made from now on and does nothing for the ones already there: their image
+ * blocks still carry width 0 and still render at the picture's natural size. A
+ * board opened tomorrow would show the same full-width logo it showed today,
+ * and the fix would look like it had not shipped.
+ *
+ * So the pass also runs once when the board mounts. It is cheap and it is safe
+ * to repeat: a block that already has a width is left alone, which covers both
+ * a size the user dragged to and a second mount of the same board.
+ */
+export async function sizeAllDocumentImages(board: any): Promise<number> {
+  try {
+    const { listDocuments } = await import('./sections');
+    const docs = listDocuments(board);
+    const counts = await Promise.all(
+      docs.map((doc: any) => sizeImagesFromHints(board, doc.noteId).catch(() => 0)),
+    );
+    return counts.reduce((n: number, c: number) => n + c, 0);
+  } catch {
+    // A board with no documents, or one still loading. Nothing to do.
+    return 0;
+  }
+}

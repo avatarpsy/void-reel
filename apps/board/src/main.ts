@@ -337,6 +337,17 @@ async function boot(): Promise<void> {
   // Which box is what: a PDF/DOCX/TEXT/SCREENPLAY tag on each document's
   // corner. See document/tags.ts for why it is an attribute and not an overlay.
   installDocumentTags(board, root);
+  /**
+   * Pictures in documents that were already here take the size their document
+   * asked for. Without this the fix only reaches documents made from now on,
+   * and a board opened tomorrow shows the same full-width logo as today.
+   *
+   * Not awaited: it measures each picture, and a slow one must not hold up a
+   * board that is already on screen and usable.
+   */
+  void import('./document/doc-images')
+    .then((m) => m.sizeAllDocumentImages(board))
+    .catch(() => { /* natural size, exactly as before */ });
 
   /**
    * THE DOCUMENT INDEX — what is on this board, and what is in the Library.
