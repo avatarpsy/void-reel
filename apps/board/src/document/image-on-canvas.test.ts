@@ -13,7 +13,7 @@
 import { describe, it, expect, vi } from 'vitest';
 
 import { makeTestBoard } from '../blocksuite/test-board';
-import { placeMarkdownDocument } from './note-io';
+import { placeMarkdownDocument, noteToMarkdown } from './note-io';
 import { sizeImagesFromHints } from './doc-images';
 
 const NL = String.fromCharCode(10);
@@ -99,5 +99,70 @@ describe('a sized picture', () => {
 
     await expect(sizeImagesFromHints(board as any, noteId)).resolves.toBeGreaterThanOrEqual(0);
     expect(imagesOf(board, noteId)[0].props.width).toBeGreaterThan(0);
+  }, 60_000);
+});
+
+/**
+ * RESIZING BY HAND HAS TO SURVIVE THE EXPORT.
+ *
+ * The size used to go one way only: `#w=38` set the block's width when the
+ * document was placed, and the export then read the URL again — the same 38 it
+ * started with. A user who dragged the logo bigger saw it bigger on the canvas,
+ * exported, and got the old size back with nothing to say why.
+ */
+describe('a picture resized by hand', () => {
+  const widthOf = (markdown: string): number | undefined => {
+    const m = /#(?:[^)\s]*&)?w=(\d+)/.exec(markdown);
+    return m ? Number(m[1]) : undefined;
+  };
+
+  it('leaves at the size it was dragged to, not the one it arrived with', async () => {
+    stubImage(1);
+    const board = makeTestBoard();
+    const { noteId } = await placeMarkdownDocument(
+      board as any, '![](https://x.test/logo.png#w=38&align=center)' + NL + NL + 'Body.');
+
+    const [image] = imagesOf(board, noteId);
+    // 160 CSS pixels is 120 points.
+    board.store.updateBlock(image, { width: 160, height: 160 });
+
+    const back = await noteToMarkdown(board as any, noteId);
+    expect(widthOf(back)).toBe(120);
+  }, 60_000);
+
+  it('keeps the rest of the hint while replacing the width', async () => {
+    stubImage(1);
+    const board = makeTestBoard();
+    const { noteId } = await placeMarkdownDocument(
+      board as any, '![](https://x.test/logo.png#w=38&align=center)' + NL + NL + 'Body.');
+
+    board.store.updateBlock(imagesOf(board, noteId)[0], { width: 160, height: 160 });
+    expect(await noteToMarkdown(board as any, noteId)).toContain('align=center');
+  }, 60_000);
+
+  /**
+   * A width of 0 is BlockSuite's default — the picture has not been sized yet.
+   * Treating that as "the author wanted full width" silently deleted the size
+   * from any document exported before its pictures finished loading.
+   */
+  it('keeps the document own size when the block has never been sized', async () => {
+    stubImage(1);
+    const board = makeTestBoard();
+    const { noteId } = await placeMarkdownDocument(
+      board as any, '![](https://x.test/logo.png#w=38)' + NL + NL + 'Body.');
+
+    board.store.updateBlock(imagesOf(board, noteId)[0], { width: 0, height: 0 });
+    expect(widthOf(await noteToMarkdown(board as any, noteId))).toBe(38);
+  }, 60_000);
+
+  it('leaves a picture that never had a size without one', async () => {
+    stubImage(1);
+    const board = makeTestBoard();
+    const { noteId } = await placeMarkdownDocument(
+      board as any, '![](https://x.test/chart.png)' + NL + NL + 'Body.');
+
+    const back = await noteToMarkdown(board as any, noteId);
+    expect(widthOf(back)).toBeUndefined();
+    expect(back).toContain('chart.png');
   }, 60_000);
 });

@@ -78,6 +78,7 @@ export function installDocumentTags(board: MountedBoard, container: HTMLElement)
       if (tag) el.dataset.vsDocTag = tag;
       else delete el.dataset.vsDocTag;
     }
+    stampImageAlignment(board, container);
   };
 
   const schedule = (): void => {
@@ -96,4 +97,43 @@ export function installDocumentTags(board: MountedBoard, container: HTMLElement)
     off?.unsubscribe?.();
     if (queued) cancelAnimationFrame(queued);
   };
+}
+
+/**
+ * -- A CENTRED LOGO IS CENTRED ON THE CANVAS TOO ----------------------------
+ *
+ * `#align=center` centres the picture in the exported PDF and in Word, because
+ * both renderers read the hint. BlockSuite's image block has no alignment prop
+ * at all — its schema is caption, sourceId, width, height, index, xywh, rotate
+ * — so the canvas drew every picture hard left while the file centred it.
+ *
+ * The alignment therefore lives where it already survives: on the URL. This
+ * copies it onto the ELEMENT so CSS can act on it, which is the same trick the
+ * document tag next door uses and runs in the same pass.
+ *
+ * Honest about the limit: there is nowhere to STORE an alignment a user
+ * changes by hand, so the canvas can show it and cannot edit it. Dragging the
+ * picture wider, which is the change people actually make, is stored and does
+ * round-trip — see `withDrawnWidth`.
+ */
+function stampImageAlignment(board: MountedBoard, container: HTMLElement): void {
+  const nodes = container.querySelectorAll<HTMLElement>('affine-image[data-block-id]');
+  for (const el of nodes) {
+    const id = el.dataset.blockId;
+    const align = id ? alignOfImage(board, id) : '';
+    if (align) el.dataset.vsImgAlign = align;
+    else delete el.dataset.vsImgAlign;
+  }
+}
+
+/** `center` or `right` from the picture's own url, or '' for the default. */
+function alignOfImage(board: MountedBoard, blockId: string): string {
+  const model: any = board.store.getBlock(blockId)?.model;
+  if (model?.flavour !== 'affine:image') return '';
+  const source = String(model?.props?.sourceId ?? '');
+  // The url is inside the media ref; a plain `#align=` on the raw value is
+  // enough to read without decoding it, and costs nothing when it is absent.
+  const hit = /align%3D(center|centre|right)|align=(center|centre|right)/i.exec(source);
+  const value = (hit?.[1] ?? hit?.[2] ?? '').toLowerCase();
+  return value === 'centre' ? 'center' : value;
 }

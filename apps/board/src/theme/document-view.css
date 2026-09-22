@@ -444,3 +444,45 @@ affine-edgeless-note[data-vs-doc-tag] affine-table th {
 affine-edgeless-note[data-vs-doc-tag]::after {
   font-family: var(--vs-ui-font, ui-sans-serif, system-ui, sans-serif);
 }
+
+/* ── A PICTURE SITS WHERE THE DOCUMENT PUT IT ───────────────────────────────
+   `#align=center` centres the picture in the PDF and in Word. BlockSuite's
+   image block has no alignment prop, so the canvas drew every picture hard left
+   while the file centred it — see `stampImageAlignment` in document/tags.ts for
+   why the hint is copied onto the element instead.
+
+   `margin-inline` rather than `text-align`: the image block is a block-level
+   custom element, so the text property does nothing to it. */
+affine-edgeless-note[data-vs-doc-tag] affine-image[data-vs-img-align='center'] {
+  display: block;
+  margin-inline: auto;
+}
+affine-edgeless-note[data-vs-doc-tag] affine-image[data-vs-img-align='right'] {
+  display: block;
+  margin-inline: auto 0;
+}
+
+/* ── ROOM TO BREATHE, AND SOMETHING TO GRAB ─────────────────────────────────
+   A picture flush against the paragraph under it reads as part of it. The
+   hover outline is the affordance: BlockSuite's resize handles only appear once
+   the block is selected, and nothing before that said the picture could be
+   changed at all. */
+affine-edgeless-note[data-vs-doc-tag] affine-image {
+  margin: 0.35rem 0 0.9rem;
+}
+affine-edgeless-note[data-vs-doc-tag] affine-image img {
+  border-radius: 2px;
+}
+affine-edgeless-note[data-vs-doc-tag] affine-image:hover img {
+  outline: 1px solid var(--affine-link-color, #1a56db);
+  outline-offset: 2px;
+}
+
+/* A caption is a caption: smaller, quieter, and centred under its picture the
+   way every document sets one. */
+affine-edgeless-note[data-vs-doc-tag] affine-image .affine-embed-block-caption,
+affine-edgeless-note[data-vs-doc-tag] affine-image figcaption {
+  font-size: 0.82em;
+  color: var(--affine-text-secondary-color);
+  text-align: center;
+}

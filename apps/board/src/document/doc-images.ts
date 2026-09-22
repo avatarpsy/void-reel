@@ -148,7 +148,10 @@ export function stripImages(root: Node): LiftedImage[] {
         const ref = decodeMediaRef(sourceId);
         if (ref?.src) {
           const n = images.length;
-          images.push({ url: ref.src, alt: String(child?.props?.caption ?? '').trim() });
+          images.push({
+            url: withDrawnWidth(ref.src, Number(child?.props?.width)),
+            alt: String(child?.props?.caption ?? '').trim(),
+          });
           kids[i] = {
             type: 'block',
             id: `vsimg-${n}`,
@@ -165,6 +168,47 @@ export function stripImages(root: Node): LiftedImage[] {
 
   walk(root);
   return images;
+}
+
+/**
+ * -- A PICTURE RESIZED BY HAND HAS TO LEAVE AT THAT SIZE --------------------
+ *
+ * The size went ONE WAY. `#w=38` set the block's width when the document was
+ * placed, and the export then read the URL again — the same 38 it started
+ * with. So a user who dragged the logo bigger saw it bigger on the canvas,
+ * exported, and got the old size back, with nothing to indicate why.
+ *
+ * The block is the truth once the document is on the board: it is what the
+ * user sees and what they dragged. Its width is in CSS pixels and the hint is
+ * in points, which is the 96-against-72 the other direction already uses.
+ *
+ * A width of 0 means the picture was never sized — BlockSuite's default — so
+ * the hint is dropped entirely and the renderer falls back to the full text
+ * column, which is the right answer for a chart.
+ */
+export function withDrawnWidth(url: string, widthPx: number): string {
+  const raw = String(url ?? '');
+  /**
+   * A block width of 0 is BlockSuite's default and means the picture has not
+   * been sized yet — the measuring pass has not finished, or the picture never
+   * loaded. It does NOT mean 'the author wanted it full width', so the
+   * document's own hint is left exactly as it was.
+   *
+   * Getting this backwards silently deleted the size from every document that
+   * was exported before its pictures finished loading.
+   */
+  const points = Number.isFinite(widthPx) && widthPx > 0
+    ? Math.round(widthPx * (72 / 96))
+    : 0;
+  if (points <= 0) return raw;
+
+  const [base, fragment = ''] = raw.split('#');
+  // Everything on the fragment EXCEPT the width, which is being replaced.
+  const kept = fragment
+    .split('&')
+    .filter((part) => part && !/^(w|width)=/i.test(part));
+  kept.unshift(`w=${points}`);
+  return `${base}#${kept.join('&')}`;
 }
 
 /** Turn the sentinels in serialised markdown back into image syntax. */
