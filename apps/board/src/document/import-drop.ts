@@ -369,14 +369,35 @@ export async function importDocumentFromUrl(
     }
     const file = new File([blob], name, { type: blob.type });
 
+    /**
+     * ── THE SAME IMPORTER THE DROP PATH USES ──────────────────────────────
+     *
+     * This used to call the parent directly, which meant a .docx opened from
+     * the Library went through mammoth and lost its formatting, while the
+     * SAME FILE dropped on the canvas kept all of it. One document, two
+     * answers, depending on which button the user happened to press.
+     */
     let markdown = '';
     let conv: Partial<Converted> = {};
     if (TEXT_FILE.test(name)) {
       markdown = await file.text();
     } else {
-      const out = await convertViaParent(file);
-      markdown = out?.markdown ?? '';
-      conv = out ?? {};
+      const { importDocument } = await import('./import');
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const isPdf = /\.pdf$/i.test(name);
+      // Only a PDF needs the app: Word is read here, and asking the parent
+      // for a layout it will not produce is a wasted round trip.
+      const pages = isPdf ? (await convertViaParent(file))?.pages : undefined;
+      if (isPdf && !pages?.length) {
+        // The app could not measure it; its flat text is still a document.
+        const out = await convertViaParent(file);
+        markdown = out?.markdown ?? '';
+        conv = { ...(out ?? {}), notes: ['the layout could not be recovered'] } as any;
+      } else {
+        const out = await importDocument({ name, bytes }, { pdfLayout: async () => pages! });
+        markdown = out.markdown;
+        conv = { images: out.images.stored, notes: out.notes } as any;
+      }
     }
     if (!markdown.trim()) {
       toast(`${name} could not be opened as a document.`, 'error');
