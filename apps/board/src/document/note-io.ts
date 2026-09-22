@@ -42,6 +42,8 @@ import {
   commentsFromMarks,
   marksFromComments,
 } from './align-marks';
+import { applyTableWidths, tableWeights, weightsOfNote, withColumnComments }
+  from './doc-tables';
 import {
   countImages,
   sizeImagesFromHints,
@@ -254,6 +256,14 @@ export async function placeMarkdownDocument(
    */
   void sizeImagesFromHints(board, model.id).catch(() => { /* natural size */ });
 
+  /**
+   * And the tables take the column widths it asked for. Synchronous and
+   * cheap — it is a property write per column, with nothing to measure — so
+   * unlike the pictures there is no reason to let the first paint win the
+   * race and show the wrong ratio first.
+   */
+  applyTableWidths(board, model.id, tableWeights(text));
+
   return { noteId: model.id, dropped: droppedConstructs(text), images: countImages(text) };
 }
 
@@ -282,7 +292,15 @@ export async function noteToMarkdown(board: MountedBoard, noteId: string): Promi
     snapshot,
     assets: transformer.assetsManager,
   });
-  return commentsFromMarks(unescapeSpans(carrierToMarkdown(restoreMarkdownImages(String(file ?? ''), images))));
+  const text = commentsFromMarks(
+    unescapeSpans(carrierToMarkdown(restoreMarkdownImages(String(file ?? ''), images))),
+  );
+  /**
+   * Column widths come from the TABLE, not from a mark in the text: they are
+   * a real BlockSuite prop, so a column the user dragged on the board is
+   * carried out to the PDF the same as one the document asked for.
+   */
+  return withColumnComments(text, weightsOfNote(board, noteId));
 }
 
 /**
