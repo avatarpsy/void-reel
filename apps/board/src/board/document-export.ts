@@ -34,17 +34,23 @@ import { defaultApiBase } from '@openreel/asset-browser';
  * somebody actually exports, below. A session that never makes a document
  * downloads none of it.
  */
-import type { DocFormat, RenderedDocument } from '../document';
+import type { DocFormat, DocSpec, RenderedDocument } from '../document';
 
 export type { DocFormat, RenderedDocument };
 
 /** Big enough for a very long board; past this the tab, not the server, suffers. */
 const MAX_MARKDOWN_BYTES = 4 * 1024 * 1024;
 
-export interface DocumentOptions {
-  pageSize?: 'a4' | 'letter';
-  typeface?: 'serif' | 'sans';
-}
+/**
+ * Everything the renderer takes except the document itself.
+ *
+ * Derived from `DocSpec` rather than listed again, because it WAS listed again:
+ * this said `pageSize` and `typeface` while the renderer had grown margins,
+ * orientation, a header, a footer and line spacing. Nothing failed — the extra
+ * keys were spread through at runtime — so the type simply described something
+ * that had stopped being true, which is the worst state for a type to be in.
+ */
+export type DocumentOptions = Omit<DocSpec, 'markdown' | 'title'>;
 
 /**
  * Make the document. Nothing leaves this machine.
