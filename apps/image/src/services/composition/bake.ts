@@ -45,10 +45,22 @@ const inflight = new Map<string, Promise<BakeResult>>();
  * over and over. Keyed by the composition hash rather than the layer, so editing
  * the words is a genuinely new attempt and gets one.
  *
- * Session-scoped on purpose: a reload is a reasonable moment to try again, and
- * whatever was wrong (the app was shut) may well have been fixed since.
+ * Remembered for a few minutes, not the whole session: whatever was wrong (the
+ * app was shut, the renderer was updated) may well be fixed by then, and a
+ * failure held until a reload left a composition blank with no way back.
  */
-const failedKeys = new Set<string>();
+const failedKeys = new Map<string, { at: number; message: string }>();
+const RETRY_FAILED_AFTER_MS = 3 * 60_000;
+
+/**
+ * Why each layer's last render did not land — so a pixel reader can tell the
+ * agent the actual reason ("the desktop app is not connected", the renderer's
+ * own error) instead of one generic "unavailable" it kept retrying against.
+ */
+const lastFailure = new Map<string, { reason: BakeResult['reason']; message: string }>();
+export function lastBakeFailure(layerId: string): { reason: BakeResult['reason']; message: string } | null {
+  return lastFailure.get(layerId) ?? null;
+}
 
 /** A still is an IMAGE. Anything else came back from a renderer that did not
  *  understand the request. */
@@ -161,11 +173,13 @@ export async function bakeComposition(layerId: string): Promise<BakeResult> {
     if (!shouldBake(layer)) return { ok: true, layerId, reason: 'up_to_date' };
 
     const key = compositionHash(source);
-    if (failedKeys.has(key)) {
-      return { ok: false, layerId, reason: 'already_failed' };
+    const prior = failedKeys.get(key);
+    if (prior && Date.now() - prior.at < RETRY_FAILED_AFTER_MS) {
+      return { ok: false, layerId, reason: 'already_failed', message: prior.message };
     }
     const failed = (message: string, reason: BakeResult['reason'] = 'render_failed'): BakeResult => {
-      failedKeys.add(key);
+      failedKeys.set(key, { at: Date.now(), message });
+      lastFailure.set(layerId, { reason, message });
       return { ok: false, layerId, reason, message };
     };
 
@@ -210,16 +224,15 @@ export async function bakeComposition(layerId: string): Promise<BakeResult> {
      * the editor stays usable — what they cannot do yet is export.
      */
     if (json?.deviceUnavailable) {
-      return {
-        ok: false,
-        layerId,
-        reason: 'device_unavailable',
-        message: 'Open the Voidspace desktop app to render this slide — it renders on your own machine.',
-      };
+      const message = 'Open the Voidspace desktop app to render this slide — it renders on your own machine.';
+      lastFailure.set(layerId, { reason: 'device_unavailable', message });
+      return { ok: false, layerId, reason: 'device_unavailable', message };
     }
 
     const url = typeof json?.url === 'string' ? json.url : '';
-    if (!url) return failed('the render produced no file');
+    // The renderer's own reason when it gave one: "the render produced no file"
+    // threw away the one line that said what was actually wrong.
+    if (!url) return failed(json?.error ? String(json.error).slice(0, 300) : 'the render produced no file');
     /**
      * A desktop app older than the `png` format renders an MP4 instead and
      * returns it perfectly happily. Loading that as a picture fails a minute
@@ -259,6 +272,7 @@ export async function bakeComposition(layerId: string): Promise<BakeResult> {
     if (!asset) return failed('could not load the render');
 
     if (!cacheCompositionRender(layerId, key, asset)) return { ok: false, layerId, reason: 'source_changed' };
+    lastFailure.delete(layerId);
     return { ok: true, layerId, assetId: asset.id };
   })();
 
@@ -325,4 +339,5 @@ export async function settleCompositions(): Promise<void> {
 /** Test seam: forget which bakes failed, as a reload would. */
 export function resetBakeFailures(): void {
   failedKeys.clear();
+  lastFailure.clear();
 }

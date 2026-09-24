@@ -11,6 +11,7 @@ import { calculateSnap } from '../../../utils/snapping';
 import type { Layer, ImageLayer, TextLayer, ShapeLayer, GroupLayer } from '../../../types/project';
 import { Rulers } from './Rulers';
 import { CompositionOverlay } from './CompositionOverlay';
+import { layersAbove, liveCompositionFor } from '../../../services/composition/overlay-model';
 import { ContextMenu, type ContextMenuPosition, type ContextMenuType } from './ContextMenu';
 import { hasActiveAdjustments, applyAllAdjustments, type LayerAdjustments } from '../../../utils/apply-adjustments';
 import { getToolCursor } from '../../../utils/cursors';
@@ -713,7 +714,19 @@ export function Canvas() {
     // Bottom-to-top. A layer with `clippingMask` clips to the layer below it
     // (its "base"): it shows only where the base has pixels (Photoshop). We draw
     // the base normally, then draw each clipped layer through the base's shape.
-    const sortedLayers = [...artboard.layerIds].reverse().map((id) => project.layers[id]);
+    //
+    // ── STOP AT THE LIVE COMPOSITION ────────────────────────────────────────
+    // A running composition is an iframe laid OVER this canvas, so whatever this
+    // canvas paints above it would sit under its frame — text placed on a
+    // composition background vanished while the layer list said it was on top.
+    // Those layers are painted over the frame by `LayersAboveComposition`
+    // instead; painting them here too would double any translucency.
+    const liveComposition = liveCompositionFor(project, artboard, {
+      canvasWidth: canvas.width, canvasHeight: canvas.height, zoom, panX: livePanX, panY: livePanY,
+    }, selectedLayerIds);
+    const bottomUp = [...artboard.layerIds].reverse();
+    const liveAt = liveComposition ? bottomUp.indexOf(liveComposition.layerId) : -1;
+    const sortedLayers = (liveAt >= 0 ? bottomUp.slice(0, liveAt + 1) : bottomUp).map((id) => project.layers[id]);
     const AW = Math.max(1, Math.ceil(artboard.size.width));
     const AH = Math.max(1, Math.ceil(artboard.size.height));
     for (let i = 0; i < sortedLayers.length; i++) {
@@ -3386,6 +3399,10 @@ export function Canvas() {
         containerWidth={containerSize.width}
         containerHeight={containerSize.height}
       />
+      <LayersAboveComposition
+        containerWidth={containerSize.width}
+        containerHeight={containerSize.height}
+      />
 
       {/* Drop-an-image affordance. pointer-events-none so the drop event still
           reaches the container underneath. */}
@@ -3478,6 +3495,86 @@ const BLEND_MODE_MAP: Record<string, GlobalCompositeOperation> = {
   'color': 'color',
   'luminosity': 'luminosity',
 };
+
+/**
+ * The layers stacked above a running composition, painted OVER its live frame.
+ *
+ * The frame is an iframe laid over the canvas (see CompositionOverlay), and a
+ * canvas cannot paint above an iframe — so without this every layer the user
+ * put on top of a composition (a headline on a background) was hidden while
+ * the layer list said it was in front. The main canvas stops painting at the
+ * composition; this paints the rest, with the same painters, transform and
+ * artboard clip, plus selection outlines so a selected layer stays visible.
+ *
+ * Draws nothing and mounts nothing when no composition is running live.
+ */
+function LayersAboveComposition({ containerWidth, containerHeight }: { containerWidth: number; containerHeight: number }) {
+  const { project, selectedArtboardId, selectedLayerIds } = useProjectStore();
+  const { zoom, panX, panY } = useUIStore();
+  const ref = useRef<HTMLCanvasElement>(null);
+  // Text measured before its font arrived paints in the fallback face; repaint
+  // when fonts land, as the main canvas does.
+  const [fontsLoaded, setFontsLoaded] = useState(0);
+  useEffect(() => {
+    const fonts = (document as any).fonts;
+    const onLoad = () => setFontsLoaded((n) => n + 1);
+    fonts?.addEventListener?.('loadingdone', onLoad);
+    return () => fonts?.removeEventListener?.('loadingdone', onLoad);
+  }, []);
+
+  const artboard = project?.artboards.find((a) => a.id === selectedArtboardId);
+  const live = liveCompositionFor(project, artboard, {
+    canvasWidth: containerWidth, canvasHeight: containerHeight, zoom, panX, panY,
+  }, selectedLayerIds);
+  const above = live && artboard ? layersAbove(artboard.layerIds, live.layerId) : [];
+
+  useEffect(() => {
+    const canvas = ref.current;
+    const ctx = canvas?.getContext('2d');
+    if (!canvas || !ctx || !project || !artboard) return;
+    if (canvas.width !== containerWidth || canvas.height !== containerHeight) {
+      canvas.width = Math.max(1, containerWidth);
+      canvas.height = Math.max(1, containerHeight);
+    }
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const artboardX = canvas.width / 2 + panX - (artboard.size.width * zoom) / 2;
+    const artboardY = canvas.height / 2 + panY - (artboard.size.height * zoom) / 2;
+
+    ctx.save();
+    ctx.translate(artboardX, artboardY);
+    ctx.scale(zoom, zoom);
+    ctx.beginPath();
+    ctx.rect(0, 0, artboard.size.width, artboard.size.height);
+    ctx.clip();
+    for (const id of above) {
+      const layer = project.layers[id];
+      if (layer?.visible) renderLayerWithChildren(ctx, layer, project);
+    }
+    ctx.restore();
+
+    ctx.strokeStyle = '#22c55e';
+    ctx.lineWidth = 2;
+    for (const id of selectedLayerIds) {
+      const layer = project.layers[id];
+      if (!layer) continue;
+      const { x, y, width, height, rotation } = layer.transform;
+      ctx.save();
+      ctx.translate(artboardX + (x + width / 2) * zoom, artboardY + (y + height / 2) * zoom);
+      ctx.rotate((rotation * Math.PI) / 180);
+      ctx.strokeRect(-(width / 2) * zoom, -(height / 2) * zoom, width * zoom, height * zoom);
+      ctx.restore();
+    }
+  }, [project, artboard, above.join(','), zoom, panX, panY, containerWidth, containerHeight, selectedLayerIds, fontsLoaded]);
+
+  if (!live) return null;
+  return (
+    <canvas
+      ref={ref}
+      className="pointer-events-none absolute"
+      style={{ top: 0, left: 0, width: '100%', height: '100%' }}
+    />
+  );
+}
 
 function renderLayerWithChildren(
   ctx: CanvasRenderingContext2D,

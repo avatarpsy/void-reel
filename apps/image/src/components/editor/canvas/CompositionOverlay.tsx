@@ -5,9 +5,8 @@ import { prepareFromSource } from '../../../services/composition/document';
 import { CompositionHost } from '../../../services/composition/frame-host';
 import { resolveComposition } from '../../../services/composition/block-source';
 import {
-  compositionLayers,
+  liveCompositionFor,
   liveFrameIdentity,
-  pickLiveComposition,
   type CompositionLayerRef,
 } from '../../../services/composition/overlay-model';
 import { compositionPlacement, type Viewport } from '../../../services/composition/overlay-placement';
@@ -43,7 +42,9 @@ interface CompositionOverlayProps {
  * ── WHY THIS IS A SIBLING OF THE CANVAS AND NOT PART OF IT ──────────────────
  * It renders immediately after `<canvas>` and carries no z-index, so it stacks
  * above the artwork by document order while the rulers (z-10/z-20) and the drop
- * affordance (z-30) stay above it. Canvas.tsx therefore gains one element and
+ * affordance (z-30) stay above it. Layers stacked ABOVE the composition are not
+ * painted by that canvas; `LayersAboveComposition` paints them over this frame,
+ * so the layer order on screen is the layer order in the file. Canvas.tsx therefore gains one element and
  * nothing else — no new state, no change to the draw path — and the composition
  * machinery stays out of a 4,300-line component.
  *
@@ -72,15 +73,7 @@ export function CompositionOverlay({ containerWidth, containerHeight }: Composit
     panY,
   };
 
-  let live: CompositionLayerRef | null = null;
-  if (project && artboard && containerWidth > 0 && containerHeight > 0) {
-    live = pickLiveComposition(compositionLayers(artboard.layerIds, project.layers), {
-      viewport,
-      artboard: artboard.size,
-      selectedLayerIds,
-      hidden: (id) => project.layers[id]?.visible === false,
-    });
-  }
+  const live: CompositionLayerRef | null = liveCompositionFor(project, artboard, viewport, selectedLayerIds);
 
   /**
    * The frame is rebuilt when the COMPOSITION changes, never when the view does.

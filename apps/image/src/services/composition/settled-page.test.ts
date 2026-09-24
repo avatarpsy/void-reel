@@ -4,7 +4,7 @@ import { compositionHash } from './hash';
 
 const state = vi.hoisted(() => ({ project: null as any, settle: vi.fn() }));
 vi.mock('../../stores/project-store', () => ({ useProjectStore: { getState: () => state } }));
-vi.mock('./bake', () => ({ settleCompositions: state.settle }));
+vi.mock('./bake', () => ({ settleCompositions: state.settle, lastBakeFailure: () => null }));
 beforeEach(() => {
   state.settle.mockReset();
   const composition = { block: 'hero', slots: { headline: 'Pause' }, fillMode: 'render', poseTime: 'end', frameWidth: 1080, frameHeight: 1350, renderHash: '' };
@@ -37,7 +37,7 @@ it('waits for pending pixels and returns the new document, not the blank snapsho
 });
 
 it('refuses a blank or stale render instead of returning an inspectable success', async () => {
-  await expect(settledPage('draft', 'cover')).rejects.toThrow('Do not rebuild');
+  await expect(settledPage('draft', 'cover')).rejects.toThrow('do not rebuild');
   finishRender();
   state.project.layers.hero.composition.slots.headline = 'New copy';
   await expect(settledPage('draft', 'cover')).rejects.toThrow('render');

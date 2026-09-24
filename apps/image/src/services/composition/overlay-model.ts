@@ -111,6 +111,42 @@ export function pickLiveComposition(
 }
 
 /**
+ * The composition running live on this page right now, or null.
+ *
+ * ONE answer shared by every surface that stacks around the live frame: the
+ * overlay mounts it, the canvas stops painting what sits above it, and the
+ * top canvas paints those layers over it instead. Computed three ways it
+ * would be three chances for the frame to cover the wrong thing.
+ */
+export function liveCompositionFor(
+  project: { layers: Record<string, Layer> } | null | undefined,
+  artboard: { layerIds: readonly string[]; size: Size } | null | undefined,
+  viewport: Viewport,
+  selectedLayerIds: readonly string[],
+): CompositionLayerRef | null {
+  if (!project || !artboard || !(viewport.canvasWidth > 0) || !(viewport.canvasHeight > 0)) return null;
+  return pickLiveComposition(compositionLayers(artboard.layerIds, project.layers), {
+    viewport,
+    artboard: artboard.size,
+    selectedLayerIds,
+    hidden: (id) => project.layers[id]?.visible === false,
+  });
+}
+
+/**
+ * The layers stacked ABOVE `layerId`, in paint order (bottom first).
+ *
+ * The live frame is an iframe over the canvas, so anything the canvas paints
+ * above a composition ends up UNDER its frame: text placed on a composition
+ * background was hidden while the layer list said it was on top. These are the
+ * layers that must be painted over the frame instead.
+ */
+export function layersAbove(layerIds: readonly string[], layerId: string): string[] {
+  const at = layerIds.indexOf(layerId);
+  return at <= 0 ? [] : layerIds.slice(0, at).reverse();
+}
+
+/**
  * Has the thing being shown changed, or only where it is on screen?
  *
  * Pan and zoom MOVE a frame; they must never rebuild one, because rebuilding
