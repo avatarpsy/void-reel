@@ -572,6 +572,27 @@ export interface BoardRpcOptions {
 }
 
 export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {}): () => void {
+  // Remember complete, bounded text reads. A note's automatic layout can bump
+  // the global revision while the words the agent read remain unchanged.
+  const canvasTextReads = new Map<number, Map<string, string>>();
+  const noteContents = (id: string): string | undefined => {
+    const model = board.store.getBlock(id)?.model;
+    if (model?.flavour !== 'affine:note') return undefined;
+    // Retexting replaces a note's children. Protect their structure, formatting
+    // and embedded content as well as words, excluding the note's outer layout.
+    const tree = (child: { id: string }): unknown => {
+      const m = board.store.getBlock(child.id)?.model;
+      if (!m) throw new Error('Missing note child');
+      const props = Object.fromEntries(Object.entries(m.props).map(([key, v]) => [key,
+        v && typeof (v as any).toDelta === 'function' ? (v as any).toDelta() : v]));
+      return { id: m.id, flavour: m.flavour, props, children: m.children.map(tree) };
+    };
+    try {
+      const value = JSON.stringify(model.children.map(tree), (_key, v) =>
+        v && typeof v.toDelta === 'function' ? v.toDelta() : v);
+      return value.length <= 60_000 ? value : undefined;
+    } catch { return undefined; }
+  };
   // Every block change bumps the revision, whoever made it. Nothing else needs
   // doing here any more: a shot's media live in its own props, so deleting a
   // shot takes its references with it and there is no sidecar left to prune.
@@ -2414,6 +2435,13 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
       const full = args?.full === true;
       const items = readCanvas(board.std, { selectionOnly, ids, full });
       const selection = readSelection(board.std);
+      const contents = new Map<string, string>();
+      for (const item of items) {
+        const value = noteContents(item.id);
+        if (value !== undefined) contents.set(item.id, value);
+      }
+      canvasTextReads.set(rev, contents);
+      if (canvasTextReads.size > 16) canvasTextReads.delete(canvasTextReads.keys().next().value!);
 
       /**
        * THE TOTAL IS CAPPED, AND THE TRIM IS REPORTED.
@@ -2740,9 +2768,18 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
 
     /** Move, resize, retext, recolour or delete things already on the canvas. */
     'voidspace:board-edit-canvas': args => {
-      const g = guard(args); if (!g.ok) return g;
       const ops = asArray<EditOp>(args.ops);
       if (!ops.length) return fail('empty', 'Send at least one operation in `ops`.');
+      const writable = checkWritable(board); if (!writable.ok) return writable;
+      const g = checkRev(args.expectRev);
+      if (!g.ok) {
+        const prior = canvasTextReads.get(Number(args.expectRev));
+        const unchangedText = prior && ops.every(o => o.op === 'text'
+          && prior.has(o.id) && noteContents(o.id) === prior.get(o.id));
+        // Never waive the revision guard for deletion, geometry, unknown reads,
+        // truncated text, or text that actually changed after the read.
+        if (!unchangedText) return g;
+      }
 
       const result = editCanvas(board.std, ops);
       rev++;

@@ -32,6 +32,7 @@ import { bakeComposition, settleCompositions } from '../services/composition/bak
 import { saveRegionToLibrary } from '../services/library-save';
 import { exportProjectToPdf, exportProjectToPptx, exportFileName } from '../services/pptx-export';
 import { uploadToLibrary } from '@openreel/asset-browser';
+import { FontWeightSchema } from '@openreel/image-core';
 import type { SlotSpec } from '../services/composition/document';
 import type { Layer, Project, Artboard, MediaAsset, TextLayer, ShapeLayer, ImageLayer, CompositionSource } from '../types/project';
 
@@ -40,6 +41,13 @@ import type { Layer, Project, Artboard, MediaAsset, TextLayer, ShapeLayer, Image
 function activeArtboard(project: Project): Artboard | null {
   const id = useProjectStore.getState().selectedArtboardId;
   return project.artboards.find((a) => a.id === id) ?? project.artboards[0] ?? null;
+}
+
+function fontWeight(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = FontWeightSchema.safeParse(value);
+  if (!parsed.success) throw new Error('fontWeight must be a number from 1 to 1000, or normal/bold.');
+  return parsed.data;
 }
 
 function resolvePage(project: Project, pageId?: string): Artboard | null {
@@ -299,7 +307,7 @@ registerImageMutation('voidspace:img-add-text', 'Add text', (msg: any) => {
     fontSize,
     lineHeight,
     fontFamily: msg?.fontFamily,
-    fontWeight: msg?.fontWeight,
+    fontWeight: fontWeight(msg?.fontWeight),
     fontStyle: msg?.fontStyle,
     letterSpacing: msg?.letterSpacing,
     textAlign: msg?.textAlign,
@@ -317,7 +325,7 @@ registerImageMutation('voidspace:img-add-text', 'Add text', (msg: any) => {
   const style = defined({
     fontFamily: msg?.fontFamily,
     fontSize: box.fontSize,
-    fontWeight: msg?.fontWeight,
+    fontWeight: fontWeight(msg?.fontWeight),
     fontStyle: msg?.fontStyle,
     textAlign: msg?.textAlign,
     verticalAlign: msg?.verticalAlign,
@@ -649,7 +657,7 @@ registerImageAsyncMutation(
      */
     void bakeComposition(layerId).catch(() => {});
 
-    return { layerId, pageId: page.id, bounds: box, block, tier, unfilled };
+    return { layerId, pageId: page.id, bounds: box, frameWidth, frameHeight, block, tier, unfilled };
   },
 );
 
@@ -767,7 +775,7 @@ registerImageAsyncMutation(
         const patch: Partial<TextLayer> = {};
         if (typeof msg?.text === 'string') (patch as any).content = msg.text;
         const style = defined({
-          fontFamily: msg?.fontFamily, fontSize: msg?.fontSize, fontWeight: msg?.fontWeight,
+          fontFamily: msg?.fontFamily, fontSize: msg?.fontSize, fontWeight: fontWeight(msg?.fontWeight),
           fontStyle: msg?.fontStyle, textAlign: msg?.textAlign, verticalAlign: msg?.verticalAlign,
           lineHeight: msg?.lineHeight, letterSpacing: msg?.letterSpacing, color: msg?.color,
           strokeColor: msg?.strokeColor, strokeWidth: msg?.strokeWidth,
@@ -1297,7 +1305,7 @@ registerImageAsyncMutation(
           fontSize,
           lineHeight,
           fontFamily: spec.fontFamily,
-          fontWeight: spec.fontWeight,
+          fontWeight: fontWeight(spec.fontWeight),
           fontStyle: spec.fontStyle,
           letterSpacing: spec.letterSpacing,
           textAlign: spec.textAlign,
@@ -1314,7 +1322,7 @@ registerImageAsyncMutation(
         const style = defined({
           fontFamily: spec.fontFamily,
           fontSize: box.fontSize,
-          fontWeight: spec.fontWeight,
+          fontWeight: fontWeight(spec.fontWeight),
           fontStyle: spec.fontStyle,
           textAlign: spec.textAlign,
           verticalAlign: spec.verticalAlign,

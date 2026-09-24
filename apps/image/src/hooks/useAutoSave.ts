@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useProjectStore } from '../stores/project-store';
+import type { Project } from '../types/project';
 
 // -----------------------------------------------------------------------------
 // Seamless local persistence for Voidspace Image.
@@ -64,7 +65,9 @@ function tx<T>(mode: IDBTransactionMode, run: (store: IDBObjectStore) => IDBRequ
       new Promise<T>((resolve, reject) => {
         const t = db.transaction(STORE, mode);
         const req = run(t.objectStore(STORE));
-        req.onsuccess = () => resolve(req.result);
+        // A successful request can still be rolled back by its transaction.
+        t.oncomplete = () => resolve(req.result);
+        t.onabort = () => reject(t.error || new Error('Project save was aborted.'));
         req.onerror = () => reject(req.error);
       }),
   );
@@ -150,8 +153,9 @@ export function useAutoSave() {
         .then(() => {
           lastSavedRef.current = projectJson;
           lastSaveAtRef.current = Date.now();
-          pendingRef.current = null;
-          markClean();
+          if (pendingRef.current?.project === project) pendingRef.current = null;
+          // A slower write must not mark edits made during that write clean.
+          if (useProjectStore.getState().project === project) markClean();
         })
         .catch((error) => console.error('Failed to auto-save:', error));
     }, saveDelay({ now: Date.now(), lastSaveAt: lastSaveAtRef.current }));
@@ -189,6 +193,10 @@ export function useAutoSave() {
       document.removeEventListener('visibilitychange', onHide);
     };
   }, []);
+}
+
+export async function saveProjectLocally(project: Project): Promise<void> {
+  await tx('readwrite', s => s.put({ id: project.id, project, updatedAt: Date.now() } as SavedRecord));
 }
 
 export async function loadSavedProject(projectId: string): Promise<any | null> {

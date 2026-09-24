@@ -23,6 +23,9 @@ import {
   NotSignedInError,
 } from '../services/voidspace-storage';
 import type { Artboard, Layer, Project } from '../types/project';
+import { saveProjectLocally } from '../hooks/useAutoSave';
+import { saveProjectDocument } from '../services/project-cloud-sync';
+import { settledPage } from '../services/composition/settled-page';
 
 function fail(reason: string, message: string) {
   return { ok: false as const, reason, message };
@@ -188,7 +191,8 @@ registerImageRpc('voidspace:img-render-pages', async (msg: any) => {
   try {
     const urls: string[] = [];
     for (let i = 0; i < settledPages.length; i++) {
-      const blob = await exportArtboard(settled, settledPages[i], {
+      const ready = await settledPage(settled.id, settledPages[i].id);
+      const blob = await exportArtboard(ready.project, ready.page, {
         format: 'jpg', quality: 'high', scale: 1, background: 'include',
       });
       const file = new File([blob], `slide-${i + 1}.jpg`, { type: 'image/jpeg' });
@@ -218,6 +222,21 @@ registerImageRpc('voidspace:img-save', async (msg: any) => {
   const project = useProjectStore.getState().project;
   if (!project) return fail('no_project', 'No image project is open.');
 
+  if (msg?.mode === 'project') {
+    try {
+      if (typeof msg.name === 'string' && msg.name.trim()) useProjectStore.getState().setProjectName(msg.name.trim());
+      await settleAllCompositions();
+      const current = useProjectStore.getState().project!;
+      await saveProjectLocally(current);
+      const cloudSaved = await saveProjectDocument(current);
+      return { ok: true, mode: 'project', projectId: current.id, name: current.name,
+        pageCount: current.artboards.length, editable: true, localSaved: true, cloudSaved,
+        ...(cloudSaved ? {} : { warning: 'Saved on this device. Cloud backup is unavailable; keep this browser data until backup succeeds.' }) };
+    } catch (error) {
+      return fail('save_failed', `Could not save the editable project: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   const page = resolvePage(project, msg?.pageId);
   if (!page) return fail('page_not_found', `No page with id ${msg?.pageId}`);
 
@@ -233,7 +252,8 @@ registerImageRpc('voidspace:img-save', async (msg: any) => {
   try {
     // PNG for an overwrite (lossless, keeps alpha); the export dialog's own
     // save path makes the same choice.
-    const blob = await exportArtboard(project, page, {
+    const ready = await settledPage(project.id, page.id);
+    const blob = await exportArtboard(ready.project, ready.page, {
       format: 'png', quality: 'high', scale: 1,
       background: msg?.transparent ? 'transparent' : 'include',
     });

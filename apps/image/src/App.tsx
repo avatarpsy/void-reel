@@ -12,7 +12,7 @@ import { bakePendingCompositions } from './services/composition/bake';
 import { useProjectCloudSync } from './hooks/useProjectCloudSync';
 import { readHandoffParams, setEditReturnId, clearHandoffUrl, loadSrcAsProject, parseEditSource } from './services/image-handoff';
 import { openCloudCarouselById } from './services/carousel-cloud';
-import { openCloudImageProject } from './services/project-cloud-open';
+import { openImageProjectWithCache } from './services/project-cloud-open';
 import { installImageRpc } from './agent/rpc';
 import { useProjectStore } from './stores/project-store';
 import { resolveBootTheme, watchSiteTheme } from '@openreel/ui';
@@ -65,6 +65,11 @@ let handoffClaimed = false;
 
 type NewPreset = { name: string; width: number; height: number };
 const NEW_PRESETS: Record<string, NewPreset> = {
+  // Square social post — the shape the format picker offers first, and the one
+  // an agent's "square poster" needs; without it an automated request fell
+  // through to the picker, which waits for a person.
+  post: { name: 'Post', width: 1080, height: 1080 },
+  thumbnail: { name: 'Thumbnail', width: 1280, height: 720 },
   presentation: { name: 'Presentation', width: 1920, height: 1080 },
   'presentation-4-3': { name: 'Presentation', width: 1024, height: 768 },
   carousel: { name: 'Carousel', width: 1080, height: 1350 },
@@ -151,9 +156,10 @@ export default function App() {
     if (!carouselId) return;
     (async () => {
       try {
-        await openCloudCarouselById(carouselId);
+        if (!await openCloudCarouselById(carouselId)) throw new Error('This carousel could not be opened. Check your connection and try again.');
       } catch (e) {
         console.warn('[image] could not open carousel:', e);
+        setHandoffError(e instanceof Error ? e.message : 'Could not open this carousel. Try again.');
       } finally {
         setBooting(false);
       }
@@ -170,21 +176,11 @@ export default function App() {
     (async () => {
       try {
         const local = await loadSavedProject(projectId);
-        if (local) {
-          useProjectStore.getState().loadProject(local);
-          setCurrentView('editor');
-          /**
-           * Render any slide whose pixels are missing or out of date.
-           * A composition layer carries no asset, and only the SELECTED one gets
-           * a live frame — so without this a reopened deck shows one slide and
-           * four blanks, and exports as five blanks.
-           */
-          void bakePendingCompositions().catch(() => {});
-          return;
-        }
-        await openCloudImageProject(projectId);
+        if (!await openImageProjectWithCache(projectId, local)) throw new Error('This project could not be found. Check your account and try again.');
+        void bakePendingCompositions().catch(() => {});
       } catch (e) {
         console.warn('[image] could not open project:', e);
+        setHandoffError(e instanceof Error ? e.message : 'Could not open this project. Try again.');
       } finally {
         setBooting(false);
       }
@@ -288,7 +284,7 @@ export default function App() {
           <CosmicField />
           <div className="relative z-10 flex max-w-sm flex-col items-center gap-3 px-6 text-center">
             <ImageOff className="w-8 h-8 text-text-secondary" />
-            <p className="text-base font-medium">Couldn’t open that image</p>
+            <p className="text-base font-medium">Couldn’t open your project</p>
             <p className="text-sm text-text-secondary">{handoffError}</p>
             <div className="flex gap-2 pt-2">
               {/* The ?src= param is still in the URL — a reload re-runs the

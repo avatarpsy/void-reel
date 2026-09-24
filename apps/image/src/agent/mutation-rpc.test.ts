@@ -48,6 +48,27 @@ describe('img-new-project', () => {
 describe('img-add-text', () => {
   beforeEach(reset);
 
+  it.each(['700', 'bold'])('normalizes CSS weight %s so the saved project can reopen', async (fontWeight) => {
+    await newProject();
+    const result = await rpc({ type: 'voidspace:img-add-text', text: 'Cover', fontWeight });
+    expect(result.ok).toBe(true);
+    const layer = project().layers[result.layerId] as TextLayer;
+    expect(layer.style.fontWeight).toBe(700);
+    const saved = JSON.parse(JSON.stringify(project()));
+    reset();
+    useProjectStore.getState().loadProject(saved);
+    expect(project().layers[result.layerId]).toEqual(layer);
+  });
+
+  it('rejects an invalid font weight without leaving a half-created layer', async () => {
+    await newProject();
+    const before = project();
+    const result = await rpc({ type: 'voidspace:img-add-text', text: 'Cover', fontWeight: 'heavy-ish' });
+    expect(result.type).toBe('voidspace:error');
+    expect(result.error).toContain('fontWeight');
+    expect(project()).toEqual(before);
+  });
+
   it('creates a styled text layer in ONE undo step', async () => {
     await newProject();
     const before = depth();

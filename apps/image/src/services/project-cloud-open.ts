@@ -20,6 +20,7 @@ import { useProjectStore } from '../stores/project-store';
 import { useUIStore } from '../stores/ui-store';
 import { aspectRatioToSize } from './image-generation';
 import type { MediaAsset } from '../types/project';
+import { setCloudSaveStatus } from './project-cloud-status';
 
 interface CloudImageProject {
   projectId: string;
@@ -54,14 +55,17 @@ export async function loadProjectDocument(projectId: string): Promise<Project | 
       `/api/studio/image-doc?project=${encodeURIComponent(projectId)}`,
       { headers: { authorization: `Bearer ${token}` } },
     );
-    if (!res.ok) return null; // 404 = no stored document; anything else is a miss too
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error('The editable project could not be loaded from your account. Check your connection and sign in, then retry.');
     const doc = await res.json();
     // A document with no artboards is not openable and would replace the user's
     // canvas with nothing — treat it as absent rather than as valid.
-    if (!doc || !Array.isArray(doc.artboards) || !doc.artboards.length) return null;
+    if (!doc || !Array.isArray(doc.artboards) || !doc.artboards.length) throw new Error('The stored project could not be read. Retry before opening a flattened copy.');
     return doc as Project;
-  } catch {
-    return null;
+  } catch (error) {
+    // A failed network/auth read is not evidence that the layered document is
+    // absent. Never replace it with a flattened thumbnail after a transient miss.
+    throw error instanceof Error ? error : new Error('The editable project could not be loaded. Retry when connected.');
   }
 }
 
@@ -70,7 +74,7 @@ export async function loadProjectDocument(projectId: string): Promise<Project | 
  * one full-bleed image layer). Returns false if it isn't found. Switches to the
  * editor when at least one page loads.
  */
-export async function openCloudImageProject(id: string): Promise<boolean> {
+export async function openCloudImageProject(id: string, knownDocument?: Project | null): Promise<boolean> {
   const token = await getVoidspaceIdToken();
   if (!token) return false;
 
@@ -82,7 +86,7 @@ export async function openCloudImageProject(id: string): Promise<boolean> {
    * made before documents were stored, where there is genuinely nothing else to
    * open.
    */
-  const doc = await loadProjectDocument(id);
+  const doc = knownDocument === undefined ? await loadProjectDocument(id) : knownDocument;
   if (doc) {
     useProjectStore.getState().loadProject(doc);
     // NOT flattened — this is the real layer tree. Cleared explicitly so the
@@ -152,4 +156,22 @@ export async function openCloudImageProject(id: string): Promise<boolean> {
   useUIStore.getState().setFlattenedProjectId(openedId);
   useUIStore.getState().setCurrentView('editor');
   return true;
+}
+
+/** A cached browser document cannot hide edits saved from another device.
+ * Keep the newer draft; an offline cached copy remains usable with a warning. */
+export async function openImageProjectWithCache(id: string, local: Project | null): Promise<boolean> {
+  let cloud: Project | null;
+  try { cloud = await loadProjectDocument(id); }
+  catch (error) {
+    if (!local) throw error;
+    useProjectStore.getState().loadProject(local);
+    useUIStore.getState().setFlattenedProjectId(null);
+    useUIStore.getState().setCurrentView('editor');
+    setCloudSaveStatus(id, { state: 'error', updatedAt: local.updatedAt || 0,
+      message: 'Opened the copy on this device. Cloud changes could not be checked. Reconnect and reopen before editing on another device.' });
+    return true;
+  }
+  const document = local && (!cloud || (local.updatedAt || 0) > (cloud.updatedAt || 0)) ? local : cloud;
+  return openCloudImageProject(id, document);
 }

@@ -23,6 +23,7 @@ import { useProjectStore } from '../stores/project-store';
 import { exportArtboard } from '../services/export-service';
 import { uploadReferenceImage } from '../services/generative-fill';
 import { NotSignedInError } from '../services/voidspace-storage';
+import { settledPage } from '../services/composition/settled-page';
 import { registerImageRpc } from './rpc';
 import type { Artboard, Project } from '../types/project';
 
@@ -42,6 +43,7 @@ async function renderPageCanvas(
   page: Artboard,
   opts: { maxPx?: number; hideLayerIds?: string[] } = {},
 ): Promise<HTMLCanvasElement> {
+  ({ project, page } = await settledPage(project.id, page.id));
   const maxPx = Math.min(opts.maxPx ?? MAX_VIEW_PX, MAX_VIEW_PX);
   const longest = Math.max(page.size.width, page.size.height) || 1;
   const scale = Math.min(1, maxPx / longest);
@@ -217,7 +219,7 @@ registerImageRpc('voidspace:img-render', async (msg: any) => {
       canvas = cropCanvas(canvas, region, page.size);
     }
     const blob = await canvasToBlob(canvas);
-    const file = new File([blob], `view-${page.id}.png`, { type: 'image/png' });
+    const file = new File([blob], `view-${page.id}-${crypto.randomUUID()}.png`, { type: 'image/png' });
     // Upload rather than returning a data URL: a 1536² PNG is megabytes of
     // base64, which would blow the tool-result budget AND the saved transcript.
     // A URL also lets the vision provider fetch it directly.

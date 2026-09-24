@@ -23,10 +23,11 @@
  * hash of what was rendered is stored on the layer. Re-baking is therefore
  * automatic when the words change and free when they have not.
  */
-import { useProjectStore } from '../../stores/project-store';
+import { useProjectStore, cacheCompositionRender } from '../../stores/project-store';
 import { getVoidspaceIdToken, libraryImageToAsset } from '../voidspace-storage';
 import { compositionHash, needsRerender } from './hash';
 import { resolveComposition } from './block-source';
+import { prepareFromSource } from './document';
 import type { ImageLayer } from '../../types/project';
 
 /** One bake per layer at a time. The agent places, reads and re-reads in quick
@@ -128,7 +129,7 @@ export interface BakeResult {
   layerId: string;
   assetId?: string;
   /** Plain enough to show a user: they are the ones who can start the app. */
-  reason?: 'no_composition' | 'up_to_date' | 'already_failed' | 'device_unavailable' | 'render_failed';
+  reason?: 'no_composition' | 'source_changed' | 'up_to_date' | 'already_failed' | 'device_unavailable' | 'render_failed';
   message?: string;
 }
 
@@ -170,6 +171,13 @@ export async function bakeComposition(layerId: string): Promise<BakeResult> {
 
     const width = Math.round(source.frameWidth || layer.transform.width || 1920);
     const height = Math.round(source.frameHeight || layer.transform.height || 1080);
+    const resolved = await resolveComposition(source).catch(() => null);
+    if (!resolved) return failed('The composition source could not be loaded.');
+    // Export the same resolved source, bound slots and page frame as the live
+    // preview. Sending the block name resolved a different copy on the desktop
+    // and the old route ignored width/height, producing a different design.
+    const prepared = prepareFromSource(resolved.html, { ...source, frameWidth: width, frameHeight: height },
+      resolved.manifest, { includePreviewRuntime: false });
 
     let res: Response;
     try {
@@ -181,9 +189,7 @@ export async function bakeComposition(layerId: string): Promise<BakeResult> {
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
         body: JSON.stringify({
-          ...(source.block ? { block: source.block } : {}),
-          ...(source.inlineHtml ? { html: source.inlineHtml } : {}),
-          slots: source.slots ?? {},
+          html: prepared.html,
           format: 'png',
           width,
           height,
@@ -228,8 +234,7 @@ export async function bakeComposition(layerId: string): Promise<BakeResult> {
     try {
       // Put the background back before this becomes pixels anybody looks at.
       const token = await getVoidspaceIdToken().catch(() => null);
-      const resolved = await resolveComposition(source).catch(() => null);
-      const background = backgroundFor(source.slots, resolved?.html ?? '');
+      const background = backgroundFor(source.slots, resolved.html);
       const flat = background ? await flatten(url, background, token) : null;
       if (flat) {
         asset = {
@@ -253,18 +258,7 @@ export async function bakeComposition(layerId: string): Promise<BakeResult> {
     }
     if (!asset) return failed('could not load the render');
 
-    const store = useProjectStore.getState();
-    // The layer may have been deleted, or its words edited, while the render ran.
-    const still = store.project?.layers[layerId] as ImageLayer | undefined;
-    if (!still || !still.composition) return { ok: false, layerId, reason: 'no_composition' };
-
-    if (!store.project!.assets[asset.id]) store.addAsset(asset as any);
-    store.updateLayer<ImageLayer>(layerId, {
-      sourceId: asset.id,
-      // Stamp what was RENDERED, not what is current: if the slots changed while
-      // this was in flight, the next sweep must see that and render again.
-      composition: { ...still.composition, renderHash: key },
-    });
+    if (!cacheCompositionRender(layerId, key, asset)) return { ok: false, layerId, reason: 'source_changed' };
     return { ok: true, layerId, assetId: asset.id };
   })();
 

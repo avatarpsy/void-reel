@@ -87,6 +87,9 @@ export interface PrepareOptions {
   /** Milliseconds to wait for fonts, images and the timeline before giving up
    *  and capturing anyway. A late font is worth a bounded wait, never a hang. */
   readyTimeoutMs?: number;
+  /** The native renderer owns animation time during export; omit the preview
+   * message bridge and its seek loop there. Layout and slot binding stay shared. */
+  includePreviewRuntime?: boolean;
   /**
    * Render into THIS frame instead of the one the block declares.
    *
@@ -345,13 +348,15 @@ export function prepareComposition(html: string, opts: PrepareOptions = {}): Pre
     || /__timelines/.test(s.textContent ?? ''),
   );
 
-  const agent = doc.createElement('script');
-  agent.textContent = frameRuntimeSource({
-    poseTime,
-    timeoutMs: readyTimeoutMs,
-    expectsTimeline,
-  });
-  (doc.body ?? doc.documentElement).appendChild(agent);
+  if (opts.includePreviewRuntime !== false) {
+    const agent = doc.createElement('script');
+    agent.textContent = frameRuntimeSource({
+      poseTime,
+      timeoutMs: readyTimeoutMs,
+      expectsTimeline,
+    });
+    (doc.body ?? doc.documentElement).appendChild(agent);
+  }
 
   return {
     html: `<!DOCTYPE html>${doc.documentElement.outerHTML}`,
@@ -384,7 +389,7 @@ export function prepareFromSource(
   html: string,
   source: CompositionSource,
   manifest: Record<string, SlotSpec> = {},
-  opts: Pick<PrepareOptions, 'runtimeUrl' | 'readyTimeoutMs' | 'poseTime'> = {},
+  opts: Pick<PrepareOptions, 'runtimeUrl' | 'readyTimeoutMs' | 'poseTime' | 'includePreviewRuntime'> = {},
 ): PreparedComposition {
   return prepareComposition(html, {
     slots: manifest,
@@ -401,5 +406,6 @@ export function prepareFromSource(
     frameHeight: source.frameHeight,
     runtimeUrl: opts.runtimeUrl,
     readyTimeoutMs: opts.readyTimeoutMs,
+    includePreviewRuntime: opts.includePreviewRuntime,
   });
 }

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { useProjectStore } from './project-store';
+import { useProjectStore, cacheCompositionRender, getProjectRev } from './project-store';
+import { compositionHash } from '../services/composition/hash';
 import { useHistoryStore } from './history-store';
 
 const DEFAULT_SIZE = { width: 1080, height: 1080 };
@@ -25,6 +26,25 @@ function createProject(name = 'Test') {
   useProjectStore.getState().createProject(name, DEFAULT_SIZE, DEFAULT_BG);
   return useProjectStore.getState();
 }
+
+it('render completion keeps the edit revision and undo history stable; real edits still invalidate it', () => {
+  resetStore();
+  createProject();
+  const id = useProjectStore.getState().addImageLayer('', { x: 0, y: 0, width: 1080, height: 1080 });
+  const composition = { block: 'hero', slots: { headline: 'Accepted' }, fillMode: 'render' as const,
+    poseTime: 'end' as const, frameWidth: 1080, frameHeight: 1080, renderHash: '' };
+  useProjectStore.getState().updateLayer(id, { composition } as any);
+  const rev = getProjectRev();
+  const undo = useHistoryStore.getState().getUndoDepth();
+  const asset = { id: 'render-1', type: 'image', name: 'Cover', mimeType: 'image/png', width: 1080, height: 1080, dataUrl: 'data:image/png;base64,a', size: 1 } as any;
+  expect(cacheCompositionRender(id, compositionHash(composition), asset)).toBe(true);
+  expect(getProjectRev()).toBe(rev);
+  expect(useHistoryStore.getState().getUndoDepth()).toBe(undo);
+  useProjectStore.getState().updateLayer(id, { composition: { ...composition, slots: { headline: 'User revision' } } } as any);
+  expect(getProjectRev()).toBeGreaterThan(rev);
+  expect(cacheCompositionRender(id, compositionHash(composition), { ...asset, id: 'late-render' })).toBe(false);
+  expect(useProjectStore.getState().project?.assets['late-render']).toBeUndefined();
+});
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
@@ -79,6 +99,19 @@ describe('project-store', () => {
   });
 
   describe('loadProject', () => {
+    it('recovers saved agent text with CSS font weights and preserves editable layers', () => {
+      createProject('Carousel');
+      const id = useProjectStore.getState().addTextLayer('Pause the autopilot');
+      const saved = JSON.parse(JSON.stringify(useProjectStore.getState().project));
+      saved.layers[id].style.fontWeight = '700';
+      resetStore();
+      useProjectStore.getState().loadProject(saved);
+      const layer = useProjectStore.getState().project?.layers[id];
+      expect(layer?.type).toBe('text');
+      if (layer?.type !== 'text') throw new Error('Editable text was lost');
+      expect(layer.content).toBe('Pause the autopilot');
+      expect(layer.style.fontWeight).toBe(700);
+    });
     it('loads a valid project', () => {
       createProject('Original');
       const snapshot = useProjectStore.getState().project!;

@@ -23,6 +23,8 @@ import type { Project } from '../types/project';
 import { exportArtboard } from './export-service';
 import { getVoidspaceIdToken } from './voidspace-storage';
 import { projectDisplayName } from './project-name';
+import { compactProjectDocument } from './project-document';
+import { setCloudSaveStatus } from './project-cloud-status';
 
 const COVER_MAX = 384; // px, longest side — for the list tile
 const PAGE_MAX = 768; // px, longest side — for the cross-device flattened fallback
@@ -96,7 +98,12 @@ export async function saveProjectDocument(project: Project | null): Promise<bool
   if (key === lastDocKey) return true;
 
   const token = await getVoidspaceIdToken();
-  if (!token) return false; // signed out — the local copy still holds it
+  const updatedAt = project.updatedAt ?? Date.now();
+  if (!token) {
+    setCloudSaveStatus(project.id, { state: 'error', updatedAt, message: 'Sign in to back up this project. Download a project copy before clearing browser data.' });
+    return false;
+  }
+  setCloudSaveStatus(project.id, { state: 'saving', updatedAt, message: 'Backing up the editable project…' });
 
   try {
     const res = await fetch('/api/studio/image-doc', {
@@ -104,17 +111,28 @@ export async function saveProjectDocument(project: Project | null): Promise<bool
       headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
       body: JSON.stringify({
         projectId: project.id,
-        doc: project,
+        doc: compactProjectDocument(project),
         updatedAt: project.updatedAt ?? Date.now(),
       }),
     });
     if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      setCloudSaveStatus(project.id, { state: 'error', updatedAt,
+        message: (detail.statusMessage || detail.message || 'Cloud backup failed.') + ' Retry, or download a project copy before clearing browser data.' });
       console.warn('[project-cloud-sync] document save failed:', res.status);
       return false;
     }
+    const result = await res.json();
+    if (result.skipped === 'stale') {
+      setCloudSaveStatus(project.id, { state: 'error', updatedAt,
+        message: 'A newer version is already backed up. Download this project copy, then reopen the cloud version before editing further.' });
+      return false;
+    }
     lastDocKey = key;
+    setCloudSaveStatus(project.id, { state: 'saved', updatedAt, message: 'Editable project backed up to your account.' });
     return true;
   } catch (e) {
+    setCloudSaveStatus(project.id, { state: 'error', updatedAt, message: 'Cloud backup could not connect. Retry, or download a project copy before clearing browser data.' });
     // Never disrupt editing. The local autosave already holds this state, and
     // the next debounce or the page-hide flush will try again.
     console.warn('[project-cloud-sync] document save error:', e);

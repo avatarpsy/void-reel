@@ -23,6 +23,7 @@ import { useProjectStore, getProjectRev } from '../stores/project-store';
 import { useSelectionStore } from '../stores/selection-store';
 import { useHistoryStore } from '../stores/history-store';
 import { useUIStore } from '../stores/ui-store';
+import { pendingCompositionLayers } from '../services/composition/readiness';
 
 export interface LayerDigest {
   id: string;
@@ -56,7 +57,8 @@ export interface LayerDigest {
    * so it had no way to tell a designed slide from a failed one, to fill a slot
    * it had left empty, or to avoid placing the same block twice.
    */
-  composition?: { block?: string; authored?: boolean; slots: string[]; unfilled?: string[] };
+  composition?: { block?: string; authored?: boolean; slots: string[]; unfilled?: string[];
+    frameWidth?: number; frameHeight?: number; values?: Record<string, string> };
   /** Shape layers only. */
   shape?: { shapeType: string; fill?: string };
   /** Group layers only. */
@@ -70,6 +72,7 @@ export interface PageDigest {
   height: number;
   background?: string;
   layerCount: number;
+  pendingCompositions: number;
   layers?: LayerDigest[];
 }
 
@@ -168,6 +171,9 @@ function digestLayer(project: Project, layer: Layer, depth: number): LayerDigest
         ...(il.composition.block ? { block: String(il.composition.block) } : {}),
         ...(il.composition.inlineHtml ? { authored: true } : {}),
         slots,
+        frameWidth: il.composition.frameWidth,
+        frameHeight: il.composition.frameHeight,
+        values: il.composition.slots ?? {},
       };
     }
   } else if (layer.type === 'shape') {
@@ -227,6 +233,7 @@ export function buildCanvasDigest(opts: { pageId?: string; includeLayers?: boole
       height: Math.round(ab.size.height),
       background: (ab.background as any)?.color,
       layerCount: ab.layerIds.length,
+      pendingCompositions: pendingCompositionLayers(project, ab).length,
       ...(wanted ? { layers: digestPageLayers(project, ab) } : {}),
     };
   });

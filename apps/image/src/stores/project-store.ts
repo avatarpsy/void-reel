@@ -62,6 +62,7 @@ import {
   CanvasBackground,
 } from '../types/project';
 import { useHistoryStore } from './history-store';
+import { compositionHash } from '../services/composition/hash';
 
 interface LayerStyle {
   blendMode: Layer['blendMode'];
@@ -184,6 +185,7 @@ const generateId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 11
  * to remember.
  */
 let projectRev = 0;
+const renderedProjects = new WeakSet<Project>();
 
 /** Current revision. Echoed to the agent on reads and checked on writes. */
 export function getProjectRev(): number {
@@ -1187,5 +1189,25 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
 // concurrency guard complete instead of best-effort.
 useProjectStore.subscribe(
   (s) => s.project,
-  () => { projectRev += 1; },
+  (project) => {
+    if (project && renderedProjects.delete(project)) return;
+    projectRev += 1;
+  },
 );
+
+/** Cache derived pixels without creating a user edit or an undo step. An edit
+ * made while rendering wins; its older pixels must never replace the new source. */
+export function cacheCompositionRender(layerId: string, renderHash: string, asset: MediaAsset): boolean {
+  const project = useProjectStore.getState().project;
+  const layer = project?.layers[layerId] as ImageLayer | undefined;
+  if (!project || layer?.type !== 'image' || !layer.composition
+      || compositionHash(layer.composition) !== renderHash) return false;
+  const rendered: Project = { ...project,
+    assets: { ...project.assets, [asset.id]: asset },
+    layers: { ...project.layers, [layerId]: { ...layer, sourceId: asset.id,
+      composition: { ...layer.composition, renderHash } } },
+  };
+  renderedProjects.add(rendered);
+  useProjectStore.setState({ project: rendered, isDirty: true });
+  return true;
+}

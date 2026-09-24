@@ -856,6 +856,49 @@ describe('tolerant list arguments', () => {
  * and the agent dutifully re-read and retried each time.
  */
 describe('the revision guard applies where it means something', () => {
+  it('allows a text edit after unrelated board changes when the read text is unchanged', async () => {
+    const drawn = await call('voidspace:board-draw', {
+      elements: [{ kind: 'note', text: 'Original words', x: 0, y: 0 }],
+    });
+    const read = await call('voidspace:board-canvas-read', { ids: drawn.ids });
+    await call('voidspace:board-draw', { elements: [{ kind: 'note', text: 'Other', x: 600, y: 0 }] });
+    const result = await call('voidspace:board-edit-canvas', {
+      expectRev: read.rev, ops: [{ id: drawn.ids[0], op: 'text', text: 'Revised words' }],
+    });
+    expect(result.ok).toBe(true);
+    expect(result.changed).toBe(1);
+  });
+
+  it('refuses to overwrite text changed after the agent read it', async () => {
+    const drawn = await call('voidspace:board-draw', {
+      elements: [{ kind: 'note', text: 'Original words', x: 0, y: 0 }],
+    });
+    const read = await call('voidspace:board-canvas-read', { ids: drawn.ids });
+    await call('voidspace:board-edit-canvas', {
+      ops: [{ id: drawn.ids[0], op: 'text', text: 'User correction' }],
+    });
+    const result = await call('voidspace:board-edit-canvas', {
+      expectRev: read.rev, ops: [{ id: drawn.ids[0], op: 'text', text: 'Stale agent replacement' }],
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('board_changed');
+  });
+
+  it('preserves a user formatting change even when the words stay the same', async () => {
+    const drawn = await call('voidspace:board-draw', {
+      elements: [{ kind: 'note', text: 'Original words', x: 0, y: 0 }],
+    });
+    const read = await call('voidspace:board-canvas-read', { ids: drawn.ids });
+    const note = board.store.getBlock(drawn.ids[0])!.model;
+    const paragraph = board.store.getBlock(note.children[0]!.id)!.model;
+    board.store.updateBlock(paragraph, { type: 'h2' });
+    const result = await call('voidspace:board-edit-canvas', {
+      expectRev: read.rev, ops: [{ id: drawn.ids[0], op: 'text', text: 'Agent replacement' }],
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('board_changed');
+  });
+
   it('draws even when the rev has moved on — nothing can be lost by adding', async () => {
     const before = (await call('voidspace:board-read')).rev;
     await call('voidspace:board-draw', { elements: [{ kind: 'note', text: 'a', x: 0, y: 0 }] });

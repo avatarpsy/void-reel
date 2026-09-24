@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useSyncExternalStore } from 'react';
 import {
   MousePointer2,
   HelpCircle,
@@ -42,6 +42,8 @@ import { useUIStore, Tool } from '../../../stores/ui-store';
 import { useProjectStore } from '../../../stores/project-store';
 import { onBackLinkClick, projectsUrl } from '@openreel/asset-browser';
 import { ZoomControl } from './ZoomControl';
+import { cloudSaveStatus, subscribeCloudSave } from '../../../services/project-cloud-status';
+import { saveProjectDocument } from '../../../services/project-cloud-sync';
 
 interface ToolItem {
   id: Tool;
@@ -253,6 +255,7 @@ export function Toolbar() {
   const anyPanelOpen = useUIStore((s) => !s.isPanelCollapsed || !s.isInspectorCollapsed);
 
   const { project, setProjectName, undo, redo, canUndo, canRedo } = useProjectStore();
+  const cloudStatus = useSyncExternalStore(subscribeCloudSave, () => cloudSaveStatus(project?.id || ''));
 
   const handleUndo = () => {
     undo();
@@ -380,10 +383,21 @@ export function Toolbar() {
       <button
         onClick={handleSaveProject}
         className="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-        title="Save Project (Ctrl+S)"
+        title="Download editable project (Ctrl+S)"
       >
         <Save size={18} />
       </button>
+      {cloudStatus?.state === 'error' ? (
+        <button type="button"
+          title={cloudStatus.message}
+          aria-label={`Retry cloud backup. ${cloudStatus.message}`}
+          onClick={() => void saveProjectDocument(project)}
+          className="px-2 text-xs whitespace-nowrap text-amber-400 hover:underline">
+          Backup failed · Retry
+        </button>
+      ) : cloudStatus && <span className="px-2 text-xs whitespace-nowrap text-muted-foreground" title={cloudStatus.message}>
+        {cloudStatus.state === 'saving' ? 'Backing up…' : 'Cloud saved'}
+      </span>}
 
       {/* Only for a multi-page project: presenting one image is not a thing
           anybody wants, and a toolbar stays readable by not offering it. */}

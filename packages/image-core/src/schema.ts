@@ -289,10 +289,20 @@ const TextShadowSchema = z.object({
   offsetY: z.number(),
 });
 
+/** Earlier agent tools accepted CSS weights as strings. Normalize those saved
+ * documents and new tool inputs to the editor's numeric representation. */
+export const FontWeightSchema = z.preprocess((value) => {
+  if (typeof value !== 'string') return value;
+  const css = value.trim().toLowerCase();
+  if (css === 'normal') return 400;
+  if (css === 'bold') return 700;
+  return /^\d+(?:\.\d+)?$/.test(css) ? Number(css) : value;
+}, z.number().min(1).max(1000));
+
 const TextStyleSchema = z.object({
   fontFamily: z.string(),
   fontSize: z.number(),
-  fontWeight: z.number(),
+  fontWeight: FontWeightSchema,
   fontStyle: z.enum(['normal', 'italic']),
   textDecoration: z.enum(['none', 'underline', 'line-through']),
   textAlign: z.enum(['left', 'center', 'right', 'justify']),

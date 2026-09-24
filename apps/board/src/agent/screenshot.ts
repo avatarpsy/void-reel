@@ -31,6 +31,7 @@ import { GfxControllerIdentifier, type GfxModel } from '@blocksuite/std/gfx';
 import type { MountedBoard } from '../blocksuite/editor';
 import { defaultApiBase } from '@openreel/asset-browser';
 import { getParentToken } from '../board/parent-auth';
+import { settleFrame } from './settle-frame';
 
 export type ShotScope = 'viewport' | 'all' | 'selection' | 'ids' | 'auto';
 
@@ -529,10 +530,6 @@ function captureSubjects(
  */
 const SETTLE_FRAMES = 3;
 
-function nextFrame(): Promise<void> {
-  return new Promise(resolve => requestAnimationFrame(() => resolve()));
-}
-
 interface FramingViewport {
   viewportBounds: { x: number; y: number; w: number; h: number };
   setViewportByBound?(
@@ -568,7 +565,7 @@ async function captureNow(
       [0, 0, 0, 0],
       false,
     );
-    for (let i = 0; i < SETTLE_FRAMES; i++) await nextFrame();
+    for (let i = 0; i < SETTLE_FRAMES; i++) await settleFrame();
   }
 
   // Scale so the long edge lands near `maxEdge`. `dpr` is the only size control

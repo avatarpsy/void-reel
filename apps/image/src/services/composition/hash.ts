@@ -63,7 +63,8 @@ export type HashableComposition = Omit<CompositionSource, 'renderHash'>;
  *       every one of them silently took the unflattened fallback
  *   3 — fetched with the token, flattened onto the composition's own background
  */
-const RENDER_RECIPE = 3;
+// 4: export the preview's resolved document, slot values and page dimensions.
+const RENDER_RECIPE = 4;
 
 /**
  * A stable string for one composition. Exported for tests and for anything that
