@@ -29,12 +29,13 @@
   z-index: 40;
   display: flex;
   flex-direction: column;
-  /* The gutter the sheet sits on. The PAGE's own palette lives at :root in
-     voidspace.css, because the card on the canvas renders the same paper from
-     a shadow root and can never see a token defined here. */
-  background: var(--vs-page-gutter, #e8eaf0);
+  /* What the sheet sits on: the BOARD's own ground. A document in focus is the
+     live canvas with the page on it, so this is what surrounds its page too —
+     and the screenplay used to sit on a grey of its own instead (in light, a
+     token nothing defined), which made two modes that share a bar look like
+     two products. The page's palette lives at :root in voidspace.css. */
+  background: var(--vs-bg);
 }
-[data-theme='dark'] .vs-focus { background: #14161c; }
 
 /* ── THE LIVE VARIANT ─────────────────────────────────────────────────────
    A document's focus mode does NOT replace the canvas: the thing being
@@ -46,26 +47,16 @@
    render perfectly and refuse every click, which is the most frustrating way
    for this to fail. The middle is transparent to the pointer; the bar takes
    it back. */
-/* Both selectors, because `[data-theme='dark'] .vs-focus` above is (0,2,0)
-   and a bare `.vs-focus--live` is (0,1,0) — so in dark mode the gutter won
-   and painted an OPAQUE panel over the canvas. Everything underneath
-   rendered perfectly and none of it could be seen; `pointer-events: none`
-   meant it still took no clicks, so it did not even feel like a cover. */
-.vs-focus--live,
-[data-theme='dark'] .vs-focus--live,
-[data-theme='light'] .vs-focus--live {
+/* Transparent, AND no themed rule may outrank it. A themed ground on
+   `.vs-focus` once did — `[data-theme='dark'] .vs-focus` is (0,2,0) — and
+   painted an OPAQUE panel over the canvas: everything underneath rendered
+   perfectly and none of it could be seen. The ground is now a single
+   unthemed rule, so this one, coming after it, wins. */
+.vs-focus--live {
   background: transparent;
   pointer-events: none;
 }
-.vs-focus--live .vs-focus__bar {
-  pointer-events: auto;
-  /* It floats over the canvas rather than sitting above it in flow, so it
-     needs its own ground to stay readable against a document. */
-  background: var(--vs-surface, #fff);
-  border-bottom: 1px solid var(--vs-border, #e3e5ea);
-  box-shadow: 0 1px 12px rgb(0 0 0 / 6%);
-}
-[data-theme='dark'] .vs-focus--live .vs-focus__bar { background: #1b1e26; }
+.vs-focus--live .vs-focus__bar { pointer-events: auto; }
 
 /* ═══════════════════════════════════════════════════════════════════════════
    THE MASK GOES AWAY, AND WITH IT EVERY WAY TO GRAB THE PAGE
@@ -102,6 +93,10 @@ body[data-doc-focus] edgeless-note-mask {
 [data-focus-mode] .vs-assets,
 [data-focus-mode] .vs-board-empty { display: none; }
 
+/* ONE bar for every focus mode — a document, a screenplay, the board as a
+   page. It floats over the live canvas in the document's case, so it carries
+   its own ground and a soft shadow; the others share that look rather than
+   having a subtly different strip of their own. */
 .vs-focus__bar {
   flex: none;
   display: flex;
@@ -110,6 +105,9 @@ body[data-doc-focus] edgeless-note-mask {
   padding: 10px 16px;
   background: var(--vs-panel);
   border-bottom: 1px solid var(--vs-border);
+  box-shadow: 0 1px 12px rgb(0 0 0 / 6%);
+  position: relative;
+  z-index: 1;
 }
 .vs-focus__back {
   flex: none;
@@ -291,7 +289,9 @@ body[data-doc-focus] edgeless-note-mask {
     var(--page-fold) 864px
   );
   background-position: 0 96px;
-  border: 1px solid var(--page-edge);
+  /* Edged and cornered exactly as a document's sheet — the edge is in the
+     shadow token, so a border here would draw it twice. */
+  border-radius: 3px;
   box-shadow: var(--page-shadow);
   padding: 96px 96px 96px 144px;
   font-family: 'Courier Prime', 'Courier Final Draft', 'Courier Screenplay', 'Nimbus Mono PS', 'Courier New', Courier, monospace;
@@ -327,6 +327,21 @@ body[data-doc-focus] edgeless-note-mask {
   height: 0;
 }
 
+/* THE TITLE PAGE — centred, as it prints, rather than the raw 'Title: …'
+   source lines. The card draws the same thing at 0.78 scale. */
+.vs-focus .el-title_field { text-align: center; color: var(--page-synopsis); }
+.vs-focus .el-title_field[data-key='title'] {
+  color: var(--page-ink);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-top: 1em;
+}
+.vs-focus .el-title_field[data-key='credit'],
+.vs-focus .el-title_field[data-key='author'],
+.vs-focus .el-title_field[data-key='authors'] { color: var(--page-ink); margin: 1em 0 0.5em; }
+.vs-focus .el-title_field + .el-blank { height: 2.5em; }
+
 /* Sections and synopses are NOT part of the script — every Fountain tool omits
    them from the printed page, so they read as margin voice here and vanish in
    print (see the print block below). */
@@ -349,13 +364,16 @@ body[data-doc-focus] edgeless-note-mask {
   margin: 0 0 12px;
 }
 
-/* Coverage marks, in the margin — never in the prose. */
+/* Coverage marks, in the margin beside the scene heading — never in the prose.
+   It sat 26px down, which is beside the synopsis under the heading; the line
+   box here is the heading's own (16px × 1.15), so the mark centres on it. */
 .vs-focus .marker { position: relative; }
 .vs-focus .marker::before {
   content: attr(data-mark);
   position: absolute;
   left: -46px;
-  top: 26px;
+  top: 0;
+  line-height: 18.4px;
   width: 36px;
   text-align: right;
   font-family: var(--affine-font-family);
@@ -370,37 +388,35 @@ body[data-doc-focus] edgeless-note-mask {
 .vs-focus .page > div[data-line] { cursor: text; border-radius: 3px; }
 .vs-focus .page > div[data-line]:hover { background: var(--page-hover); }
 
-.vs-focus__editor {
-  flex: 1;
-  min-height: 0;
-  width: 100%;
-  max-width: 880px;
-  margin: 0 auto;
-  box-sizing: border-box;
+/* WRITING — the same sheet, now plain text. It is a `.page` as well, so it
+   keeps the paper, the edge and the margins, and entering it reads as the page
+   becoming editable. It fills the view and scrolls itself, so the scroller
+   around it gives up its bottom padding while it is there. */
+.vs-focus__scroll:has(> .vs-focus__editor) { padding-bottom: 0; overflow: hidden; }
+.vs-focus .page.vs-focus__editor {
+  display: block;
+  height: 100%;
   border: none;
+  border-radius: 3px 3px 0 0;
   outline: none;
   resize: none;
-  padding: 32px 40px 64px;
-  background: var(--page-bg);
-  color: var(--page-ink);
-  font-family: 'Courier Prime', 'Courier Final Draft', 'Courier Screenplay', 'Nimbus Mono PS', 'Courier New', Courier, monospace;
-  font-size: 15px;
-  line-height: 1.6;
+  background-image: none;
+  line-height: 1.5;
   tab-size: 4;
 }
 
-.vs-focus__empty {
-  max-width: 560px;
-  margin: 48px auto;
-  padding: 32px;
-  background: var(--page-bg);
-  border: 1px dashed rgba(15, 23, 42, 0.18);
-  border-radius: 10px;
+/* An empty screenplay is an empty PAGE, and clicking it starts writing. */
+.vs-focus .page.vs-focus__empty {
+  padding: 180px 96px;
+  background-image: none;
   text-align: center;
-  font: 400 13px/1.7 var(--affine-font-family);
-  color: var(--vs-muted);
+  white-space: normal;
+  font: 400 14px/1.7 var(--affine-font-family);
+  color: var(--page-synopsis);
+  cursor: text;
 }
-.vs-focus__empty b { display: block; margin-bottom: 8px; font-size: 15px; color: var(--vs-text); }
+.vs-focus__empty b { display: block; margin-bottom: 8px; font-size: 16px; font-weight: 600; color: var(--page-ink); }
+.vs-focus__empty p { max-width: 420px; margin: 0 auto; }
 .vs-focus__empty code {
   font-family: 'Courier New', monospace;
   background: var(--vs-hover);
@@ -533,6 +549,11 @@ body[data-doc-focus] edgeless-note-mask {
   .vs-focus .el-transition { text-align: right; text-transform: uppercase; margin: 1em 0; }
   .vs-focus .el-centered { text-align: center; margin: 1em 0; }
   .vs-focus .el-blank { height: 1em; }
+  /* The title page is its own sheet: a third of the way down, and the script
+     starts on the next page — as `document/screenplay-pdf.ts` sets it. */
+  .vs-focus .el-title_field { color: #000; }
+  .vs-focus .el-title_field[data-key='title'] { margin-top: 3in; }
+  .vs-focus .el-title_field + .el-blank { break-after: page; page-break-after: always; height: 0; }
   .vs-focus .el-page_break {
     break-before: page;
     page-break-before: always;

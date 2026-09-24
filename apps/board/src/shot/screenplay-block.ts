@@ -1,5 +1,5 @@
 /**
- * The screenplay, rendered as a screenplay.
+ * The screenplay, rendered as a screenplay — on the same sheet as a document.
  *
  * ── WHY IT LOOKS LIKE THIS ───────────────────────────────────────────────────
  * A script has a typographic form that is a hundred years old and every writer
@@ -8,25 +8,38 @@
  * Those measurements are not decoration — they are why a page of screenplay runs
  * roughly a minute, which is the only reason anyone can judge pacing by looking.
  *
- * So this renders a PAGE: paper, margins, monospace, real indents. A person can
- * read it the way they read a PDF, and scroll it, and believe it.
+ * The block is 640 wide, which is within a hair of US letter's proportions, so
+ * this card is the focus page (`theme/screenplay-focus.css`) at 0.78 scale:
+ * the same margins, the same indents, the same rhythm. What you glance at on
+ * the canvas is a miniature of what you read in focus and of what prints.
+ *
+ * ── AND IT IS THE SAME OBJECT AS A DOCUMENT ──────────────────────────────────
+ * It used to be a card: a header strip with its own name, a coverage count and
+ * Focus/Edit buttons, around a grey gutter, around a page. Beside a document —
+ * a plain sheet with a tag on its corner — it read as a different product. Now
+ * it is the sheet. The tag says SCREENPLAY (and how many scenes have shots;
+ * see `document/tags.ts`), and it behaves like a document:
+ *
+ *   click          selects it, and a drag moves it, like any object
+ *   double-click   writes, at the line under the pointer
+ *   the board bar  "Open in focus" appears when it is selected (`ui/board-ui.ts`)
  *
  * ── EDITING ──────────────────────────────────────────────────────────────────
- * Reading is the default; editing is a mode. Double-click (or the Edit button)
- * swaps the rendered page for a plain textarea holding the raw Fountain, and
- * blur commits. That split exists because the two things want opposite layouts:
- * you read a formatted page, and you write plain text where every character is
- * where you put it. Trying to serve both at once produces a contenteditable that
- * fights the writer over indentation.
+ * Reading is the default; writing is a mode. Double-click swaps the rendered
+ * page for a plain textarea holding the raw Fountain, and blur commits. That
+ * split exists because the two things want opposite layouts: you read a
+ * formatted page, and you write plain text where every character is where you
+ * put it. A contenteditable that tried to be both would fight the writer over
+ * indentation. The textarea sits on the same sheet, so the switch reads as the
+ * page becoming editable rather than as a different widget appearing.
  *
  * ── WHAT IS DELIBERATELY NOT HERE ────────────────────────────────────────────
  * No sequence rows, no scene forms, no purpose dropdowns, no duration fields.
- * All of that was deleted. The structure is IN the text — `#` acts, `##`
- * sequences, sluglines — and anything that needs it parses it. Nothing about the
- * film is authored twice.
+ * The structure is IN the text — `#` acts, `##` sequences, sluglines — and
+ * anything that needs it parses it. Nothing about the film is authored twice.
  */
 import { GfxBlockComponent } from '@blocksuite/std';
-import { css, html, nothing } from 'lit';
+import { css, html, unsafeCSS } from 'lit';
 import { state } from 'lit/decorators.js';
 import { repeat } from 'lit/directives/repeat.js';
 
@@ -35,18 +48,8 @@ import { type ScreenplayBlockModel } from './screenplay-doc';
 import { rowClass, screenplayView, type ScreenplayRow } from './screenplay-view';
 import { blockScrollWheel } from '../ui/wheel';
 
-/** Shown on a board whose screenplay has not been started. */
-const PLACEHOLDER = `Title: Untitled
-
-# ACT ONE
-
-## SEQUENCE 1 — the opening
-= What this run has to do.
-
-INT. SOMEWHERE — DAY
-
-Something happens.
-`;
+/** The Courier the focus page and the PDF are set in, in the same order. */
+const COURIER = `'Courier Prime', 'Courier Final Draft', 'Courier Screenplay', 'Nimbus Mono PS', 'Courier New', Courier, monospace`;
 
 export class ScreenplayBlockComponent extends GfxBlockComponent<ScreenplayBlockModel> {
   static override styles = css`
@@ -55,192 +58,147 @@ export class ScreenplayBlockComponent extends GfxBlockComponent<ScreenplayBlockM
       width: 100%;
       height: 100%;
     }
+
+    /* THE SHEET — the same paper, edge and corner as a document on the canvas.
+       Tokens from voidspace.css, which both read, so the two cannot drift. */
     .sp {
-      position: relative;
       display: flex;
       flex-direction: column;
       height: 100%;
       box-sizing: border-box;
-      border: 1px solid var(--vs-border, rgba(255, 255, 255, 0.12));
-      border-radius: 14px;
-      background: var(--vs-shot-bg, #ffffff);
-      box-shadow: 0 6px 24px rgba(15, 23, 42, 0.08);
       overflow: hidden;
-      font-family: var(--affine-font-family, Inter, sans-serif);
-      color: var(--vs-text, #1a1a2e);
+      background: var(--page-bg);
+      color: var(--page-ink);
+      border-radius: 3px;
+      box-shadow: var(--page-shadow);
     }
 
-    /* THE DRAG HANDLE — no pointer claiming, so the page moves like any other
-       object on the canvas. */
-    .sp__head {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 9px 14px;
-      border-bottom: 1px solid var(--vs-border, rgba(255, 255, 255, 0.1));
-      background: var(--vs-shot-head, rgba(127, 140, 170, 0.08));
-      cursor: grab;
-      flex: none;
-    }
-    .sp__kind {
-      font: 600 10px/1 var(--affine-font-family, sans-serif);
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
-      color: var(--vs-muted, #64748b);
-    }
-    .sp__title {
-      flex: 1;
-      min-width: 0;
-      font: 600 13px/1.3 var(--affine-font-family, sans-serif);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .sp__stat {
-      font: 400 10px/1 var(--affine-font-family, sans-serif);
-      color: var(--vs-muted, #94a3b8);
-      white-space: nowrap;
-    }
-    .sp__btn {
-      font: 500 10px/1 var(--affine-font-family, sans-serif);
-      border: 1px solid var(--vs-border, rgba(127, 140, 170, 0.32));
-      background: none;
-      color: var(--vs-text, #1a1a2e);
-      border-radius: 6px;
-      padding: 4px 8px;
-      cursor: pointer;
-      flex: none;
-    }
-    .sp__btn:hover { background: var(--vs-hover, rgba(127, 140, 170, 0.14)); }
-
-    /* ── The page ───────────────────────────────────────────────────────────
-       A tinted sheet inside a darker gutter, so it reads as paper on a desk
-       rather than as a text field. */
-    .sp__scroll {
+    /* The focus page at 0.78 scale: 96/96/96/144px there, 75/75/75/113 here —
+       1in round, 1.5in on the binding side. Courier at 12.5px is 12pt on a
+       sheet this wide, so an action line holds the same ~60 characters it
+       does on paper and the card wraps where the printed page will. */
+    .sp__page,
+    .sp__editor {
       flex: 1;
       min-height: 0;
-      overflow-y: auto;
-      background: var(--vs-page-gutter, #e8eaf0);
-      padding: 14px 0 28px;
+      box-sizing: border-box;
+      padding: 75px 60px 75px 113px;
+      font-family: ${unsafeCSS(COURIER)};
+      font-size: 12.5px;
+      color: var(--page-ink);
     }
-    .page {
-      width: 100%;
-      max-width: 520px;
-      margin: 0 auto;
-      background: var(--page-bg, #fffef9);
-      border: 1px solid rgba(15, 23, 42, 0.1);
-      box-shadow: 0 2px 10px rgba(15, 23, 42, 0.1);
-      /* 1in top/bottom, 1.5in left, 1in right — scaled to this width. */
-      padding: 34px 26px 40px 38px;
-      /* 12pt Courier is the standard. Anything else and the page-per-minute
-         relationship a writer judges pacing by stops holding. */
-      font-family: 'Courier New', Courier, monospace;
-      font-size: 11.5px;
-      line-height: 1.36;
-      color: var(--page-ink, #14151a);
+    /* The scrollbar only while the pointer is on the page. A document's sheet
+       has none, and a bar drawn down the edge at rest read as a frame round
+       this one. Coloured rather than removed, so the text does not reflow
+       when it appears. */
+    .sp__page {
+      overflow-y: auto;
+      line-height: 1.15;
       white-space: pre-wrap;
       word-break: break-word;
+      scrollbar-width: thin;
+      scrollbar-color: transparent transparent;
     }
+    .sp:hover .sp__page { scrollbar-color: var(--page-rule) transparent; }
 
+    /* Indents as a fraction of the 6in content box — the focus page's numbers. */
     .el-scene_heading {
       text-transform: uppercase;
       font-weight: 700;
-      margin: 14px 0 6px;
+      margin: 19px 0 8px;
       letter-spacing: 0.02em;
     }
-    .el-action { margin: 0 0 6px; }
-    .el-character {
-      margin: 10px 0 0 36%;
-      text-transform: uppercase;
-    }
-    .el-parenthetical { margin: 0 0 0 28%; }
-    .el-dialogue { margin: 0 12% 0 20%; }
-    .el-transition {
-      text-align: right;
-      text-transform: uppercase;
-      margin: 8px 0 10px;
-    }
-    .el-centered { text-align: center; margin: 8px 0; }
-    .el-blank { height: 0.7em; }
-    .el-page_break {
-      border-top: 1px dashed rgba(15, 23, 42, 0.25);
-      margin: 16px 0;
-      height: 0;
-    }
+    .el-action { margin: 0 0 8px; }
+    .el-character { margin: 12px 0 0 36.7%; text-transform: uppercase; }
+    .el-parenthetical { margin: 0 0 0 25%; }
+    .el-dialogue { margin: 0 25% 0 16.7%; }
+    .el-transition { text-align: right; text-transform: uppercase; margin: 11px 0 12px; }
+    .el-centered { text-align: center; margin: 11px 0; }
+    .el-blank { height: 1em; }
+    .el-page_break { border-top: 1px dashed var(--page-rule); margin: 19px 0; height: 0; }
 
-    /* SECTIONS AND SYNOPSES ARE NOT PART OF THE SCRIPT.
-       Every Fountain tool omits them from the printed page, so they are drawn in
-       the margin voice — visible while working, obviously not the film. */
+    /* THE TITLE PAGE — centred, as it prints. It used to show as the raw
+       'Title: …' lines, which is the source, not the page. */
+    .el-title_field {
+      text-align: center;
+      color: var(--page-synopsis);
+    }
+    .el-title_field[data-key='title'] {
+      color: var(--page-ink);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-top: 1em;
+    }
+    .el-title_field[data-key='credit'],
+    .el-title_field[data-key='author'],
+    .el-title_field[data-key='authors'] { color: var(--page-ink); margin: 1em 0 0.5em; }
+    .el-title_field + .el-blank { height: 2.5em; }
+
+    /* SECTIONS AND SYNOPSES ARE NOT PART OF THE SCRIPT. Every Fountain tool
+       omits them from the printed page, so they are drawn in the margin voice —
+       visible while working, obviously not the film. */
     .el-section {
       font-family: var(--affine-font-family, Inter, sans-serif);
-      color: var(--page-section, #7c3aed);
+      color: var(--page-section);
+      font-size: 10.5px;
       font-weight: 700;
       letter-spacing: 0.08em;
       text-transform: uppercase;
-      margin: 20px 0 2px;
-      border-top: 1px solid rgba(124, 58, 237, 0.22);
-      padding-top: 10px;
+      margin: 25px 0 3px;
+      border-top: 1px solid var(--page-section-rule);
+      padding-top: 11px;
     }
-    .el-section[data-depth='1'] { font-size: 11px; }
-    .el-section[data-depth='2'] { font-size: 10px; margin-top: 16px; }
     .el-synopsis {
       font-family: var(--affine-font-family, Inter, sans-serif);
       font-style: italic;
       font-size: 10.5px;
-      color: var(--page-synopsis, #6b7280);
-      margin: 0 0 8px;
+      color: var(--page-synopsis);
+      margin: 0 0 9px;
     }
 
-    /* A scene the board has no shots for. Marked in the MARGIN, never in the
-       prose — the script must read as the script, not as a checklist. */
-    .marker {
-      position: relative;
-    }
+    /* COVERAGE, in the margin beside the scene heading — never in the prose;
+       the script must read as the script, not as a checklist. It sat 15px
+       down, which put it beside the synopsis under the heading instead. The
+       line box matches the heading's, so the mark centres on that line. */
+    .marker { position: relative; }
     .marker::before {
       content: attr(data-mark);
       position: absolute;
-      left: -34px;
-      top: 15px;
+      left: -36px;
+      top: 0;
       width: 28px;
+      line-height: 14.4px;
       text-align: right;
       font-family: var(--affine-font-family, sans-serif);
-      font-size: 8.5px;
+      font-size: 9px;
       font-weight: 700;
       letter-spacing: 0.04em;
-      color: var(--page-mark, #b45309);
+      color: var(--page-mark);
     }
-    .marker[data-covered='yes']::before { color: var(--page-mark-done, #16a34a); font-weight: 500; }
+    .marker[data-covered='yes']::before { color: var(--page-mark-done); font-weight: 500; }
 
-    /* ── The editor ─────────────────────────────────────────────────────── */
-    .editor {
-      flex: 1;
-      min-height: 0;
+    /* WRITING — the same sheet, now plain text. */
+    .sp__editor {
       width: 100%;
-      box-sizing: border-box;
       border: none;
       outline: none;
       resize: none;
-      padding: 16px 18px;
-      background: var(--page-bg, #fffef9);
-      color: var(--page-ink, #14151a);
-      font-family: 'Courier New', Courier, monospace;
-      font-size: 12px;
+      background: transparent;
       line-height: 1.45;
       tab-size: 4;
+      scrollbar-width: thin;
+      scrollbar-color: var(--page-rule) transparent;
     }
 
-    .empty {
-      max-width: 520px;
-      margin: 0 auto;
-      padding: 26px 24px;
-      font: 400 12px/1.6 var(--affine-font-family, sans-serif);
-      color: var(--vs-muted, #64748b);
-      background: var(--page-bg, #fffef9);
-      border: 1px dashed rgba(15, 23, 42, 0.18);
-      border-radius: 8px;
+    .sp__empty {
+      margin: 30% 0 0 -53px;
       text-align: center;
+      font: 400 12px/1.6 var(--affine-font-family, sans-serif);
+      color: var(--page-synopsis);
+      white-space: normal;
     }
-    .empty b { display: block; margin-bottom: 6px; color: var(--vs-text, #1a1a2e); }
+    .sp__empty b { display: block; margin-bottom: 4px; color: var(--page-ink); font-weight: 600; }
   `;
 
   @state() private accessor _editing = false;
@@ -254,6 +212,9 @@ export class ScreenplayBlockComponent extends GfxBlockComponent<ScreenplayBlockM
    * whole reason the page is worth looking at while working.
    */
   private disposeDoc: (() => void) | null = null;
+
+  /** Where the READ view was scrolled to, so returning to it does not jump. */
+  private _readScroll = 0;
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -291,15 +252,14 @@ export class ScreenplayBlockComponent extends GfxBlockComponent<ScreenplayBlockM
      *
      * The page is re-rendered from the new text, so its scroll container is a
      * fresh element at the top. After editing scene 12 that meant being returned
-     * to the title page — which reads as the edit having reset something, and is
-     * the reason people avoided the Edit button and asked the agent instead.
+     * to the title page — which reads as the edit having reset something.
      *
      * Restored on the next frame, once the page has been laid out; before that
      * the container has no scroll height and the assignment is a no-op.
      */
     const at = this._readScroll;
     requestAnimationFrame(() => {
-      const scroll = this.querySelector<HTMLElement>('.sp__scroll');
+      const scroll = this.querySelector<HTMLElement>('.sp__page');
       if (scroll) scroll.scrollTop = at;
     });
   }
@@ -307,34 +267,26 @@ export class ScreenplayBlockComponent extends GfxBlockComponent<ScreenplayBlockM
   /**
    * Enter the editor WHERE THE USER CLICKED.
    *
-   * It used to put the caret at the end of the document, always. On a two-scene
-   * sketch that is harmless; on a forty-scene screenplay, double-clicking scene
-   * 12 scrolled to the bottom of the file and left the caret four hundred lines
-   * from the thing being looked at — so every edit began with hunting for the
-   * place you had just been pointing at. That is the single reason writing on
-   * this board felt like a mode rather than a document.
+   * It used to put the caret at the end of the document, always. On a forty-scene
+   * screenplay, double-clicking scene 12 left the caret four hundred lines from
+   * the thing being looked at — so every edit began with hunting for the place
+   * you had just been pointing at.
    *
    * `line` comes from the element that was clicked (`data-line`), which the
-   * parser records for exactly this. No line — the Edit button, an empty page —
-   * still means the end.
+   * parser records for exactly this. No line — an empty page, or the margin —
+   * means the end.
    */
-  private startEditing(opts: { seed?: string; line?: number } = {}): void {
-    if (opts.seed !== undefined && !this.model.props.text.trim()) {
-      this.store.captureSync();
-      this.store.updateBlock(this.model, { text: opts.seed });
-    }
+  private startEditing(line?: number): void {
     // Remember where the page was, so leaving the editor does not also scroll
     // the reader back to the top of the script.
-    this._readScroll = this.querySelector<HTMLElement>('.sp__scroll')?.scrollTop ?? 0;
+    this._readScroll = this.querySelector<HTMLElement>('.sp__page')?.scrollTop ?? 0;
     this._editing = true;
 
     // Focus after the textarea exists.
     requestAnimationFrame(() => {
-      const ta = this.querySelector<HTMLTextAreaElement>('.editor');
+      const ta = this.querySelector<HTMLTextAreaElement>('.sp__editor');
       if (!ta) return;
-      const at = opts.line === undefined
-        ? ta.value.length
-        : offsetOfLine(ta.value, opts.line);
+      const at = line === undefined ? ta.value.length : offsetOfLine(ta.value, line);
       ta.focus();
       ta.setSelectionRange(at, at);
 
@@ -348,116 +300,77 @@ export class ScreenplayBlockComponent extends GfxBlockComponent<ScreenplayBlockM
        * with a mirror element: this is a fixed-width monospace block with no
        * wrapping tricks, so the arithmetic is exact and costs nothing.
        */
-      if (opts.line !== undefined) {
-        const lineHeight = parseFloat(getComputedStyle(ta).lineHeight) || 17;
-        ta.scrollTop = Math.max(0, (opts.line - 3) * lineHeight);
+      if (line !== undefined) {
+        const lineHeight = parseFloat(getComputedStyle(ta).lineHeight) || 18;
+        ta.scrollTop = Math.max(0, (line - 3) * lineHeight);
       }
     });
   }
 
-  /** Where the READ view was scrolled to, so returning to it does not jump. */
-  private _readScroll = 0;
-
-  /** Group elements so a scene heading and its body share one marker element. */
-  private renderElement(row: ScreenplayRow) {
+  private renderRow(row: ScreenplayRow) {
     if (row.type === 'blank') return html`<div class="el-blank"></div>`;
     if (row.type === 'page_break') return html`<div class="el-page_break"></div>`;
     return html`<div
       class=${rowClass(row)}
       data-depth=${row.depth ?? ''}
+      data-key=${row.key ?? ''}
       data-mark=${row.mark ?? ''}
       data-covered=${row.covered ? 'yes' : 'no'}
       data-line=${row.line}
-    >${row.text}</div>`;
+    >${row.type === 'title_field' ? row.value : row.text}</div>`;
   }
 
   override renderGfxBlock() {
     // ONE description of the page, shared with the focus overlay — see
     // `screenplay-view.ts`. Memoised per document revision underneath, which
     // matters because this render runs whenever ANY block changes.
-    const { script, text, rows, stat } = screenplayView(this.std);
+    const { script, text, rows } = screenplayView(this.std);
 
+    if (this._editing) {
+      return html`<div class="sp"><textarea
+        class="sp__editor"
+        spellcheck="false"
+        data-range-sync-exclude="true"
+        .value=${text}
+        @pointerdown=${(e: Event) => e.stopPropagation()}
+        @dblclick=${(e: Event) => e.stopPropagation()}
+        @wheel=${blockScrollWheel}
+        @keydown=${(e: KeyboardEvent) => {
+          // The canvas listens for keys on the host — Backspace deletes the
+          // selected block, space pans. Without this, writing a script would
+          // also drive the board.
+          e.stopPropagation();
+          if (e.key === 'Escape') (e.target as HTMLTextAreaElement).blur();
+        }}
+        @blur=${(e: FocusEvent) => this.commit(e.target as HTMLTextAreaElement)}
+      ></textarea></div>`;
+    }
+
+    /**
+     * READING. The pointer is NOT claimed here, deliberately: a click selects
+     * the sheet and a drag moves it, exactly as it does a document — the
+     * header strip that used to be the only handle is gone. The wheel IS
+     * claimed, so a long script scrolls inside its page instead of panning
+     * the board out from under the pointer.
+     */
     return html`<div class="sp">
-      <div class="sp__head">
-        <span class="sp__kind">Screenplay</span>
-        <span class="sp__title">${script.title || 'Untitled'}</span>
-        ${stat ? html`<span class="sp__stat">${stat}</span>` : nothing}
-        <!--
-          FOCUS — the way out of a 640px card and into a page.
-
-          A screenplay is READ at page size and WRITTEN at page size; judging
-          pace is the whole reason the format is fixed, and you cannot judge it
-          through a porthole on a canvas. This is the primary action on the card
-          once there is a script, which is why it sits before Edit.
-        -->
-        <button
-          class="sp__btn sp__btn--primary"
-          title="Open full size — write, read and export from here"
-          @pointerdown=${(e: Event) => e.stopPropagation()}
-          @click=${(e: Event) => {
-            e.stopPropagation();
-            this.dispatchEvent(new CustomEvent('voidspace-open-screenplay', {
-              bubbles: true, composed: true,
-            }));
-          }}
-        >Focus</button>
-        <button
-          class="sp__btn"
-          @pointerdown=${(e: Event) => e.stopPropagation()}
-          @click=${(e: Event) => {
-            e.stopPropagation();
-            if (this._editing) {
-              this.querySelector<HTMLTextAreaElement>('.editor')?.blur();
-            } else {
-              this.startEditing();
-            }
-          }}
-        >${this._editing ? 'Done' : 'Edit'}</button>
-      </div>
-
-      ${this._editing
-        ? html`<textarea
-            class="editor"
-            spellcheck="false"
-            data-range-sync-exclude="true"
-            .value=${text}
-            @pointerdown=${(e: Event) => e.stopPropagation()}
-            @dblclick=${(e: Event) => e.stopPropagation()}
-            @wheel=${blockScrollWheel}
-            @keydown=${(e: KeyboardEvent) => {
-              // The canvas listens for keys on the host — Backspace deletes the
-              // selected block, space pans. Without this, writing a script would
-              // also drive the board.
-              e.stopPropagation();
-              if (e.key === 'Escape') (e.target as HTMLTextAreaElement).blur();
-            }}
-            @blur=${(e: FocusEvent) => this.commit(e.target as HTMLTextAreaElement)}
-          ></textarea>`
-        : html`<div
-            class="sp__scroll"
-            @pointerdown=${(e: Event) => e.stopPropagation()}
-            @wheel=${blockScrollWheel}
-            @dblclick=${(e: MouseEvent) => {
-              e.stopPropagation();
-              // The line under the pointer, so editing opens where the user was
-              // reading rather than at the end of the file.
-              const line = (e.target as HTMLElement | null)
-                ?.closest<HTMLElement>('[data-line]')?.dataset.line;
-              this.startEditing(line === undefined ? {} : { line: Number(line) });
-            }}
-          >
-            ${script.empty
-              ? html`<div class="empty">
-                  <b>No screenplay yet.</b>
-                  Tell the agent what you want to make and it will write one —
-                  or double-click here to start typing.
-                </div>`
-              : html`<div class="page">
-                  ${repeat(rows, r => r.line, r => this.renderElement(r))}
-                </div>`}
-          </div>`}
+      <div
+        class="sp__page"
+        @wheel=${blockScrollWheel}
+        @dblclick=${(e: MouseEvent) => {
+          e.stopPropagation();
+          // The line under the pointer, so writing starts where the user was
+          // reading rather than at the end of the file.
+          const line = (e.target as HTMLElement | null)
+            ?.closest<HTMLElement>('[data-line]')?.dataset.line;
+          this.startEditing(line === undefined ? undefined : Number(line));
+        }}
+      >${script.empty
+        ? html`<div class="sp__empty">
+            <b>No screenplay yet</b>
+            Ask the agent to write one, or double-click to start typing.
+          </div>`
+        : repeat(rows, r => r.line, r => this.renderRow(r))}</div>
     </div>`;
   }
 }
-
-export { PLACEHOLDER as SCREENPLAY_PLACEHOLDER };

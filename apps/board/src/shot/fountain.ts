@@ -57,13 +57,28 @@ export type ElementType =
   | 'synopsis'
   | 'centered'
   | 'page_break'
-  | 'blank';
+  | 'blank'
+  /**
+   * `Title:`, `Credit:`, `Draft date:` — the title page.
+   *
+   * Its own type because it is not action. Read as action it was drawn on the
+   * canvas as the raw `Title: …` line, and the PDF — which already sets a
+   * proper title page from these fields — printed them AGAIN at the top of
+   * page two.
+   */
+  | 'title_field';
 
 export interface Element {
   type: ElementType;
+  /** The source line as written. For a title field that is `Title: X`, so
+   *  anything joining the text back together gets the script it was given. */
   text: string;
   /** Section depth, 1-based. Only on `section`. */
   depth?: number;
+  /** The field's name, lowercased (`title`, `draft date`). Only on `title_field`. */
+  key?: string;
+  /** What the field says, without its name. Only on `title_field`. */
+  value?: string;
   /** Line index in the source, so an editor can map a click back to the text. */
   line: number;
 }
@@ -259,7 +274,7 @@ export function parseFountain(source: string): ParsedScript {
         else if (key === 'credit' || key === 'author' || key === 'authors') {
           credit = credit || tf[2].trim();
         }
-        elements.push({ type: 'action', text: line, line: i });
+        elements.push({ type: 'title_field', text: line, key, value: tf[2].trim(), line: i });
         preambleEnd = i + 1;
         continue;
       }

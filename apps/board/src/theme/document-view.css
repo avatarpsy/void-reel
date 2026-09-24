@@ -383,15 +383,16 @@ body[data-doc-focus] [data-vs-doc-tag]::after,
    without anyone noticing until a customer printed one. */
 
 affine-edgeless-note[data-vs-doc-tag] {
-  /* Paper and ink. Very slightly warm: pure #fff glares even in light mode, and
-     this is nearer what a laser printer actually puts on the page. */
-  --vs-paper: #fdfdfc;
+  /* Paper and ink — the ONE page palette, shared with the screenplay, so the
+     two sit side by side as the same sheet. It lives in `voidspace.css` and
+     follows the theme there. */
+  --vs-paper: var(--page-bg);
   --affine-background-primary-color: var(--vs-paper);
   --affine-background-secondary-color: #f4f4f2;
   --affine-background-tertiary-color: #ecece9;
   --affine-background-code-block: #f4f4f2;
   --affine-background-overlay-panel-color: #ffffff;
-  --affine-text-primary-color: #17171a;
+  --affine-text-primary-color: var(--page-ink);
   --affine-text-secondary-color: #6b6b73;
   --affine-text-disable-color: #9a9aa2;
   --affine-border-color: #e0e0dc;
@@ -447,12 +448,10 @@ affine-edgeless-note[data-vs-doc-tag] affine-code {
    rhythm are the document's and are the same in both themes — those are what
    make it the same document as the file. */
 [data-theme='dark'] affine-edgeless-note[data-vs-doc-tag] {
-  --vs-paper: #1f1f23;
   --affine-background-secondary-color: #27272c;
   --affine-background-tertiary-color: #2e2e34;
   --affine-background-code-block: #27272c;
   --affine-background-overlay-panel-color: #27272c;
-  --affine-text-primary-color: #e9e9ec;
   --affine-text-secondary-color: #a0a0aa;
   --affine-text-disable-color: #6e6e78;
   --affine-border-color: #35353c;
@@ -465,11 +464,6 @@ affine-edgeless-note[data-vs-doc-tag] affine-code {
   --affine-placeholder-color: #6e6e78;
 }
 
-/* A dark shadow on a dark canvas is invisible, so the edge is a hairline. */
-[data-theme='dark'] affine-edgeless-note[data-vs-doc-tag] edgeless-note-background {
-  box-shadow: 0 0 0 1px #33333a, 0 10px 30px rgba(0, 0, 0, 0.45) !important;
-}
-
 /* The table header reads as a band on paper and has to be a band in the dark
    too — the light grey would be a bright stripe across the page. */
 [data-theme='dark'] affine-edgeless-note[data-vs-doc-tag] affine-table th {
@@ -480,8 +474,10 @@ affine-edgeless-note[data-vs-doc-tag] affine-code {
 affine-edgeless-note[data-vs-doc-tag] edgeless-note-background {
   background-color: var(--vs-paper) !important;
   /* Paper has an edge. Without one, a pale page on a pale canvas has no
-     boundary and its margin reads as part of the board. */
-  box-shadow: 0 1px 2px rgba(16, 16, 20, 0.18), 0 10px 28px rgba(16, 16, 20, 0.16) !important;
+     boundary and its margin reads as part of the board — and a dark page on a
+     dark canvas has none at all, which is why the dark token carries a 1px
+     spread. One token, so the screenplay's sheet is edged identically. */
+  box-shadow: var(--page-shadow) !important;
   border-radius: 3px !important;
 }
 

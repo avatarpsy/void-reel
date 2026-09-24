@@ -36,6 +36,9 @@ import type { PDFFont, PDFPage } from 'pdf-lib';
 export interface ScriptLine {
   type: string;
   text: string;
+  /** A title-page field's name and value — see `title_field` in `fountain.ts`. */
+  key?: string;
+  value?: string;
 }
 
 const PAGE_W = 612;   // 8.5in
@@ -151,6 +154,20 @@ export async function renderScreenplayPdf(
         y -= LINE;
       }
     }
+    /**
+     * The draft and the contact, bottom left — where every script carries
+     * them. They were being printed as action on page two instead, straight
+     * after a title page that had already said who wrote it.
+     */
+    const corner = lines
+      .filter((el) => el.type === 'title_field' && (el.key === 'draft date' || el.key === 'contact'))
+      .map((el) => String(el.value ?? '').trim())
+      .filter(Boolean);
+    y = BOTTOM + LINE * corner.length;
+    for (const line of corner) {
+      page.drawText(winAnsi(line, dropped), { x: LEFT, y: y - SIZE, size: SIZE, font: courier, color: ink });
+      y -= LINE;
+    }
     newPage();
   }
 
@@ -158,7 +175,12 @@ export async function renderScreenplayPdf(
   for (const el of lines) {
     const type = String(el.type ?? 'action');
     const text = String(el.text ?? '');
-    if (type === 'blank') { blank(1); continue; }
+    // The title page is set above, from the same fields. With no title there
+    // is no title page, and a draft date must not vanish with it.
+    if (type === 'title_field' && title) continue;
+    // Not at the top of a page: the blank line that followed the title page
+    // would otherwise open page two a line down.
+    if (type === 'blank') { if (y < TOP) blank(1); continue; }
     if (type === 'page_break') { newPage(); previous = null; continue; }
     // Synopses and section headers are the writer's scaffolding, not the script.
     if (type === 'synopsis' || type === 'section') continue;

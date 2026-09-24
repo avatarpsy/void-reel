@@ -190,7 +190,7 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
       the sentence is true.
     -->
     <!--
-      OPEN THE SELECTED DOCUMENT, FULL SIZE.
+      OPEN THE SELECTED DOCUMENT OR SCREENPLAY, FULL SIZE.
 
       Hidden until exactly one note is selected, and the bar is REVEALED at that
       moment (see the selection handler below) — the chrome autohides, and
@@ -209,7 +209,7 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
       and real typography — was the part the label left out.
     -->
     <button type="button" class="vs-board-btn" data-act="open-note-doc"
-      title="Open this document full screen — rename, write and export it there" hidden>
+      title="Open it full screen — rename, write and export it there" hidden>
       ${ICONS.expand}<span>Open in focus</span>
     </button>
     <div class="vs-board-sel" data-sel hidden></div>`;
@@ -409,14 +409,19 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
         })();
         break;
       case 'focus': void fullscreen.toggle(); break;
-      // The overlay owns itself; the bar only raises the intent — same
-      // arrangement the screenplay card's Focus button uses.
+      // The overlay owns itself; the bar only raises the intent.
       case 'document':
         container.dispatchEvent(new CustomEvent('voidspace-open-document', { bubbles: true }));
         break;
       // Same arrangement: the bar raises the intent, the overlay owns itself.
+      // A screenplay and a document open the same way from the same button;
+      // only the overlay that answers differs.
       case 'open-note-doc':
-        requestOpenDocument(openDocBtn.dataset.noteId ?? '');
+        if (openDocBtn.dataset.kind === 'screenplay') {
+          container.dispatchEvent(new CustomEvent('voidspace-open-screenplay', { bubbles: true }));
+        } else {
+          requestOpenDocument(openDocBtn.dataset.noteId ?? '');
+        }
         break;
       /**
        * The card raises intent; the PAGE owns the network.
@@ -545,13 +550,21 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
      * Selecting a document is a deliberate act, and showing what you can do
      * with it is the answer to it — see `applyPin`.
      */
-    const soleNote = ids.length === 1 && board.store.getBlock(ids[0]!)?.flavour === 'affine:note'
-      && documentIds().has(ids[0]!)
+    const soleFlavour = ids.length === 1 ? board.store.getBlock(ids[0]!)?.flavour : undefined;
+    const soleNote = soleFlavour === 'affine:note' && documentIds().has(ids[0]!)
       ? ids[0]!
       : null;
-    openDocBtn.hidden = !soleNote;
+    /**
+     * THE SCREENPLAY OPENS THE SAME WAY. It had its own Focus button in a
+     * header strip on the card, and a document had this one — two ways to do
+     * one thing, depending on which kind of page you had clicked. The strip
+     * is gone; selecting either offers the same action in the same place.
+     */
+    const soleScript = soleFlavour === 'voidspace:screenplay';
+    openDocBtn.hidden = !soleNote && !soleScript;
     openDocBtn.dataset.noteId = soleNote ?? '';
-    docSelected = !!soleNote;
+    openDocBtn.dataset.kind = soleScript ? 'screenplay' : 'note';
+    docSelected = !!soleNote || soleScript;
     applyPin();
 
     const media = ids.filter(id => {

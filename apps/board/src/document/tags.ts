@@ -22,6 +22,7 @@
  * per document, rewritten when the canvas changes.
  */
 import { readBlockMeta } from '../board/board-meta';
+import { screenplayView } from '../shot/screenplay-view';
 import { isOnlyMarks, readMark } from './align-marks';
 import { listDocuments } from './sections';
 
@@ -48,7 +49,19 @@ const LABEL: Record<string, string> = {
 export function tagFor(board: MountedBoard, blockId: string, isDocument: boolean): string {
   const model: any = board.store.getBlock(blockId)?.model;
   if (!model) return '';
-  if (model.flavour === SCREENPLAY) return LABEL.screenplay!;
+  if (model.flavour === SCREENPLAY) {
+    /**
+     * WITH ITS COVERAGE. How many scenes have shots is the one number a
+     * storyboard is worked by, and it used to sit in a header strip on the
+     * card; the strip is gone, so the number rides on the tag. Memoised per
+     * revision underneath (`board/doc-cache.ts`), and this runs once a frame
+     * at most.
+     */
+    const { covered, script } = screenplayView(board.std);
+    return script.scenes.length
+      ? `${LABEL.screenplay} · ${covered}/${script.scenes.length} COVERED`
+      : LABEL.screenplay!;
+  }
   if (!isDocument) return '';
   const kind = readBlockMeta(board.workspace.doc, blockId)?.docKind;
   return LABEL[kind ?? 'text'] ?? LABEL.text!;

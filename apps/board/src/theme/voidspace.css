@@ -51,11 +51,17 @@
      white on a dark canvas.
 
      PRINT IS NOT THEMED: both @media print blocks pin #fff and #000, because a
-     dark page sent to paper is a black rectangle. */
-  --page-bg: #171920;
-  --page-ink: #e7e9f0;
-  --page-edge: rgba(255, 255, 255, 0.09);
-  --page-shadow: 0 6px 28px rgba(0, 0, 0, 0.55);
+     dark page sent to paper is a black rectangle.
+
+     ONE PAPER FOR EVERY PAGE. A document note on the canvas reads these too
+     (see `document-view.css`), so a screenplay and a contract side by side
+     are the same sheet — same tone, same edge, same shadow. They were two
+     near-identical palettes, and beside each other the difference read as
+     two products. The edge is IN the shadow, as a 1px spread: a dark shadow
+     on a dark canvas is invisible, so without it the sheet has no boundary. */
+  --page-bg: #1f1f23;
+  --page-ink: #e9e9ec;
+  --page-shadow: 0 0 0 1px #33333a, 0 10px 30px rgba(0, 0, 0, 0.45);
   --page-rule: rgba(255, 255, 255, 0.22);
   /* The violet and amber lifted until they carry on a dark ground. The light
      values are unreadable there, which is how a "themed" page still fails. */
@@ -123,13 +129,11 @@
   --vs-text-dim: rgba(26, 26, 46, 0.66);
   --vs-text-mute: rgba(26, 26, 46, 0.42);
 
-  /* The same paper in daylight — see the note in the dark block. Warm white
-     rather than pure #fff, which is what a script has always been printed on
-     and what stops the sheet glaring against the grey canvas. */
-  --page-bg: #fffef9;
-  --page-ink: #14151a;
-  --page-edge: rgba(15, 23, 42, 0.12);
-  --page-shadow: 0 4px 24px rgba(15, 23, 42, 0.12);
+  /* The same paper in daylight — see the note in the dark block. Very slightly
+     warm rather than pure #fff, which glares against the grey canvas. */
+  --page-bg: #fdfdfc;
+  --page-ink: #17171a;
+  --page-shadow: 0 1px 2px rgba(16, 16, 20, 0.18), 0 10px 28px rgba(16, 16, 20, 0.16);
   --page-rule: rgba(15, 23, 42, 0.25);
   --page-section: #7c3aed;
   --page-section-rule: rgba(124, 58, 237, 0.22);

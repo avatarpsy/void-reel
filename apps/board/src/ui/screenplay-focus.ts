@@ -252,14 +252,30 @@ ${text}`;
       if (r.type === 'page_break') return '<div class="el-page_break"></div>';
       return `<div class="${rowClass(r)}"`
         + ` data-depth="${r.depth ?? ''}"`
+        + ` data-key="${esc(r.key ?? '')}"`
         + ` data-mark="${esc(r.mark ?? '')}"`
         + ` data-covered="${r.covered ? 'yes' : 'no'}"`
-        + ` data-line="${r.line}">${esc(r.text)}</div>`;
+        + ` data-line="${r.line}">${esc(r.type === 'title_field' ? r.value ?? '' : r.text)}</div>`;
     }).join('');
   }
 
-  function render(): void {
+  /**
+   * What sits beside the name — the same slot a document uses for its hint.
+   * The counts that used to live in a footer bar go here, so the mode has one
+   * strip of chrome, as a document does, not two.
+   */
+  function hint(): string {
     const { script, text, stat } = screenplayView(board.std);
+    if (editing) return 'Writing in Fountain — Esc or click away to see the page';
+    if (script.empty) return 'Click the page to start writing';
+    // `stat` already says how many scenes there are ("2/5 scenes covered").
+    const facts = [`about ${estimateMinutes(text)} min`];
+    if (stat) facts.push(stat);
+    return `${facts.join(' · ')} — click any line to write`;
+  }
+
+  function render(): void {
+    const { script, text } = screenplayView(board.std);
 
     el.innerHTML = `
       <header class="vs-focus__bar">
@@ -278,12 +294,15 @@ ${text}`;
                  size="${Math.max(10, Math.min(40, (script.title || '').length + 1))}"
                  spellcheck="false" aria-label="Screenplay name"
                  placeholder="Untitled screenplay" />
-          ${stat ? `<span>${esc(stat)}</span>` : ''}
+          <span data-hint>${esc(hint())}</span>
         </div>
+        <!--
+          NO EDIT BUTTON. A document has none — you type into it — and a
+          screenplay here is written the same way: click the line you want.
+          The button was a second way into the same editor, and a Done that
+          did what clicking away already does.
+        -->
         <div class="vs-focus__actions">
-          <button type="button" class="vs-focus__btn" data-act="${editing ? 'read' : 'write'}">
-            ${editing ? 'Done' : 'Edit'}
-          </button>
           <div class="vs-focus__menu-wrap">
             <button type="button" class="vs-focus__btn vs-focus__btn--primary"
                     data-act="menu" aria-haspopup="menu" aria-expanded="false">
@@ -303,25 +322,20 @@ ${text}`;
         </div>
       </header>
 
-      ${editing
-        ? `<textarea class="vs-focus__editor" data-editor spellcheck="false">${esc(text)}</textarea>`
-        : `<div class="vs-focus__scroll" data-page-scroll>
-             ${script.empty
-               ? `<div class="vs-focus__empty">
-                    <b>No screenplay yet.</b>
-                    <p>Tell the agent what you want to make and it will write one — or click
-                    Edit and start typing. Fountain: <code>INT. KITCHEN — DAY</code> for a scene,
-                    a name in CAPS for a character.</p>
-                  </div>`
-               : `<article class="page" data-page>${pageHtml()}</article>`}
-           </div>`}
-
-      <footer class="vs-focus__foot">
-        <span>Click any line to edit it there · Esc to go back</span>
-        <span>${script.scenes.length
-          ? `${script.scenes.length} scene${script.scenes.length === 1 ? '' : 's'} · about ${estimateMinutes(text)} min`
-          : ''}</span>
-      </footer>`;
+      <div class="vs-focus__scroll" data-page-scroll>
+        ${editing
+          // The editor is the same sheet as the page — see the CSS — so writing
+          // reads as the page becoming editable, not as a different screen.
+          ? `<textarea class="page vs-focus__editor" data-editor spellcheck="false">${esc(text)}</textarea>`
+          : script.empty
+            ? `<article class="page vs-focus__empty" data-page data-start>
+                 <b>No screenplay yet</b>
+                 <p>Ask the agent to write one — or click here and start typing.
+                 <code>INT. KITCHEN — DAY</code> starts a scene; a name in CAPS starts
+                 a character's line.</p>
+               </article>`
+            : `<article class="page" data-page>${pageHtml()}</article>`}
+      </div>`;
   }
 
   /**
@@ -372,17 +386,14 @@ ${text}`;
     // `.catch` because exportPdf is async; the toast has already spoken.
     if (act === 'pdf') { setMenu(false); exportPdf().catch(() => {}); return; }
     if (act === 'fountain') { setMenu(false); downloadFountain(); return; }
-    if (act === 'write') { startEditing(); return; }
-    if (act === 'read') {
-      const ta = el.querySelector<HTMLTextAreaElement>('[data-editor]');
-      if (ta) commit(ta);
-      return;
-    }
+    if (editing) return;
 
     // A click on the page opens the editor AT that line — the seam between
-    // reading and writing, made cheap.
-    const line = (e.target as HTMLElement).closest<HTMLElement>('[data-line]')?.dataset.line;
-    if (line !== undefined && !editing) startEditing(Number(line));
+    // reading and writing, made cheap. An empty page starts from the top.
+    const target = e.target as HTMLElement;
+    const line = target.closest<HTMLElement>('[data-line]')?.dataset.line;
+    if (line !== undefined) startEditing(Number(line));
+    else if (target.closest('[data-start]')) startEditing();
   });
 
   el.addEventListener('blur', e => {
@@ -445,9 +456,9 @@ ${text}`;
     onKey = null;
   }
 
-  // The card's Focus button. An event rather than a direct call, so the block
-  // stays ignorant of the chrome — the same arrangement `voidspace-open-media`
-  // uses for the media inspector.
+  // The board bar's "Open in focus", with the screenplay selected. An event
+  // rather than a direct call, so the bar stays ignorant of the overlay — the
+  // same arrangement documents use.
   const onOpen = () => open();
   container.addEventListener('voidspace-open-screenplay', onOpen);
 
