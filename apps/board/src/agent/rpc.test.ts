@@ -786,16 +786,28 @@ describe('screenplay focus and export', () => {
   });
 
   /**
-   * THE AGENT MUST NOT CLAIM TO HAVE SAVED A FILE. Export hands the page to the
-   * user's own print dialog — they choose "Save as PDF" and where it goes — so
-   * the reply says that in words the agent will repeat.
+   * THE REPLY SAYS WHAT HAPPENED. Export used to hand the page to the user's
+   * own print dialog, and the reply said so — and went on saying so after the
+   * button started typesetting a real PDF and saving it itself, so the agent
+   * told people to "choose Save as PDF" in a dialog that never opened. It now
+   * names the file it made, and says there is no link: it is on their device.
    */
-  it('says the print dialog is the user’s, not a file it wrote', async () => {
-    await call('voidspace:board-write-script', { text: 'INT. ROOM — DAY\n\nShe waits.\n' });
+  it('makes a real PDF and names it, rather than describing a print dialog', async () => {
+    await call('voidspace:board-write-script', { text: 'Title: The Room\n\nINT. ROOM — DAY\n\nShe waits.\n' });
     const r = await call('voidspace:board-screenplay', { action: 'pdf' });
     expect(r.ok).toBe(true);
-    expect(r.note).toContain('print dialog');
-    expect(r.note).not.toMatch(/\bsaved\b/i);
+    expect(r.fileName).toMatch(/\.pdf$/);
+    expect(r.pages).toBeGreaterThanOrEqual(1);
+    expect(r.note).toContain(r.fileName);
+    expect(r.note).toContain('downloads');
+    expect(r.note).not.toContain('print dialog');
+  });
+
+  it('says nothing was made for an empty screenplay, instead of claiming a file', async () => {
+    await call('voidspace:board-write-script', { text: '' });
+    const r = await call('voidspace:board-screenplay', { action: 'pdf' });
+    expect(r.ok).toBe(false);
+    expect(r.message).toContain('Nothing was saved');
   });
 
   it('offers the .fountain source as the portable export', async () => {

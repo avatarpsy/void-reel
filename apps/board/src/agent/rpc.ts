@@ -547,7 +547,8 @@ export interface BoardRpcOptions {
     open(): void;
     close(): void;
     isOpen(): boolean;
-    print(): void;
+    /** A real PDF, saved to the user's downloads; what was made, or null. */
+    print(): Promise<{ fileName: string; pages: number } | null>;
     downloadFountain(): void;
   } | null;
   /**
@@ -2798,25 +2799,36 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
      * the chat is still on screen in focus mode is that "tighten scene four,
      * then send me the PDF" is one sentence and should be one exchange.
      *
-     * `pdf` hands the page to the browser's print pipeline, which opens the
-     * user's own print dialog — so the agent can prepare an export but never
-     * silently writes a file to their machine.
+     * `pdf` typesets a real PDF on this device and saves it to the user's
+     * downloads, and says which file — there is no URL, because nothing left
+     * the machine.
      */
-    'voidspace:board-screenplay': args => {
+    'voidspace:board-screenplay': async args => {
       const focus = opts.screenplay?.();
       if (!focus) return fail('unavailable', 'The screenplay view is not ready yet.');
 
       const action = String(args.action ?? 'open');
       if (action === 'close') { focus.close(); return { ok: true as const, rev, open: false }; }
       if (action === 'pdf') {
-        focus.print();
+        /**
+         * A REAL FILE now, typeset on this device and saved to the user's
+         * downloads. This used to say a print dialog had opened and the user
+         * must choose "Save as PDF" — true once, and still being told to the
+         * user long after the button started saving the file itself.
+         */
+        const made = await focus.print();
+        if (!made) {
+          return fail('not_made', 'No PDF was made — the screenplay is empty, or one is already '
+            + 'being made. Nothing was saved.');
+        }
         return {
           ok: true as const,
           rev,
-          open: true,
-          // Said plainly, because the agent must not claim to have saved a file.
-          note: 'The print dialog is open on the user’s screen — they choose "Save as PDF" '
-            + 'and where it goes. Tell them to look at it.',
+          open: focus.isOpen(),
+          fileName: made.fileName,
+          pages: made.pages,
+          note: `Saved ${made.fileName} (${made.pages} page${made.pages === 1 ? '' : 's'}, with a `
+            + 'title page) to the user’s downloads. It is on their device — there is no link.',
         };
       }
       if (action === 'fountain') {

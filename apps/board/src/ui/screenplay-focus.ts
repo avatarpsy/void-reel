@@ -44,8 +44,9 @@ export interface ScreenplayFocus {
   open(): void;
   close(): void;
   isOpen(): boolean;
-  /** A real PDF of the script — see `exportPdf`. */
-  print(): void;
+  /** A real PDF of the script, saved to the user's downloads — see `exportPdf`.
+   *  Resolves to what was made, or null when nothing was. */
+  print(): Promise<{ fileName: string; pages: number } | null>;
   /** Download the raw Fountain, which is what other screenwriting apps read. */
   downloadFountain(): void;
   destroy(): void;
@@ -151,14 +152,14 @@ export function installScreenplayFocus(
    * same layout the page on screen marks its page breaks from, so the page
    * count in the bar is the page count in the file.
    */
-  async function exportPdf(): Promise<void> {
+  async function exportPdf(): Promise<{ fileName: string; pages: number } | null> {
     save();
     const view = screenplayView(board.std);
     if (view.script.empty) {
       toast('There is no screenplay to export yet.', 'error');
-      return;
+      return null;
     }
-    if (exporting) return;
+    if (exporting) return null;
 
     exporting = true;
     const buttons = el.querySelectorAll<HTMLButtonElement>('.vs-focus__btn');
@@ -180,9 +181,11 @@ export function installScreenplayFocus(
           : `Downloaded ${fileName}`,
         out.droppedGlyphs ? 'error' : 'info',
       );
+      return { fileName, pages: out.pages };
     } catch (e: any) {
       console.error('[screenplay-focus] pdf failed:', e);
       toast('That PDF could not be made.', 'error');
+      return null;
     } finally {
       exporting = false;
       buttons.forEach(b => { b.disabled = false; });
