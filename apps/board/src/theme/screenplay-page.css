@@ -1,0 +1,210 @@
+/* ══ The screenplay page ═════════════════════════════════════════════════════
+
+   ONE stylesheet for every place a screenplay is drawn — the sheet on the
+   canvas, the page in focus mode, and the editor that both of them ARE — so
+   reading and writing cannot look different, and neither can differ from the
+   PDF.
+
+   ── EVERYTHING IS IN EM, BECAUSE 1EM IS 12PT OF COURIER ─────────────────────
+   Courier is 600/1000 em, so at 12pt one character is 0.6em and an inch is
+   exactly 6em. Every measurement below is the PDF's (`document/screenplay-
+   pdf.ts`) written in those units:
+
+       page            8.5in           51em
+       left margin     1.5in            9em    binding side
+       right margin    1in              6em
+       text            6in, 60 chars   36em
+       character cue   3.7in           13.2em in from the text's left edge
+       parenthetical   3.1in, 28 chars  9.6em in, 16.8em wide
+       dialogue        2.5in, 35 chars  6em in,   21em wide
+
+   So one number — the font size — scales the whole page. The canvas sets it
+   from the sheet's width; focus mode sets 12pt at screen resolution. Nothing
+   else differs between them.
+
+   ── ONE LINE OF SOURCE IS ONE LINE OF PAGE ──────────────────────────────────
+   The gaps are the Fountain's own blank lines, plus one more before a scene
+   heading — the rule the PDF is laid out by — and they are PADDING, never
+   margin, because CodeMirror measures a line by its box and a margin sits
+   outside it. */
+
+.sp-sheet {
+  --sp-lh: 1.2;
+  --sp-line: calc(var(--sp-lh) * 1em);
+  box-sizing: border-box;
+  background: var(--page-bg);
+  color: var(--page-ink);
+  border-radius: 3px;
+  box-shadow: var(--page-shadow);
+  font-family: 'Courier Prime', 'Courier Final Draft', 'Courier Screenplay', 'Nimbus Mono PS', 'Courier New', Courier, monospace;
+  line-height: var(--sp-lh);
+}
+
+/* CodeMirror's base theme is (0,2,0) — `.ͼ1 .cm-line` — so these are (0,3,0). */
+.sp-sheet .cm-editor { background: transparent; color: inherit; }
+.sp-sheet .cm-editor.cm-focused { outline: none; }
+.sp-sheet .cm-editor .cm-scroller {
+  font-family: inherit;
+  line-height: inherit;
+  overflow-x: hidden;
+}
+.sp-sheet .cm-editor .cm-content {
+  /* The page's margins: 1in round, 1.5in on the binding side. */
+  padding: 6em 6em 6em 9em;
+  font-family: inherit;
+  caret-color: var(--page-ink);
+  white-space: pre-wrap;
+}
+.sp-sheet .cm-editor .cm-line {
+  padding: 0;
+  position: relative;
+  /* A HAIR OF SLACK — a tenth of a character. Every column here is an exact
+     number of characters wide, and a line exactly that long (a 28-character
+     parenthetical, a 60-character action line) sits on the edge, where
+     sub-pixel rounding at canvas zoom levels wraps it. The PDF sets it on one
+     line, so the screen must too; a tenth of a character cannot let one more
+     character in. */
+  margin-right: -0.06em;
+}
+.sp-sheet .cm-editor .cm-placeholder {
+  color: var(--page-synopsis);
+  font-family: var(--affine-font-family, ui-sans-serif, system-ui, sans-serif);
+  font-size: 0.85em;
+}
+.sp-sheet .cm-editor ::selection,
+.sp-sheet .cm-editor .cm-line::selection { background: var(--page-hover); }
+
+/* ── The elements ──────────────────────────────────────────────────────────── */
+
+.sp-sheet .cm-line.sp-scene_heading {
+  font-weight: 700;
+  text-transform: uppercase;
+  /* One line more than the source's blank line: a new scene reads as one. */
+  padding-top: var(--sp-line);
+}
+.sp-sheet .cm-line.sp-scene_heading.sp-first { padding-top: 0; }
+
+.sp-sheet .cm-line.sp-character {
+  padding-left: 13.2em;
+  text-transform: uppercase;
+}
+.sp-sheet .cm-line.sp-parenthetical { padding: 0 9.6em; }
+.sp-sheet .cm-line.sp-dialogue { padding: 0 9em 0 6em; }
+.sp-sheet .cm-line.sp-transition {
+  text-align: right;
+  text-transform: uppercase;
+}
+
+/* CENTRED ON THE PAGE, not on the text — which sits 1.5em right of the
+   page's middle, because the binding margin is wider. The extra 3em on the
+   right puts the centre of the line on the centre of the paper, where the PDF
+   centres its title and `> THE END <`. */
+.sp-sheet .cm-line.sp-centered,
+.sp-sheet .cm-line.sp-title_field {
+  text-align: center;
+  padding-right: 3em;
+}
+
+/* THE TITLE PAGE — its own sheet in the PDF, the head of the page here. */
+.sp-sheet .cm-line.sp-title_field { color: var(--page-synopsis); }
+.sp-sheet .cm-line.sp-title_field[data-key='title'] {
+  color: var(--page-ink);
+  font-weight: 700;
+  text-transform: uppercase;
+  padding-top: var(--sp-line);
+}
+.sp-sheet .cm-line.sp-title_field[data-key='credit'],
+.sp-sheet .cm-line.sp-title_field[data-key='author'],
+.sp-sheet .cm-line.sp-title_field[data-key='authors'] {
+  color: var(--page-ink);
+  padding-top: var(--sp-line);
+}
+
+/* SEQUENCES AND SYNOPSES ARE THE WRITER'S NOTES, NOT THE FILM. Every Fountain
+   tool leaves them off the printed page, so they are drawn in a margin voice —
+   still Courier, so the page keeps one grid of lines. */
+.sp-sheet .cm-line.sp-section {
+  color: var(--page-section);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+.sp-sheet .cm-line.sp-synopsis {
+  color: var(--page-synopsis);
+  font-style: italic;
+}
+
+/* A forced page break (`===`): the break itself is the page-turn widget. */
+.sp-sheet .cm-line.sp-page_break { min-height: var(--sp-line); }
+
+/* Notes and the boneyard: visible while writing, never printed. */
+.sp-sheet .sp-hidden { color: var(--page-synopsis); opacity: 0.7; }
+
+/* Fountain syntax on the caret's line — present, and plainly not the script. */
+.sp-sheet .sp-syntax {
+  color: var(--page-synopsis);
+  font-weight: 400;
+  font-style: normal;
+  text-transform: none;
+  letter-spacing: 0;
+  opacity: 0.75;
+}
+
+/* ── Coverage, in the margin beside the scene heading ─────────────────────────
+   Never in the prose — the script must read as the script. Placed on the line
+   box of the heading's TEXT (below its extra line of space) and exactly one
+   line tall, so the mark centres level with the words.
+
+   The mark is set smaller (0.72), and an em inside it is ITS em — so every
+   distance is the line's measure divided by 0.72: one line down, 3.6em of the
+   line into the margin, 2.6em wide. */
+.sp-sheet .cm-line.sp-marker::before {
+  content: attr(data-mark);
+  position: absolute;
+  font-size: 0.72em;
+  top: calc(var(--sp-lh) * 1em / 0.72);
+  height: calc(var(--sp-lh) * 1em / 0.72);
+  left: -5em;
+  width: 3.6em;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  font-family: var(--affine-font-family, ui-sans-serif, system-ui, sans-serif);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  color: var(--page-mark);
+}
+/* The heading's text box starts after its padding — unless it opens the page. */
+.sp-sheet .cm-line.sp-marker.sp-first::before { top: 0; }
+.sp-sheet .cm-line.sp-marker[data-covered='yes']::before {
+  color: var(--page-mark-done);
+  font-weight: 500;
+}
+
+/* ── Where the paper turns ──────────────────────────────────────────────────
+   A hairline across the WHOLE sheet — out past the margins to both edges —
+   with the page number where the PDF prints it, top right of the new page. */
+.sp-sheet .sp-pagebreak {
+  position: relative;
+  height: calc(var(--sp-line) * 2);
+  margin: 0 -6em 0 -9em;
+  pointer-events: none;
+}
+.sp-sheet .sp-pagebreak::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  border-top: 1px dashed var(--page-rule);
+  opacity: 0.8;
+}
+.sp-sheet .sp-pagebreak[data-page]::after {
+  content: attr(data-page);
+  position: absolute;
+  right: 6em;
+  top: calc(50% + 0.35em);
+  font-size: 0.8em;
+  color: var(--page-synopsis);
+}

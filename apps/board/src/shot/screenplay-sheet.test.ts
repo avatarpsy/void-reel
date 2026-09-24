@@ -21,7 +21,8 @@ import { tagFor } from '../document/tags';
 import { renderScreenplayPdf } from '../document/screenplay-pdf';
 import { parseFountain } from './fountain';
 import { screenplayBlock, writeScript } from './screenplay-doc';
-import { rowClass, screenplayView } from './screenplay-view';
+import { pageModel } from './screenplay-lines';
+import { screenplayView } from './screenplay-view';
 import { createShots, setShotFields } from './shots';
 
 const NL = String.fromCharCode(10);
@@ -65,12 +66,11 @@ describe('the title page is a title page', () => {
     expect(s.credit).toBe('Written for Sofia');
   });
 
-  it('gives both painters one class and the field name to style by', () => {
-    const b = makeTestBoard();
-    writeScript(b.std, b.surfaceId, SCRIPT);
-    const title = screenplayView(b.std).rows.find((r) => r.type === 'title_field')!;
-    expect(rowClass(title)).toBe('el-title_field');
-    expect(title).toMatchObject({ key: 'title', value: 'Sofia Storyboard' });
+  it('tells the page which field each line is, and which characters are the key', () => {
+    const [title] = pageModel(SCRIPT).lines;
+    expect(title).toMatchObject({ type: 'title_field', key: 'title' });
+    // 'Title: ' is syntax: hidden on the page, shown faintly on the caret's line.
+    expect(title!.syntax).toEqual([[0, 'Title: '.length]]);
   });
 });
 

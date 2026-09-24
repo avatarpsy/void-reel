@@ -1,40 +1,24 @@
 /**
- * The screenplay page, as ROWS — one description, two painters.
+ * What the screenplay says about itself — the facts every view of it shares.
  *
- * The card on the canvas paints these with Lit; the focus overlay paints them
- * with plain DOM (chrome that sits over the editor never joins BlockSuite's
- * render cycle — see `ui/board-ui.ts`). Both must agree about what the page
- * SAYS, or the same script reads differently depending on which one you opened,
- * and the margin marks — the whole reason to look at the page while working —
- * stop being trustworthy.
- *
- * So: this module decides what the page says. The two painters decide only how
- * it looks, and they share the class names so the typography cannot drift
- * either.
+ * The page itself is drawn by ONE editor (`screenplay-editor.ts`), on the
+ * canvas and in focus mode alike, from `screenplay-lines.ts`. What lives here
+ * is the summary around it: the parsed script, the coverage line the tag and
+ * the focus bar show, and how many shots each scene has, which is what the
+ * margin marks count.
  */
 import type { BlockStdScope } from '@blocksuite/std';
 
-import type { Element, ParsedScript } from './fountain';
+import { perRev } from '../board/doc-cache';
+import type { ParsedScript } from './fountain';
 import { boardCoverage } from './resolution';
 import { readParsed, readScript } from './screenplay-doc';
-
-export interface ScreenplayRow extends Element {
-  /**
-   * The MARGIN MARK for this line, or null when it carries none.
-   *
-   * Only scene headings get one: the number of shots covering that scene, or an
-   * em dash for none. Drawn in the margin and never in the prose — the script
-   * has to read as the script, not as a checklist.
-   */
-  mark: string | null;
-  covered: boolean;
-}
+import { readShots } from './shots';
 
 export interface ScreenplayView {
   script: ParsedScript;
-  /** The raw Fountain, for the editor half. */
+  /** The raw Fountain. */
   text: string;
-  rows: ScreenplayRow[];
   /** "3/8 scenes covered · 2 off-script", or '' when there is no script yet. */
   stat: string;
   /** Scenes covered by at least one shot. */
@@ -42,40 +26,36 @@ export interface ScreenplayView {
 }
 
 export function screenplayView(std: BlockStdScope): ScreenplayView {
-  const text = readScript(std);
   // Both memoised per document revision — see `board/doc-cache.ts`. This is
-  // called from the card's render, which runs whenever any block changes.
+  // called from renders that run whenever any block changes.
+  const text = readScript(std);
   const script = readParsed(std);
   const cov = boardCoverage(std);
-  const byKey = new Map(cov.scenes.map(s => [s.key, s] as const));
-
-  // Which source line each scene heading sits on, so the mark lands on it.
-  const markAtLine = new Map<number, { mark: string; covered: boolean }>();
-  for (const scene of script.scenes) {
-    const c = byKey.get(scene.key);
-    markAtLine.set(scene.fromLine, {
-      mark: c && c.shots > 0 ? `${c.shots}` : '—',
-      covered: !!c && c.shots > 0,
-    });
-  }
-
   const covered = cov.scenes.filter(s => s.shots > 0).length;
-
   return {
     script,
     text,
     covered,
-    rows: script.elements.map(e => {
-      const m = markAtLine.get(e.line);
-      return { ...e, mark: m ? m.mark : null, covered: !!m?.covered };
-    }),
     stat: script.scenes.length
       ? `${covered}/${script.scenes.length} scenes covered${cov.offScript ? ` · ${cov.offScript} off-script` : ''}`
       : '',
   };
 }
 
-/** The class list for a row, shared so both painters style identically. */
-export function rowClass(row: ScreenplayRow): string {
-  return `el-${row.type}${row.mark !== null ? ' marker' : ''}`;
+/**
+ * Shots per scene KEY, straight off the board.
+ *
+ * By key rather than by the saved script's scenes, because the page counts
+ * coverage for the text being TYPED: a scene heading written a moment ago
+ * already has its key, and if shots point at it the mark should say so before
+ * the script has been saved.
+ */
+export function shotsByScene(std: BlockStdScope): Map<string, number> {
+  return perRev(std, 'script:shots-by-scene', () => {
+    const count = new Map<string, number>();
+    for (const s of readShots(std)) {
+      if (s.sceneKey) count.set(s.sceneKey, (count.get(s.sceneKey) ?? 0) + 1);
+    }
+    return count;
+  });
 }

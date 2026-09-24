@@ -15,25 +15,20 @@
  * The agent chat stays. This is deliberately NOT the classic distraction-free
  * mode, because the thing being removed is the CANVAS, not the collaborator —
  * "rewrite scene 4 tighter", "export this as a PDF" are the reasons to be here.
- * It matches the pattern people already know from every document tool with an
- * assistant beside it, and it costs nothing to implement: the chat lives in the
- * parent page, so hiding the board's own chrome leaves it exactly where it was.
+ * The chat lives in the parent page, so hiding the board's own chrome leaves it
+ * exactly where it was; the LEFT pane changes what it holds and nothing moves.
  *
- * The layout therefore does not move. The LEFT pane changes what it contains;
- * the right pane is untouched. That consistency is the point — a mode that
- * rearranges the window makes people lose their place.
- *
- * ── READ AND WRITE, NOT TWO MODES INSIDE A MODE ──────────────────────────────
- * The card splits reading (a formatted page) from editing (a raw Fountain
- * textarea) because a contenteditable fights the writer over indentation. Focus
- * keeps that split but makes the seam cheap: click any line and you are editing
- * AT that line (`offsetOfLine`), Escape puts you back on the page at the same
- * scroll position. So it behaves like one document that happens to render.
+ * ── THE PAGE IS THE EDITOR ───────────────────────────────────────────────────
+ * It was a formatted page you clicked to swap for a textarea of raw Fountain —
+ * two views that could never look alike. Now it is the same editor the canvas
+ * sheet is (`shot/screenplay-editor.ts`), always writable: click anywhere and
+ * type, and the line formats itself as a scene heading, a cue, dialogue or a
+ * transition as you go. It saves as you pause, and again on the way out.
  */
 import { enterFocusMode } from './focus-lock';
-import { offsetOfLine } from '../shot/fountain';
 import { screenplayBlock, writeScript } from '../shot/screenplay-doc';
-import { rowClass, screenplayView } from '../shot/screenplay-view';
+import { createScreenplayEditor, type ScreenplayEditor } from '../shot/screenplay-editor';
+import { screenplayView, shotsByScene } from '../shot/screenplay-view';
 import type { MountedBoard } from '../blocksuite/editor';
 import { toast } from './toast';
 
@@ -42,11 +37,14 @@ const ESC_HTML: Record<string, string> = {
 };
 const esc = (s: string) => s.replace(/[&<>"]/g, c => ESC_HTML[c]);
 
+/** One save per pause in the typing. */
+const SAVE_AFTER_MS = 450;
+
 export interface ScreenplayFocus {
   open(): void;
   close(): void;
   isOpen(): boolean;
-  /** Hand the page to the browser's print pipeline — see `exportPdf`. */
+  /** A real PDF of the script — see `exportPdf`. */
   print(): void;
   /** Download the raw Fountain, which is what other screenwriting apps read. */
   downloadFountain(): void;
@@ -66,75 +64,50 @@ export function installScreenplayFocus(
   el.hidden = true;
   container.append(el);
 
-  let editing = false;
-  /** Where the page was scrolled, so leaving the editor does not jump. */
-  let readScroll = 0;
+  let editor: ScreenplayEditor | null = null;
+  /** The block's text as of the last time this editor and it agreed. */
+  let synced = '';
+  let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let onKey: ((e: KeyboardEvent) => void) | null = null;
   let docSub: { unsubscribe?: () => void } | null = null;
+  let docQueued = false;
+
+  const menuEl = (): HTMLElement | null => el.querySelector('[data-menu]');
+  const nameEl = (): HTMLInputElement | null => el.querySelector('[data-name]');
+  const hintEl = (): HTMLElement | null => el.querySelector('[data-hint]');
 
   // ── writing ───────────────────────────────────────────────────────────────
 
-  function commit(ta: HTMLTextAreaElement): void {
+  /** Write the editor's text to the block, if it differs. One undo step each. */
+  function save(): void {
+    if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
     const model = screenplayBlock(board.std);
-    if (model && ta.value !== model.props.text) {
-      board.store.captureSync();
-      board.store.updateBlock(model, { text: ta.value });
-    }
-    editing = false;
-    render();
-    requestAnimationFrame(() => {
-      const scroll = el.querySelector<HTMLElement>('[data-page-scroll]');
-      if (scroll) scroll.scrollTop = readScroll;
-    });
+    const next = editor?.text();
+    if (!model || next === undefined) return;
+    synced = next;
+    if (next === model.props.text) return;
+    board.store.captureSync();
+    board.store.updateBlock(model, { text: next });
   }
 
-  function startEditing(line?: number): void {
-    readScroll = el.querySelector<HTMLElement>('[data-page-scroll]')?.scrollTop ?? 0;
-    editing = true;
-    render();
-    requestAnimationFrame(() => {
-      const ta = el.querySelector<HTMLTextAreaElement>('[data-editor]');
-      if (!ta) return;
-      const at = line === undefined ? ta.value.length : offsetOfLine(ta.value, line);
-      ta.focus();
-      ta.setSelectionRange(at, at);
-      // A textarea does not scroll a PROGRAMMATIC selection into view, only a
-      // typed one — so without this the caret is correctly on line 312 and the
-      // view is showing line 1, which looks exactly like the click was ignored.
-      if (line !== undefined) {
-        const lh = parseFloat(getComputedStyle(ta).lineHeight) || 20;
-        ta.scrollTop = Math.max(0, (line - 6) * lh);
-      }
-    });
+  function queueSave(): void {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => { save(); paintHint(); }, SAVE_AFTER_MS);
   }
-
-  // ── exporting ─────────────────────────────────────────────────────────────
 
   /**
-   * PDF, VIA THE BROWSER'S OWN PRINT PIPELINE.
-   *
-   * Not a JS PDF builder. The page is already correct typography — 12pt Courier,
-   * the industry margins, real indents — so the only thing a library would add
-   * is a second, worse implementation of a layout we already have, plus a
-   * megabyte of bundle. `@media print` (see `voidspace.css`) restates the same
-   * page in real inches and lets the browser paginate it, which also gets
-   * widow/orphan control and a page size the user can change in the dialog.
-   *
-   * Printing from INSIDE the iframe prints this frame alone, which is why the
-   * board's chrome does not have to be torn down first.
-   *
-   * The page must be in READ mode: a textarea prints as a scrolled box showing
-   * whatever fitted on screen, which is the one way this could silently produce
-   * a wrong document.
+   * FROM OUTSIDE — the agent rewrote the script while it was open, which is
+   * the reason the chat stays on screen. Taken whenever this editor has
+   * nothing unsaved, focused or not: a caret blinking on the page must not
+   * stop "tighten scene four" from appearing. With unsaved typing, the typing
+   * wins — it is newer, and it is about to be saved.
    */
-  const menuEl = (): HTMLElement | null => el.querySelector('[data-menu]');
-  const nameEl = (): HTMLInputElement | null => el.querySelector('[data-name]');
-
-  function setMenu(open2: boolean): void {
-    const menu = menuEl();
-    if (!menu) return;
-    menu.hidden = !open2;
-    el.querySelector('[data-act="menu"]')?.setAttribute('aria-expanded', String(open2));
+  function takeOutside(): void {
+    if (!editor) return;
+    const text = screenplayBlock(board.std)?.props.text ?? '';
+    if (text === synced) return;
+    if (editor.text() === synced) editor.setText(text);
+    synced = text;
   }
 
   /**
@@ -147,45 +120,45 @@ export function installScreenplayFocus(
    */
   function rename(next: string): void {
     const value = next.trim();
+    save();
     const { script, text } = screenplayView(board.std);
     if (!value || value === script.title) return;
     const line = `Title: ${value}`;
     const updated = /^\s*Title:.*$/mi.test(text)
       ? text.replace(/^\s*Title:.*$/mi, line)
-      : `${line}
-
-${text}`;
+      : `${line}\n\n${text}`;
     try {
       writeScript(board.std, board.surfaceId, updated);
+      takeOutside();
     } catch (e: any) {
       console.warn('[screenplay-focus] rename failed:', e?.message ?? e);
     }
   }
 
+  // ── exporting ─────────────────────────────────────────────────────────────
+
+  function setMenu(open2: boolean): void {
+    const menu = menuEl();
+    if (!menu) return;
+    menu.hidden = !open2;
+    el.querySelector('[data-act="menu"]')?.setAttribute('aria-expanded', String(open2));
+  }
+
   let exporting = false;
 
   /**
-   * A REAL PDF FILE, typeset here.
-   *
-   * This was `window.print()`: the browser's dialog, which saves nothing, hands
-   * back no file and needs a person sitting in front of it. A screenwriter
-   * could not get a file out of their own script. `renderScreenplayPdf` sets
-   * the page at the industry's actual measurements — 12pt Courier, 1.5in left
-   * margin, character cues at 3.7in — so the page count still means what a
-   * reader expects it to mean.
+   * A REAL PDF FILE, typeset here — set at the industry's measurements by the
+   * same layout the page on screen marks its page breaks from, so the page
+   * count in the bar is the page count in the file.
    */
   async function exportPdf(): Promise<void> {
+    save();
     const view = screenplayView(board.std);
     if (view.script.empty) {
       toast('There is no screenplay to export yet.', 'error');
       return;
     }
     if (exporting) return;
-    // Commit an open edit first, or the file is of the draft they just left.
-    if (editing) {
-      const ta = el.querySelector<HTMLTextAreaElement>('[data-editor]');
-      if (ta) commit(ta);
-    }
 
     exporting = true;
     const buttons = el.querySelectorAll<HTMLButtonElement>('.vs-focus__btn');
@@ -195,12 +168,11 @@ ${text}`;
       const { renderScreenplayPdf } = await import('../document/screenplay-pdf');
       const { documentFileName } = await import('../document/blocks');
       const { downloadDocument } = await import('../document');
-      const fresh = screenplayView(board.std);
       const out = await renderScreenplayPdf(
-        fresh.script.elements ?? fresh.rows,
-        { title: fresh.script.title, credit: fresh.script.credit },
+        view.script.elements,
+        { title: view.script.title, credit: view.script.credit },
       );
-      const fileName = documentFileName(fresh.script.title || 'screenplay', 'pdf');
+      const fileName = documentFileName(view.script.title || 'screenplay', 'pdf');
       downloadDocument({ blob: out.blob, fileName, format: 'pdf', bytes: out.blob.size });
       toast(
         out.droppedGlyphs
@@ -226,6 +198,7 @@ ${text}`;
    * carrying the work somewhere else.
    */
   function downloadFountain(): void {
+    save();
     const { script, text } = screenplayView(board.std);
     if (!text.trim()) {
       toast('There is no screenplay to download yet.', 'error');
@@ -245,63 +218,44 @@ ${text}`;
 
   // ── painting ──────────────────────────────────────────────────────────────
 
-  function pageHtml(): string {
-    const { rows } = screenplayView(board.std);
-    return rows.map(r => {
-      if (r.type === 'blank') return '<div class="el-blank"></div>';
-      if (r.type === 'page_break') return '<div class="el-page_break"></div>';
-      return `<div class="${rowClass(r)}"`
-        + ` data-depth="${r.depth ?? ''}"`
-        + ` data-key="${esc(r.key ?? '')}"`
-        + ` data-mark="${esc(r.mark ?? '')}"`
-        + ` data-covered="${r.covered ? 'yes' : 'no'}"`
-        + ` data-line="${r.line}">${esc(r.type === 'title_field' ? r.value ?? '' : r.text)}</div>`;
-    }).join('');
-  }
-
   /**
-   * What sits beside the name — the same slot a document uses for its hint.
-   * The counts that used to live in a footer bar go here, so the mode has one
-   * strip of chrome, as a document does, not two.
+   * Beside the name — the slot a document uses for its hint. Pages, runtime
+   * and coverage: the three numbers a storyboard is worked by. Pages come from
+   * the same layout the PDF is set by, so "12 pages" is what prints.
    */
-  function hint(): string {
-    const { script, text, stat } = screenplayView(board.std);
-    if (editing) return 'Writing in Fountain — Esc or click away to see the page';
-    if (script.empty) return 'Click the page to start writing';
-    // `stat` already says how many scenes there are ("2/5 scenes covered").
-    const facts = [`about ${estimateMinutes(text)} min`];
+  function paintHint(): void {
+    const hint = hintEl();
+    if (!hint || !editor) return;
+    const pages = editor.pages();
+    if (!pages) {
+      hint.textContent = 'Type anywhere — a line like INT. KITCHEN — DAY starts a scene';
+      return;
+    }
+    const { stat } = screenplayView(board.std);
+    const facts = [`${pages} page${pages === 1 ? '' : 's'}`, `about ${pages} min`];
     if (stat) facts.push(stat);
-    return `${facts.join(' · ')} — click any line to write`;
+    hint.textContent = facts.join(' · ');
   }
 
-  function render(): void {
-    const { script, text } = screenplayView(board.std);
-
+  function paint(): void {
+    const { script } = screenplayView(board.std);
     el.innerHTML = `
       <header class="vs-focus__bar">
         <button type="button" class="vs-focus__back" data-act="close" title="Back to the board (Esc)">
           ← Board
         </button>
         <!--
-          THE SAME BAR AS A DOCUMENT, because a screenplay IS one. The name is a
-          field you click, and the formats live inside one Download — the shape
-          every office suite uses, and the shape the document mode already had.
-          Only the PAGE below differs, because a script's typography is
-          semantic and prose typography would destroy it.
+          THE SAME BAR AS A DOCUMENT, because a screenplay IS one: the name is
+          a field you click, the formats live inside one Download, and the hint
+          beside the name carries the page count, runtime and coverage.
         -->
         <div class="vs-focus__title">
           <input class="vs-focus__name" data-name value="${esc(script.title)}"
                  size="${Math.max(10, Math.min(40, (script.title || '').length + 1))}"
                  spellcheck="false" aria-label="Screenplay name"
                  placeholder="Untitled screenplay" />
-          <span data-hint>${esc(hint())}</span>
+          <span data-hint></span>
         </div>
-        <!--
-          NO EDIT BUTTON. A document has none — you type into it — and a
-          screenplay here is written the same way: click the line you want.
-          The button was a second way into the same editor, and a Done that
-          did what clicking away already does.
-        -->
         <div class="vs-focus__actions">
           <div class="vs-focus__menu-wrap">
             <button type="button" class="vs-focus__btn vs-focus__btn--primary"
@@ -321,34 +275,9 @@ ${text}`;
           </div>
         </div>
       </header>
-
       <div class="vs-focus__scroll" data-page-scroll>
-        ${editing
-          // The editor is the same sheet as the page — see the CSS — so writing
-          // reads as the page becoming editable, not as a different screen.
-          ? `<textarea class="page vs-focus__editor" data-editor spellcheck="false">${esc(text)}</textarea>`
-          : script.empty
-            ? `<article class="page vs-focus__empty" data-page data-start>
-                 <b>No screenplay yet</b>
-                 <p>Ask the agent to write one — or click here and start typing.
-                 <code>INT. KITCHEN — DAY</code> starts a scene; a name in CAPS starts
-                 a character's line.</p>
-               </article>`
-            : `<article class="page" data-page>${pageHtml()}</article>`}
+        <div class="sp-sheet sp-focus-page" data-page></div>
       </div>`;
-  }
-
-  /**
-   * Runtime, from page count, the way the industry does it.
-   *
-   * ~55 lines to a page and roughly a minute a page. Deliberately not a
-   * word-count heuristic: the reason the format is fixed is that a page of
-   * dense action and a page of sparse dialogue take the same time on screen,
-   * and a word count would report the opposite.
-   */
-  function estimateMinutes(text: string): number {
-    const lines = text ? text.split('\n').length : 0;
-    return Math.max(1, Math.round(lines / 55));
   }
 
   // ── input ─────────────────────────────────────────────────────────────────
@@ -386,55 +315,70 @@ ${text}`;
     // `.catch` because exportPdf is async; the toast has already spoken.
     if (act === 'pdf') { setMenu(false); exportPdf().catch(() => {}); return; }
     if (act === 'fountain') { setMenu(false); downloadFountain(); return; }
-    if (editing) return;
-
-    // A click on the page opens the editor AT that line — the seam between
-    // reading and writing, made cheap. An empty page starts from the top.
-    const target = e.target as HTMLElement;
-    const line = target.closest<HTMLElement>('[data-line]')?.dataset.line;
-    if (line !== undefined) startEditing(Number(line));
-    else if (target.closest('[data-start]')) startEditing();
+    /**
+     * A click in the grey around the sheet writes at the end — the page is
+     * a document, and there is nowhere on it that should do nothing.
+     */
+    if ((e.target as HTMLElement).matches('[data-page-scroll]')) editor?.focusAt();
   });
-
-  el.addEventListener('blur', e => {
-    const ta = (e.target as HTMLElement).closest<HTMLTextAreaElement>('[data-editor]');
-    if (ta) commit(ta);
-  }, true);
 
   // ── lifecycle ─────────────────────────────────────────────────────────────
 
   function open(): void {
     if (!el.hidden) return;
-    render();
+    paint();
     el.hidden = false;
     // The board underneath must not take keys or pointer events while a modal
-    // surface is over it — and `inert` is the one line that guarantees both,
-    // including for the toolbar buttons the canvas renders into the same host.
+    // surface is over it — see `focus-lock.ts`.
     leaveFocus?.();
     leaveFocus = enterFocusMode('screenplay');
 
+    const mount = el.querySelector<HTMLElement>('[data-page]')!;
+    synced = screenplayBlock(board.std)?.props.text ?? '';
+    editor = createScreenplayEditor(mount, {
+      text: synced,
+      editable: true,
+      coverage: shotsByScene(board.std),
+      placeholder: 'Type anywhere. INT. KITCHEN — DAY starts a scene; a NAME in capitals, then a line under it, is dialogue.',
+      onChange: () => queueSave(),
+      onBlur: () => save(),
+    });
+    paintHint();
+    // An empty script is an invitation to type, so the caret is already there.
+    if (!synced.trim()) editor.focusAt();
+
     /**
-     * Repaint when the SCRIPT changes underneath — which is the common case
-     * here, because the reason the chat is still on screen is so the user can
-     * say "tighten scene four". Without this the agent rewrites the screenplay
-     * and the page in front of the user does not move.
+     * Follow the board while open: coverage as shots are made, and the script
+     * itself when the agent rewrites it. Coalesced to a frame — `blockUpdated`
+     * fires on every pointermove of a drag on the canvas behind.
      */
     docSub = board.store.slots.blockUpdated.subscribe(() => {
-      if (el.hidden || editing) return;   // never repaint under a caret
-      const scroll = el.querySelector<HTMLElement>('[data-page-scroll]')?.scrollTop ?? 0;
-      render();
-      const next = el.querySelector<HTMLElement>('[data-page-scroll]');
-      if (next) next.scrollTop = scroll;
+      if (el.hidden || docQueued) return;
+      docQueued = true;
+      requestAnimationFrame(() => {
+        docQueued = false;
+        if (el.hidden || !editor) return;
+        editor.setCoverage(shotsByScene(board.std));
+        takeOutside();
+        paintHint();
+      });
     });
 
     onKey = (ev: KeyboardEvent) => {
-      if (ev.key !== 'Escape') return;
-      // Escape in the editor means "stop editing", not "leave" — the same rule
-      // the media inspector follows.
-      if (editing) {
-        const ta = el.querySelector<HTMLTextAreaElement>('[data-editor]');
-        if (ta) { ta.blur(); return; }
+      /**
+       * PRINTING MAKES THE PDF. The page is an editor that draws only the lines
+       * on screen, so the browser's print would stop after a screenful — and
+       * the real file is set by the same layout as the page breaks you see.
+       */
+      if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && ev.key.toLowerCase() === 'p') {
+        ev.preventDefault();
+        exportPdf().catch(() => {});
+        return;
       }
+      if (ev.key !== 'Escape') return;
+      // The name field and the open menu each own their Escape first.
+      if (ev.target === nameEl()) return;
+      if (menuEl()?.hidden === false) { setMenu(false); return; }
       close();
     };
     document.addEventListener('keydown', onKey, true);
@@ -442,12 +386,11 @@ ${text}`;
 
   function close(): void {
     if (el.hidden) return;
-    if (editing) {
-      const ta = el.querySelector<HTMLTextAreaElement>('[data-editor]');
-      if (ta) commit(ta);
-    }
+    save();
+    setMenu(false);
     el.hidden = true;
-    editing = false;
+    editor?.destroy();
+    editor = null;
     leaveFocus?.();
     leaveFocus = null;
     docSub?.unsubscribe?.();

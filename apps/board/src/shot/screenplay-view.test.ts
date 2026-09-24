@@ -11,7 +11,8 @@ import { describe, expect, it } from 'vitest';
 
 import { makeTestBoard } from '../blocksuite/test-board';
 import { writeScript } from './screenplay-doc';
-import { rowClass, screenplayView } from './screenplay-view';
+import { pageModel } from './screenplay-lines';
+import { screenplayView, shotsByScene } from './screenplay-view';
 import { createShots, setShotFields } from './shots';
 
 const SCRIPT = `Title: The leak
@@ -42,23 +43,23 @@ function board() {
 }
 
 describe('screenplayView', () => {
-  it('reads the title and every element in source order', () => {
-    const v = screenplayView(board().std);
+  it('reads the title and describes every line of the source', () => {
+    const b = board();
+    const v = screenplayView(b.std);
     expect(v.script.title).toBe('The leak');
-    expect(v.rows.length).toBeGreaterThan(0);
-    // Source line indices must be strictly increasing, or a click on the page
-    // maps back to the wrong place in the text.
-    const lines = v.rows.map(r => r.line);
-    expect([...lines].sort((a, b) => a - b)).toEqual(lines);
+    // One entry per SOURCE line, in order — the editor formats line N from
+    // entry N, so a count that drifted would indent the wrong lines.
+    const page = pageModel(v.text);
+    expect(page.lines).toHaveLength(v.text.split(String.fromCharCode(10)).length);
   });
 
   it('marks scene headings and nothing else', () => {
-    const v = screenplayView(board().std);
-    const marked = v.rows.filter(r => r.mark !== null);
+    const page = pageModel(screenplayView(board().std).text);
+    const marked = page.lines.filter(l => l.mark !== undefined);
     expect(marked).toHaveLength(2);
-    expect(marked.every(r => r.type === 'scene_heading')).toBe(true);
+    expect(marked.every(l => l.type === 'scene_heading')).toBe(true);
     // No shots yet, so both read as uncovered.
-    expect(marked.every(r => r.mark === '—' && !r.covered)).toBe(true);
+    expect(marked.every(l => l.mark === '—' && !l.covered)).toBe(true);
   });
 
   /** The mark IS the coverage — verified from the shots, never asserted. */
@@ -69,13 +70,14 @@ describe('screenplayView', () => {
     setShotFields(b.std, a, { sceneKey: key } as never);
     setShotFields(b.std, c, { sceneKey: key } as never);
 
-    const v = screenplayView(b.std);
-    const marked = v.rows.filter(r => r.mark !== null);
+    const shots = shotsByScene(b.std);
+    const page = pageModel(screenplayView(b.std).text, k => shots.get(k) ?? 0);
+    const marked = page.lines.filter(l => l.mark !== undefined);
     expect(marked[0].mark).toBe('2');
     expect(marked[0].covered).toBe(true);
     // The second scene still has none.
     expect(marked[1].mark).toBe('—');
-    expect(v.stat).toContain('1/2 scenes covered');
+    expect(screenplayView(b.std).stat).toContain('1/2 scenes covered');
   });
 
   it('reports an empty script as empty rather than as a blank page', () => {
@@ -83,17 +85,6 @@ describe('screenplayView', () => {
     const v = screenplayView(b.std);
     expect(v.script.empty).toBe(true);
     expect(v.stat).toBe('');
-  });
-
-  /**
-   * Both painters key their styling off this string, so a change here changes
-   * the card and the printed PDF together — which is the point of sharing it.
-   */
-  it('builds the class list the painters style from', () => {
-    const v = screenplayView(board().std);
-    const heading = v.rows.find(r => r.type === 'scene_heading')!;
-    const action = v.rows.find(r => r.type === 'action')!;
-    expect(rowClass(heading)).toBe('el-scene_heading marker');
-    expect(rowClass(action)).toBe('el-action');
+    expect(pageModel(v.text).pages).toBe(0);
   });
 });

@@ -203,9 +203,18 @@ function isCharacter(
   return nameOnly === nameOnly.toUpperCase() && !SLUGLINE.test(t) && !TRANSITION.test(t);
 }
 
-/** Strip notes and the boneyard — they are authoring scaffolding, never output. */
+/**
+ * Strip notes and the boneyard — they are authoring scaffolding, never output.
+ *
+ * THE NEWLINES STAY. Every element carries the `line` it came from, and the
+ * editor formats the source line by line from those numbers. A boneyard that
+ * spanned three lines used to vanish WITH its line breaks, so every element
+ * after it pointed three lines too high — the editor would have indented the
+ * wrong lines, and a click on the page opened the wrong place.
+ */
 function stripHidden(src: string): string {
-  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\[\[[\s\S]*?\]\]/g, '');
+  const blank = (m: string) => m.replace(/[^\n]/g, '');
+  return src.replace(/\/\*[\s\S]*?\*\//g, blank).replace(/\[\[[\s\S]*?\]\]/g, blank);
 }
 
 /** A slug for a scene key: lowercase, alphanumeric, dash-separated. */

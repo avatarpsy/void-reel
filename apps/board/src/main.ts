@@ -11,6 +11,10 @@
  *   theme  — 'light' | 'dark'; thereafter the parent sends voidspace:board-theme
  */
 import './theme/voidspace.css';
+// The screenplay's PAGE — one stylesheet for the canvas sheet, focus mode and
+// the editor both of them are. Global rather than in the block's Lit styles,
+// which BlockSuite removes whenever the canvas culls the block.
+import './theme/screenplay-page.css';
 // Its own file, not an appendix to the theme: it carries a `@media print` block
 // that has to be read as one piece to be maintainable, and it is the only place
 // in the app that reasons in inches.

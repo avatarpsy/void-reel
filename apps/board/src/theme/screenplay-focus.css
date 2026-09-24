@@ -1,19 +1,10 @@
-/* ══ Screenplay focus ═══════════════════════════════════════════════════════
-   The screenplay at page size — where it is actually written.
+/* ══ Focus modes ════════════════════════════════════════════════════════════
+   The shell every focus mode shares — the screenplay, one document, the board
+   as a document: the overlay, the bar, the name field, the Download menu.
 
-   WHY ITS OWN TYPOGRAPHY AND NOT THE CARD'S. The card's `.page` rules live in
-   the block's Lit styles, which BlockSuite injects while the block is CONNECTED
-   and removes when it disconnects — and `gfx-viewport` culls by visibility, so
-   panning away from the screenplay would strip the stylesheet out from under
-   this overlay. They are also genuinely different renderings: the card is a
-   thumbnail in px, this is a page in inches. What the two share is the ROW
-   MODEL (`shot/screenplay-view.ts`), which is the part that must not drift.
-
-   MEASUREMENTS ARE THE INDUSTRY SPEC, not taste: 12pt Courier, 1.5in left and
-   1in elsewhere, character cues at 3.7in from the page edge, dialogue at 2.5in,
-   ~55 lines to a page. They are fixed so that one page runs about one minute —
-   which is the only reason a writer can judge pacing by looking at a script.
-   Get these wrong and the page count lies. */
+   The SCREENPLAY'S PAGE is not here. It is the same editor on the canvas and
+   in focus, and its typography lives once, in `screenplay-page.css`, in em —
+   so this file only decides how big the page is. */
 
 /* FIRST, AND IT IS NOT A NICETY: `display: flex` on the class BEATS the `hidden`
    attribute's UA rule, because a class selector outranks it. Without this line
@@ -258,165 +249,53 @@ body[data-doc-focus] edgeless-note-mask {
 }
 .vs-focus__btn--primary:hover { filter: brightness(1.08); }
 
-.vs-focus__scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 28px 24px 64px; }
+.vs-focus__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 28px 24px 64px;
+  /* So the screenplay's sheet can size itself to the pane — see below. */
+  container-type: inline-size;
+}
 
-/* THE SHEET. 6in of content inside 1.5in + 1in margins is 8.5in of paper; at
-   96dpi that is 816px, and the padding below is those margins to scale. */
+/* THE SHEET a focus page sits on — edged and cornered exactly as a document
+   on the canvas, the edge being in the shadow token. The board-as-document
+   view sets its own measure and type on top (`document-view.css`). */
 .vs-focus .page {
   width: 100%;
-  max-width: 816px;
   margin: 0 auto;
   box-sizing: border-box;
-  /*
-   * ── WHERE EACH PAGE ENDS, ON THE PAGE ────────────────────────────────────
-   * This mode exists because "a page runs about a minute, so page count IS
-   * pacing, and a writer judges pacing by looking". On screen the sheet is one
-   * continuous scroll, so there was nothing to look AT — the page count only
-   * appeared once it had been printed, which is the wrong moment to find out
-   * the second act drags.
-   *
-   * US letter is 11in with 1in top and bottom, so 9in of text — 864px at 96dpi.
-   * A hairline every 864px, offset by the top margin, is where the paper breaks.
-   * Costs one gradient and no JavaScript, and it is now true because the screen
-   * is set at the printed metrics (see line-height above).
-   */
   background-color: var(--page-bg);
-  background-image: repeating-linear-gradient(
-    to bottom,
-    transparent 0,
-    transparent 863px,
-    var(--page-fold) 863px,
-    var(--page-fold) 864px
-  );
-  background-position: 0 96px;
-  /* Edged and cornered exactly as a document's sheet — the edge is in the
-     shadow token, so a border here would draw it twice. */
+  color: var(--page-ink);
   border-radius: 3px;
   box-shadow: var(--page-shadow);
-  padding: 96px 96px 96px 144px;
-  font-family: 'Courier Prime', 'Courier Final Draft', 'Courier Screenplay', 'Nimbus Mono PS', 'Courier New', Courier, monospace;
-  /* 12pt at 96dpi is 16px, and a screenplay is set solid — 55 lines to the
-     page. line-height 1.5 was comfortable and WRONG: it fits 36 lines where
-     paper fits 55, so the page count this mode exists to let a writer judge
-     was out by a third. Screen and print now measure the same. */
-  font-size: 16px;
-  line-height: 1.15;
-  color: var(--page-ink);
-  white-space: pre-wrap;
-  word-break: break-word;
 }
 
-/* Indents as a FRACTION of the 6in content box, so they hold at any width:
-   character 2.2/6, parenthetical 1.5/6, dialogue 1.0/6 with 1.5/6 off the right. */
-.vs-focus .el-scene_heading {
-  text-transform: uppercase;
-  font-weight: 700;
-  margin: 24px 0 10px;
-  letter-spacing: 0.02em;
-}
-.vs-focus .el-action { margin: 0 0 10px; }
-.vs-focus .el-character { margin: 16px 0 0 36.7%; text-transform: uppercase; }
-.vs-focus .el-parenthetical { margin: 0 0 0 25%; }
-.vs-focus .el-dialogue { margin: 0 25% 0 16.7%; }
-.vs-focus .el-transition { text-align: right; text-transform: uppercase; margin: 14px 0 16px; }
-.vs-focus .el-centered { text-align: center; margin: 14px 0; }
-.vs-focus .el-blank { height: 1em; }
-.vs-focus .el-page_break {
-  border-top: 1px dashed var(--page-rule);
-  margin: 24px 0;
-  height: 0;
-}
-
-/* THE TITLE PAGE — centred, as it prints, rather than the raw 'Title: …'
-   source lines. The card draws the same thing at 0.78 scale. */
-.vs-focus .el-title_field { text-align: center; color: var(--page-synopsis); }
-.vs-focus .el-title_field[data-key='title'] {
-  color: var(--page-ink);
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  margin-top: 1em;
-}
-.vs-focus .el-title_field[data-key='credit'],
-.vs-focus .el-title_field[data-key='author'],
-.vs-focus .el-title_field[data-key='authors'] { color: var(--page-ink); margin: 1em 0 0.5em; }
-.vs-focus .el-title_field + .el-blank { height: 2.5em; }
-
-/* Sections and synopses are NOT part of the script — every Fountain tool omits
-   them from the printed page, so they read as margin voice here and vanish in
-   print (see the print block below). */
-.vs-focus .el-section {
-  font-family: var(--affine-font-family);
-  color: var(--page-section);
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  margin: 32px 0 4px;
-  border-top: 1px solid var(--page-section-rule);
-  padding-top: 14px;
-  font-size: 13px;
-}
-.vs-focus .el-synopsis {
-  font-family: var(--affine-font-family);
-  font-style: italic;
-  font-size: 13px;
-  color: var(--page-synopsis);
-  margin: 0 0 12px;
-}
-
-/* Coverage marks, in the margin beside the scene heading — never in the prose.
-   It sat 26px down, which is beside the synopsis under the heading; the line
-   box here is the heading's own (16px × 1.15), so the mark centres on it. */
-.vs-focus .marker { position: relative; }
-.vs-focus .marker::before {
-  content: attr(data-mark);
-  position: absolute;
-  left: -46px;
-  top: 0;
-  line-height: 18.4px;
-  width: 36px;
-  text-align: right;
-  font-family: var(--affine-font-family);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  color: var(--page-mark);
-}
-.vs-focus .marker[data-covered='yes']::before { color: var(--page-mark-done); font-weight: 500; }
-
-/* Click a line to edit it there — say so before the click. */
-.vs-focus .page > div[data-line] { cursor: text; border-radius: 3px; }
-.vs-focus .page > div[data-line]:hover { background: var(--page-hover); }
-
-/* WRITING — the same sheet, now plain text. It is a `.page` as well, so it
-   keeps the paper, the edge and the margins, and entering it reads as the page
-   becoming editable. It fills the view and scrolls itself, so the scroller
-   around it gives up its bottom padding while it is there. */
-.vs-focus__scroll:has(> .vs-focus__editor) { padding-bottom: 0; overflow: hidden; }
-.vs-focus .page.vs-focus__editor {
-  display: block;
-  height: 100%;
-  border: none;
-  border-radius: 3px 3px 0 0;
-  outline: none;
-  resize: none;
-  background-image: none;
-  line-height: 1.5;
-  tab-size: 4;
-}
-
-/* An empty screenplay is an empty PAGE, and clicking it starts writing. */
-.vs-focus .page.vs-focus__empty {
-  padding: 180px 96px;
-  background-image: none;
-  text-align: center;
-  white-space: normal;
-  font: 400 14px/1.7 var(--affine-font-family);
-  color: var(--page-synopsis);
+/* THE SCREENPLAY'S PAGE — the editor, on a sheet 8.5in wide. Its typography
+   is ALL in `screenplay-page.css`, in em, where an em is 12pt of Courier; the
+   only thing decided here is how big an em is. 12pt at screen resolution is
+   16px, making the sheet 816px — and in a pane narrower than that the whole
+   page shrinks in proportion, rather than wrapping differently from paper. */
+.vs-focus .sp-focus-page {
+  width: 51em;
+  margin: 0 auto;
+  font-size: min(16px, calc(100cqw / 51));
   cursor: text;
 }
-.vs-focus__empty b { display: block; margin-bottom: 8px; font-size: 16px; font-weight: 600; color: var(--page-ink); }
-.vs-focus__empty p { max-width: 420px; margin: 0 auto; }
+
+/* A board with nothing to assemble into a document yet (`document-view.ts`). */
+.vs-focus__empty {
+  max-width: 560px;
+  margin: 48px auto;
+  padding: 32px;
+  background: var(--page-bg);
+  border: 1px dashed var(--page-rule);
+  border-radius: 10px;
+  text-align: center;
+  font: 400 13px/1.7 var(--affine-font-family);
+  color: var(--page-synopsis);
+}
+.vs-focus__empty b { display: block; margin-bottom: 8px; font-size: 15px; color: var(--page-ink); }
 .vs-focus__empty code {
   font-family: 'Courier New', monospace;
   background: var(--vs-hover);
@@ -469,7 +348,6 @@ body[data-doc-focus] edgeless-note-mask {
    */
   [data-focus-mode] .vs-focus__bar,
   [data-focus-mode] .vs-focus__foot,
-  [data-focus-mode] .vs-focus__editor,
   [data-focus-mode] .affine-edgeless-viewport,
   [data-focus-mode] .vs-board-bar,
   [data-focus-mode] .vs-assets,
@@ -506,67 +384,24 @@ body[data-doc-focus] edgeless-note-mask {
     flex: none !important;
   }
 
+  /* The sheet loses its screen chrome — paper is the page. */
   .vs-focus .page {
     max-width: none;
     width: auto;
     margin: 0;
     padding: 0;
     border: 0;
+    border-radius: 0;
     box-shadow: none;
     background: #fff;
-    /* 12pt Courier is the standard, and the reason a page runs a minute. */
-    font-family: 'Courier Prime', 'Courier Final Draft', 'Courier Screenplay', 'Nimbus Mono PS', 'Courier New', Courier, monospace;
-    font-size: 12pt;
-    line-height: 1;
     color: #000;
   }
 
-  /* Indents from the CONTENT box, which the @page margin has already inset to
-     1.5in — so each is (spec position − 1.5in). */
-  .vs-focus .el-scene_heading {
-    margin: 1em 0;
-    text-transform: uppercase;
-    font-weight: 400;
-    /* A slugline stranded at the foot of a page is the classic formatting
-       error: it promises a scene the page never shows. */
-    break-after: avoid-page;
-    page-break-after: avoid;
-  }
-  .vs-focus .el-action { margin: 0 0 1em; }
-  .vs-focus .el-character { margin: 1em 0 0 2.2in; text-transform: uppercase; }
-  .vs-focus .el-parenthetical { margin: 0 0 0 1.5in; }
-  .vs-focus .el-dialogue { margin: 0 1.5in 0 1in; }
-  /* A character cue must never be split from the line it introduces. */
-  .vs-focus .el-character,
-  .vs-focus .el-parenthetical {
-    break-after: avoid-page;
-    page-break-after: avoid;
-  }
-  .vs-focus .el-dialogue {
-    break-inside: avoid-page;
-    page-break-inside: avoid;
-  }
-  .vs-focus .el-transition { text-align: right; text-transform: uppercase; margin: 1em 0; }
-  .vs-focus .el-centered { text-align: center; margin: 1em 0; }
-  .vs-focus .el-blank { height: 1em; }
-  /* The title page is its own sheet: a third of the way down, and the script
-     starts on the next page — as `document/screenplay-pdf.ts` sets it. */
-  .vs-focus .el-title_field { color: #000; }
-  .vs-focus .el-title_field[data-key='title'] { margin-top: 3in; }
-  .vs-focus .el-title_field + .el-blank { break-after: page; page-break-after: always; height: 0; }
-  .vs-focus .el-page_break {
-    break-before: page;
-    page-break-before: always;
-    border: 0;
-    height: 0;
-    margin: 0;
-  }
-
-  /* SECTIONS, SYNOPSES AND COVERAGE MARKS ARE NOT THE SCRIPT. Every Fountain
-     tool omits them from the printed page — they are the writer's scaffolding,
-     and the PDF someone sends out must contain the film and nothing else. */
-  .vs-focus .el-section,
-  .vs-focus .el-synopsis { display: none !important; }
-  .vs-focus .marker::before { content: none !important; }
-  .vs-focus .page > div[data-line]:hover { background: none !important; }
+  /*
+   * THE SCREENPLAY IS NOT PRINTED FROM HERE. Its page is an editor that
+   * draws only the lines on screen, so the browser would print a screenful
+   * and stop. Ctrl+P in screenplay focus makes the real PDF instead
+   * (`ui/screenplay-focus.ts`) — set by the same layout the page on screen
+   * marks its page breaks from, which a print stylesheet could only imitate.
+   */
 }
