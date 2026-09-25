@@ -84,7 +84,8 @@ export const AutoCaptionPanel: React.FC = () => {
   const handleStopTranscription = useCallback(async () => {
     const speechEngine = await getSpeechToTextEngine();
 
-    const result = speechEngine.stopTranscription();
+    // Settled: waits for the phrase the recognizer was still finishing.
+    const result = await speechEngine.stopTranscriptionSettled();
     setIsTranscribing(false);
     setProgress(null);
 

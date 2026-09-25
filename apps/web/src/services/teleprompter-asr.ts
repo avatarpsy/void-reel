@@ -246,8 +246,17 @@ export class TeleprompterAsr {
   // Model/worker died → tell the prompter to fall back to the crawl (idle),
   // instead of leaving it stuck on "Warming up…" forever.
   private onFail = () => {
-    if (!this.stopped) this.setStatus("idle");
+    if (!this.stopped) {
+      this.degraded = true;
+      this.setStatus("idle");
+    }
   };
+  /**
+   * Fell back to the crawl after a run of failed windows. The loop keeps
+   * sending, so when a window succeeds again (a GPU hiccup passed) follow the
+   * voice again — it used to stay on the crawl for the rest of the take.
+   */
+  private degraded = false;
   /** Downsample factor when the context couldn't be opened at 16 kHz. */
   private decimate = 1;
   /** Rotating phase for decimation so we don't re-sample the same offset. */
@@ -499,7 +508,12 @@ export class TeleprompterAsr {
   }
 
   private handleResult(text: string) {
-    if (this.stopped || !text) return;
+    if (this.stopped) return;
+    if (this.degraded && _workerReady) {
+      this.degraded = false;
+      this.maybeListening();
+    }
+    if (!text) return;
     const words = text.split(/\s+/).map(normalizeWord).filter(Boolean).slice(-TAIL_WORDS);
     if (words.length) this.cb.onWords(words);
   }

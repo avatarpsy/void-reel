@@ -187,25 +187,30 @@ export class SpeechToTextEngine {
     if (!this.recognition) return;
 
     this.recognition.onresult = (event: SpeechRecognitionEvent) => {
-      const result = event.results[event.results.length - 1];
-      if (!result.isFinal) return;
+      // Every result that changed in this event, not only the last: one event
+      // can settle several phrases, and reading `results[length - 1]` alone
+      // dropped all but the final one.
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i];
+        if (!result.isFinal) continue;
 
-      const transcript = result[0].transcript.trim();
-      if (!transcript) return;
+        const transcript = result[0].transcript.trim();
+        if (!transcript) continue;
 
-      const currentTime = this.getCurrentTime();
-      const segment: TranscriptionSegment = {
-        text: transcript,
-        startTime: this.segmentStartTime,
-        endTime: currentTime,
-        confidence: result[0].confidence,
-      };
+        const currentTime = this.getCurrentTime();
+        const segment: TranscriptionSegment = {
+          text: transcript,
+          startTime: this.segmentStartTime,
+          endTime: currentTime,
+          confidence: result[0].confidence,
+        };
 
-      this.segments.push(segment);
-      this.segmentStartTime = currentTime;
+        this.segments.push(segment);
+        this.segmentStartTime = currentTime;
 
-      if (this.segmentCallback) {
-        this.segmentCallback(segment);
+        if (this.segmentCallback) {
+          this.segmentCallback(segment);
+        }
       }
 
       this.reportProgress("transcribing");
@@ -219,6 +224,8 @@ export class SpeechToTextEngine {
     };
 
     this.recognition.onend = () => {
+      this.onEnded?.();
+      this.onEnded = null;
       if (this.isTranscribing && this.recognition) {
         try {
           this.recognition.start();
@@ -291,6 +298,31 @@ export class SpeechToTextEngine {
       this.isTranscribing = false;
       throw error;
     }
+  }
+
+  /** Resolves the settled-stop wait below when the recognizer ends. */
+  private onEnded: (() => void) | null = null;
+
+  /**
+   * Stop, and wait for the recognizer to hand over the phrase it was still
+   * finishing (up to 2 s). `stopTranscription` returns at once, before
+   * `recognition.stop()` has delivered that final — so the last thing the
+   * user said never became a caption.
+   */
+  async stopTranscriptionSettled(): Promise<TranscriptionResult> {
+    if (this.isTranscribing && this.recognition) {
+      const ended = new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, 2000);
+        this.onEnded = () => { clearTimeout(t); resolve(); };
+      });
+      this.stopTranscription();
+      await ended;
+    }
+    return {
+      success: true,
+      segments: [...this.segments],
+      language: this.currentOptions.language,
+    };
   }
 
   stopTranscription(): TranscriptionResult {
