@@ -12,7 +12,7 @@ import { useVoidspaceStore } from "./stores/voidspace-store";
 import { useRouter } from "./hooks/use-router";
 import { useKieAIPoller } from "./hooks/useKieAIPoller";
 import { ensureWhisperModel } from "./services/teleprompter-asr";
-import { SOCIAL_MEDIA_PRESETS, getSpeedEngine, type SocialMediaCategory } from "@openreel/core";
+import { SOCIAL_MEDIA_PRESETS, getSpeedEngine, getMediaEngine, type MediaMetadata, type SocialMediaCategory } from "@openreel/core";
 import { readClipLooks, readTrackTransitions, readbackSourcesFrom } from "./agent/clip-readback";
 import { TooltipProvider } from "@openreel/ui";
 import {
@@ -527,6 +527,7 @@ async function hydrateLibraryMediaBlobs(): Promise<void> {
     let bridge: any = null;
     const newBlobs = new Map<string, Blob>();
     const freshThumbs = new Map<string, string>();
+    const sourceMetadata = new Map<string, MediaMetadata>();
     let blobHits = 0;
 
     for (const item of needsWork) {
@@ -546,6 +547,15 @@ async function hydrateLibraryMediaBlobs(): Promise<void> {
       }
       if (!blob) continue; // truly unavailable — item still lists, just inert
       if (!(item.blob instanceof Blob)) { newBlobs.set(item.id, blob); blobHits++; }
+      // Source properties are independent of the output canvas and clip trim.
+      // Legacy generated items used the canvas dimensions as source metadata.
+      if (item.type === "video") {
+        try {
+          const engine = getMediaEngine();
+          await engine.initialize();
+          sourceMetadata.set(item.id, await engine.extractMetadata(blob));
+        } catch { /* keep the existing metadata if the source cannot be probed */ }
+      }
 
       // 2. Regenerate a persistable data: thumbnail when the current one won't
       //    survive (video/image only; audio renders a waveform, no frame).
@@ -565,24 +575,29 @@ async function hydrateLibraryMediaBlobs(): Promise<void> {
       }
     }
 
-    if (newBlobs.size === 0 && freshThumbs.size === 0) {
+    if (newBlobs.size === 0 && freshThumbs.size === 0 && sourceMetadata.size === 0) {
       console.log(`[Voidspace] library hydration: nothing to restore (${needsWork.length} candidates, none recoverable)`);
       return;
     }
     const cur = useProjectStore.getState().project;
+    if (cur.id !== proj.id) return;
+    const originalSources = new Map(items.map((m) => [m.id, m.originalUrl]));
     useProjectStore.setState({
       project: {
         ...cur,
         mediaLibrary: {
           ...cur.mediaLibrary,
           items: cur.mediaLibrary.items.map((m) => {
+            if (!originalSources.has(m.id) || originalSources.get(m.id) !== m.originalUrl) return m;
             const nb = newBlobs.get(m.id);
             const nt = freshThumbs.get(m.id);
-            if (!nb && !nt) return m;
+            const metadata = sourceMetadata.get(m.id);
+            if (!nb && !nt && !metadata) return m;
             return {
               ...m,
               blob: nb && !(m.blob instanceof Blob) ? nb : m.blob,
               thumbnailUrl: nt ?? m.thumbnailUrl,
+              metadata: metadata ? { ...m.metadata, ...metadata } : m.metadata,
             };
           }),
         },

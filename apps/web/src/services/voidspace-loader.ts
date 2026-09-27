@@ -1440,7 +1440,7 @@ function setSceneListContext(
 
   useVoidspaceStore.getState().setSceneList({
     sceneListId,
-    name: slData.name as string | undefined,
+    name: (slData.name || slData.title) as string | undefined,
     videoUrl: slData.video_url as string | undefined,
     thumbnailUrl:
       (slData.thumbnail_url as string | undefined) ||
@@ -1918,7 +1918,10 @@ export async function loadSceneListAsProject(
           // it, and because this branch is the load SSOT no amount of
           // re-sending the board would ever reach it. Same shape as the heals
           // above; see `healGraphicBlend`.
-          const blended = healGraphicBlends(parsed);
+          let blended = healGraphicBlends(parsed);
+          if (!blended.name || blended.name === "Voidspace Project") {
+            blended = { ...blended, name: slData.name || slData.title || slData.avatar_name || "Voidspace Project" };
+          }
 
           console.log(`[voidspace-loader] Using project_state blob (${projectStateRaw.json.length} bytes${projectStateRaw.history ? `, +${projectStateRaw.history.length}b history` : ""})`);
           // Heal legacy '-fallback' media ids (cross-project IndexedDB
@@ -3486,7 +3489,7 @@ export async function loadSceneListAsProject(
 
   const project: Project = {
     id: buildVoidspaceProjectId(userId, sceneListId, slData.avatar_id as string | undefined),
-    name: slData.name || slData.avatar_name || "Voidspace Project",
+    name: slData.name || slData.title || slData.avatar_name || "Voidspace Project",
     createdAt: slData.created_at?.seconds
       ? slData.created_at.seconds * 1000
       : now,
