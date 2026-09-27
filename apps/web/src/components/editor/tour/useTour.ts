@@ -108,6 +108,9 @@ export function useTour() {
   }, []);
 
   useEffect(() => {
+    // The host already owns onboarding and may be opening an agent task.
+    // Keep Help's explicit start action, without covering embedded work.
+    if (new URLSearchParams(window.location.search).get("embed") === "1") return;
     const completed = localStorage.getItem(ONBOARDING_KEY);
     if (!completed) {
       const timer = setTimeout(() => {

@@ -576,6 +576,28 @@ export const useProjectStore = create<ProjectState>()(
       },
 
       loadProject: (project: Project) => {
+        // Older inspector rollback code accidentally persisted its targeting
+        // wrapper instead of the native clip. Recover only that exact shape.
+        project = {
+          ...project,
+          timeline: {
+            ...project.timeline,
+            tracks: project.timeline.tracks.map((track) => ({
+              ...track,
+              clips: track.clips.map((clip) => {
+                let restored = clip as any;
+                for (let depth = 0; depth < 8 && !Number.isFinite(restored.duration); depth++) {
+                  if (!restored.raw || restored.raw.id !== clip.id || !restored.kind) break;
+                  const { raw, kind: _wrapperKind, ...edits } = restored;
+                  restored = { ...raw, ...edits };
+                }
+                return typeof restored.mediaId === "string"
+                  && Number.isFinite(restored.startTime) && Number.isFinite(restored.duration)
+                  ? restored : clip;
+              }),
+            })),
+          },
+        };
         const titleEngine = useEngineStore.getState().getTitleEngine();
         const graphicsEngine = useEngineStore.getState().getGraphicsEngine();
 

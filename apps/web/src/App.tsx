@@ -3570,7 +3570,7 @@ function App() {
               // Ctrl+Z/redo (and the snapshot above bookmarks an executor
               // stack the setters never grow, making its restore a no-op).
               const beforeStates = new Map<string, unknown>(
-                targets.map((t: any) => [t.id, JSON.parse(JSON.stringify(t))]),
+                targets.map((t) => [t.id, JSON.parse(JSON.stringify(t.raw))]),
               );
               const results: Array<{ clipId: string; ok: boolean; note?: string; error?: string }> = [];
               let threw: unknown = null;
@@ -3592,6 +3592,7 @@ function App() {
                * `Cut ranges` and `Cut silence` already do for the same reason.
                */
               const hist = (useProjectStore.getState() as any).actionHistory;
+              const historyBefore = hist?.serialize?.();
               const historyDepthBefore: number = hist?.getHistory?.().length ?? 0;
               try { hist?.beginGroup?.(`Apply ${surface.name}`); } catch { /* older history */ }
               try {
@@ -3637,6 +3638,9 @@ function App() {
               // no history entry (torn, un-undoable state). Restore every target
               // to its captured before-state, register NO history entry, and fail.
               if (threw || results.some((r) => !r.ok)) {
+                // Failed executor-backed surfaces must not leave partial edits
+                // on the undo/redo stack after their clip state is restored.
+                if (historyBefore) hist.restore(historyBefore);
                 const engRb = useEngineStore.getState().getTitleEngine();
                 const timelineClipIds = new Set<string>();
                 for (const tr of project.timeline?.tracks ?? []) {
