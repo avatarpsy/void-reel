@@ -63,6 +63,43 @@ import { restoreMediaItem } from "../utils/media-recovery";
 import { collectFolder, buildRelinkPlan, type RelinkableItem } from "../services/media-relink";
 import { projectManager } from "../services/project-manager";
 
+/** Repair known legacy persisted shapes for cloud AND local recovery. */
+function normalizeSavedEditorProject(project: Project): Project {
+  // Text lives outside track.clips. Old additive imports dropped the
+  // empty caption track, making saved captions invisible in the export.
+  if (project.textClips?.some(clip => clip.trackId === "track-captions")
+    && !project.timeline.tracks.some(track => track.id === "track-captions")
+    && !project.deletedTracks?.some(track => track.id === "track-captions")) {
+    project = { ...project, timeline: { ...project.timeline, tracks: [{
+      id: "track-captions", type: "text", name: "Captions", clips: [],
+      transitions: [], locked: false, hidden: false, muted: false, solo: false,
+    }, ...project.timeline.tracks] } };
+  }
+  // Older inspector rollback code accidentally persisted its targeting
+  // wrapper instead of the native clip. Recover only that exact shape.
+  project = {
+    ...project,
+    timeline: {
+      ...project.timeline,
+      tracks: project.timeline.tracks.map((track) => ({
+        ...track,
+        clips: track.clips.map((clip) => {
+          let restored = clip as any;
+          for (let depth = 0; depth < 8 && !Number.isFinite(restored.duration); depth++) {
+            if (!restored.raw || restored.raw.id !== clip.id || !restored.kind) break;
+            const { raw, kind: _wrapperKind, ...edits } = restored;
+            restored = { ...raw, ...edits };
+          }
+          return typeof restored.mediaId === "string"
+            && Number.isFinite(restored.startTime) && Number.isFinite(restored.duration)
+            ? restored : clip;
+        }),
+      })),
+    },
+  };
+  return project;
+}
+
 /**
  * ProjectState - Complete state interface for project management
  *
@@ -576,38 +613,7 @@ export const useProjectStore = create<ProjectState>()(
       },
 
       loadProject: (project: Project) => {
-        // Text lives outside track.clips. Old additive imports dropped the
-        // empty caption track, making saved captions invisible in the export.
-        if (project.textClips?.some(clip => clip.trackId === "track-captions")
-          && !project.timeline.tracks.some(track => track.id === "track-captions")
-          && !project.deletedTracks?.some(track => track.id === "track-captions")) {
-          project = { ...project, timeline: { ...project.timeline, tracks: [{
-            id: "track-captions", type: "text", name: "Captions", clips: [],
-            transitions: [], locked: false, hidden: false, muted: false, solo: false,
-          }, ...project.timeline.tracks] } };
-        }
-        // Older inspector rollback code accidentally persisted its targeting
-        // wrapper instead of the native clip. Recover only that exact shape.
-        project = {
-          ...project,
-          timeline: {
-            ...project.timeline,
-            tracks: project.timeline.tracks.map((track) => ({
-              ...track,
-              clips: track.clips.map((clip) => {
-                let restored = clip as any;
-                for (let depth = 0; depth < 8 && !Number.isFinite(restored.duration); depth++) {
-                  if (!restored.raw || restored.raw.id !== clip.id || !restored.kind) break;
-                  const { raw, kind: _wrapperKind, ...edits } = restored;
-                  restored = { ...raw, ...edits };
-                }
-                return typeof restored.mediaId === "string"
-                  && Number.isFinite(restored.startTime) && Number.isFinite(restored.duration)
-                  ? restored : clip;
-              }),
-            })),
-          },
-        };
+        project = normalizeSavedEditorProject(project);
         const titleEngine = useEngineStore.getState().getTitleEngine();
         const graphicsEngine = useEngineStore.getState().getGraphicsEngine();
 
@@ -3224,7 +3230,7 @@ export const useProjectStore = create<ProjectState>()(
         // (no historyData) still recover with a fresh history — same
         // behaviour as before this change.
         const recovered = await autoSaveManager.recoverWithHistory(saveId);
-        const recoveredProject = recovered?.project ?? null;
+        const recoveredProject = recovered?.project ? normalizeSavedEditorProject(recovered.project) : null;
         const persistedHistory = recovered?.historyData ?? null;
         if (recoveredProject) {
           const storedMedia = await loadProjectMedia(recoveredProject.id);

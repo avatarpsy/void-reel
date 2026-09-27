@@ -388,7 +388,10 @@ function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
     (n, a) => n + a.length,
     0,
   );
+  const adoptFreshName = (!current.name || current.name === "Voidspace Project")
+    && !!fresh.name && fresh.name !== "Voidspace Project";
   const dirty =
+    adoptFreshName ||
     newMedia.length > 0 ||
     upgradedMediaById.size > 0 ||
     newTextClips.length > 0 ||
@@ -448,6 +451,7 @@ function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
   useProjectStore.setState({
     project: {
       ...current,
+      name: adoptFreshName ? fresh.name : current.name,
       settings: adoptFreshSettings
         ? { ...current.settings, ...fresh.settings }
         : current.settings,
