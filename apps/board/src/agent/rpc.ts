@@ -92,8 +92,8 @@ function bounds(m: { xywh?: string }): { x: number; y: number; w: number; h: num
   }
 }
 import {
-  allModels, aspectFor, checkShot, effectiveModel, estimateShotCredits, findModel,
-  plannedSeconds, referenceTag, resolutionFor, setModelCatalogue, type ModelCaps,
+  allModels, aspectFor, checkShot, creditConversion, effectiveModel, estimateShotCredits, findModel,
+  plannedSeconds, referenceTag, resolutionFor, setCreditConversion, setModelCatalogue, type ModelCaps,
 } from '../shot/models';
 import {
   addGraphic, addMedia, addTake, chooseTake, createShots, deleteShot, moveMedia, readShot,
@@ -384,6 +384,8 @@ function digest(board: MountedBoard) {
         model: s.model,
         modelLabel: caps?.label ?? '',
         durationSec: s.durationSec,
+        aspect: aspectFor(s, caps),
+        resolution: resolutionFor(s, caps),
         // WHAT THIS SHOT IS. A graphic has no model and no first frame, so an
         // agent that cannot see the kind will keep offering both.
         kind: s.kind,
@@ -1133,6 +1135,7 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
      */
     'voidspace:board-models': args => {
       const models = Array.isArray(args.models) ? (args.models as ModelCaps[]) : [];
+      setCreditConversion(args.creditsPerUsd);
       setModelCatalogue(models, String(args.defaultModel ?? ''));
       return { ok: true as const, rev, modelCount: allModels().length };
     },
@@ -1312,10 +1315,15 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
     'voidspace:board-model-catalog': () => ({
       ok: true as const,
       rev,
+      pricing: { currency: 'credits', creditsPerUsd: creditConversion(), estimatesOnly: true },
       models: allModels().map(m => ({
         id: m.id,
         label: m.label,
         credits: m.credits,
+        pricePerSec: m.pricePerSec,
+        resolutions: m.resolutions,
+        aspectRatios: m.aspectRatios,
+        ...(m.local ? { local: m.local } : {}),
         locked: m.locked,
         durations: m.allowedDurations.length
           ? m.allowedDurations
@@ -1359,7 +1367,17 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
           `No video model with id ${modelId}. Call board_model_catalog for the ids in use.`,
         );
       }
-      const patch: { model: string; durationSec?: number } = { model: modelId };
+      const caps = findModel(modelId);
+      const patch: { model: string; durationSec?: number; aspect?: string; resolution?: string } = { model: modelId };
+      for (const key of ['aspect', 'resolution'] as const) {
+        if (args[key] === undefined) continue;
+        const value = String(args[key]).trim();
+        const offered = (key === 'aspect' ? caps?.aspectRatios : caps?.resolutions) ?? [];
+        if (value && !offered.includes(value)) {
+          return fail('unsupported_format', `${caps?.label || 'This model'} does not offer ${key} ${value}. Available: ${offered.join(', ') || 'model default'}.`);
+        }
+        patch[key] = value;
+      }
       if (args.durationSec !== undefined) {
         patch.durationSec = Math.max(0, Math.round(Number(args.durationSec) || 0));
       }

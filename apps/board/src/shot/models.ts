@@ -114,6 +114,14 @@ export interface ModelCaps {
 
 let catalogue: ModelCaps[] = [];
 let defaultModelId = '';
+let creditsPerUsd: number | null = null;
+
+/** Sent by the parent from its pricing registry; unknown for older hosts. */
+export function setCreditConversion(value: unknown): void {
+  creditsPerUsd = typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+export function creditConversion(): number | null { return creditsPerUsd; }
 
 /**
  * Who to tell when the catalogue lands.
