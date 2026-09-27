@@ -5,18 +5,11 @@ export function MobileBlocker() {
   const [isMobile, setIsMobile] = useState(false);
 
   useEffect(() => {
-    const checkMobile = () => {
-      const userAgent = navigator.userAgent.toLowerCase();
-      const mobileKeywords =
-        /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini|mobile|tablet/i;
-      const isMobileDevice = mobileKeywords.test(userAgent);
-      const isSmallScreen = window.innerWidth < 768;
-      setIsMobile(isMobileDevice || isSmallScreen);
-    };
-
-    checkMobile();
-    window.addEventListener("resize", checkMobile);
-    return () => window.removeEventListener("resize", checkMobile);
+    // An embedded desktop editor becomes narrow when its chat opens. Width
+    // describes its pane, not the user's device, and must not block editing.
+    setIsMobile(
+      /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini|mobile|tablet/i.test(navigator.userAgent),
+    );
   }, []);
 
   if (!isMobile) return null;
