@@ -576,6 +576,16 @@ export const useProjectStore = create<ProjectState>()(
       },
 
       loadProject: (project: Project) => {
+        // Text lives outside track.clips. Old additive imports dropped the
+        // empty caption track, making saved captions invisible in the export.
+        if (project.textClips?.some(clip => clip.trackId === "track-captions")
+          && !project.timeline.tracks.some(track => track.id === "track-captions")
+          && !project.deletedTracks?.some(track => track.id === "track-captions")) {
+          project = { ...project, timeline: { ...project.timeline, tracks: [{
+            id: "track-captions", type: "text", name: "Captions", clips: [],
+            transitions: [], locked: false, hidden: false, muted: false, solo: false,
+          }, ...project.timeline.tracks] } };
+        }
         // Older inspector rollback code accidentally persisted its targeting
         // wrapper instead of the native clip. Recover only that exact shape.
         project = {

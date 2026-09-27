@@ -200,10 +200,12 @@ export function mergeSavedArrangement(rebuilt: Project, savedIn: Project): Proje
   for (const t of rebuilt.timeline.tracks) {
     if (savedTrackIds.has(t.id)) continue;
     const add = newByTrack.get(t.id);
-    if (!add?.length) continue;
-    const fresh: Track = { ...t, clips: add.map(shift) };
+    const hasNewText = newTextClips.some(clip => clip.trackId === t.id);
+    if (!add?.length && !hasNewText) continue;
+    if (saved.deletedTracks?.some(track => track.id === t.id)) continue;
+    const fresh: Track = { ...t, clips: (add ?? []).map(shift) };
     const firstVideo = tracks.findIndex((x) => x.type === "video");
-    const stacksOnTop = t.id.startsWith("track-take-") || t.id.startsWith("track-graphic-");
+    const stacksOnTop = t.type === "text" || t.id.startsWith("track-take-") || t.id.startsWith("track-graphic-");
     if (stacksOnTop && firstVideo >= 0) tracks.splice(firstVideo, 0, fresh);
     else tracks.push(fresh);
   }
