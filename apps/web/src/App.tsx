@@ -2039,12 +2039,52 @@ function App() {
               // the same words at the same start already exists → it IS the
               // answer; never add a second copy.
               const existingClip = (useEngineStore.getState().getTitleEngine()?.getAllTextClips() ?? [])
-                .find((tc: any) => Math.abs((tc.startTime ?? 0) - startTime) < 0.05 && tc.text === text.trim());
+                .find((tc: any) => Math.abs((tc.startTime ?? 0) - startTime) < 0.05
+                  // A split line (see FIT THE FRAME) exists as its first group.
+                  && (tc.text === text.trim() || (typeof tc.text === "string" && tc.text.length > 0
+                    && text.trim().replace(/\s+/g, " ").startsWith(tc.text + " "))));
               if (existingClip) {
                 reply({ type: "voidspace:text-clip-added", requestId: msg.requestId, ok: true, clipId: existingClip.id ?? null, trackId: "track-captions", existing: true });
                 break;
               }
               const endTime = startTime + (typeof durationSec === "number" && durationSec > 0 ? durationSec : 3);
+              // FIT THE FRAME. Captions are drawn as ONE line at the viral size
+              // (~7% of height) and neither renderer wraps plain text, so a
+              // sentence ran off both edges of a 9:16 frame (Grok test #5,
+              // 29 Sep: "I HAD THE WORDS READY THIS MORNING..." → "WORDS READY
+              // THIS M"). Untimed text is split the way the pipeline's own
+              // captions are — short consecutive groups (≤18 chars filled ~85%
+              // of 1080 px), each timed by its share of the characters. Timed
+              // words keep one clip: that renderer already scales to fit.
+              const clean = text.trim().replace(/\s+/g, " ");
+              if (!(Array.isArray(words) && words.length > 0) && clean.length > 18) {
+                const groups: string[] = [];
+                for (const w of clean.split(" ")) {
+                  const last = groups[groups.length - 1];
+                  if (last !== undefined && (last + " " + w).length <= 18) groups[groups.length - 1] = last + " " + w;
+                  else groups.push(w);
+                }
+                const span = endTime - startTime;
+                const chars = groups.reduce((n, g) => n + g.length, 0) || 1;
+                let t = startTime;
+                const ids: string[] = [];
+                for (let i = 0; i < groups.length; i++) {
+                  const end = i === groups.length - 1 ? endTime : t + span * (groups[i].length / chars);
+                  await useProjectStore.getState().addSubtitle({
+                    id: `agent-text-${Date.now().toString(36)}-${i}`,
+                    text: groups[i], startTime: t, endTime: end,
+                    ...(typeof animationStyle === "string" ? { animationStyle } : {}),
+                  } as any);
+                  const made = (useEngineStore.getState().getTitleEngine()?.getAllTextClips() ?? [])
+                    .filter((tc: any) => Math.abs((tc.startTime ?? 0) - t) < 0.05 && tc.text === groups[i]).pop();
+                  if (made?.id) ids.push(made.id);
+                  t = end;
+                }
+                reply({ type: "voidspace:text-clip-added", requestId: msg.requestId, ok: true,
+                  clipId: ids[0] ?? null, clipIds: ids, trackId: "track-captions",
+                  note: `split into ${groups.length} caption groups so the line fits the frame` });
+                break;
+              }
               await useProjectStore.getState().addSubtitle({
                 id: `agent-text-${Date.now().toString(36)}`,
                 text: text.trim(),
