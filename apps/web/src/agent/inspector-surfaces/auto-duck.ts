@@ -343,7 +343,7 @@ export function duckEnvelope(
 }
 
 const DEFAULTS: Required<Omit<AutoDuckConfig, "clear" | "againstTrackId">> = {
-  duckTo: 0.25,
+  duckTo: 0.3,
   attackSec: 0.3,
   releaseSec: 0.5,
   leadSec: 0.15,
@@ -371,7 +371,7 @@ export const surface: InspectorSurface<AutoDuckConfig> = {
     properties: {
       duckTo: {
         type: "number", minimum: 0, maximum: 1,
-        description: "Level under the voice, as a fraction of normal. Default 0.25. Use 0.15 for a dense voiceover, 0.4 when the music should stay present.",
+        description: "Level under the voice, as a fraction of normal. Default 0.3. Use 0.25 for a dense voiceover, 0.4 when the music should stay present. Never below 0.2 — lower and the bed vanishes on a phone once the render is loudness-normalised.",
       },
       attackSec: { type: "number", minimum: 0, maximum: 3, description: "Ramp down. Default 0.3." },
       releaseSec: { type: "number", minimum: 0, maximum: 5, description: "Ramp back up. Default 0.5 — longer than the attack, which is what sounds natural." },
@@ -405,7 +405,9 @@ export const surface: InspectorSurface<AutoDuckConfig> = {
     }
 
     const cfg: Required<Omit<AutoDuckConfig, "clear" | "againstTrackId">> = {
-      duckTo: typeof config.duckTo === "number" ? Math.max(0, Math.min(1, config.duckTo)) : DEFAULTS.duckTo,
+      // Floor 0.2 (−14 dB): Episode 3 ducked to 0.08 and, after the render was
+      // brought to −14 LUFS, the music and ambience were barely audible.
+      duckTo: typeof config.duckTo === "number" ? Math.max(0.2, Math.min(1, config.duckTo)) : DEFAULTS.duckTo,
       attackSec: typeof config.attackSec === "number" ? Math.max(0, config.attackSec) : DEFAULTS.attackSec,
       releaseSec: typeof config.releaseSec === "number" ? Math.max(0, config.releaseSec) : DEFAULTS.releaseSec,
       leadSec: typeof config.leadSec === "number" ? Math.max(0, config.leadSec) : DEFAULTS.leadSec,
