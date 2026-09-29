@@ -20,6 +20,7 @@ import {
   fetchSceneListContext,
   loadSceneListAsProject,
   subscribeSceneListAsProject,
+  carryArrivingTransitions,
 } from "./services/voidspace-loader";
 import { resolveBootTheme, watchSiteTheme } from "@openreel/ui";
 import { autoSaveManager } from "./services/auto-save";
@@ -408,10 +409,21 @@ function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
     };
   }
 
+  // A scene that streams in while the editor is open brings its scene-boundary
+  // blend with it. Without this, only a cold load got blends and the normal
+  // automated run — editor open from scene 1 — shipped every cut hard (founder,
+  // 28 Sep: "clip transitions are abrupt"). See `carryArrivingTransitions`.
+  const freshTrackById = new Map(fresh.timeline.tracks.map((t) => [t.id, t] as const));
   const mergedTracks = current.timeline.tracks.map((tr) => {
     const adds = trackPatches.get(tr.id);
     const replaced = tr.clips.map((c) => updatedClips.get(c.id) ?? c);
-    return adds ? { ...tr, clips: [...replaced, ...adds] } : { ...tr, clips: replaced };
+    return adds
+      ? carryArrivingTransitions(
+          { ...tr, clips: [...replaced, ...adds] },
+          new Set(adds.map((c) => c.id)),
+          freshTrackById.get(tr.id),
+        )
+      : { ...tr, clips: replaced };
   });
   const knownTrackIds = new Set(mergedTracks.map((t) => t.id));
   for (const tr of fresh.timeline.tracks) {

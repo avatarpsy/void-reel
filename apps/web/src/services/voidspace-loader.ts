@@ -29,6 +29,8 @@ import type {
   Subtitle,
   TextClip,
   CompoundClip,
+  Transition,
+  TransitionType,
 } from "@openreel/core";
 // Screenplay sequences → nested sequences on the timeline. See NEST_SEQUENCES
 // below; the mapping is built and tested, and gated until the editor can open
@@ -178,9 +180,18 @@ export function mergeSavedArrangement(rebuilt: Project, savedIn: Project): Proje
     ({ ...c, startTime: c.startTime + delta });
 
   const savedTrackIds = new Set(saved.timeline.tracks.map((t) => t.id));
+  const rebuiltTrackById = new Map(rebuilt.timeline.tracks.map((t) => [t.id, t] as const));
   const tracks: Track[] = saved.timeline.tracks.map((t) => {
     const add = newByTrack.get(t.id);
-    return add ? { ...t, clips: [...t.clips, ...add.map(shift)] } : t;
+    // The new shots' scene-boundary blends travel with them — see
+    // `carryArrivingTransitions` for why only theirs.
+    return add
+      ? carryArrivingTransitions(
+          { ...t, clips: [...t.clips, ...add.map(shift)] },
+          new Set(add.map((c) => c.id)),
+          rebuiltTrackById.get(t.id),
+        )
+      : t;
   });
 
   /**
@@ -307,6 +318,142 @@ export function buildTakeTracks(clipsBySlot: Map<number, Clip[]>): Track[] {
     });
   }
   return out;
+}
+
+/**
+ * THE BLEND AT EVERY SCENE BOUNDARY — decided here, not left to the agent.
+ *
+ * ── THE INCIDENT ────────────────────────────────────────────────────────────
+ * Founder, on an automated Seedance episode (28 Sep): "I liked the video, but
+ * the agent did not add blend transitions between clips, so clip transitions
+ * are abrupt." Nothing was broken in the usual sense. The chat side has a
+ * scene-level `transitionIn`, but nothing ever carried it here — every track
+ * this loader built had `transitions: []` — so the ONLY way a cut got a blend
+ * was an agent remembering to call `clip-transitions` during finishing. An
+ * unattended production has nobody to remember, and every cut shipped hard.
+ *
+ * ── THE RULE ────────────────────────────────────────────────────────────────
+ *  • A real cut (the board shot's camera line began "CUT —", or simply any
+ *    shot that is not continuous) gets a short CROSSFADE — both shots on screen
+ *    at once, the most natural blend the engine has. Not dipToBlack: a dip
+ *    between every shot reads as a string of chapter breaks.
+ *  • A CONTINUOUS shot (`continues_previous`, written by compile) opens on the
+ *    previous shot's exact last frame. The seam is already invisible; a
+ *    dissolve there would ghost two near-identical frames into a visible
+ *    stutter. It stays a hard cut.
+ *  • An explicit `transition_in` set in chat always wins, including `cut`.
+ *
+ * ── WHY IT CANNOT SHIFT THE NARRATION ───────────────────────────────────────
+ * The engine centres a transition ON the cut (`getTransitionWindow`: the window
+ * is A's end ± half the duration) and blends A's tail into B's head in place.
+ * No clip moves, the film is not shortened, and narration and captions — which
+ * sit on their own tracks, timed to each scene's start — stay exactly where
+ * they are.
+ *
+ * Only ADJACENT clips are paired. A gap means a scene has no picture yet (still
+ * generating, or failed); blending across a hole would dissolve into nothing.
+ *
+ * Ids derive from the incoming clip, which is stable per shot, so the editor's
+ * additive merge sees the same transition on every rebuild instead of a new one.
+ */
+export const DEFAULT_SCENE_BLEND_SEC = 0.45;
+
+const SCENE_TRANSITION_KINDS: Record<string, { type: TransitionType; params: Record<string, unknown> } | null> = {
+  cut: null,
+  fade: { type: "crossfade", params: {} },
+  "slide-left": { type: "slide", params: { direction: "left" } },
+  "slide-up": { type: "slide", params: { direction: "up" } },
+  wipe: { type: "wipe", params: { direction: "left" } },
+  zoom: { type: "zoom", params: {} },
+};
+
+export interface SceneBoundaryInfo {
+  continuesPrevious?: boolean;
+  transitionIn?: { kind?: string; durationSec?: number } | null;
+}
+
+export function buildSceneBoundaryTransitions(
+  clips: Clip[],
+  infoFor: (clipId: string) => SceneBoundaryInfo | undefined,
+): Transition[] {
+  const out: Transition[] = [];
+  const ordered = [...clips].sort((a, b) => a.startTime - b.startTime);
+  for (let i = 1; i < ordered.length; i++) {
+    const a = ordered[i - 1];
+    const b = ordered[i];
+    if (Math.abs(a.startTime + a.duration - b.startTime) > 0.05) continue;
+
+    const info = infoFor(b.id) ?? {};
+    const explicitKind = typeof info.transitionIn?.kind === "string" ? info.transitionIn.kind : "";
+    let spec: { type: TransitionType; params: Record<string, unknown> } | null;
+    let wanted = DEFAULT_SCENE_BLEND_SEC;
+    if (explicitKind) {
+      // An unknown kind is a typo, not a request for a hard cut — blend.
+      spec = explicitKind in SCENE_TRANSITION_KINDS
+        ? SCENE_TRANSITION_KINDS[explicitKind]
+        : SCENE_TRANSITION_KINDS.fade;
+      const d = Number(info.transitionIn?.durationSec);
+      if (d > 0) wanted = d;
+    } else if (info.continuesPrevious) {
+      spec = null;
+    } else {
+      spec = SCENE_TRANSITION_KINDS.fade;
+    }
+    if (!spec) continue;
+
+    // Half the shorter clip is the ceiling `clip-transitions` uses too: a
+    // transition consumes the tail of A and the head of B and must leave both.
+    const ceiling = Math.max(0.1, Math.min(a.duration, b.duration) / 2);
+    out.push({
+      id: `tr-scene-${b.id}`,
+      clipAId: a.id,
+      clipBId: b.id,
+      type: spec.type,
+      duration: Math.max(0.1, Math.min(wanted, ceiling)),
+      params: { ...spec.params },
+    });
+  }
+  return out;
+}
+
+/**
+ * Carry the scene-boundary blends that belong to clips ARRIVING in a merge.
+ *
+ * Both merges — the editor's live additive merge and `mergeSavedArrangement` —
+ * add clips and nothing else, so without this a scene generated while the
+ * editor was open landed with no blend even though the rebuild had one for it.
+ * That is the normal shape of an automated production: the editor is open from
+ * scene 1 and every later scene streams in.
+ *
+ * ONLY transitions touching a clip that is new in this merge. One between two
+ * clips the user already has is theirs: if it is missing they removed it, and
+ * re-adding it on every Firestore tick would make "no blend here" impossible.
+ * The pair must still be adjacent where the clips actually landed.
+ */
+export function carryArrivingTransitions(
+  target: Track,
+  arrivingClipIds: Set<string>,
+  source: Track | undefined,
+): Track {
+  const incoming = source?.transitions ?? [];
+  if (!incoming.length || !arrivingClipIds.size) return target;
+  const byId = new Map(target.clips.map((c) => [c.id, c] as const));
+  const have = target.transitions ?? [];
+  const add: Transition[] = [];
+  for (const t of incoming) {
+    if (!t.clipBId) continue;
+    if (!arrivingClipIds.has(t.clipAId) && !arrivingClipIds.has(t.clipBId)) continue;
+    const a = byId.get(t.clipAId);
+    const b = byId.get(t.clipBId);
+    if (!a || !b) continue;
+    if (Math.abs(a.startTime + a.duration - b.startTime) > 0.05) continue;
+    if (have.some((h) => h.id === t.id || (h.clipAId === t.clipAId && h.clipBId === t.clipBId))) continue;
+    // One transition per edge: a clip's head or tail already blended with
+    // something else would make the two compete for the same frames.
+    if (have.some((h) => h.clipAId === a.id || h.clipBId === b.id)) continue;
+    add.push(t);
+  }
+  return add.length ? { ...target, transitions: [...have, ...add] } : target;
 }
 
 /**
@@ -509,6 +656,10 @@ interface SceneData {
   lyrics_json?: string;
   is_branding?: boolean;
   status?: string;
+  /** Written by compile for a CONTINUOUS board shot — see `buildSceneBoundaryTransitions`. */
+  continues_previous?: boolean;
+  /** An explicit scene-level transition set in chat (`edit_scene transitionIn`). */
+  transition_in?: { kind?: string; durationSec?: number } | null;
   edit_state?: {
     music_start_ms?: number | string;
     music_end_ms?: number | string;
@@ -2033,6 +2184,9 @@ export async function loadSceneListAsProject(
   // 4) Build media library + timeline
   const mediaItems: MediaItem[] = [];
   const videoTrackClips: Clip[] = [];
+  // What each picture clip's scene says about the cut INTO it — the input to
+  // `buildSceneBoundaryTransitions` once the track is laid out.
+  const sceneBoundaryByClip = new Map<string, SceneBoundaryInfo>();
   /**
    * Alternate takes, keyed by their POSITION in the stack (2, 3, 4…).
    *
@@ -2509,6 +2663,10 @@ export async function loadSceneListAsProject(
         transform: makeDefaultTransform(),
         volume: primaryVideo?.has_embedded_audio ? 1 : 0,
         keyframes: [],
+      });
+      sceneBoundaryByClip.set(`clip-video-${idKey}`, {
+        continuesPrevious: scene.continues_previous === true,
+        transitionIn: scene.transition_in ?? null,
       });
     }
 
@@ -3341,7 +3499,7 @@ export async function loadSceneListAsProject(
     type: "video",
     name: "Video",
     clips: videoTrackClips,
-    transitions: [],
+    transitions: buildSceneBoundaryTransitions(videoTrackClips, (id) => sceneBoundaryByClip.get(id)),
     locked: false,
     hidden: false,
     muted: false,

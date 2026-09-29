@@ -1324,8 +1324,26 @@ export class VideoEngine {
       if (!resolvedA) return drawn;
 
       if (clipB) {
+        /**
+         * THE INCOMING SHOT BEFORE IT HAS STARTED.
+         *
+         * The window is centred on the cut, so for its first half `time` is
+         * BEFORE clip B's start. With an untrimmed head (inPoint 0 — every
+         * generated scene) that asks for a NEGATIVE source time. MediaBunny has
+         * no frame before the first one and returns null, which left the blend
+         * to the slow `<video>` fallback at best and, when that failed too,
+         * abandoned it: shot A played on untouched, then at the cut the picture
+         * jumped straight to a 50% mix. Scene-boundary blends are now the
+         * default on automated productions (founder, 28 Sep: "clip transitions
+         * are abrupt"), so every cut depends on this.
+         *
+         * Hold B's first frame instead — or use the real head handle when the
+         * clip was trimmed and has one. The outgoing side needs no guard: past
+         * the end of its source MediaBunny returns the last frame.
+         */
+        const tB = Math.max(time, clipB.startTime - Math.max(0, clipB.inPoint ?? 0));
         resolvedB = await this.resolveClipBitmap(
-          clipB, this.createClipRenderInfo(clipB, time), project, time, width, height,
+          clipB, this.createClipRenderInfo(clipB, tB), project, tB, width, height,
         );
         if (!resolvedB) return drawn;
       } else {
