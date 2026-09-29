@@ -150,7 +150,11 @@ export function mergeSavedArrangement(rebuilt: Project, savedIn: Project): Proje
       newMin = Math.min(newMin, c.startTime);
     }
   }
-  const newTextClips = (rebuilt.textClips ?? []).filter((t) => !savedClipIds.has(t.id));
+  // A deleted caption is ABSENT from the save and PRESENT in the rebuild —
+  // exactly what this treats as new. Its tombstone says otherwise.
+  const tombTextIds = new Set((saved.deletedTracks ?? []).flatMap((d) => [...d.clipIds]));
+  const newTextClips = (rebuilt.textClips ?? [])
+    .filter((t) => !savedClipIds.has(t.id) && !tombTextIds.has(t.id));
   for (const t of newTextClips) newMin = Math.min(newMin, t.startTime);
 
   // Nothing genuinely new: the blob was flagged stale by a probe that looks at
@@ -3659,7 +3663,12 @@ export async function loadSceneListAsProject(
     settings,
     mediaLibrary: { items: mediaItems },
     timeline,
-    textClips: captionTextClips,
+    textClips: deletedTracks.length > 0
+      ? (() => {
+          const gone = new Set(deletedTracks.flatMap((d) => (Array.isArray(d.clipIds) ? d.clipIds : [])));
+          return captionTextClips.filter((t) => !gone.has(t.id));
+        })()
+      : captionTextClips,
     // Keep the tombstones on the rebuilt project so they persist through the
     // next autosave (otherwise one rebuild would erase the deletion record).
     ...(deletedTracks.length > 0 ? { deletedTracks } : {}),

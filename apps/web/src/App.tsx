@@ -153,11 +153,14 @@ const isCaptionTextClip = (tc: import("@openreel/core").TextClip): boolean =>
 export function pickNewTextClips(
   existingTextClips: readonly import("@openreel/core").TextClip[],
   freshTextClips: readonly import("@openreel/core").TextClip[],
+  deletedIds: ReadonlySet<string> = new Set(),
 ): import("@openreel/core").TextClip[] {
   const knownIds = new Set(existingTextClips.map((t) => t.id));
   const existingCaptions = existingTextClips.filter(isCaptionTextClip);
   return freshTextClips.filter((t) => {
     if (knownIds.has(t.id)) return false;
+    // Deleted by the user or the agent: a rebuild re-derives it, never re-add.
+    if (deletedIds.has(t.id)) return false;
     if (isCaptionTextClip(t)) {
       const tEnd = t.startTime + t.duration;
       const overlapsExisting = existingCaptions.some(
@@ -327,6 +330,7 @@ function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
   const newTextClips = pickNewTextClips(
     existingTextClips,
     fresh.textClips ?? [],
+    tombClipIds,
   );
 
   const knownClipIds = new Set<string>();

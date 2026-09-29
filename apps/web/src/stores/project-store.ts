@@ -4265,10 +4265,23 @@ export const useProjectStore = create<ProjectState>()(
           // by the cloud render, and reloaded via loadTextClips (which rebuilds
           // the engine FROM the snapshot, resurrecting the deleted caption).
           // Mirrors updateText / updateStyle / updateTextTransform etc.
+          // Tombstone it like a timeline clip (`clip:<id>`, see e445f15).
+          // Captions are RE-DERIVED from each scene's narration on every
+          // rebuild, and both merges add any id the live project lacks — so a
+          // deleted caption came straight back (Grok test #5, 29 Sep: the
+          // agent removed 7 auto captions, they reappeared 30 s later).
+          const key = `clip:${clipId}`;
+          const prev = (project.deletedTracks ?? []).filter((d) => d.id !== key);
+          const trackTombs = prev.filter((d) => !d.id.startsWith("clip:"));
+          const clipTombs = prev.filter((d) => d.id.startsWith("clip:"));
           set({
             project: {
               ...project,
               textClips: titleEngine.getAllTextClips(),
+              deletedTracks: [
+                ...trackTombs,
+                ...[...clipTombs, { id: key, clipIds: [clipId], at: Date.now() }].slice(-500),
+              ],
               modifiedAt: Date.now(),
             },
           });
