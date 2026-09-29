@@ -2729,26 +2729,48 @@ function App() {
               // "Track with ID track-sfx not found" (the generated SFX would be
               // saved but never placed). addTrack() mints a random id, so we
               // push the fixed-id track directly, matching the loader's shape.
-              {
+              /**
+               * WHICH LANE. Grok test #8 (29 Sep): a 10 s room tone attached per
+               * scene plus a cup clink and a wind chime all landed on ONE lane,
+               * stacked on top of each other — the founder read it as a bug.
+               * Overlapping sounds are normal; overlapping CLIPS ON ONE LANE are
+               * unreadable and hard to edit. An ambience bed gets its own
+               * "Ambience" lane; a hit that would overlap a clip already on
+               * "SFX" goes to the first SFX lane where it fits ("SFX 2", …).
+               */
+              const ensureTrack = (id: string, name: string) => {
                 const cur = useProjectStore.getState().project;
-                const hasSfxTrack = (cur.timeline?.tracks ?? []).some((t: any) => t.id === "track-sfx");
-                if (!hasSfxTrack) {
-                  useProjectStore.setState({
-                    project: {
-                      ...cur,
-                      timeline: {
-                        ...cur.timeline,
-                        tracks: [
-                          ...(cur.timeline?.tracks ?? []),
-                          { id: "track-sfx", type: "audio", name: "SFX", clips: [], transitions: [], locked: false, hidden: false, muted: false, solo: false } as any,
-                        ],
-                      },
-                      modifiedAt: Date.now(),
+                if ((cur.timeline?.tracks ?? []).some((t: any) => t.id === id)) return;
+                useProjectStore.setState({
+                  project: {
+                    ...cur,
+                    timeline: {
+                      ...cur.timeline,
+                      tracks: [
+                        ...(cur.timeline?.tracks ?? []),
+                        { id, type: "audio", name, clips: [], transitions: [], locked: false, hidden: false, muted: false, solo: false } as any,
+                      ],
                     },
-                  });
+                    modifiedAt: Date.now(),
+                  },
+                });
+              };
+              const { lane } = msg as { lane?: string };
+              let targetTrack = "track-sfx";
+              if (lane === "ambience") {
+                targetTrack = "track-ambience";
+                ensureTrack(targetTrack, "Ambience");
+              } else {
+                const end = startTime + duration;
+                const tracksNow = useProjectStore.getState().project.timeline?.tracks ?? [];
+                const fits = (id: string) => !((tracksNow.find((t: any) => t.id === id)?.clips ?? [])
+                  .some((c: any) => startTime < c.startTime + c.duration - 1e-3 && end > c.startTime + 1e-3));
+                for (let n = 1; n <= 8; n++) {
+                  const id = n === 1 ? "track-sfx" : `track-sfx-${n}`;
+                  if (fits(id)) { targetTrack = id; ensureTrack(id, n === 1 ? "SFX" : `SFX ${n}`); break; }
                 }
               }
-              const ar = await useProjectStore.getState().addClip("track-sfx", sfxMediaId, startTime);
+              const ar = await useProjectStore.getState().addClip(targetTrack, sfxMediaId, startTime);
               if (!ar.success) {
                 const e: any = ar.error;
                 const errStr = e && typeof e === "object" ? `${e.code ?? "ERROR"}: ${e.message ?? "addClip failed"}` : (typeof e === "string" ? e : "addClip failed");
@@ -2758,7 +2780,7 @@ function App() {
               // Locate the new clip + apply duration/volume via the
               // executor so they're part of the same ActionHistory
               // entry (one undo step covers the full placement).
-              const tr = useProjectStore.getState().project.timeline?.tracks?.find((t: any) => t.id === "track-sfx");
+              const tr = useProjectStore.getState().project.timeline?.tracks?.find((t: any) => t.id === targetTrack);
               const newClip = (tr?.clips ?? []).find((c: any) => c.mediaId === sfxMediaId && c.startTime === startTime && c.id);
               if (newClip && typeof duration === "number") {
                 await useProjectStore.getState().trimClip(newClip.id, 0, duration);
@@ -2773,7 +2795,7 @@ function App() {
                 }, volStore.project);
                 useProjectStore.setState({ project: { ...volStore.project, modifiedAt: Date.now() } });
               }
-              reply({ type: "voidspace:sfx-clip-added", requestId: msg.requestId, ok: true, clipId: newClip?.id ?? null, mediaId: sfxMediaId });
+              reply({ type: "voidspace:sfx-clip-added", requestId: msg.requestId, ok: true, clipId: newClip?.id ?? null, mediaId: sfxMediaId, trackId: targetTrack });
             } catch (err: any) {
               reply({ type: "voidspace:error", requestId: msg.requestId, error: err?.message ?? String(err) });
             }
