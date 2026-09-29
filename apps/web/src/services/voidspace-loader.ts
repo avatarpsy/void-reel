@@ -139,6 +139,43 @@ export function mergeSavedArrangement(rebuilt: Project, savedIn: Project): Proje
   for (const t of saved.timeline.tracks) for (const c of t.clips) savedClipIds.add(c.id);
   for (const t of (saved.textClips ?? [])) savedClipIds.add(t.id);
 
+  /**
+   * A NEW CLIP FOR A SCENE THE CUT ALREADY HAS IS NOT A NEW SHOT.
+   *
+   * Appending is right for a shot added to the board. It is wrong for the
+   * video, voiceover or captions of a scene whose first frame is already on
+   * the timeline — and that is every generation in order: frames land and are
+   * saved, then the clips arrive as "new". Grok test #6 (29 Sep): stills at
+   * 0/12 s, their clips at 6/18 s, narration at 24/28.5 s — the agent spent a
+   * whole job re-assembling a timeline the loader had scrambled, and a person
+   * would have opened the same mess. A scene is anchored by a clip present in
+   * BOTH the save and the rebuild; its new clips go where that anchor sits in
+   * the save (the user's arrangement still wins), unless that would overlap
+   * something already on the track — then they append as before.
+   */
+  const rebuiltStartById = new Map<string, number>();
+  for (const t of rebuilt.timeline.tracks) for (const c of t.clips) rebuiltStartById.set(c.id, c.startTime);
+  const anchorOffset = new Map<string, number>();
+  for (const t of saved.timeline.tracks) {
+    for (const c of t.clips) {
+      const m = /^clip-(?:video|image|narration)-(.+)$/.exec(c.id);
+      const r = rebuiltStartById.get(c.id);
+      if (m && r !== undefined && !anchorOffset.has(m[1])) anchorOffset.set(m[1], c.startTime - r);
+    }
+  }
+  const sceneOffsetFor = (id: string): number | undefined => {
+    for (const [k, off] of anchorOffset) {
+      if (id === `clip-video-${k}` || id === `clip-image-${k}` || id === `clip-narration-${k}`
+        || id.startsWith(`clip-take-${k}-`) || id.startsWith(`clip-graphic-${k}-`)
+        || id.startsWith(`clip-sfx-${k}-`) || id.startsWith(`caption-${k}-`)) return off;
+    }
+    return undefined;
+  };
+  const overlaps = (list: ReadonlyArray<{ startTime: number; duration: number }>, s: number, d: number) =>
+    list.some((x) => s < x.startTime + x.duration - 1e-3 && s + d > x.startTime + 1e-3);
+  const savedTrackClips = new Map(saved.timeline.tracks.map((t) => [t.id, t.clips] as const));
+  const anchoredStart = new Map<string, number>();
+
   const newByTrack = new Map<string, Clip[]>();
   let newMin = Infinity;
   for (const t of rebuilt.timeline.tracks) {
@@ -147,7 +184,12 @@ export function mergeSavedArrangement(rebuilt: Project, savedIn: Project): Proje
       const list = newByTrack.get(t.id) ?? [];
       list.push(c);
       newByTrack.set(t.id, list);
-      newMin = Math.min(newMin, c.startTime);
+      const off = sceneOffsetFor(c.id);
+      if (off !== undefined && !overlaps(savedTrackClips.get(t.id) ?? [], c.startTime + off, c.duration)) {
+        anchoredStart.set(c.id, Math.max(0, c.startTime + off));
+      } else {
+        newMin = Math.min(newMin, c.startTime);
+      }
     }
   }
   // A deleted caption is ABSENT from the save and PRESENT in the rebuild —
@@ -155,7 +197,14 @@ export function mergeSavedArrangement(rebuilt: Project, savedIn: Project): Proje
   const tombTextIds = new Set((saved.deletedTracks ?? []).flatMap((d) => [...d.clipIds]));
   const newTextClips = (rebuilt.textClips ?? [])
     .filter((t) => !savedClipIds.has(t.id) && !tombTextIds.has(t.id));
-  for (const t of newTextClips) newMin = Math.min(newMin, t.startTime);
+  for (const t of newTextClips) {
+    const off = sceneOffsetFor(t.id);
+    if (off !== undefined && !overlaps(saved.textClips ?? [], t.startTime + off, t.duration)) {
+      anchoredStart.set(t.id, Math.max(0, t.startTime + off));
+    } else {
+      newMin = Math.min(newMin, t.startTime);
+    }
+  }
 
   // Nothing genuinely new: the blob was flagged stale by a probe that looks at
   // scene COUNTS, which can disagree with what is actually on the timeline (a
@@ -180,8 +229,10 @@ export function mergeSavedArrangement(rebuilt: Project, savedIn: Project): Proje
    * material back so it starts where the film currently stops.
    */
   const delta = Number.isFinite(newMin) ? savedEnd - newMin : 0;
-  const shift = <T extends { startTime: number }>(c: T): T =>
-    ({ ...c, startTime: c.startTime + delta });
+  const shift = <T extends { id: string; startTime: number }>(c: T): T =>
+    anchoredStart.has(c.id)
+      ? { ...c, startTime: anchoredStart.get(c.id)! }
+      : { ...c, startTime: c.startTime + delta };
 
   const savedTrackIds = new Set(saved.timeline.tracks.map((t) => t.id));
   const rebuiltTrackById = new Map(rebuilt.timeline.tracks.map((t) => [t.id, t] as const));
