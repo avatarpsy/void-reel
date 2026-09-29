@@ -3245,6 +3245,22 @@ function App() {
             // agent got "clip not found" for caption ids and re-read stale state.
             const _store = useProjectStore.getState();
             if (typeof _store.getTextClip === "function" && _store.getTextClip(clipId)) {
+              /**
+               * WORD-TIMED CAPTIONS STAY. Grok tests #6 and #9 (29 Sep): the
+               * agent deleted the voiceover-aligned captions and retyped the
+               * lines; retyped text has no word timing, so the captions drifted
+               * off the voice — the founder saw it. Guidance to restyle instead
+               * was ignored twice, so the agent's delete is refused unless it
+               * passes force (the person asked to remove captions). The
+               * person's own Delete key does not come through here.
+               */
+              const tc: any = _store.getTextClip(clipId);
+              if (String(clipId).startsWith("caption-") && Array.isArray(tc?.captionWords)
+                && tc.captionWords.length > 0 && (msg as any).force !== true) {
+                reply({ type: "voidspace:error", requestId: msg.requestId,
+                  error: "WORD_TIMED_CAPTION: this caption is timed word-by-word to the voiceover. Keep it — restyle it with apply_inspector_tool (text-style) or change the words by editing the scene's narration. Retyped captions lose the timing and drift off the voice. Pass force:true only if the person asked to remove captions." });
+                break;
+              }
               const deleted = _store.deleteTextClip(clipId);
               if (!deleted) {
                 reply({ type: "voidspace:error", requestId: msg.requestId, error: "TEXT_CLIP_NOT_FOUND: caption could not be deleted" });
