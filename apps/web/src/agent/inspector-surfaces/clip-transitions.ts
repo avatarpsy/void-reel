@@ -104,7 +104,7 @@ export const surface: InspectorSurface<ClipTransitionConfig> = {
         description: "\"end\" (default) = between this clip and the NEXT one. \"start\" = between the PREVIOUS clip and this one.",
       },
       params: { type: "object", additionalProperties: true, description: "Type-specific options, e.g. { direction: \"left\" } for wipe/slide/push/whipPan." },
-      remove: { type: "boolean", description: "Remove the transition at this edge instead of adding one." },
+      remove: { type: "boolean", description: "Remove the transition at this edge instead of adding one. Scene boundaries between NEW SHOTS carry a short crossfade by default — the person asked for blends, not abrupt cuts. Remove one ONLY when the person asked for a hard cut in their own words; \"hard cut\" in a coordinator's delegated brief is shorthand for \"new shot\" and does not count (Grok test #8, 29 Sep, lost its blend that way)." },
     },
     additionalProperties: false,
   },
