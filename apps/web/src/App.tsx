@@ -2016,6 +2016,18 @@ function App() {
               break;
             }
             try {
+              // IDEMPOTENT. The page gives this call a fixed time to answer; when
+              // the editor is busy (Episode 3: captions added right before an
+              // export) the page gives up, the agent retries, and the first call
+              // still lands — every caption came out three deep. A caption with
+              // the same words at the same start already exists → it IS the
+              // answer; never add a second copy.
+              const existingClip = (useEngineStore.getState().getTitleEngine()?.getAllTextClips() ?? [])
+                .find((tc: any) => Math.abs((tc.startTime ?? 0) - startTime) < 0.05 && tc.text === text.trim());
+              if (existingClip) {
+                reply({ type: "voidspace:text-clip-added", requestId: msg.requestId, ok: true, clipId: existingClip.id ?? null, trackId: "track-captions", existing: true });
+                break;
+              }
               const endTime = startTime + (typeof durationSec === "number" && durationSec > 0 ? durationSec : 3);
               await useProjectStore.getState().addSubtitle({
                 id: `agent-text-${Date.now().toString(36)}`,
