@@ -170,3 +170,46 @@ export function renderCaptionWordHighlight(
     ctx.textBaseline = prevBaseline;
   }
 }
+
+/**
+ * Wrap plain text to a width by turning the space at each break into "\n".
+ *
+ * Neither the preview nor the export renderer wrapped text — they split on
+ * "\n" only — so a caption the agent typed as one sentence ran off both edges
+ * of a 9:16 frame (Grok tests #5 and #6, 29 Sep; in #6 it even undid the
+ * add_text split by writing the whole sentence back with text-content). Fitting
+ * at draw time covers every way text reaches a clip.
+ *
+ * The result has the SAME length as the input (a space becomes a newline), so
+ * per-character animation state stays aligned. A single word wider than the
+ * limit stays on its own line rather than being broken.
+ */
+export function wrapTextToWidth(
+  measure: (s: string) => number,
+  text: string,
+  maxWidth: number,
+): string {
+  if (!(maxWidth > 0) || !text) return text;
+  return text
+    .split("\n")
+    .map((para) => {
+      if (measure(para) <= maxWidth) return para;
+      const words = para.split(" ");
+      const out: string[] = [];
+      let line = "";
+      let started = false;
+      for (const w of words) {
+        const trial = started ? `${line} ${w}` : w;
+        if (started && line && measure(trial) > maxWidth) {
+          out.push(line);
+          line = w;
+        } else {
+          line = trial;
+        }
+        started = true;
+      }
+      out.push(line);
+      return out.join("\n");
+    })
+    .join("\n");
+}

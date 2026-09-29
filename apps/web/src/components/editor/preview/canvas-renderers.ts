@@ -9,6 +9,7 @@ import {
   type Keyframe,
   type EmphasisAnimation,
   renderCaptionWordHighlight,
+  wrapTextToWidth,
 } from "@openreel/core";
 import * as THREE from "three";
 
@@ -679,6 +680,11 @@ const renderTextClipToCanvasUnsafe = (
     ctx.shadowOffsetY = style.shadowOffsetY || 0;
   }
 
+  // Fit the frame — same rule as the export renderer (TitleEngine.renderText).
+  if (!(textClip.captionWords && textClip.captionWords.length > 0)) {
+    const sx = Math.max(0.01, Math.abs(transform.scale.x));
+    visibleText = wrapTextToWidth((s) => ctx.measureText(s).width, visibleText, (canvasWidth * 0.9) / sx);
+  }
   const lines = visibleText.split("\n");
   const lineHeight = style.fontSize * style.lineHeight;
   const totalHeight = lines.length * lineHeight;

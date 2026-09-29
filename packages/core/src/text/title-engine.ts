@@ -14,7 +14,7 @@ import type {
 } from "./types";
 import { DEFAULT_TEXT_STYLE, DEFAULT_TEXT_TRANSFORM } from "./types";
 import { textAnimationEngine } from "./text-animation";
-import { renderCaptionWordHighlight } from "./caption-word-renderer";
+import { renderCaptionWordHighlight, wrapTextToWidth } from "./caption-word-renderer";
 
 export interface CreateTextClipOptions {
   id?: string;
@@ -278,6 +278,12 @@ export class TitleEngine {
 
     this.applyTextStyle(ctx, style);
 
+    // Fit the frame (see wrapTextToWidth). Word-timed captions scale
+    // themselves in the word renderer and keep their single line.
+    if (!(clip.captionWords && clip.captionWords.length > 0)) {
+      const sx = Math.max(0.01, Math.abs(transform.scale.x));
+      visibleText = wrapTextToWidth((s) => ctx.measureText(s).width, visibleText, (width * 0.9) / sx);
+    }
     const lines = visibleText.split("\n");
     const lineHeight = style.fontSize * style.lineHeight;
     const totalHeight = lines.length * lineHeight;
