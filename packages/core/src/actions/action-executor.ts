@@ -41,6 +41,49 @@ import { createIdGenerator, type IdGenerator } from "./id-generator";
 import { createSerialQueue, type EnqueueFn } from "../utils/serial-queue";
 
 /**
+ * A DELETED CLIP IS AN ABSENCE — AND AN ADDITIVE MERGE CANNOT SEE ABSENCES.
+ *
+ * Episode 2 (29 Sep): the founder deleted agent-placed SFX clips and they
+ * "kept coming back". Voidspace's live subscription re-reads the saved blob
+ * (or rebuilds from scene_lists) on every Firestore tick and merges it in
+ * additively: any clip id the live project lacks is ADDED. A tick that lands
+ * before the delete's autosave, or a second editor window (the unattended
+ * production window) that still holds the clip and re-saves it, hands the
+ * deleted id straight back. Tracks already had tombstones for exactly this;
+ * clips did not.
+ *
+ * So a clip delete rides the SAME list (`Project.deletedTracks`) as a
+ * one-clip entry keyed `clip:<id>`. Every consumer already flattens
+ * `clipIds` into its skip-set — the App's additive merge, the loader's
+ * rebuild filter — so they honour it with no further change, and undo
+ * (`clip/restore`, `clip/rippleRestore`) removes the entry. Clip entries get
+ * their own cap so a busy edit can never push a TRACK tombstone out.
+ */
+const CLIP_TOMB_PREFIX = "clip:";
+const CLIP_TOMB_CAP = 500;
+type TombProject = { deletedTracks?: Project["deletedTracks"] };
+
+function tombstoneClip(project: Project, clipId: string): void {
+  const p = project as TombProject;
+  const key = CLIP_TOMB_PREFIX + clipId;
+  const prev = (p.deletedTracks ?? []).filter((d) => d.id !== key);
+  const tracks = prev.filter((d) => !d.id.startsWith(CLIP_TOMB_PREFIX));
+  const clips = prev.filter((d) => d.id.startsWith(CLIP_TOMB_PREFIX));
+  p.deletedTracks = [
+    ...tracks,
+    ...[...clips, { id: key, clipIds: [clipId], at: Date.now() }].slice(-CLIP_TOMB_CAP),
+  ];
+}
+
+function untombstoneClip(project: Project, clipId: string): void {
+  const p = project as TombProject;
+  const key = CLIP_TOMB_PREFIX + clipId;
+  if (p.deletedTracks?.some((d) => d.id === key)) {
+    p.deletedTracks = p.deletedTracks.filter((d) => d.id !== key);
+  }
+}
+
+/**
  * Minimal interface the executor needs to apply text/* actions. The
  * editor app's engine-store provides this — keeping it as an
  * interface (rather than importing TitleEngine directly) means core
@@ -601,8 +644,13 @@ export class ActionExecutor {
             clipIds: removed.clips.map((c) => c.id),
             at: Date.now(),
           };
+          // The 100 cap counts TRACK entries only — single-clip tombstones
+          // (`clip:<id>`, see tombstoneClip) share this list and must neither
+          // push a track out nor be pushed out by one.
+          const clipTombs = prev.filter((d) => d.id.startsWith(CLIP_TOMB_PREFIX));
+          const trackTombs = prev.filter((d) => !d.id.startsWith(CLIP_TOMB_PREFIX) && d.id !== removed.id);
           (project as { deletedTracks?: Project["deletedTracks"] }).deletedTracks =
-            [...prev.filter((d) => d.id !== removed.id), entry].slice(-100);
+            [...[...trackTombs, entry].slice(-100), ...clipTombs];
         }
         timeline.tracks = timeline.tracks.filter(
           (t: MutableTrack) => t.id !== params.trackId,
@@ -803,6 +851,7 @@ export class ActionExecutor {
 
       case "clip/remove": {
         const params = action.params as { clipId: string };
+        if (this.findClip(timeline, params.clipId)) tombstoneClip(project, params.clipId);
         timeline.tracks = timeline.tracks.map((track: MutableTrack) => ({
           ...track,
           clips: track.clips.filter((c: MutableClip) => c.id !== params.clipId),
@@ -812,6 +861,7 @@ export class ActionExecutor {
 
       case "clip/restore": {
         const params = action.params as { clip: Clip };
+        untombstoneClip(project, params.clip.id);
         timeline.tracks = timeline.tracks.map((track: MutableTrack) =>
           track.id === params.clip.trackId
             ? { ...track, clips: [...track.clips, params.clip] }
@@ -944,6 +994,7 @@ export class ActionExecutor {
         const params = action.params as { clipId: string };
         const clip = this.findClip(timeline, params.clipId);
         if (clip) {
+          tombstoneClip(project, params.clipId);
           const deletedDuration = clip.duration;
           const deletedStartTime = clip.startTime;
 
@@ -971,6 +1022,7 @@ export class ActionExecutor {
           clip: Clip;
           affectedClips: Array<{ id: string; originalStartTime: number }>;
         };
+        untombstoneClip(project, params.clip.id);
         timeline.tracks = timeline.tracks.map((track: MutableTrack) => {
           if (track.id === params.clip.trackId) {
             const restoredClips = track.clips.map((c: MutableClip) => {
