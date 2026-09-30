@@ -17,7 +17,7 @@
  */
 import { useProjectStore } from "../stores/project-store";
 import { loadMediaBlobForProject } from "./media-storage";
-import { saveMediaToDisk } from "./recording-save";
+import { saveMediaToCloud } from "./cloud-save";
 
 let sweepInFlight = false;
 const attempted = new Set<string>();
@@ -70,7 +70,7 @@ export async function sweepMaterializeTimelineMedia(): Promise<void> {
         const blob = (item.blob instanceof Blob ? item.blob : null) ?? await loadMediaBlobForProject(project.id, item.id);
         if (!blob) continue; // no bytes on this machine — nothing to upload
         const ext = guessExt(item.name, blob.type, (item as any).type);
-        const saved = await saveMediaToDisk(blob, item.name || "timeline-media", ext, kindFor((item as any).type));
+        const saved = await saveMediaToCloud(blob, item.name || "timeline-media", ext, kindFor((item as any).type));
         if (saved?.url) {
           useProjectStore.setState((s: any) => ({
             project: {

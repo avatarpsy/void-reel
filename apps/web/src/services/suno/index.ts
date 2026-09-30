@@ -548,8 +548,8 @@ export async function importResultToLibrary(
   // before this change (we just skip the disk layer + URL repoint).
   let durableUrl: string | undefined;
   try {
-    const { saveMediaToDisk } = await import("../recording-save");
-    const saved = await saveMediaToDisk(blob, safe, ext, "music");
+    const { saveMediaToCloud } = await import("../cloud-save");
+    const saved = await saveMediaToCloud(blob, safe, ext, "music");
     if (saved?.url) durableUrl = saved.url; // /api/studio/local-asset?...&kind=music
   } catch (e) {
     console.warn("[suno] disk save failed:", e);

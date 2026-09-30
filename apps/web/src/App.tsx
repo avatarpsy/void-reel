@@ -2125,8 +2125,8 @@ function App() {
                 if (t.includes("ogg")) return "ogg";
                 return "webm"; // webcam/screen MediaRecorder default
               };
-              const { saveMediaToDisk } = await import("./services/recording-save");
-              const saved = await saveMediaToDisk(blob, item.name || "recording", guessExt(), "recordings");
+              const { saveMediaToCloud } = await import("./services/cloud-save");
+              const saved = await saveMediaToCloud(blob, item.name || "recording", guessExt(), "recordings");
               if (!saved?.url) {
                 reply({ type: "voidspace:error", requestId: msg.requestId, error: "Could not save the clip. Open and save the project first, then try again." });
                 break;
@@ -2651,16 +2651,16 @@ function App() {
                     } as any);
                   } catch (e) { console.warn("[sfx] IndexedDB save failed:", e); }
                   try {
-                    const { saveMediaToDisk } = await import("./services/recording-save");
+                    const { saveMediaToCloud } = await import("./services/cloud-save");
                     const ext = (sfxBlob.type || "").includes("wav") ? "wav" : "mp3";
-                    const saved = await saveMediaToDisk(
+                    const saved = await saveMediaToCloud(
                       sfxBlob,
                       typeof label === "string" && label ? label : "sfx",
                       ext,
                       "sfx",
                     );
-                    if (saved?.url) durableUrl = saved.url; // /api/studio/local-asset?...&kind=sfx
-                  } catch (e) { console.warn("[sfx] disk save failed:", e); }
+                    if (saved?.url) durableUrl = saved.url; // the person's cloud copy
+                  } catch (e) { console.warn("[sfx] cloud save failed:", e); }
                 }
                 const newItem: any = {
                   id: sfxMediaId,

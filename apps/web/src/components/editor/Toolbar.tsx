@@ -28,7 +28,7 @@ import { useProjectStore } from "../../stores/project-store";
 import { useUIStore } from "../../stores/ui-store";
 import { goBack, projectsUrl } from "@openreel/asset-browser";
 import { autoSaveManager } from "../../services/auto-save";
-import { saveRecordingToDisk, saveMediaToDisk } from "../../services/recording-save";
+import { saveMediaToCloud } from "../../services/cloud-save";
 import {
   getExportEngine,
   getDeviceProfile,
@@ -906,7 +906,6 @@ export const Toolbar: React.FC = () => {
       }
 
       // 'both' mode also produces a separate webcam file.
-      let webcamMediaId: string | null = null;
       if (webcamBlob && webcamBlob.size > 0) {
         const webcamFile = new File([webcamBlob], `Webcam_${timestamp}.webm`, {
           type: webcamBlob.type || "video/webm",
@@ -914,7 +913,6 @@ export const Toolbar: React.FC = () => {
         const webcamResult = await importMedia(webcamFile);
         if (webcamResult.success) {
           importCount++;
-          webcamMediaId = webcamResult.actionId ?? null;
         } else {
           errors.push(
             webcamResult.error?.message || "Failed to import webcam recording",
@@ -942,31 +940,21 @@ export const Toolbar: React.FC = () => {
         }));
       };
 
-      // Durability: also save the raw take(s) to the user's local folder so
-      // they persist beyond IndexedDB and the project reopens later. Best-
-      // effort and non-blocking — the in-editor copy already works without it.
-      let savedToDisk = false;
-      try {
-        // Audio takes save to narrations/ (kind 'narration') so they reach the
-        // Library under Voice; webcam/screen takes stay local-only in recordings/.
-        const primarySave = await saveMediaToDisk(
-          primaryFile,
-          `${primaryLabel}_${timestamp}`,
-          "webm",
-          isAudio ? "narration" : "recordings",
-        );
-        savedToDisk = !!primarySave;
-        if (primarySave?.url && primaryResult.success && primaryResult.actionId) {
-          tagOriginalUrl(primaryResult.actionId, primarySave.url);
-        }
-        if (webcamBlob && webcamBlob.size > 0) {
-          const webcamSave = await saveRecordingToDisk(webcamBlob, `Webcam_${timestamp}`, "webm");
-          if (webcamSave?.url && webcamMediaId) {
-            tagOriginalUrl(webcamMediaId, webcamSave.url);
+      // The take is already on this device (the editor's IndexedDB store).
+      // A VOICE take is also a Library item, so it goes to the person's cloud
+      // (cloud-save.ts); raw webcam/screen takes stay on the device and are
+      // uploaded only if they end up on the timeline (media-materialize.ts).
+      let savedToCloud = false;
+      if (isAudio) {
+        try {
+          const primarySave = await saveMediaToCloud(primaryFile, `${primaryLabel}_${timestamp}`, "webm", "narration");
+          savedToCloud = !!primarySave;
+          if (primarySave?.url && primaryResult.success && primaryResult.actionId) {
+            tagOriginalUrl(primaryResult.actionId, primarySave.url);
           }
+        } catch {
+          /* non-fatal — the take is still usable from the asset library */
         }
-      } catch {
-        /* non-fatal — recording is still usable from the asset library */
       }
 
       if (importCount > 0) {
@@ -985,8 +973,8 @@ export const Toolbar: React.FC = () => {
         }
         toast.success(
           `${importCount} recording${importCount > 1 ? "s" : ""} imported!`,
-          savedToDisk
-            ? "Saved to your Voidspace folder and added to assets."
+          savedToCloud
+            ? "Voice take added to assets and saved to your library."
             : webcamBlob && webcamBlob.size > 0
               ? "Screen and webcam added to assets. Use the timeline to composite them."
               : `${primaryLabel} recording added to assets.`,
