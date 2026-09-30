@@ -6,6 +6,7 @@ import { applyGenerativeFill } from '../../../services/apply-generative-fill';
 import { FILL_MODELS, loadFillModels, type FillModelId, type FillModelOption, GenFillError, LocalFillError, fetchCreditSituation, uploadReferenceImage, uploadReferenceFromUrl } from '../../../services/generative-fill';
 import { nativePixelsFrom } from '../../../services/apply-generative-fill';
 import { NotSignedInError } from '../../../services/voidspace-storage';
+import { askHostForCredits } from '../../../services/out-of-credits';
 
 /**
  * Photoshop-style Generative Fill box. Opened from the selection right-click
@@ -159,9 +160,12 @@ export function GenerativeFillPanel() {
       if (e instanceof NotSignedInError) {
         setError('Sign in to Voidspace to use Generative Fill.');
       } else if (e instanceof GenFillError && e.code === 402) {
-        // The USER is out of credits → show the top-up / subscribe popup.
-        const sit = await fetchCreditSituation();
-        setCredits({ available: e.available, required: e.required, subscribed: sit.isSubscribed });
+        // The USER is out of credits → the host's shared upgrade sheet when
+        // embedded; the local top-up / subscribe popup when standalone.
+        if (!askHostForCredits({ needed: e.required, balance: e.available })) {
+          const sit = await fetchCreditSituation();
+          setCredits({ available: e.available, required: e.required, subscribed: sit.isSubscribed });
+        }
       } else if (e instanceof LocalFillError) {
         /**
          * A LOCAL failure says exactly what went wrong, and that is deliberate.

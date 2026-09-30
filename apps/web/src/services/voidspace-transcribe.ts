@@ -20,6 +20,7 @@
  */
 
 import { auth } from "../config/firebase-config";
+import { reportIfOutOfCredits } from "./out-of-credits";
 import type {
   CloudflareWhisperResponse,
   WhisperTranscriptionProgress,
@@ -125,7 +126,10 @@ export async function transcribeViaVoidspace(
     body: JSON.stringify({ mediaUrl: up.url }),
   });
   if (!txRes.ok) {
-    throw new Error(`Transcription failed: ${await errorText(txRes)}`);
+    const why = await errorText(txRes);
+    // Out of credits: the host's shared upgrade sheet says so (see out-of-credits.ts).
+    reportIfOutOfCredits(txRes.status, why);
+    throw new Error(`Transcription failed: ${why}`);
   }
   const data = (await txRes.json()) as {
     transcript?: string;

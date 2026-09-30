@@ -21,6 +21,7 @@
 import { v4 as uuidv4 } from "uuid";
 import { auth } from "../../config/firebase-config";
 import { useProjectStore } from "../../stores/project-store";
+import { reportIfOutOfCredits } from "../out-of-credits";
 import type { MediaItem } from "@openreel/core";
 
 export type SunoOp =
@@ -364,6 +365,8 @@ async function postOp<T>(
   if (!res.ok) {
     const err = new Error(await errorText(res)) as Error & { statusCode?: number };
     err.statusCode = res.status;
+    // Out of credits: the host's shared upgrade sheet says so (see out-of-credits.ts).
+    reportIfOutOfCredits(res.status, err.message);
     throw err;
   }
   const json = (await res.json()) as T & { charged?: number; balance?: number };

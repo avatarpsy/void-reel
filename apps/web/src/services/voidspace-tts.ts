@@ -19,6 +19,7 @@
 
 import { auth } from "../config/firebase-config";
 import { toast } from "../stores/notification-store";
+import { reportIfOutOfCredits } from "./out-of-credits";
 import type { ElevenLabsVoice, ElevenLabsModel } from "../components/editor/inspector/tts-types";
 
 async function authHeader(): Promise<Record<string, string>> {
@@ -127,7 +128,12 @@ export async function synthesizeViaVoidspace(
     }),
     signal,
   });
-  if (!res.ok) throw new Error(`Voice generation failed: ${await errorText(res)}`);
+  if (!res.ok) {
+    const why = await errorText(res);
+    // Out of credits: the host's shared upgrade sheet says so (see out-of-credits.ts).
+    reportIfOutOfCredits(res.status, why);
+    throw new Error(`Voice generation failed: ${why}`);
+  }
   const data = (await res.json()) as { audioUrl?: string; charged?: number; balance?: number };
   if (!data.audioUrl) throw new Error("Voice generation returned no audio.");
 
@@ -160,7 +166,11 @@ export async function enhanceTextViaVoidspace(
     body: JSON.stringify({ text }),
     signal,
   });
-  if (!res.ok) throw new Error(`Text enhancement failed: ${await errorText(res)}`);
+  if (!res.ok) {
+    const why = await errorText(res);
+    reportIfOutOfCredits(res.status, why);
+    throw new Error(`Text enhancement failed: ${why}`);
+  }
   const data = (await res.json()) as { text?: string };
   return data.text ?? text;
 }

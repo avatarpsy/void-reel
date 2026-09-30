@@ -4,6 +4,7 @@ import { useUIStore } from '../../../stores/ui-store';
 import { separateArtboardIntoLayers } from '../../../services/layer-separation';
 import { ImageGenError, fetchCreditSituation } from '../../../services/image-generation';
 import { NotSignedInError } from '../../../services/voidspace-storage';
+import { askHostForCredits } from '../../../services/out-of-credits';
 
 /**
  * "Separate into layers" (Seedream 5.0 Pro). Flattens the current page and asks
@@ -35,10 +36,13 @@ export function LayerSeparationModal() {
     } catch (e) {
       if (e instanceof NotSignedInError) setError('Sign in to Voidspace to separate layers.');
       else if (e instanceof ImageGenError && e.code === 402) {
-        const sit = await fetchCreditSituation();
-        setCredits({ available: e.available, required: e.required, subscribed: sit.isSubscribed });
+        // Embedded: the host's shared upgrade sheet. Standalone: our popup.
+        if (!askHostForCredits({ needed: e.required, balance: e.available })) {
+          const sit = await fetchCreditSituation();
+          setCredits({ available: e.available, required: e.required, subscribed: sit.isSubscribed });
+        }
       } else if (e instanceof ImageGenError && (e.code === 403 || e.upgrade)) {
-        setCredits({ subscribed: false, locked: true });
+        if (!askHostForCredits({ reason: 'plan' })) setCredits({ subscribed: false, locked: true });
       } else if (e instanceof ImageGenError && (e.code === 503 || e.code === 429)) {
         setError('Seedream is busy right now — please try again in a moment.');
       } else {
