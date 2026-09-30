@@ -1,4 +1,6 @@
 import type { ExportProgress } from "../export/types";
+import { yieldToEventLoop } from "../utils/yield";
+
 type FFmpegInstance = {
   load(options?: {
     coreURL?: string;
@@ -661,7 +663,8 @@ export class FFmpegFallback {
         }
 
         if (frameCount % BATCH_SIZE === 0) {
-          await new Promise((resolve) => setTimeout(resolve, 10));
+          // Not setTimeout: a hidden tab throttles timers to ~1/min (utils/yield.ts).
+          await yieldToEventLoop();
         }
       }
 

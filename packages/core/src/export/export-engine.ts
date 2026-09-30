@@ -23,6 +23,7 @@ import { graphicsEngine } from "../graphics/graphics-engine";
 import { UpscalingEngine, getUpscalingEngine } from "../video/upscaling";
 import { getMediaEngine } from "../media/mediabunny-engine";
 import { rewriteToProxy } from "../utils/cors-proxy";
+import { yieldToEventLoop } from "../utils/yield";
 import { getWavEncoder } from "../wasm/wav";
 
 export class ExportEngine {
@@ -524,7 +525,8 @@ export class ExportEngine {
           try {
             mediaEngine.clearFrameCache();
           } catch {}
-          await new Promise((resolve) => setTimeout(resolve, 2));
+          // Not setTimeout: a hidden tab throttles timers to ~1/min (utils/yield.ts).
+          await yieldToEventLoop();
         }
 
         yield this.createProgress(
@@ -1185,7 +1187,7 @@ export class ExportEngine {
 
       // Yield between chunks so the browser can reclaim the previous buffer
       // before the next long-running render starts.
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await yieldToEventLoop();
     }
   }
 
