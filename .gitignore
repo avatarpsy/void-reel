@@ -57,3 +57,28 @@ FEATURES_TWITTER.md
 .claude-tasks.md
 
 CLAUDE.md
+
+# --- Secrets (security audit 2026-10-01): never commit keys or credential files ---
+.env
+.env.*
+!.env.example
+!.env.*.example
+!.env.template
+*.env.bak*
+.secrets/
+*-firebase-adminsdk-*.json
+firebase-credentials*.json
+serviceAccountKey*.json
+service-account*.json
+service_account*.json
+client_secret*.json
+*.pem
+*.p8
+*.p12
+*.pfx
+*.jks
+*.keystore
+key.properties
+id_rsa*
+id_ed25519*
+cloudflared/*.json
