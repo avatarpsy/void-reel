@@ -4126,7 +4126,11 @@ function App() {
                 frameRate: proj.settings?.frameRate ?? 30,
                 format: "mp4",
                 codec: "h264",
-                bitrate: 12000,
+                // Scaled to the frame size, 12 Mbps at 1080p down to a 2.5 Mbps
+                // floor. A flat 12 Mbps made a 480p render ~5x larger than it
+                // needed to be, so a long cut passed the 300 MB storage limit at
+                // ~3 min and could not be saved or published (2026-10-01).
+                bitrate: Math.max(2500, Math.min(12000, Math.round((w * h) / (1920 * 1080) * 12000))),
                 quality: 85,
                 ...(msg.settings || {}),
               };

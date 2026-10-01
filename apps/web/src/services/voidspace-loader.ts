@@ -1009,7 +1009,14 @@ export async function fetchMediaBlob(
 
   const tryFetch = async (targetUrl: string): Promise<Blob | null> => {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    // A STALL limit, re-armed on every chunk. As a total it cut off any clip
+    // that took over 15 s to download (a 1080p clip on an ordinary link), and
+    // the export then rendered that clip black.
+    let timer = setTimeout(() => controller.abort(), timeoutMs);
+    const touch = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => controller.abort(), timeoutMs);
+    };
     try {
       const stamped = await maybeAuthStamp(targetUrl);
       const res = await fetch(stamped, {
@@ -1018,13 +1025,27 @@ export async function fetchMediaBlob(
         cache: "no-store",
         signal: controller.signal,
       });
+      touch();
       if (!res.ok) {
         console.warn(
           `[voidspace-loader] Blob fetch failed (${res.status}) for ${targetUrl}`,
         );
         return null;
       }
-      const blob = await res.blob();
+      let blob: Blob;
+      if (res.body) {
+        const reader = res.body.getReader();
+        const parts: Uint8Array[] = [];
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          parts.push(value);
+          touch();
+        }
+        blob = new Blob(parts as BlobPart[], { type: (res.headers.get("content-type") || "").toLowerCase() });
+      } else {
+        blob = await res.blob();
+      }
       if (blob.size > 0) {
         mediaBlobCache.set(url, blob);
         return blob;
