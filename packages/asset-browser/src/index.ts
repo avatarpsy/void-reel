@@ -38,3 +38,5 @@ export * from './blocks';
  */
 export * from './block-preview/auth';
 export * from './block-preview/block-preview';
+/** Storage full → the host's sheet (`voidspace:storage-full`). See its header. */
+export * from './storage-full';

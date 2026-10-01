@@ -9,7 +9,7 @@ import {
   registerServiceWorker,
 } from "./services/service-worker";
 import { auth } from "./config/firebase-config";
-import { setBlockTokenProvider } from "@openreel/asset-browser";
+import { installStorageFullWatch, setBlockTokenProvider } from "@openreel/asset-browser";
 
 /**
  * Tell the shared block preview how THIS app gets a token.
@@ -76,6 +76,9 @@ if (typeof window !== "undefined") {
     return origFetch(input, init);
   };
 }
+
+// After the auth stamp above, so the watcher wraps it: storage full → host sheet.
+installStorageFullWatch();
 
 const POSTHOG_KEY = import.meta.env.VITE_PUBLIC_POSTHOG_KEY;
 const POSTHOG_HOST = import.meta.env.VITE_PUBLIC_POSTHOG_HOST;

@@ -26,7 +26,7 @@ import './theme/document-view.css';
 import { IndexeddbPersistence } from 'y-indexeddb';
 import * as Y from 'yjs';
 
-import { defaultApiBase, setBlockTokenProvider } from '@openreel/asset-browser';
+import { defaultApiBase, installStorageFullWatch, setBlockTokenProvider } from '@openreel/asset-browser';
 
 import { mountBoard, type MountedBoard } from './blocksuite/editor';
 import { installFrameTitleScale } from './ui/frame-title-scale';
@@ -117,6 +117,8 @@ async function boot(): Promise<void> {
    * `auth.ts`.
    */
   setBlockTokenProvider(() => getParentToken());
+  // Storage full on a generation → the host's "Your storage is full" sheet.
+  installStorageFullWatch();
 
   const ydoc = new Y.Doc({ guid: boardId });
   const persistence = new IndexeddbPersistence(`voidspace-board-${boardId}`, ydoc);

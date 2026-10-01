@@ -3,7 +3,7 @@ import ReactDOM from 'react-dom/client';
 import App from './App';
 import './index.css';
 import { redirectToAgentHost } from './services/agent-host-redirect';
-import { setBlockTokenProvider } from '@openreel/asset-browser';
+import { installStorageFullWatch, setBlockTokenProvider } from '@openreel/asset-browser';
 import { getVoidspaceIdToken } from './services/voidspace-storage';
 
 /**
@@ -16,6 +16,9 @@ import { getVoidspaceIdToken } from './services/voidspace-storage';
  * tile to become visible already has one.
  */
 setBlockTokenProvider(getVoidspaceIdToken);
+
+// Storage full on a generation → the host's "Your storage is full" sheet.
+installStorageFullWatch();
 
 // The editor is always used with its agent (see agent-host-redirect). A
 // top-level load of /image/ bounces to /ai/image, which embeds this app

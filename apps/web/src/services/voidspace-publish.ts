@@ -122,6 +122,12 @@ export async function uploadRenderedVideo(
   });
 
   const videoUrl = await getDownloadURL(fileRef);
+  // Bill the export to the person's storage: the server reads the real size
+  // from the object (website /api/studio/storage/attest). Never blocks publish.
+  void apiFetch("/api/studio/storage/attest", {
+    method: "POST",
+    body: JSON.stringify({ path }),
+  }).catch(() => { /* the reconciler counts users/{uid}/ later */ });
   return { videoUrl };
 }
 
