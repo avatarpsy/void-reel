@@ -256,6 +256,31 @@ export async function readSections(
   noteId: string,
   opts: { ids?: string[]; budget?: number } = {},
 ): Promise<ReadResult> {
+  const read = await readSectionsMarkdown(board, noteId, opts);
+  if (read.markdown.trim() || opts.ids?.length) return read;
+  /**
+   * NEVER AN EMPTY READ OF A NOTE THAT HAS WORDS (2 Oct). A beat card laid out
+   * by board_compose counted 34 words in listDocuments and came back from here
+   * as "", so every agent reading the board saw blank notes and kept re-reading
+   * them one by one until its turn ran out. The plain text of its blocks is
+   * what the person sees on the card; return that.
+   */
+  const lines: string[] = [];
+  const walk = (m: any) => {
+    const t = textOf(m);
+    if (t) lines.push(t);
+    for (const c of m?.children ?? []) walk(c);
+  };
+  for (const c of (board.store.getBlock(noteId)?.model as any)?.children ?? []) walk(c);
+  const plain = lines.join('\n\n');
+  return plain ? { markdown: plain, omitted: [], words: wordsIn(plain) } : read;
+}
+
+async function readSectionsMarkdown(
+  board: MountedBoard,
+  noteId: string,
+  opts: { ids?: string[]; budget?: number } = {},
+): Promise<ReadResult> {
   const { noteToMarkdown } = await import('./note-io');
   const all = ranges(board, noteId);
   /**
