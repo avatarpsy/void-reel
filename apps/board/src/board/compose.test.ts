@@ -3,8 +3,8 @@ import { describe, expect, it } from 'vitest';
 import { makeTestBoard } from '../blocksuite/test-board';
 import { drawOnCanvas, fitFramesToMembers, readCanvas } from './canvas';
 import {
-  ACCENT_MAX_RATIO, CARD_W, GUTTER, cardHeight, columnsFor, composeRegion, numberCard,
-  sequenceWidth,
+  ACCENT_MAX_RATIO, CARD_W, GUTTER, type ComposeBox, cardHeight, columnsFor, composeRegion,
+  numberCard, reflowComposed, sequenceWidth,
 } from './compose';
 
 /**
@@ -202,37 +202,32 @@ describe('nothing lands on top of anything', () => {
  * every card. Each must be met or exceeded — never under.
  */
 describe('cardHeight never under-reads a real card', () => {
-  const real: Array<[string, string, number]> = [
+  /**
+   * Re-measured 2026-10-05 on the current note theme (the earlier table was
+   * taken on an older, tighter one and no longer matches what renders).
+   * Read back with board_canvas_read after every note had finished growing.
+   */
+  const beat = '# 1 · Beat 1\nHe takes the stairs down past the floors he swore he would never visit, and every landing is quieter than the last one.';
+  const real: Array<[string, string, number, number?]> = [
     [
-      'heading plus a long line',
-      '# SEVEN\nOne tower block. Seven floors, one per drive — Survival at the ground, Purpose at the top. Riders nest by floor and travel in the walls.',
-      194,
+      'a long line, no heading',
+      'One tower block. Seven floors, one per drive — Survival at the ground, Purpose at the top. Riders nest by floor and travel in the walls.',
+      294,
     ],
     [
       'heading plus two short lines',
       '# The one rule\nSee it completely and it dies.\nFight it and it grows.',
-      180,
+      296,
     ],
-    [
-      'heading plus one medium line',
-      '# The tone\nFunny for fifty seconds. Then it turns, and the last ten seconds hurt.',
-      170,
-    ],
-    [
-      'one long paragraph, no heading',
-      'Why one building: a map that escalates by going **up**, a world small enough to feel intimate, and the same locations every episode — which is what makes a daily affordable.',
-      164,
-    ],
-    [
-      'a shorter paragraph, no heading',
-      "He owns the building the Riders nest in. He is right often enough to be frightening, and his whole argument is four words: *it's easier down here.*",
-      140,
-    ],
+    ['one word', 'short', 201],
+    ['one medium line', 'Funny for fifty seconds. Then it turns, and the last ten seconds hurt.', 248],
+    ['a narrow sequence beat (w=248)', beat, 637, 248],
+    ['a narrower sequence beat (w=203)', beat, 928, 203],
   ];
 
-  for (const [label, text, actual] of real) {
+  for (const [label, text, actual, width] of real) {
     it(`${label}: covers the real ${actual}px`, () => {
-      const h = cardHeight(text);
+      const h = cardHeight(text, width);
       expect(h, 'must never be under the real height').toBeGreaterThanOrEqual(actual);
       // …and not so far over that the page turns into whitespace.
       expect(h, 'must not be absurdly over').toBeLessThan(actual * 1.6);
@@ -415,5 +410,75 @@ describe('a sequence is a run, not a grid', () => {
     expect(new Set(runCards.map(n => n.w)).size).toBe(1);
     // Both start on the same left edge — one document, not two.
     expect(Math.min(...grid.map(n => n.x))).toBe(Math.min(...runCards.map(n => n.x)));
+  });
+});
+
+/**
+ * ── THE PAGE IS RE-STACKED FROM WHAT THE RENDERER REALLY DREW ──────────────
+ * Measured on a live board: a 248-wide sequence card estimated ~390 rendered
+ * 629, and the composed page had 35 overlapping pairs. These boxes play that
+ * back — every card far taller than planned — and the reflow must still leave
+ * no card on a card and no frame on the next section or the title.
+ */
+describe('reflow from measured heights', () => {
+  it('leaves nothing overlapping when every card grew past its estimate', () => {
+    const plan = composeRegion({
+      title: 'SEASON ONE',
+      subtitle: 'Seven floors, one per drive.',
+      columns: 3,
+      sections: [
+        { title: 'S1E01', layout: 'sequence', cards: Array.from({ length: 5 }, (_, i) => ({ text: `# Beat ${i}\nHe takes the stairs down past the floors he swore he would never visit.` })) },
+        { title: 'THE WORLD', cards: [{ text: 'a' }, { text: 'b' }, { text: 'c' }, { text: 'd' }, { text: 'e' }, { text: 'f' }] },
+        { title: 'S1E02', layout: 'sequence', cards: [{ text: 'x' }, { text: 'y' }] },
+      ],
+    });
+
+    // The planned boxes, with every note grown to 629 — and the subtitle too.
+    const boxes: Record<string, ComposeBox> = {};
+    for (const e of plan.elements) {
+      if (!e.ref || e.kind === 'frame') continue;
+      boxes[e.ref] = { x: e.x!, y: e.y!, w: e.w ?? 900, h: e.kind === 'note' ? 629 : 76 };
+    }
+    for (const m of reflowComposed(plan.layout, boxes)) boxes[m.ref] = { ...boxes[m.ref], y: m.y };
+
+    // Frames as `fitFramesToMembers` draws them: 56 pad, 48 title bar above.
+    const frames = plan.layout.sections.map(s => {
+      const m = s.rows.flat().map(r => boxes[r]);
+      const x = Math.min(...m.map(b => b.x)) - 56;
+      const y = Math.min(...m.map(b => b.y)) - 104;
+      const r = Math.max(...m.map(b => b.x + b.w)) + 56;
+      const btm = Math.max(...m.map(b => b.y + b.h)) + 56;
+      return { x, y, w: r - x, h: btm - y };
+    });
+    const hit = (p: ComposeBox, q: ComposeBox) =>
+      p.x < q.x + q.w && p.x + p.w > q.x && p.y < q.y + q.h && p.y + p.h > q.y;
+
+    const cards = Object.entries(boxes);
+    for (let a = 0; a < cards.length; a++) {
+      for (let b = a + 1; b < cards.length; b++) {
+        expect(hit(cards[a][1], cards[b][1]), `${cards[a][0]} on ${cards[b][0]}`).toBe(false);
+      }
+    }
+    for (let a = 0; a < frames.length; a++) {
+      for (let b = a + 1; b < frames.length; b++) {
+        expect(hit(frames[a], frames[b]), `frame ${a} on frame ${b}`).toBe(false);
+      }
+      expect(hit(frames[a], boxes['compose-title']), `frame ${a} on the title`).toBe(false);
+      expect(hit(frames[a], boxes['compose-sub']), `frame ${a} on the subtitle`).toBe(false);
+    }
+    // A sequence stays one row after the reflow.
+    expect(new Set(plan.layout.sections[0].rows.flat().map(r => boxes[r].y)).size).toBe(1);
+  });
+
+  it('moves nothing when the estimate was already right', () => {
+    const plan = composeRegion({ title: 'T', sections: [{ title: 'S', cards: [{ text: 'a' }, { text: 'b' }] }] });
+    const boxes: Record<string, ComposeBox> = {};
+    for (const e of plan.elements) {
+      if (!e.ref || e.kind === 'frame') continue;
+      boxes[e.ref] = { x: e.x!, y: e.y!, w: e.w ?? 400, h: e.kind === 'note' ? cardHeight((e as { text: string }).text) : 76 };
+    }
+    // The title's real height differs from the estimate, so anchor the check on it.
+    boxes['compose-title'].h = boxes['c0-0'].y - 104 - 40 - boxes['compose-title'].y;
+    expect(reflowComposed(plan.layout, boxes)).toEqual([]);
   });
 });

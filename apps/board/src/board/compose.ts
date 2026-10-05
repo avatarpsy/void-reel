@@ -71,6 +71,19 @@ export interface ComposeRequest {
 export interface ComposePlan {
   elements: ElementSpec[];
   notes: string[];
+  /**
+   * The page's STRUCTURE, by `ref`: which cards share a row, which rows make a
+   * section, and which frame wraps it. The coordinates in `elements` are only a
+   * first guess — a note's real height exists after AFFiNE renders it — and
+   * this is what lets `reflowComposed` re-stack the page from measured boxes.
+   */
+  layout: ComposeLayout;
+}
+
+export interface ComposeLayout {
+  title: string;
+  subtitle?: string;
+  sections: Array<{ frame: string; rows: string[][] }>;
 }
 
 // ── The grid. One pitch, everywhere. ─────────────────────────────────────────
@@ -89,9 +102,17 @@ export const GUTTER = 70;
 export const SECTION_GAP = 76;
 /** A frame's title bar is drawn ABOVE its box; `fitFramesToMembers` pads for it. */
 const FRAME_CHROME = 104;
+/** Clear space between the header (title, or subtitle) and the first frame. */
+const HEADER_GAP = 40;
+/** Clear space between two rows of cards inside one section. */
+const ROW_GAP = 40;
 /** Body text inside a note, for estimating how tall a card will be. */
 const CARD_FONT = 16;
 /**
+ * ONLY A FIRST GUESS. `reflowComposed` re-stacks the page from the heights
+ * AFFiNE really gave the cards, so this decides the initial placement and
+ * nothing that survives it.
+ *
  * CALIBRATED AGAINST REAL CARDS, because the first guess overlapped.
  *
  * Measured on a live board, cards at w=400:
@@ -102,6 +123,17 @@ const CARD_FONT = 16;
  *
  * Under by up to 31%, and under is what put a card 19px on top of the one
  * above it — the exact defect this whole pass exists to remove.
+ *
+ * RE-MEASURED 2026-10-05 on the current theme, which pads notes far more: a
+ * one-word card is 201 tall, and narrow sequence cards are where it hurts —
+ *
+ *   w=248  heading + 117 chars           old estimate ~390   actual 637
+ *   w=203  same text                                          actual 928
+ *   w=400  "short"                                            actual 201
+ *   w=400  70 chars, one line                                 actual 248
+ *
+ * so the vertical chrome, line height and glyph width below are fitted to
+ * those, and the text is wrapped at word boundaries inside the 80px insets.
  *
  * Three things the first estimate missed, all visible in those numbers:
  *   • a note's inner width is much narrower than the box, so ~30 characters
@@ -114,15 +146,24 @@ const CARD_FONT = 16;
  * whitespace, which the frame then absorbs; under-estimating costs a
  * collision.
  */
-const CARD_PAD = 60;
+const CARD_PAD = 195;
+/**
+ * A NOTE'S TEXT IS INSET ~80px EACH SIDE, which is nothing at w=400 and most of
+ * the card at w=248. Measured on a composed page: a 248-wide sequence card with
+ * ~140 characters wrapped at 9-11 characters a line and grew to 629px, against
+ * an estimate of ~390 from a formula that assumed a 48px total inset.
+ */
+const NOTE_INSET = 80;
 /** Effective advance of a character in note body text, as a fraction of size. */
-const CARD_GLYPH_EM = 0.72;
+const CARD_GLYPH_EM = 0.6;
+/** A heading's glyphs are wider by about this much, so fewer fit a line. */
+const HEADING_SCALE = 1.3;
 /** A `# heading` line is set larger than the body it sits above. */
 const HEADING_LINES = 1.7;
 /** Each source line is its own block, and blocks carry a margin. */
-const BLOCK_MARGIN = 15;
-/** Line height, matching the one `measureLabel` uses for labels. */
-const LINE_EM = 1.35;
+const BLOCK_MARGIN = 6;
+/** Line height of note body text, fitted to the 2026-10-05 measurements. */
+const LINE_EM = 1.5;
 
 const TITLE_SIZE = 56;
 
@@ -202,9 +243,31 @@ export function numberCard(text: string, n: number): string {
     : `**${n}** ${body}`;
 }
 
+/**
+ * Lines a paragraph takes when wrapped at WORD boundaries.
+ *
+ * Dividing characters by line width assumes every line is filled to the last
+ * column. At 9-11 characters a line a single word routinely leaves a third of
+ * a line empty, which is where most of a narrow card's height comes from.
+ */
+function wrappedLines(body: string, perLine: number): number {
+  let lines = 1;
+  let used = 0;
+  for (const word of body.split(/\s+/).filter(Boolean)) {
+    let len = word.length;
+    if (used > 0 && used + 1 + len <= perLine) { used += 1 + len; continue; }
+    if (used > 0) lines++;
+    // A word longer than the line breaks mid-word.
+    while (len > perLine) { lines++; len -= perLine; }
+    used = len;
+  }
+  return lines;
+}
+
 /** Roughly how tall a card of this text will be once AFFiNE has grown it. */
 export function cardHeight(text: string, width = CARD_W): number {
-  const perLine = Math.max(8, Math.floor((width - 48) / (CARD_FONT * CARD_GLYPH_EM)));
+  const inner = Math.max(48, width - 2 * NOTE_INSET);
+  const perLine = Math.max(4, Math.floor(inner / (CARD_FONT * CARD_GLYPH_EM)));
   let lines = 0;
   let blocks = 0;
   for (const raw of String(text ?? '').split(/\r?\n/)) {
@@ -212,8 +275,11 @@ export function cardHeight(text: string, width = CARD_W): number {
     if (!line) continue;
     blocks++;
     const heading = line.startsWith('#');
-    const body = heading ? line.replace(/^#+\s*/, '') : line;
-    const wrapped = Math.max(1, Math.ceil(body.length / perLine));
+    // Markdown emphasis marks are not drawn, so they take no width.
+    const body = (heading ? line.replace(/^#+\s*/, '') : line).replace(/\*\*|[*`]/g, '');
+    const wrapped = heading
+      ? wrappedLines(body, Math.max(3, Math.floor(perLine / HEADING_SCALE)))
+      : wrappedLines(body, perLine);
     lines += heading ? wrapped * HEADING_LINES : wrapped;
   }
   const text_h = Math.ceil(lines * CARD_FONT * LINE_EM) + blocks * BLOCK_MARGIN;
@@ -269,7 +335,8 @@ export function composeRegion(req: ComposeRequest): ComposePlan {
     ref: 'compose-title',
   });
 
-  let y = originY + titleBox.h + 40;
+  /** Top of whatever comes next — a FRAME's top, title bar included. */
+  let y = originY + titleBox.h + HEADER_GAP;
 
   if (req.subtitle?.trim()) {
     const gridW = columns * CARD_W + (columns - 1) * GUTTER;
@@ -282,8 +349,14 @@ export function composeRegion(req: ComposeRequest): ComposePlan {
       w: Math.min(gridW, CARD_W * 2 + GUTTER),
       ref: 'compose-sub',
     });
-    y += cardHeight(req.subtitle) + 90;
+    y += cardHeight(req.subtitle, Math.min(gridW, CARD_W * 2 + GUTTER)) + HEADER_GAP;
   }
+
+  const layout: ComposeLayout = {
+    title: 'compose-title',
+    ...(req.subtitle?.trim() ? { subtitle: 'compose-sub' } : {}),
+    sections: [],
+  };
 
   // ── Sections ──────────────────────────────────────────────────────────────
   sections.forEach((section, si) => {
@@ -299,15 +372,20 @@ export function composeRegion(req: ComposeRequest): ComposePlan {
     const gutter = run ? SEQ_GUTTER : GUTTER;
 
     const refs: Array<{ ref: string }> = [];
-    let rowTop = y;
+    const rows: string[][] = [];
+    // The frame's title bar is drawn ABOVE its box, so the cards start a title
+    // bar's height below where the frame does. Without this the first frame
+    // sat on top of the page title.
+    let rowTop = y + FRAME_CHROME;
     let rowTallest = 0;
 
     cards.forEach((card, ci) => {
       const col = ci % cols;
       if (col === 0 && ci > 0) {
-        rowTop += rowTallest + 40;
+        rowTop += rowTallest + ROW_GAP;
         rowTallest = 0;
       }
+      if (col === 0) rows.push([]);
       const ref = `c${si}-${ci}`;
       const useAccent = !!card.accent && spent < budget;
       if (useAccent) spent++;
@@ -323,6 +401,7 @@ export function composeRegion(req: ComposeRequest): ComposePlan {
         ref,
       });
       refs.push({ ref });
+      rows[rows.length - 1].push(ref);
       rowTallest = Math.max(rowTallest, cardHeight(text, cardW));
     });
 
@@ -336,11 +415,85 @@ export function composeRegion(req: ComposeRequest): ComposePlan {
         kind: 'frame',
         title: section.title || `Section ${si + 1}`,
         contains: refs,
+        ref: `f${si}`,
       });
+      layout.sections.push({ frame: `f${si}`, rows });
     }
 
-    y = rowTop + rowTallest + SECTION_GAP + FRAME_CHROME;
+    y = rowTop + rowTallest + SECTION_GAP;
   });
 
-  return { elements, notes };
+  return { elements, notes, layout };
+}
+
+export interface ComposeBox { x: number; y: number; w: number; h: number }
+
+/**
+ * ── RE-STACK A COMPOSED PAGE FROM THE SIZES IT REALLY CAME OUT AT ────────────
+ *
+ * THE FAILURE THIS FIXES, measured on a live board: 35 overlapping pairs on one
+ * composed page. Every card had been placed against `cardHeight`, a guess, and
+ * on narrow sequence cards the guess was off by more than half (390 estimated,
+ * 629 rendered). Cards overran their rows, frames — fitted to their members —
+ * grew into the section below, and the page was unreadable.
+ *
+ * No constant fixes that, because the height is decided by the renderer. So
+ * after the page is drawn and the notes have stopped growing, this walks it top
+ * to bottom with the MEASURED boxes and puts every row at the previous row's
+ * real bottom, and every section below the previous one's real frame:
+ *
+ *   header        title (left where it is), subtitle HEADER_GAP below it
+ *   section       frame top = header/previous bottom + gap; cards FRAME_CHROME lower
+ *   row           top = previous row's real bottom + ROW_GAP
+ *   next section  previous section's last real bottom + SECTION_GAP
+ *
+ * The title is the anchor, so a batch translated as a whole after drawing
+ * (clear of the storyboard strip) keeps that offset. Only `y` changes: columns
+ * are the grid, and nothing is ever moved sideways.
+ *
+ * PURE. Returns the target `y` of every element that is not already there;
+ * frames are not in it, because they are refitted around their members after
+ * the moves (`fitFramesToMembers`).
+ */
+export function reflowComposed(
+  layout: ComposeLayout,
+  boxes: Readonly<Record<string, ComposeBox | undefined>>,
+): Array<{ ref: string; y: number }> {
+  const moves: Array<{ ref: string; y: number }> = [];
+  const place = (ref: string, y: number) => {
+    const b = boxes[ref];
+    if (b && Math.abs(b.y - y) >= 0.5) moves.push({ ref, y: Math.round(y) });
+  };
+
+  const title = boxes[layout.title];
+  let cursor: number | null = title ? title.y + title.h + HEADER_GAP : null;
+
+  const sub = layout.subtitle ? boxes[layout.subtitle] : undefined;
+  if (sub) {
+    const top = cursor ?? sub.y;
+    place(layout.subtitle!, top);
+    cursor = top + sub.h + HEADER_GAP;
+  }
+
+  for (const section of layout.sections) {
+    let rowTop: number | null = null;
+    let bottom: number | null = null;
+    for (const row of section.rows) {
+      const present = row.filter(ref => boxes[ref]);
+      if (!present.length) continue;
+      if (rowTop === null) {
+        // No header measured: the section stays where its first card already is.
+        rowTop = cursor !== null
+          ? cursor + FRAME_CHROME
+          : Math.min(...present.map(ref => boxes[ref]!.y));
+      } else {
+        rowTop = bottom! + ROW_GAP;
+      }
+      for (const ref of present) place(ref, rowTop);
+      bottom = rowTop + Math.max(...present.map(ref => boxes[ref]!.h));
+    }
+    if (bottom !== null) cursor = bottom + SECTION_GAP;
+  }
+
+  return moves;
 }

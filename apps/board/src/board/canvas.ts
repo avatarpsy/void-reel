@@ -705,6 +705,13 @@ const CONNECTOR_MODE = { straight: 0, orthogonal: 1, curve: 2 } as const;
 export function drawOnCanvas(
   std: BlockStdScope,
   specs: ElementSpec[],
+  /**
+   * `settle: false` skips the deferred overlap/frame passes below, for a caller
+   * that measures and lays the batch out itself (`board_compose`). Those passes
+   * push notes down one at a time, which turns a grid row into a staircase that
+   * the caller would only have to undo.
+   */
+  opts: { settle?: boolean } = {},
 ): DrawResult {
   const crud = std.get(EdgelessCRUDIdentifier);
   const gfx = std.get(GfxControllerIdentifier);
@@ -1059,7 +1066,7 @@ export function drawOnCanvas(
    * `board_draw` makes — one call, one undo — still holds.
    */
   const madeIds = ids.filter((id): id is string => !!id);
-  if (madeIds.length) {
+  if (madeIds.length && opts.settle !== false) {
     /**
      * ── AND IT HAS TO RUN MORE THAN ONCE ──────────────────────────────────
      *

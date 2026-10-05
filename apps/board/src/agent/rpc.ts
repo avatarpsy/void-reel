@@ -45,6 +45,7 @@ import {
 import { reserveFlow } from '../board/space';
 import { arrangeCanvas } from '../board/arrange';
 import { type ComposeSection, composeRegion } from '../board/compose';
+import { settleComposed } from '../board/compose-settle';
 import { readBoardMap } from '../board/map';
 import { pendingToast } from '../ui/toast';
 import type { PendingMediaApi } from '../ui/pending-media';
@@ -2738,9 +2739,11 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
      * produced through this door because no coordinate is ever asked for.
      *
      * It still goes out as ONE `drawOnCanvas` batch, so a composed page is one
-     * transaction and one Ctrl+Z, exactly like a drawn one.
+     * transaction and one Ctrl+Z, exactly like a drawn one. Then it waits for
+     * the notes to finish growing and re-stacks rows and sections from their
+     * MEASURED heights (`settleComposed`) — the placement above is a guess.
      */
-    'voidspace:board-compose': args => {
+    'voidspace:board-compose': async args => {
       const g = addGuard(args); if (!g.ok) return g;
       const sections = asArray<ComposeSection>(args.sections);
       if (!sections.length) {
@@ -2759,25 +2762,35 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
         y: typeof args.y === 'number' ? args.y : undefined,
       });
 
-      const result = drawOnCanvas(board.std, plan.elements);
+      const result = drawOnCanvas(board.std, plan.elements, { settle: false });
       rev++;
 
       const made = result.ids.filter((id): id is string => !!id);
-      const boxes = readCanvas(board.std).filter(i => made.includes(i.id));
-      if (boxes.length) {
+      const show = () => {
+        const boxes = readCanvas(board.std).filter(i => made.includes(i.id));
+        if (!boxes.length) return;
         ensureVisible({
           x: Math.min(...boxes.map(b => b.x)),
           y: Math.min(...boxes.map(b => b.y)),
           w: Math.max(...boxes.map(b => b.x + b.w)) - Math.min(...boxes.map(b => b.x)),
           h: Math.max(...boxes.map(b => b.y + b.h)) - Math.min(...boxes.map(b => b.y)),
         });
-      }
+      };
+      // In view BEFORE measuring: a card the viewport has never shown can sit
+      // at its drawn height until it is scrolled to, and then grow over the
+      // section below after the layout was already decided.
+      show();
+      const layout = await settleComposed(board.std, plan, result);
+      show();
 
       return {
         ok: true as const,
         rev,
         created: made.length,
         sections: sections.length,
+        // How the measured re-layout went: cards moved, and whether the notes
+        // stopped growing inside the wait (false = laid out from what was there).
+        layout,
         // The accent budget's verdict is a NOTE, not a problem: the page was
         // drawn, and the caller should know colour was withheld and why.
         ...(plan.notes.length ? { notes: plan.notes } : {}),
