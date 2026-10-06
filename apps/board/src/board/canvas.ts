@@ -46,7 +46,9 @@ import { Text } from '@blocksuite/store';
 import * as Y from 'yjs';
 
 import { readBlockMeta } from './board-meta';
-import { decodeMediaRef } from './media-ref';
+import { decodeMediaRef, isMediaRef } from './media-ref';
+import { localReferenceKey } from './local-reference';
+import type { BoardWorkspace } from '../blocksuite/workspace';
 /**
  * GEOMETRY LIVES IN `space.ts`, and it moved there for a reason.
  *
@@ -425,10 +427,44 @@ export function mediaUrlOf(std: BlockStdScope, id: string): string | null {
   if (block.flavour !== 'affine:image' && block.flavour !== 'affine:attachment') return null;
 
   const meta = readBlockMeta(std.store.doc.spaceDoc, id);
-  if (meta?.originalUrl) return meta.originalUrl;
+  if (meta?.originalUrl && isServerFetchable(meta.originalUrl)) return meta.originalUrl;
 
   const sourceId = (block.model.props as { sourceId?: string }).sourceId;
-  return (sourceId ? decodeMediaRef(sourceId)?.src : null) ?? null;
+  const src = sourceId ? decodeMediaRef(sourceId)?.src : null;
+  if (src && isServerFetchable(src)) return src;
+
+  /**
+   * A DROPPED/PASTED picture is a content key in the board's own blob store —
+   * no url on the block, none in meta (or a `vs-local:` one). Its durable cloud
+   * backup, when the drop's mirror finished, is recorded beside the key. Only
+   * that: `vs-local:`/`blob:` never leave this tab, because a server handed one
+   * fetches nothing. Making a backup that does not exist yet is async and lives
+   * in `reference-urls.ts`.
+   */
+  const key = localMediaKey(std, id);
+  if (!key) return null;
+  return (std.store.doc.workspace as BoardWorkspace).blobSource?.native?.cloudUrl(key) ?? null;
+}
+
+/** A url a SERVER can fetch. `vs-local:`, `blob:` and `data:` are this tab's. */
+export function isServerFetchable(url: string): boolean {
+  return /^https?:\/\//i.test(url);
+}
+
+/**
+ * The board blob-store key behind a canvas media block, when it has one.
+ *
+ * Either the block's own `sourceId` (anything that is not a `vsmedia:` Library
+ * ref is a content key) or a `vs-local:` original recorded by a relink/attach.
+ */
+export function localMediaKey(std: BlockStdScope, id: string): string | null {
+  const block = std.store.getBlock(id);
+  if (!block || (block.flavour !== 'affine:image' && block.flavour !== 'affine:attachment')) return null;
+  const original = readBlockMeta(std.store.doc.spaceDoc, id)?.originalUrl ?? '';
+  const fromMeta = localReferenceKey(original);
+  if (fromMeta) return fromMeta;
+  const sourceId = String((block.model.props as { sourceId?: string }).sourceId ?? '');
+  return sourceId && !isMediaRef(sourceId) ? sourceId : null;
 }
 
 /**
@@ -1435,7 +1471,13 @@ export function editCanvas(std: BlockStdScope, ops: EditOp[]): EditResult {
             changed++;
             continue;
           }
-          patch.text = new Y.Text(op.text);
+          // A frame's name is its `title`. Writing `text` onto one set a prop a frame
+          // does not have and the title bar read "Untitled section" afterwards.
+          if (block?.flavour === 'affine:frame') {
+            patch.title = new Text(op.text);
+          } else {
+            patch.text = new Y.Text(op.text);
+          }
         } else if (op.op === 'color') {
           if (block?.flavour === 'affine:note') {
             patch.background = noteColor(op.fill);

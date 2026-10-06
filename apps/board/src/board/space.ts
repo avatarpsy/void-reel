@@ -125,7 +125,13 @@ export function isLayoutInert(model: unknown): boolean {
   // A CONNECTOR has no position of its own; it follows its endpoints.
   if (m.type === 'connector') return true;
   // Anything inside a group (a mind map's nodes) is positioned BY the group.
-  if (m.group) return true;
+  // A FRAME is not such a group: BlockSuite reports a framed block's frame as its
+  // `group`, and treating that as "positioned by its parent" made every picture
+  // in a frame unmovable by board_arrange and invisible to collision checks, so
+  // new media landed on top of framed references (measured 6 Oct on the launch
+  // board: 16 character sheets in a frame, "Nothing on the canvas could be arranged").
+  const g = m.group as { flavour?: string } | null | undefined;
+  if (g && g.flavour !== 'affine:frame') return true;
   return false;
 }
 

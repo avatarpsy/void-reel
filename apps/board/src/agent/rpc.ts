@@ -79,6 +79,7 @@ const GEN_ROLE_ORDER: MediaRole[] = [
 import { allBlocks, findBlock, searchBlocks, setBlockCatalogue } from '../shot/blocks';
 import { resolveCanvasMedia } from '../shot/canvas-drop';
 import { providerReference } from '../board/local-reference';
+import { isCanvasMediaBlock, resolveReferenceUrls } from '../board/reference-urls';
 import { clearTakeProgress, setTakeProgress } from '../shot/take-progress';
 import { readParsed, readScript, writeScript } from '../shot/screenplay-doc';
 import { coverage, nextScene, renderScene, renderScriptContext } from '../shot/resolution';
@@ -2616,22 +2617,41 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
       return { ok: true as const, rev };
     },
 
-    'voidspace:board-selection': args => {
+    /**
+     * `mediaUrls` are always SERVER-FETCHABLE. A picture dropped onto the board
+     * lives in its blob store with no url; `resolveReferenceUrls` hands over its
+     * durable cloud backup (making it once if the drop's backup never finished)
+     * and records it on the block. Anything that could not be made available is
+     * in `problems` with its own reason, so the page can tell "not media" from
+     * "media the account has no room to back up".
+     */
+    'voidspace:board-selection': async args => {
       const ids = Array.isArray(args.ids) ? args.ids.map(String) : null;
-      if (!ids) return { ok: true as const, rev, ...readSelection(board.std) };
+      if (!ids) {
+        const sel = readSelection(board.std);
+        // A selection mixes notes and pictures on purpose; only the media in it
+        // are references, and a note in it is not a problem worth reporting.
+        const media = sel.ids.filter(id => isCanvasMediaBlock(board.std, id) || !!mediaUrlOf(board.std, id));
+        const resolved = await resolveReferenceUrls(board.std, media);
+        return {
+          ok: true as const, rev, ids: sel.ids, items: sel.items,
+          mediaIds: resolved.ids, mediaUrls: resolved.mediaUrls, problems: resolved.problems,
+        };
+      }
 
       const items = readCanvas(board.std).filter(i => ids.includes(i.id));
+      // ORDER FOLLOWS THE CALLER, not the canvas. A model receives references
+      // positionally, so "use the first one as the style" only means anything
+      // if the order the agent asked for survives.
+      const resolved = await resolveReferenceUrls(board.std, ids);
       return {
         ok: true as const,
         rev,
         ids: items.map(i => i.id),
         items,
-        // ORDER FOLLOWS THE CALLER, not the canvas. A model receives references
-        // positionally, so "use the first one as the style" only means anything
-        // if the order the agent asked for survives.
-        mediaUrls: ids
-          .map(id => mediaUrlOf(board.std, id))
-          .filter((u): u is string => !!u),
+        mediaIds: resolved.ids,
+        mediaUrls: resolved.mediaUrls,
+        problems: resolved.problems,
       };
     },
 
@@ -3487,6 +3507,9 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
         title: String(args.title ?? '') || 'Untitled board',
         aspect: String(args.aspect ?? '') || '9:16',
         goal: String(args.goal ?? ''),
+        ...(Array.isArray(args.shotIds) && args.shotIds.length
+          ? { shotIds: args.shotIds.map(String) }
+          : {}),
       });
 
       await Promise.all(payload.shots.flatMap(shot => shot.references.map(async ref => {

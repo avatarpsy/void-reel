@@ -47,6 +47,8 @@ export class NativeMediaStore extends EventTarget {
   private previews = new Map<string, string>();
   private previewing = new Set<string>();
   private providerCopies = new Map<string, { url: string; until: number }>();
+  /** Why the last cloud backup of a key failed, in words fit for a person. */
+  private mirrorErrors = new Map<string, string>();
 
   async previewUrl(key: string): Promise<string> {
     if (this.previews.has(key)) return this.previews.get(key)!;
@@ -77,6 +79,24 @@ export class NativeMediaStore extends EventTarget {
     const url = await uploadBlob(blob, this.records.get(key)?.name || 'board-reference', 'provider');
     this.providerCopies.set(key, { url, until: Date.now() + 30 * 60_000 });
     return url;
+  }
+
+  /**
+   * The DURABLE cloud url for a key — the board's own backup, made once.
+   *
+   * For a caller that hands the url to the server (a generation reference).
+   * Reuses the backup when it exists; otherwise runs the same `mirror` the drop
+   * already started, so a key is uploaded at most once however many times it is
+   * asked for (the url lands in `records`, which travels with the board).
+   * Throws with the reason — storage full, signed out, original missing —
+   * because "not media" is the wrong answer for a picture that is right there.
+   */
+  async durableUrl(key: string): Promise<string> {
+    const saved = this.cloudUrl(key);
+    if (saved) return saved;
+    const url = await this.mirror(key);
+    if (url) return url;
+    throw new Error(this.mirrorErrors.get(key) || this.status(key).message || 'Cloud backup failed.');
   }
 
   constructor(readonly boardId: string, private doc: Y.Doc, private local: () => IndexedDBBlobSource) {
@@ -190,7 +210,7 @@ export class NativeMediaStore extends EventTarget {
     if (pending) return pending;
     const task = this.queue.then(async () => {
       const original = blob || await this.get(key);
-      if (!original) return;
+      if (!original) { this.mirrorErrors.set(key, this.status(key).message); return; }
       const localState = this.status(key);
       this.report(key, 'uploading', 'Original kept on this device. Backing up to cloud…');
       try {
@@ -198,10 +218,12 @@ export class NativeMediaStore extends EventTarget {
         const url = shared ? await uploadSharedMedia(shared, original) : await uploadBlob(original, this.records.get(key)?.name || 'board-media');
         const record = this.records.get(key)!;
         this.records.set(key, { ...record, cloudUrl: url });
+        this.mirrorErrors.delete(key);
         this.report(key, 'cloud', 'Backed up to cloud.');
         return url;
       } catch (e) {
         const reason = e instanceof Error ? e.message : 'Cloud backup failed.';
+        this.mirrorErrors.set(key, reason);
         this.report(key, localState.state === 'unsaved' ? 'unsaved' : localState.state === 'folder' ? 'folder' : 'browser', `${localState.message} ${reason}`);
       }
     }).finally(() => { this.mirrors.delete(key); });

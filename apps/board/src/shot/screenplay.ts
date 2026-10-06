@@ -378,7 +378,7 @@ function legendLine(ref: CompiledReference): string {
 
 export function compileBoard(
   std: BlockStdScope,
-  header: { title: string; aspect: string; goal: string },
+  header: { title: string; aspect: string; goal: string; shotIds?: string[] },
 ): CompiledBoard {
   /**
    * THE SCREENPLAY IS READ FIRST, and it is optional.
@@ -392,7 +392,14 @@ export function compileBoard(
   const parsed = readParsed(std);
   const sceneIndex = new Map(parsed.scenes.map(c => [c.key, c] as const));
 
-  const shots = readShots(std).map((shot, i): CompiledShot => {
+  /**
+   * A SUBSET compiles as its own film: the chosen shots, numbered 1..n, with a
+   * screenplay of only those shots. Filtering after the screenplay was written
+   * sent 12 shots of screenplay with 6 shots of payload, and the server rightly
+   * refused ("screenplay parses to 12 shots but the board has 6").
+   */
+  const only = header.shotIds?.length ? new Set(header.shotIds) : null;
+  const shots = readShots(std).filter(s => !only || only.has(s.id)).map((shot, i): CompiledShot => {
     const caps = effectiveModel(shot.model);
     /**
      * ROLE ORDER FIRST, THEN TAG NUMBERS FROM THAT ORDER.
