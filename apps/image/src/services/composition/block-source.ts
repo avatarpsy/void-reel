@@ -34,7 +34,7 @@ export interface BlockDocument {
   name: string;
   /** Which tier this NAME actually resolved to, which is not always the tier a
    *  layer was placed from — a user block can start shadowing a starter. */
-  tier: 'user' | 'shared' | 'starter';
+  tier: 'user' | 'shared' | 'starter' | 'catalog';
   html: string;
   /** The block's own slot manifest, keyed by slot name. */
   slots: Record<string, SlotSpec>;
@@ -48,7 +48,7 @@ export interface ResolvedComposition {
   html: string;
   manifest: Record<string, SlotSpec>;
   /** The tier the block resolved to now. Absent for authored html. */
-  tier?: 'user' | 'shared' | 'starter';
+  tier?: 'user' | 'shared' | 'starter' | 'catalog';
   /** Non-fatal things the caller should be able to say out loud. */
   warnings: string[];
 }

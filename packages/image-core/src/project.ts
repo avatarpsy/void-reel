@@ -136,7 +136,7 @@ export interface CompositionSource {
   block?: string;
   /** Which tier the block resolved from. Recorded so a later render resolves the
    *  SAME block: a user block can shadow a starter of the same name. */
-  tier?: 'user' | 'shared' | 'starter';
+  tier?: 'user' | 'shared' | 'starter' | 'catalog';
   /** Authored html, for work no block covers. Large documents are stored by
    *  content address elsewhere; this holds the reference or the html itself. */
   inlineHtml?: string;
