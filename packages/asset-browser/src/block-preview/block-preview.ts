@@ -15,6 +15,7 @@ import { mountBlockPreview, type PreviewHandle, type SlotFill } from './block-re
 export {
   blockSrcdoc, loadBlock, forgetBlockDoc, mountBlockPreview, onBlockReport,
   type BlockDoc, type BlockReport, type PreviewHandle, type SlotFill,
+  type LayerTiming, type BlockLayer, type MountOptions,
 } from './block-render';
 /**
  * The runtime shim, re-exported here because a host that renders a block

@@ -73,7 +73,15 @@ export const LiveGraphicLayer: React.FC<{
   const blockRef = useRef<BlockInfo | null>(null);
   const graphic = clip.metadata?.graphic;
   const draft = useLiveGraphicStore((s) => s.drafts[clip.id]);
+  const timingDraft = useLiveGraphicStore((s) => s.timingDrafts[clip.id]);
   const setLiveClip = useLiveGraphicStore((s) => s.setLiveClip);
+  const setLayers = useLiveGraphicStore((s) => s.setLayers);
+  const timing = useMemo(
+    () => timingDraft ?? (graphic?.timing as Record<string, { delay?: number; speed?: number }> | undefined),
+    [timingDraft, graphic?.timing],
+  );
+  const timingRef = useRef(timing);
+  timingRef.current = timing;
   const values = useMemo(() => ({ ...(graphic?.slots ?? {}), ...(draft ?? {}) }), [graphic?.slots, draft]);
   // Composition time: the clip's own clock, from its in-point.
   const local = Math.max(0, time - clip.startTime + (clip.inPoint ?? 0));
@@ -96,6 +104,8 @@ export const LiveGraphicLayer: React.FC<{
         source: graphic.source,
         seek: localRef.current,
         transparent: true,
+        layerTiming: timingRef.current,
+        onLayers: (layers) => { if (live) setLayers(clip.id, layers); },
         onSettled: (ok) => { if (live && ok) setLiveClip(clip.id); },
       });
     });
@@ -105,7 +115,15 @@ export const LiveGraphicLayer: React.FC<{
       handle.current = null;
       setLiveClip(null);
     };
-  }, [clip.id, graphic?.block, graphic?.source, setLiveClip]);
+  }, [clip.id, graphic?.block, graphic?.source, setLiveClip, setLayers]);
+
+  // Timing re-shifts the composition's own timelines: the frame is rebuilt.
+  const timingKey = JSON.stringify(timing ?? {});
+  const firstTiming = useRef(true);
+  useEffect(() => {
+    if (firstTiming.current) { firstTiming.current = false; return; }
+    handle.current?.setTiming(timingRef.current);
+  }, [timingKey]);
 
   useEffect(() => {
     const { vars, fills } = toFills(blockRef.current, values);

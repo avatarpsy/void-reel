@@ -18,18 +18,35 @@
  *                re-render turns them into the clip's file.
  */
 import { create } from "zustand";
+import type { BlockLayer, LayerTiming } from "@openreel/asset-browser";
 
 interface LiveGraphicState {
   liveClipId: string | null;
   drafts: Record<string, Record<string, string>>;
+  /** Per-layer timing being edited, per clip (see GraphicRef.timing). */
+  timingDrafts: Record<string, LayerTiming>;
+  /** The animated layers the live composition reported, per clip. */
+  layers: Record<string, BlockLayer[]>;
   setLiveClip: (clipId: string | null) => void;
   setDraft: (clipId: string, values: Record<string, string>) => void;
   clearDraft: (clipId: string) => void;
+  setTimingDraft: (clipId: string, timing: LayerTiming | null) => void;
+  setLayers: (clipId: string, layers: BlockLayer[]) => void;
 }
 
 export const useLiveGraphicStore = create<LiveGraphicState>((set) => ({
   liveClipId: null,
   drafts: {},
+  timingDrafts: {},
+  layers: {},
+  setTimingDraft: (clipId, timing) =>
+    set((s) => {
+      const next = { ...s.timingDrafts };
+      if (timing) next[clipId] = timing;
+      else delete next[clipId];
+      return { timingDrafts: next };
+    }),
+  setLayers: (clipId, layers) => set((s) => ({ layers: { ...s.layers, [clipId]: layers } })),
   setLiveClip: (clipId) => set((s) => (s.liveClipId === clipId ? s : { liveClipId: clipId })),
   setDraft: (clipId, values) => set((s) => ({ drafts: { ...s.drafts, [clipId]: values } })),
   clearDraft: (clipId) =>

@@ -33,7 +33,12 @@
  * to defend against a threat that does not exist yet.
  */
 import { blockApiUrl, blockToken } from './auth';
-import { blockRuntimeScript, dropRedundantGsapTag, ensureBlockRuntime } from './block-runtime';
+import { blockRuntimeScript, dropRedundantGsapTag, ensureBlockRuntime, ensureLayerTiming, layerTimingScript } from './block-runtime';
+
+/** `{ "#id": { delay, speed } }` — see GraphicRef.timing. */
+export type LayerTiming = Record<string, { delay?: number; speed?: number }>;
+/** One animated layer of a composition, as the live preview found it. */
+export interface BlockLayer { sel: string; start: number; end: number }
 
 /** One block's source, as the preview needs it. */
 export interface BlockDoc {
@@ -555,7 +560,11 @@ export function blockSrcdoc(
   vars: Record<string, string> = {},
   previewId = '',
   slots: SlotFill[] = [],
-  opts: { untrusted?: boolean; baseUrl?: string; seek?: number; transparent?: boolean } = {},
+  opts: {
+    untrusted?: boolean; baseUrl?: string; seek?: number; transparent?: boolean;
+    /** Per-layer timing to apply, and whether to report the layers found. */
+    layerTiming?: LayerTiming; reportLayers?: boolean;
+  } = {},
 ): string {
   // The reporter goes FIRST — its error listener has to predate the block's own
   // scripts or the failure it exists to catch happens before it is watching.
@@ -598,7 +607,13 @@ export function blockSrcdoc(
   // the placeholder and then snap.
   const seek = typeof opts.seek === 'number' && isFinite(opts.seek)
     ? `<script>window.__vsInitialSeek=${Math.max(0, opts.seek)};<\/script>` : '';
-  const tail = `${patcherFor(slots)}${seek}${DRIVER}`;
+  // Layer timing runs after the block built its timelines and BEFORE the
+  // driver seeks or plays them, so the first frame is already the timed one.
+  const timing = opts.layerTiming || opts.reportLayers
+    ? `<script>window.__vsLayerTiming=${JSON.stringify(opts.layerTiming ?? {}).replace(/</g, '\\u003c')};`
+      + `window.__vsReportLayers=${opts.reportLayers ? 'true' : 'false'};<\/script>${layerTimingScript()}`
+    : '';
+  const tail = `${patcherFor(slots)}${timing}${seek}${DRIVER}`;
   return /<\/body>/i.test(out)
     ? out.replace(/<\/body>/i, `${tail}</body>`)
     : `${out}${tail}`;
@@ -621,6 +636,8 @@ export interface PreviewHandle {
    * mode for good: it no longer plays on its own.
    */
   seek(t: number): void;
+  /** Change the per-layer timing (rebuilds the frame). */
+  setTiming(timing: LayerTiming | undefined): void;
   destroy(): void;
 }
 
@@ -633,6 +650,10 @@ export interface MountOptions {
   onSettled?: (ok: boolean) => void;
   /** Drawn as a layer over a picture: no page background (see blockSrcdoc). */
   transparent?: boolean;
+  /** Per-layer delay/speed inside the composition (GraphicRef.timing). */
+  layerTiming?: LayerTiming;
+  /** Called with the composition's animated layers once it has rendered. */
+  onLayers?: (layers: BlockLayer[]) => void;
 }
 
 /**
@@ -688,6 +709,12 @@ export function mountBlockPreview(
   options: MountOptions = {},
 ): PreviewHandle {
   let seekAt: number | undefined = options.seek;
+  let timing: LayerTiming | undefined = options.layerTiming;
+  const onLayersMsg = (e: MessageEvent) => {
+    const d = e.data as { type?: string; id?: string; layers?: BlockLayer[] } | null;
+    if (d?.type === 'vs-block-layers' && d.id === previewId && Array.isArray(d.layers)) options.onLayers?.(d.layers);
+  };
+  if (options.onLayers) window.addEventListener('message', onLayersMsg);
   let frame: HTMLIFrameElement | null = null;
   let current = { ...vars };
   let currentSlots = [...slots];
@@ -728,7 +755,10 @@ export function mountBlockPreview(
     if (options.transparent) f.style.colorScheme = 'normal';
     f.style.width = `${doc.width}px`;
     f.style.height = `${doc.height}px`;
-    f.srcdoc = blockSrcdoc(doc.html, current, previewId, currentSlots, { baseUrl: doc.baseUrl, seek: seekAt, transparent: options.transparent });
+    f.srcdoc = blockSrcdoc(doc.html, current, previewId, currentSlots, {
+      baseUrl: doc.baseUrl, seek: seekAt, transparent: options.transparent,
+      layerTiming: timing, reportLayers: !!options.onLayers,
+    });
     frame = f;
     host.append(f);
     fit();
@@ -740,7 +770,11 @@ export function mountBlockPreview(
    * fetched and the block is painted regardless — unanimated beats absent, and
    * the block's own report already carries `gsap: false` when it matters.
    */
-  void Promise.all([loadBlock(name, options.source), ensureBlockRuntime()]).then(([d]) => {
+  void Promise.all([
+    loadBlock(name, options.source),
+    ensureBlockRuntime(),
+    options.layerTiming || options.onLayers ? ensureLayerTiming() : Promise.resolve(null),
+  ]).then(([d]) => {
     if (dead) return;
     if (!d) {
       // NAMED, not a spinner that never resolves. A block can genuinely be
@@ -804,7 +838,22 @@ export function mountBlockPreview(
           return;
         } catch { /* fall through to the rebuild */ }
       }
-      frame.srcdoc = blockSrcdoc(doc.html, current, previewId, currentSlots, { baseUrl: doc.baseUrl, seek: seekAt, transparent: options.transparent });
+      frame.srcdoc = blockSrcdoc(doc.html, current, previewId, currentSlots, {
+        baseUrl: doc.baseUrl, seek: seekAt, transparent: options.transparent,
+        layerTiming: timing, reportLayers: !!options.onLayers,
+      });
+    },
+    setTiming(next) {
+      // A timeline already shifted cannot be un-shifted in place: rebuild.
+      timing = next;
+      if (!frame || !doc) return;
+      void ensureLayerTiming().then(() => {
+        if (!frame || !doc) return;
+        frame.srcdoc = blockSrcdoc(doc.html, current, previewId, currentSlots, {
+          baseUrl: doc.baseUrl, seek: seekAt, transparent: options.transparent,
+          layerTiming: timing, reportLayers: !!options.onLayers,
+        });
+      });
     },
     seek(t) {
       seekAt = t;
@@ -821,6 +870,7 @@ export function mountBlockPreview(
     },
     destroy() {
       dead = true;
+      window.removeEventListener('message', onLayersMsg);
       ro?.disconnect();
       pending.delete(previewId);
       frame?.remove();

@@ -162,11 +162,32 @@ export const GraphicSection: React.FC<GraphicSectionProps> = ({ clipId }) => {
   const fields = useMemo(() => valueSlots(block), [block]);
   const mediaFields = useMemo(() => mediaSlots(block), [block]);
 
+  /**
+   * PER-LAYER TIMING. The live layer reports the composition's animated
+   * layers; a delay or speed set here is applied by the same script in the
+   * live preview and in the render (GraphicRef.timing), and counts as a change
+   * like any typed value: shown at once, re-rendered a moment later.
+   */
+  const layers = useLiveGraphicStore((st) => st.layers[clipId]);
+  const timingDraft = useLiveGraphicStore((st) => st.timingDrafts[clipId]);
+  const savedTiming = (graphic?.timing ?? {}) as Record<string, { delay?: number; speed?: number }>;
+  const timing = timingDraft ?? savedTiming;
+  const timingChanged = JSON.stringify(timing) !== JSON.stringify(savedTiming);
+  const setLayerTiming = (sel: string, patch: { delay?: number; speed?: number }) => {
+    const next = { ...timing, [sel]: { ...timing[sel], ...patch } };
+    const e = next[sel];
+    if (!e.delay) delete e.delay;
+    if (!e.speed || e.speed === 1) delete e.speed;
+    if (!Object.keys(e).length) delete next[sel];
+    useLiveGraphicStore.getState().setTimingDraft(clipId, next);
+  };
+
   const changed = useMemo(() => {
     const was = graphic?.slots ?? {};
     const keys = new Set([...Object.keys(was), ...Object.keys(draft)]);
-    return [...keys].filter((k) => (was[k] ?? "") !== (draft[k] ?? ""));
-  }, [draft, graphic?.slots]);
+    const list = [...keys].filter((k) => (was[k] ?? "") !== (draft[k] ?? ""));
+    return timingChanged ? [...list, "timing"] : list;
+  }, [draft, graphic?.slots, timingChanged]);
 
   /**
    * Re-render with the staged values and swap the clip's media.
@@ -191,6 +212,7 @@ export const GraphicSection: React.FC<GraphicSectionProps> = ({ clipId }) => {
         mode: graphic.mode ?? "overlay",
         aspect: graphic.aspect,
         source: graphic.source,
+        timing,
         // The user has now said what it should say. Anything still empty draws
         // nothing rather than the designer's sample — in a finished video
         // somebody else's placeholder name is worse than an absent line.
@@ -213,7 +235,12 @@ export const GraphicSection: React.FC<GraphicSectionProps> = ({ clipId }) => {
 
       // An overlay render now decodes WITH its alpha (see GraphicRef.alpha).
       const overlay = (graphic.mode ?? "overlay") === "overlay";
-      const nextGraphic = { ...graphic, slots, ...(overlay ? { alpha: true } : {}) };
+      const nextGraphic = {
+        ...graphic,
+        slots,
+        ...(overlay ? { alpha: true } : {}),
+        ...(Object.keys(timing).length ? { timing } : { timing: undefined }),
+      };
       // The `screen` this clip got automatically was a stand-in for that alpha;
       // with real transparency it would only wash the design out. A blend the
       // user chose (anything but the old automatic one) is left alone.
@@ -259,6 +286,7 @@ export const GraphicSection: React.FC<GraphicSectionProps> = ({ clipId }) => {
         blob,
         (fresh as any).metadata ?? {},
       ).catch(() => {});
+      useLiveGraphicStore.getState().setTimingDraft(clipId, null);
       proc.completeTask(taskId);
     } catch (e: any) {
       const message = String(e?.message ?? e).slice(0, 200);
@@ -267,7 +295,7 @@ export const GraphicSection: React.FC<GraphicSectionProps> = ({ clipId }) => {
     } finally {
       setBusy(false);
     }
-  }, [clip, clipId, draft, graphic]);
+  }, [clip, clipId, draft, graphic, timing]);
 
   /**
    * TYPE, SEE IT, KEEP IT.
@@ -288,7 +316,7 @@ export const GraphicSection: React.FC<GraphicSectionProps> = ({ clipId }) => {
     if (!changed.length || busy) return;
     const t = window.setTimeout(() => { void rerender(); }, 1200);
     return () => window.clearTimeout(t);
-  }, [draft, changed.length, busy, rerender]);
+  }, [draft, changed.length, busy, rerender, timing]);
 
   if (!graphic) return null;
 
@@ -379,6 +407,47 @@ export const GraphicSection: React.FC<GraphicSectionProps> = ({ clipId }) => {
             on your computer for playback and export — position, trim and blend stay as they are.
           </p>
         </>
+      )}
+
+      {block && (
+        <div className="space-y-1.5 pt-1">
+          <span className="text-[10px] uppercase tracking-wide text-text-muted">Layers</span>
+          {!layers?.length ? (
+            <p className="text-[10px] text-text-muted leading-relaxed">
+              Pause with the playhead on this clip to list its animated layers.
+            </p>
+          ) : (
+            layers.map((L) => {
+              const t = timing[L.sel] ?? {};
+              return (
+                <div key={L.sel} className="flex items-center gap-1.5">
+                  <span className="flex-1 min-w-0 truncate text-[11px] text-text-primary" title={L.sel}>
+                    {fieldLabel(L.sel)}
+                    <span className="ml-1 text-[10px] text-text-muted">{L.start.toFixed(1)}–{L.end.toFixed(1)}s</span>
+                  </span>
+                  <input
+                    type="number"
+                    step={0.1}
+                    title="Delay (seconds)"
+                    value={t.delay ?? 0}
+                    onChange={(e) => setLayerTiming(L.sel, { delay: Number(e.target.value) || 0 })}
+                    className="w-14 px-1.5 py-0.5 text-[11px] bg-background-tertiary border border-border rounded
+                               text-text-primary focus:border-primary/60 focus:outline-none"
+                  />
+                  <select
+                    title="Speed"
+                    value={String(t.speed ?? 1)}
+                    onChange={(e) => setLayerTiming(L.sel, { speed: Number(e.target.value) })}
+                    className="w-16 px-1 py-0.5 text-[11px] bg-background-tertiary border border-border rounded
+                               text-text-primary focus:border-primary/60 focus:outline-none"
+                  >
+                    {[0.5, 0.75, 1, 1.25, 1.5, 2].map((v) => <option key={v} value={v}>{v}×</option>)}
+                  </select>
+                </div>
+              );
+            })
+          )}
+        </div>
       )}
 
       {error && <p className="text-[10px] text-error leading-relaxed">{error}</p>}

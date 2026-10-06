@@ -107,6 +107,37 @@ export function blockRuntimeScript(): string {
   return `<script>${safe}<\/script>`;
 }
 
+// ── layer timing ──────────────────────────────────────────────────────────
+// Voidspace's per-layer delay/speed script — the same string the render route
+// inlines (served by the site at /blocks-runtime/layer-timing.js), so a layer
+// timed in a preview plays the same in the file.
+
+let layerTiming: string | null = null;
+let layerTimingInflight: Promise<string | null> | null = null;
+
+export async function ensureLayerTiming(): Promise<string | null> {
+  if (layerTiming !== null) return layerTiming;
+  if (layerTimingInflight) return layerTimingInflight;
+  layerTimingInflight = (async () => {
+    try {
+      const res = await fetch('/blocks-runtime/layer-timing.js');
+      if (!res.ok) return null;
+      layerTiming = await res.text();
+      return layerTiming;
+    } catch {
+      return null;
+    } finally {
+      layerTimingInflight = null;
+    }
+  })();
+  return layerTimingInflight;
+}
+
+export function layerTimingScript(): string {
+  if (!layerTiming) return '';
+  return `<script>${layerTiming.replace(/<\/script/gi, '<\\/script')}<\/script>`;
+}
+
 /** Test seam: set the cached runtime without touching the network. */
 export function __setBlockRuntime(src: string | null): void {
   runtime = src;

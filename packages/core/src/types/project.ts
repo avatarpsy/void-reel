@@ -216,6 +216,12 @@ export interface GraphicRef {
    * stand-in for transparency that the decoder used to drop.
    */
   readonly alpha?: boolean;
+  /**
+   * Per-LAYER timing inside the composition: `{ "#lt-card": { delay, speed } }`
+   * shifts (seconds) and time-scales the tweens it runs on that element.
+   * Applied by one shared script in the live preview and in the render.
+   */
+  readonly timing?: Readonly<Record<string, { readonly delay?: number; readonly speed?: number }>>;
 }
 
 export interface MediaMetadata {

@@ -59,6 +59,8 @@ export interface RenderBlockArgs {
   aspect?: string;
   /** `hyperframes` = a block from HyperFrames' catalog (see GraphicRef.source). */
   source?: "hyperframes";
+  /** Per-layer delay/speed inside the composition (GraphicRef.timing). */
+  timing?: Record<string, { delay?: number; speed?: number }>;
 }
 
 /**
@@ -101,6 +103,7 @@ async function renderKey(args: RenderBlockArgs): Promise<string> {
     !!args.useSampleContent,
     args.aspect ?? "",
     args.source ?? "",
+    args.timing ?? {},
   ]);
   try {
     const bytes = new TextEncoder().encode(material);
@@ -142,6 +145,7 @@ export async function renderBlock(args: RenderBlockArgs): Promise<RenderedBlock>
           ? { catalog: { name: args.block, ...catalogValues(args.slots) } }
           : { block: args.block, slots: args.slots ?? {} }),
         ...(Number(args.durationSec) > 0 ? { durationSec: args.durationSec } : {}),
+        ...(args.timing && Object.keys(args.timing).length ? { layerTiming: args.timing } : {}),
         fillMode: args.useSampleContent ? "preview" : "render",
         format: baked ? "mp4" : "webm",
         ...(baked ? { backdrop: args.backdropUrl } : {}),
