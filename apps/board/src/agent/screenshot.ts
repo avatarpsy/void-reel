@@ -32,6 +32,7 @@ import type { MountedBoard } from '../blocksuite/editor';
 import { defaultApiBase } from '@openreel/asset-browser';
 import { getParentToken } from '../board/parent-auth';
 import { settleFrame } from './settle-frame';
+import { gateImages, type MissingPicture } from './screenshot-images';
 
 export type ShotScope = 'viewport' | 'all' | 'selection' | 'ids' | 'auto';
 
@@ -65,6 +66,11 @@ export interface ScreenshotResult {
   legible: boolean;
   /** Set on an `auto` region. */
   label?: string;
+  /**
+   * Pictures in frame that could NOT be drawn, with where they come from. Their
+   * cards are blank in the image; do not describe them from it.
+   */
+  missing?: MissingPicture[];
   /**
    * HOW LONG EACH STEP TOOK, in milliseconds.
    *
@@ -573,7 +579,21 @@ async function captureNow(
   const scale = Math.min(2, Math.max(0.2, maxEdge / Math.max(box.w, box.h)));
 
   const t0 = Date.now();
+  // Before html2canvas sees the document: see `screenshot-images.ts`. Released
+  // in the `finally` below, whatever happens.
+  const gate = await gateImages(board, subjects.map(m => (m as unknown as { id: string }).id));
   try {
+  /**
+   * NOTHING DRAWABLE IS A FAST, NAMED FAILURE. When every subject is a picture
+   * and none of them loaded, the capture would be a sheet of empty cards that
+   * the agent then describes. Say which pictures and where they come from.
+   */
+  if (gate.missing.length && gate.missing.length === subjects.length) {
+    throw new Error(
+      `None of those pictures could be drawn on this device: ${gate.missing
+        .map(m => `${m.id} (${m.problem}; source: ${m.source})`).join('; ')}.`,
+    );
+  }
   const canvas = await withStage(
     Promise.resolve(clipboard.toCanvas(
       blocks as never,
@@ -610,6 +630,7 @@ async function captureNow(
     scale: Math.round(scale * 1000) / 1000,
     box,
     legible: scale >= LEGIBLE_SCALE,
+    ...(gate.missing.length ? { missing: gate.missing } : {}),
     timing: {
       render: rendered - t0,
       upload: Date.now() - rendered,
@@ -617,6 +638,7 @@ async function captureNow(
     },
   };
   } finally {
+    gate.release();
     // The user's framing is theirs. Restored even when the capture failed —
     // especially then, because a failure they did not ask for should not also
     // move their board.
