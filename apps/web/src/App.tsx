@@ -1246,69 +1246,15 @@ export function useVideoRpc(sourceBoardIdRef?: { current: string }) {
             break;
           }
           case "voidspace:materialize-media": {
-            // Turn a LOCAL-ONLY media item (a webcam clip the user recorded or
-            // dragged in — bytes live only as a Blob in IndexedDB, no server
-            // URL) into a durable /api/studio/local-asset URL that server-side
-            // agent tools (transcribe / build_scenes_from_recording / Seedance
-            // reference) can actually read. Idempotent: if the item already has
-            // a reachable originalUrl we return it and never re-upload.
             const { mediaId } = msg as { mediaId?: string };
             if (!mediaId || typeof mediaId !== "string") {
               reply({ type: "voidspace:error", requestId: msg.requestId, error: "mediaId required" });
               break;
             }
             try {
-              const proj = useProjectStore.getState().project;
-              const item: any = (proj.mediaLibrary?.items ?? []).find((m: any) => m.id === mediaId);
-              if (!item) {
-                reply({ type: "voidspace:error", requestId: msg.requestId, error: "no media found for that id" });
-                break;
-              }
-              // Already server-reachable (durable disk/cloud URL)? Reuse it.
-              const existing = typeof item.originalUrl === "string" ? item.originalUrl : "";
-              const reachable = !!existing && (/^https?:\/\//i.test(existing) || existing.includes("/api/studio/local-asset"));
-              if (reachable) {
-                reply({ type: "voidspace:media-materialized", requestId: msg.requestId, ok: true, url: existing, durationSec: item.duration ?? null, alreadyUploaded: true });
-                break;
-              }
-              const blob = await loadMediaBlobForProject(useProjectStore.getState().project.id, mediaId);
-              if (!blob) {
-                reply({ type: "voidspace:error", requestId: msg.requestId, error: "media bytes not found in local storage" });
-                break;
-              }
-              // Pick a sane file extension from the item name / blob mime.
-              const guessExt = (): string => {
-                const fromName = String(item.name || "").split(".").pop() || "";
-                if (fromName && fromName !== item.name && /^[a-z0-9]{2,5}$/i.test(fromName)) return fromName.toLowerCase();
-                const t = String(blob.type || item.mimeType || "").toLowerCase();
-                if (t.includes("webm")) return "webm";
-                if (t.includes("mp4")) return "mp4";
-                if (t.includes("quicktime") || t.includes("mov")) return "mov";
-                if (t.includes("wav")) return "wav";
-                if (t.includes("mpeg") || t.includes("mp3")) return "mp3";
-                if (t.includes("ogg")) return "ogg";
-                return "webm"; // webcam/screen MediaRecorder default
-              };
-              const { saveMediaToCloud } = await import("./services/cloud-save");
-              const saved = await saveMediaToCloud(blob, item.name || "recording", guessExt(), "recordings");
-              if (!saved?.url) {
-                reply({ type: "voidspace:error", requestId: msg.requestId, error: "Could not save the clip. Open and save the project first, then try again." });
-                break;
-              }
-              // Tag originalUrl so a reload rehydrates from disk, not the blob.
-              useProjectStore.setState((s: any) => ({
-                project: {
-                  ...s.project,
-                  mediaLibrary: {
-                    ...s.project.mediaLibrary,
-                    items: (s.project.mediaLibrary?.items ?? []).map((m: any) =>
-                      m.id === mediaId ? { ...m, originalUrl: m.originalUrl ?? saved.url } : m,
-                    ),
-                  },
-                  modifiedAt: Date.now(),
-                },
-              }));
-              reply({ type: "voidspace:media-materialized", requestId: msg.requestId, ok: true, url: saved.url, durationSec: item.duration ?? null, alreadyUploaded: false });
+              const { materializeProjectMedia } = await import("./services/materialize-media");
+              const m = await materializeProjectMedia(mediaId);
+              reply({ type: "voidspace:media-materialized", requestId: msg.requestId, ok: true, ...m });
             } catch (err: any) {
               reply({ type: "voidspace:error", requestId: msg.requestId, error: err?.message ?? String(err) });
             }

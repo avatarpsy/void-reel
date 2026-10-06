@@ -3771,6 +3771,35 @@ export const Preview: React.FC<{ readOnly?: boolean }> = ({ readOnly = false }) 
     liveTransform,
   ]);
 
+  /**
+   * Where the LIVE graphic layer sits at the playhead — the clip's animated
+   * transform (position/scale/rotation/opacity keyframes), the same function
+   * the canvas draws with, so a keyframed lower third slides in live exactly
+   * as it plays. While a transform drag is in progress the drag box wins.
+   */
+  const liveGraphicPlacement = useMemo(() => {
+    if (!clipBounds || !selectedClip?.metadata?.graphic) return null;
+    const base = selectedClip.transform;
+    if (liveTransform || !base || !(selectedClip.keyframes?.length)) {
+      return { bounds: clipBounds, rotation: base?.rotation ?? 0, opacity: base?.opacity ?? 1 };
+    }
+    const t = getAnimatedTransform(
+      base,
+      selectedClip.keyframes as any,
+      playheadPosition - selectedClip.startTime,
+    );
+    const ds = clipBounds.displayScale;
+    const w = settings.width * t.scale.x * ds;
+    const h = settings.height * t.scale.y * ds;
+    const cx = clipBounds.centerX + (t.position.x - base.position.x) * ds;
+    const cy = clipBounds.centerY + (t.position.y - base.position.y) * ds;
+    return {
+      bounds: { x: cx - w / 2, y: cy - h / 2, width: w, height: h },
+      rotation: t.rotation ?? 0,
+      opacity: t.opacity ?? 1,
+    };
+  }, [clipBounds, selectedClip, liveTransform, playheadPosition, settings.width, settings.height]);
+
   const textClipBounds = useMemo(() => {
     if (!selectedTextClip || !canvasRef.current || !overlayRef.current)
       return null;
@@ -5000,15 +5029,15 @@ export const Preview: React.FC<{ readOnly?: boolean }> = ({ readOnly = false }) 
           {/* Resize/Transform Overlay */}
           {/* A selected HyperFrames graphic, paused: drawn live by its own
               composition at the playhead, so edits show as they are typed. */}
-          {!isPlaying && !cropMode && clipBounds && selectedClip?.metadata?.graphic
+          {!isPlaying && !cropMode && liveGraphicPlacement && selectedClip?.metadata?.graphic
             && playheadPosition >= selectedClip.startTime
             && playheadPosition < selectedClip.startTime + selectedClip.duration && (
             <LiveGraphicLayer
               clip={selectedClip}
-              bounds={clipBounds}
+              bounds={liveGraphicPlacement.bounds}
               time={playheadPosition}
-              rotation={selectedClip.transform?.rotation ?? 0}
-              opacity={selectedClip.transform?.opacity ?? 1}
+              rotation={liveGraphicPlacement.rotation}
+              opacity={liveGraphicPlacement.opacity}
             />
           )}
           {!cropMode && showResizeHandles && clipBounds && (
