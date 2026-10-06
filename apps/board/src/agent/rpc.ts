@@ -889,7 +889,8 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
     'voidspace:board-remove-draft': args => {
       const id = String(args.blockId ?? '');
       const b = board.std.store.getBlock(id);
-      if (!b) return fail('not_found', `No block draft ${id}.`);
+      // Drafts only: this used to delete ANY block id it was handed.
+      if (!b || b.flavour !== 'voidspace:blockdraft') return fail('not_found', `No block draft ${id}.`);
       board.std.store.captureSync();
       board.std.store.deleteBlock(b.model);
       rev++;

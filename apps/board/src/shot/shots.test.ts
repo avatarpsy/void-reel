@@ -236,6 +236,29 @@ describe('shots', () => {
     expect(shotAtPoint(board.std, [ax + SHOT_W + 10, ay + 10])).toBeNull();
   });
 
+  /**
+   * board_delete_shot is a SHOT verb. Handed any other id — a generated song,
+   * a frame, the page root — it used to delete that block, because the only
+   * check was "does a block with this id exist". A media card disappearing
+   * with no trace in the canvas tools is exactly what that looks like.
+   */
+  it('refuses to delete anything that is not a shot', () => {
+    const board = makeTestBoard();
+    createShots(board.std, board.surfaceId, ['A']);
+    const songId = board.store.addBlock(
+      'affine:attachment',
+      { name: 'BETTER ME', type: 'audio/mpeg', sourceId: 'vsmedia:song' },
+      board.surfaceId,
+    );
+    expect(board.store.getBlock(songId)).toBeTruthy();
+
+    expect(deleteShot(board.std, songId)).toBe(false);
+    expect(board.store.getBlock(songId)).toBeTruthy();
+    expect(deleteShot(board.std, board.surfaceId)).toBe(false);
+    expect(board.store.getBlock(board.surfaceId)).toBeTruthy();
+    expect(readShots(board.std)).toHaveLength(1);
+  });
+
   /** A missing shot is a normal outcome (the user deleted it while the agent was
    *  thinking), so every mutator reports it rather than throwing. */
   it('reports a missing shot instead of throwing', () => {

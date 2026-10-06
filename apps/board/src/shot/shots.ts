@@ -440,7 +440,9 @@ export function boardPlan(std: BlockStdScope): BoardPlan {
 
 export function deleteShot(std: BlockStdScope, id: string): boolean {
   const block = std.store.getBlock(id);
-  if (!block) return false;
+  // A SHOT verb deletes shots only. Given any other id (a media card, a frame,
+  // the page root) it used to delete that block too.
+  if (!block || block.flavour !== 'voidspace:shot') return false;
   std.store.captureSync();
   std.store.deleteBlock(block.model);
   // Close the gap so the filmstrip stays contiguous — a hole reads as a bug,
