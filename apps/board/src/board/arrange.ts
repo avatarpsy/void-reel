@@ -29,6 +29,7 @@ import type { BlockStdScope } from '@blocksuite/std';
 import { Text } from '@blocksuite/store';
 
 import { adoptIntoFrame } from './canvas';
+import { type NearSpec, type PlacedNear, planPlacement, resolveNear } from './near';
 import { readBlockMeta } from './board-meta';
 import { CARD_GAP } from './metrics';
 import { boardPlan } from '../shot/shots';
@@ -58,12 +59,24 @@ export interface ArrangeRequest {
    *  thinking region. The right answer when the user asked to tidy something
    *  they are looking at. */
   inPlace?: boolean;
+  /**
+   * MOVE THESE BESIDE SOMETHING — "put the song next to its lyrics".
+   *
+   * The same anchor the media tools take (`board/near.ts`): an element id, an
+   * optional document section, an optional side. The named items become a
+   * column beside it (top-aligned with the section when one is named), cleared
+   * of everything else. Needs `ids` (or `sceneKey`) — moving "everything" next
+   * to one note is never what was meant.
+   */
+  near?: NearSpec;
 }
 
 export interface ArrangeResult {
   moved: number;
   frameId?: string;
   problems: string[];
+  /** With `near`: where it went, in words the agent can repeat. */
+  placedNear?: PlacedNear;
 }
 
 /** An element this may move: on the canvas, not owned, not positioned by a parent. */
@@ -216,6 +229,20 @@ export function arrangeCanvas(std: BlockStdScope, req: ArrangeRequest): ArrangeR
     }
   }
 
+  if (req.near && !ids?.length) {
+    return {
+      moved: 0,
+      problems: ['near moves the items you name — pass their ids (or a sceneKey).'],
+    };
+  }
+  if (req.near && ids?.includes(req.near.id)) {
+    return { moved: 0, problems: [`${req.near.id} is the anchor; it cannot also be moved beside itself.`] };
+  }
+  if (req.near) {
+    const r = resolveNear(std, req.near);
+    if (!r.ok) return { moved: 0, problems: [r.message.replace(/, so it was placed.*$/, '.')] };
+  }
+
   const found = movables(std, ids);
   const problems = [...found.problems];
   const items = readingOrder(found.items);
@@ -249,7 +276,22 @@ export function arrangeCanvas(std: BlockStdScope, req: ArrangeRequest): ArrangeR
    */
   const rowY = req.sceneKey ? sceneRowY(std, req.sceneKey) : null;
 
-  const slots = req.inPlace
+  let placedNear: PlacedNear | undefined;
+  const nearPlan = req.near
+    ? planPlacement(std, sizes, {
+        item: { kind: kindOfItem(std, items[0]!.id) },
+        near: req.near,
+        exclude: items.map(i => i.id),
+      })
+    : null;
+  if (nearPlan) {
+    placedNear = nearPlan.placedNear ?? undefined;
+    problems.push(...nearPlan.problems);
+  }
+
+  const slots = nearPlan
+    ? nearPlan.boxes
+    : req.inPlace
     ? reserveFlow(std, sizes, {
         at: { x: current.x, y: current.y },
         exclude: items.map(i => i.id),
@@ -286,7 +328,13 @@ export function arrangeCanvas(std: BlockStdScope, req: ArrangeRequest): ArrangeR
     if (!frameId) problems.push('The frame could not be created.');
   }
 
-  return { moved, frameId, problems };
+  return { moved, frameId, problems, ...(placedNear ? { placedNear } : {}) };
+}
+
+/** The media kind a block records, for `near`'s section choice (a track beside lyrics). */
+function kindOfItem(std: BlockStdScope, id: string): 'image' | 'video' | 'audio' {
+  const k = readBlockMeta(std.store.doc.spaceDoc, id)?.kind;
+  return k === 'audio' || k === 'video' ? k : 'image';
 }
 
 /**

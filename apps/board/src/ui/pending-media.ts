@@ -31,7 +31,7 @@
  */
 import { GfxControllerIdentifier } from '@blocksuite/std/gfx';
 
-import { anchorFor } from '../board/canvas';
+import { type NearSpec, planPlacement } from '../board/near';
 import { type Size, cardBox } from '../board/metrics';
 import { SHOT_H } from '../shot/model';
 import type { MountedBoard } from '../blocksuite/editor';
@@ -92,6 +92,9 @@ export interface PendingMediaApi {
     kind: 'image' | 'video' | 'audio',
     referenceIds: string[],
     aspect?: string,
+    /** Where the finished media will go — the same rule the real placement
+     *  uses (`board/near.ts`), so the card stands where the result will land. */
+    place?: { name?: string; near?: NearSpec | null },
   ): void;
   /** Take one away. Called on success AND on failure — see `fail`. */
   hide(id: string): void;
@@ -128,15 +131,25 @@ export function installPendingMedia(board: MountedBoard, container: HTMLElement)
     kind: 'image' | 'video' | 'audio',
     referenceIds: string[],
     aspect?: string,
+    place?: { name?: string; near?: NearSpec | null },
   ): void {
     if (items.has(id)) return;
     /**
-     * Beside the references when there are any, and otherwise in the same clear
-     * space below the filmstrip that `board-insert-media` falls back to — so
-     * the two agree about where a result with no references goes.
+     * Wherever `board-insert-media` will put the result — both ask
+     * `planPlacement` (`board/near.ts`): beside the references when there are
+     * any, else beside its lyrics / shot / own kind — so the spinner is replaced
+     * in the spot it occupied.
      */
-    const at = anchorFor(board.std, referenceIds) ?? { x: 0, y: SHOT_H + 240 };
     const box = pendingBox(kind, aspect);
+    let at: { x: number; y: number } = { x: 0, y: SHOT_H + 240 };
+    try {
+      const planned = planPlacement(board.std, [box], {
+        item: { kind, name: place?.name },
+        near: place?.near ?? null,
+        referenceIds,
+      }).boxes[0];
+      if (planned) at = planned;
+    } catch { /* a placeholder in the old spot beats no placeholder */ }
 
     const el = document.createElement('div');
     el.className = `vs-pending vs-pending--${kind}`;

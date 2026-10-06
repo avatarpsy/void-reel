@@ -42,7 +42,7 @@ import {
   COLOR_NAMES, canvasDigest, drawOnCanvas, editCanvas, mediaUrlOf, readCanvas, readSelection,
   type EditOp, type ElementSpec,
 } from '../board/canvas';
-import { reserveFlow } from '../board/space';
+import { type PlacedNear, parseNear, planPlacement } from '../board/near';
 import { arrangeCanvas } from '../board/arrange';
 import { type ComposeSection, composeRegion } from '../board/compose';
 import { settleComposed } from '../board/compose-settle';
@@ -2185,20 +2185,15 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
        * on scene 2 and in the gutter — and, being fixed, on the previous
        * placement too.
        */
+      /*
+       * Since 2026-10-06 the decision lives in `board/near.ts` (`planPlacement`),
+       * which keeps the references rule above verbatim and adds what it lacked:
+       * a caller-named anchor (`near`), and a default that puts a track beside
+       * its lyrics, a shot's material beside its row, and like with like —
+       * instead of "clear space" the user then has to go and search.
+       */
       const anchorIds = rows.flatMap(r => (Array.isArray(r.referenceIds) ? r.referenceIds.map(String) : []));
-      const anchors = anchorIds.length
-        ? readCanvas(board.std).filter(i => anchorIds.includes(i.id))
-        : [];
-      const boxed = anchors.filter(a => typeof a.x === 'number' && typeof a.y === 'number');
-      const origin = boxed.length
-        ? {
-            x: Math.min(...boxed.map(a => a.x as number)),
-            y: Math.max(...boxed.map(a => (a.y as number) + (typeof a.h === 'number' ? a.h : 240))) + 64,
-          }
-        // Undefined, not a computed point: `reserveFlow` measures the batch and
-        // right-aligns it in the thinking region, which it cannot do if it is
-        // handed an origin that was decided before the widths were known.
-        : undefined;
+      const near = parseNear(args.near);
 
       /**
        * WHICH SCENE THESE ARE ABOUT, per row and falling back to the call.
@@ -2211,6 +2206,7 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
         (typeof row.sceneKey === 'string' && row.sceneKey ? row.sceneKey : callScene);
 
       const placedIds: string[] = [];
+      let placedNear: PlacedNear | null = null;
       const problems: string[] = [];
       let missingDisplay = 0;
 
@@ -2317,10 +2313,20 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
           return model && box ? [{ model, box }] : [];
         });
 
-        const slots = reserveFlow(board.std, entries.map(e => e.box), {
-          at: origin,
+        const first = rows.find(r => String(r.displayUrl ?? r.url ?? '')) ?? rows[0] ?? {};
+        const plan = planPlacement(board.std, entries.map(e => e.box), {
+          item: {
+            kind: first.kind === 'video' || first.kind === 'audio' ? first.kind : 'image',
+            name: typeof first.name === 'string' ? first.name : undefined,
+            sceneKey: sceneKeyFor(first) || undefined,
+          },
+          near,
+          referenceIds: anchorIds,
           exclude: placedIds,
         });
+        const slots = plan.boxes;
+        placedNear = plan.placedNear;
+        problems.push(...plan.problems);
 
         entries.forEach((entry, i) => {
           const slot = slots[i];
@@ -2353,6 +2359,16 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
         insertedIds: placedIds,
         // Kept so a single-asset caller reads the same field it always did.
         insertedId: placedIds[0],
+        /**
+         * WHERE IT WENT, in words and numbers, so the agent can tell the user
+         * ("next to the lyrics in section 4") instead of "it's on the board".
+         */
+        ...(placedNear ? { placedNear } : {}),
+        positions: placedIds.flatMap(id => {
+          const m = board.store.getBlock(id)?.model;
+          const b = m ? bounds(m.props as { xywh?: string }) : null;
+          return b ? [{ id, x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.w), h: Math.round(b.h) }] : [];
+        }),
         ...(problems.length ? { problems } : {}),
         ...(missingDisplay
           ? {
@@ -2426,7 +2442,13 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
           : {}),
         ...(typeof args.frame === 'string' ? { frame: args.frame } : {}),
         inPlace: args.inPlace === true,
+        ...(parseNear(args.near) ? { near: parseNear(args.near)! } : {}),
       });
+
+      // Already exactly beside the anchor is a success, not a no-op to refuse.
+      if (!result.moved && result.placedNear && !result.problems.length) {
+        return { ok: true as const, rev, moved: 0, placedNear: result.placedNear };
+      }
 
       // Nothing moved AND nothing framed is a no-op worth reporting as one, so
       // the agent does not tell the user it tidied a board it did not touch.
@@ -2444,6 +2466,7 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
         rev,
         moved: result.moved,
         ...(result.frameId ? { frameId: result.frameId } : {}),
+        ...(result.placedNear ? { placedNear: result.placedNear } : {}),
         ...(result.problems.length ? { problems: result.problems } : {}),
         digest,
       };
@@ -2579,7 +2602,10 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
         const ids = Array.isArray(args.referenceIds) ? args.referenceIds.map(String) : [];
         // The aspect the generation ASKED FOR, so the card is the shape of its
         // own result rather than a fixed portrait guess.
-        layer.show(id, kind, ids, typeof args.aspect === 'string' ? args.aspect : undefined);
+        layer.show(id, kind, ids, typeof args.aspect === 'string' ? args.aspect : undefined, {
+          name: typeof args.name === 'string' ? args.name : undefined,
+          near: parseNear(args.near),
+        });
       }
       return { ok: true as const, rev };
     },

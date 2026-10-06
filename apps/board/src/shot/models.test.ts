@@ -340,9 +340,9 @@ describe('rolesFor', () => {
       .toEqual(['background', 'inset', 'texture', 'reference']);
   });
 
-  it('gives audio the same two jobs whatever the shot is', () => {
-    expect(rolesFor('clip', 'audio')).toEqual(['sfx', 'bgm', 'reference']);
-    expect(rolesFor('hyperframes', 'audio')).toEqual(['sfx', 'bgm', 'reference']);
+  it('gives audio the same jobs whatever the shot is, including timed narration and dialogue', () => {
+    expect(rolesFor('clip', 'audio')).toEqual(['reference', 'narration', 'dialogue', 'sfx', 'bgm']);
+    expect(rolesFor('hyperframes', 'audio')).toEqual(['reference', 'narration', 'dialogue', 'sfx', 'bgm']);
   });
 });
 
