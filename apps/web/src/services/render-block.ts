@@ -57,6 +57,25 @@ export interface RenderBlockArgs {
   /** Leave the designer's sample content in unfilled slots. Default false. */
   useSampleContent?: boolean;
   aspect?: string;
+  /** `hyperframes` = a block from HyperFrames' catalog (see GraphicRef.source). */
+  source?: "hyperframes";
+}
+
+/**
+ * A catalog block's values, split the way the render route takes them:
+ * selector keys ("#lt-name") replace hard-coded words, the rest are variables.
+ */
+export function catalogValues(slots: Record<string, string> | undefined): {
+  variables: Record<string, string>;
+  text: Record<string, string>;
+} {
+  const variables: Record<string, string> = {};
+  const text: Record<string, string> = {};
+  for (const [k, v] of Object.entries(slots ?? {})) {
+    if (/^[#.]/.test(k)) text[k] = v;
+    else variables[k] = v;
+  }
+  return { variables, text };
 }
 
 export interface RenderedBlock {
@@ -81,6 +100,7 @@ async function renderKey(args: RenderBlockArgs): Promise<string> {
     args.backdropUrl ?? "",
     !!args.useSampleContent,
     args.aspect ?? "",
+    args.source ?? "",
   ]);
   try {
     const bytes = new TextEncoder().encode(material);
@@ -118,8 +138,9 @@ export async function renderBlock(args: RenderBlockArgs): Promise<RenderedBlock>
         ...(key ? { "Idempotency-Key": `gfx-${key}` } : {}),
       },
       body: JSON.stringify({
-        block: args.block,
-        slots: args.slots ?? {},
+        ...(args.source === "hyperframes"
+          ? { catalog: { name: args.block, ...catalogValues(args.slots) } }
+          : { block: args.block, slots: args.slots ?? {} }),
         ...(Number(args.durationSec) > 0 ? { durationSec: args.durationSec } : {}),
         fillMode: args.useSampleContent ? "preview" : "render",
         format: baked ? "mp4" : "webm",

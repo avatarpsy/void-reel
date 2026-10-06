@@ -83,6 +83,8 @@ export interface DroppedBlockItem {
   backdropUrl?: string;
   durationSec?: number;
   aspect?: string;
+  /** `hyperframes` = from HyperFrames' catalog rather than the user's library. */
+  source?: "hyperframes";
 }
 
 /** What a failed block drop failed WITH, for the UI to show. The drop handler
@@ -117,6 +119,7 @@ export async function resolveDroppedMediaId(rawJson: string): Promise<string | n
 function sameGraphic(a: any, b: DroppedBlockItem): boolean {
   const g = a?.metadata?.graphic;
   if (!g || g.block !== b.name) return false;
+  if ((g.source ?? "") !== (b.source ?? "")) return false;
   if ((g.mode ?? "overlay") !== (b.mode ?? "overlay")) return false;
   return JSON.stringify(g.slots ?? {}) === JSON.stringify(b.slots ?? {});
 }
@@ -155,6 +158,7 @@ export async function importBlockToProject(bi: DroppedBlockItem): Promise<string
       durationSec: bi.durationSec,
       backdropUrl: bi.backdropUrl,
       aspect: bi.aspect,
+      source: bi.source,
       /**
        * THE DESIGNER'S OWN CONTENT, when the user has typed nothing yet.
        *
@@ -210,6 +214,10 @@ export async function importBlockToProject(bi: DroppedBlockItem): Promise<string
                       slots: bi.slots ?? {},
                       mode: bi.mode ?? "overlay",
                       ...(bi.aspect ? { aspect: bi.aspect } : {}),
+                      ...(bi.source ? { source: bi.source } : {}),
+                      // An overlay render is VP9 with alpha, now decoded as
+                      // such: it composites normally, no `screen` stand-in.
+                      ...((bi.mode ?? "overlay") === "overlay" ? { alpha: true } : {}),
                     },
                   },
                 }

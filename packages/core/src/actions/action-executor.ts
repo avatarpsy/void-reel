@@ -825,9 +825,12 @@ export class ActionExecutor {
              * this rule does not, and the inspector must be able to set
              * `normal` on a graphic and have it stay.
              */
+            // A render decoded WITH its alpha (`graphic.alpha`) needs none of
+            // this: its transparent pixels arrive transparent, and `screen`
+            // would only wash out its dark parts (a charcoal bar turns grey).
             ...(params.blendMode
               ? { blendMode: params.blendMode }
-              : mediaItem?.metadata.graphic
+              : mediaItem?.metadata.graphic && !mediaItem.metadata.graphic.alpha
                 ? { blendMode: "screen" as const }
                 : {}),
             /**

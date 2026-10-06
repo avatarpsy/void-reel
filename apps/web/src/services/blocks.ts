@@ -18,11 +18,17 @@ export {
   type BlockInfo,
 } from "@openreel/asset-browser";
 
-import { loadBlockCatalogue } from "@openreel/asset-browser";
+import { loadBlockCatalogue, loadHyperframesCatalog, loadCatalogFields } from "@openreel/asset-browser";
 import type { BlockInfo } from "@openreel/asset-browser";
 
-/** One block by name, from the catalogue (fetching it if needed). */
-export async function findBlock(name: string): Promise<BlockInfo | null> {
+/** One block by name, from the catalogue (fetching it if needed). A
+ *  HyperFrames catalog block comes back with its fields already read. */
+export async function findBlock(name: string, source?: "hyperframes"): Promise<BlockInfo | null> {
+  if (source === "hyperframes") {
+    const row = (await loadHyperframesCatalog()).find((b) => b.name === name);
+    if (!row) return null;
+    return { ...row, slots: await loadCatalogFields(name) };
+  }
   const all = await loadBlockCatalogue();
   return all.find((b) => b.name === name) ?? null;
 }

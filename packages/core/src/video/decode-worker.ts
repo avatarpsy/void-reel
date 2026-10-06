@@ -91,6 +91,7 @@ async function getOrCreateResources(
     }
 
     const sink = new CanvasSink(videoTrack as never, {
+      alpha: await Promise.resolve((videoTrack as any).canBeTransparent?.()).then((v) => v === true, () => false),
       width,
       height,
       fit: "contain",
@@ -270,6 +271,7 @@ async function getOrCreateResources(clipId, blob, width, height) {
  }
 
  const sink = new CanvasSink(videoTrack, {
+ alpha: await Promise.resolve(videoTrack.canBeTransparent && videoTrack.canBeTransparent()).then(function (v) { return v === true; }, function () { return false; }),
  width,
  height,
  fit: "contain",

@@ -180,6 +180,7 @@ export class ExportFrameDecoder {
       sinkOptions.fit = "contain";
     }
 
+    sinkOptions.alpha = await Promise.resolve((videoTrack as any).canBeTransparent?.()).then((v) => v === true, () => false);
     this.sink = new CanvasSink(videoTrack, sinkOptions);
     this.initialized = true;
     return true;
@@ -675,6 +676,7 @@ export class MediaBunnyEngine {
         sinkOptions.fit = "contain";
       }
 
+      sinkOptions.alpha = await Promise.resolve((videoTrack as any).canBeTransparent?.()).then((v) => v === true, () => false);
       const sink = new CanvasSink(videoTrack, sinkOptions);
       const result = await sink.getCanvas(timestamp);
 
@@ -1188,6 +1190,7 @@ export class MediaBunnyEngine {
       );
 
       const sink = new CanvasSink(videoTrack, {
+        alpha: await Promise.resolve((videoTrack as any).canBeTransparent?.()).then((v) => v === true, () => false),
         fit: "contain",
         poolSize: 5,
       });

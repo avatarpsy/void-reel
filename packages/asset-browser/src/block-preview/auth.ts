@@ -80,7 +80,7 @@ export function blockApiUrl(): string {
  * signed in yet). Caching that would leave the panel empty until a reload, long
  * after the reason went away.
  */
-import { normalizeBlocks, type BlockInfo } from '../blocks';
+import { normalizeBlocks, normalizeCatalog, catalogSlots, type BlockInfo, type BlockSlot } from '../blocks';
 
 let catalogue: BlockInfo[] | null = null;
 let inFlight: Promise<BlockInfo[]> | null = null;
@@ -142,6 +142,51 @@ export function loadBlockCatalogue(): Promise<BlockInfo[]> {
     .catch((e) => { lastError = String(e?.message ?? e).slice(0, 160); return []; })
     .finally(() => { inFlight = null; });
   return inFlight;
+}
+
+// ── HyperFrames' catalog ────────────────────────────────────────────────────
+// Read on the server (no desktop needed to browse); cached for the session.
+
+let hfCatalog: BlockInfo[] | null = null;
+let hfInFlight: Promise<BlockInfo[]> | null = null;
+
+async function blockPost(body: Record<string, unknown>): Promise<any> {
+  const token = await blockToken();
+  const res = await fetch(blockApiUrl(), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    body: JSON.stringify(body),
+  }).catch(() => null);
+  if (!res || !res.ok) return null;
+  return res.json().catch(() => null);
+}
+
+/** Every HyperFrames registry block, as catalog-tier BlockInfo. Never throws. */
+export function loadHyperframesCatalog(): Promise<BlockInfo[]> {
+  if (hfCatalog?.length) return Promise.resolve(hfCatalog);
+  if (hfInFlight) return hfInFlight;
+  hfInFlight = blockPost({ action: 'catalog' })
+    .then((json) => {
+      const rows = normalizeCatalog(Array.isArray(json?.blocks) ? json.blocks : []);
+      if (rows.length) hfCatalog = rows;
+      return rows;
+    })
+    .catch(() => [])
+    .finally(() => { hfInFlight = null; });
+  return hfInFlight;
+}
+
+const fieldCache = new Map<string, Promise<BlockSlot[]>>();
+
+/** One catalog block's fillable fields, as slots. Cached per name. */
+export function loadCatalogFields(name: string): Promise<BlockSlot[]> {
+  let hit = fieldCache.get(name);
+  if (!hit) {
+    hit = blockPost({ action: 'catalog_fields', name }).then((json) => (json?.ok ? catalogSlots(json) : []));
+    hit.catch(() => fieldCache.delete(name));
+    fieldCache.set(name, hit);
+  }
+  return hit;
 }
 
 /** Force a re-read — the user saved a block in the desktop app and came back. */

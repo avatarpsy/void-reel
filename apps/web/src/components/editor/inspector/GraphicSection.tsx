@@ -54,9 +54,9 @@ export const GraphicSection: React.FC<GraphicSectionProps> = ({ clipId }) => {
   useEffect(() => {
     if (!graphic?.block) return;
     let live = true;
-    void findBlock(graphic.block).then((b) => { if (live) setBlock(b); });
+    void findBlock(graphic.block, graphic.source).then((b) => { if (live) setBlock(b); });
     return () => { live = false; };
-  }, [graphic?.block]);
+  }, [graphic?.block, graphic?.source]);
 
   /** Restage whenever the clip changes — selecting another graphic must not
    *  carry the previous one's half-typed values across. */
@@ -96,6 +96,7 @@ export const GraphicSection: React.FC<GraphicSectionProps> = ({ clipId }) => {
         slots,
         mode: graphic.mode ?? "overlay",
         aspect: graphic.aspect,
+        source: graphic.source,
         // The user has now said what it should say. Anything still empty draws
         // nothing rather than the designer's sample — in a finished video
         // somebody else's placeholder name is worse than an absent line.
@@ -116,7 +117,13 @@ export const GraphicSection: React.FC<GraphicSectionProps> = ({ clipId }) => {
       );
       if (!fresh) throw new Error("Imported, but the media item could not be found.");
 
-      const nextGraphic = { ...graphic, slots };
+      // An overlay render now decodes WITH its alpha (see GraphicRef.alpha).
+      const overlay = (graphic.mode ?? "overlay") === "overlay";
+      const nextGraphic = { ...graphic, slots, ...(overlay ? { alpha: true } : {}) };
+      // The `screen` this clip got automatically was a stand-in for that alpha;
+      // with real transparency it would only wash the design out. A blend the
+      // user chose (anything but the old automatic one) is left alone.
+      const dropAutoScreen = overlay && !graphic.alpha;
       useProjectStore.setState((s: any) => ({
         project: {
           ...s.project,
@@ -142,6 +149,7 @@ export const GraphicSection: React.FC<GraphicSectionProps> = ({ clipId }) => {
                   ? {
                       ...c,
                       mediaId: fresh.id,
+                      ...(dropAutoScreen && c.blendMode === "screen" ? { blendMode: undefined } : {}),
                       metadata: { ...(c.metadata ?? {}), graphic: nextGraphic },
                     }
                   : c,
@@ -169,6 +177,11 @@ export const GraphicSection: React.FC<GraphicSectionProps> = ({ clipId }) => {
 
   if (!graphic) return null;
 
+  /** "#lt-name" (a catalog block's hard-coded word) reads as "name". */
+  function fieldLabel(key: string): string {
+    return key.replace(/^[#.]/, "").replace(/^[a-z]{1,3}-(?=[a-z])/, "").replace(/[-_]+/g, " ");
+  }
+
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-1.5 text-[11px] text-text-secondary">
@@ -195,7 +208,7 @@ export const GraphicSection: React.FC<GraphicSectionProps> = ({ clipId }) => {
         <>
           {fields.map((f) => (
             <label key={f.key} className="block">
-              <span className="text-[10px] uppercase tracking-wide text-text-muted">{f.key}</span>
+              <span className="text-[10px] uppercase tracking-wide text-text-muted">{fieldLabel(f.key)}</span>
               {f.kind === "color" ? (
                 <input
                   type="color"

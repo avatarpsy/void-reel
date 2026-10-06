@@ -203,6 +203,19 @@ export interface GraphicRef {
   readonly mode?: "overlay" | "bake";
   /** What it was rendered at, so a re-render matches ("16:9", "9:16", "1:1"). */
   readonly aspect?: string;
+  /**
+   * Where the block comes from. Absent = the user's own block library.
+   * `hyperframes` = HyperFrames' registry catalog, installed on the desktop by
+   * their own installer and rendered by name; its `slots` keys are variable
+   * ids, or selectors ("#lt-name") for words the block hard-codes.
+   */
+  readonly source?: "hyperframes";
+  /**
+   * The render carries a REAL alpha channel (VP9 with alpha), decoded as such.
+   * Such a clip composites normally — no `screen` blend, which was only ever a
+   * stand-in for transparency that the decoder used to drop.
+   */
+  readonly alpha?: boolean;
 }
 
 export interface MediaMetadata {

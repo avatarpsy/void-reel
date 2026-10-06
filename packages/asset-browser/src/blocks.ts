@@ -52,7 +52,7 @@ export interface BlockInfo {
    * when reading a block, so a listing that showed both would offer a block
    * that is not the one you would get.
    */
-  tier: 'user' | 'shared' | 'starter';
+  tier: 'user' | 'shared' | 'starter' | 'catalog';
   /** Who published it, for an adopted block. A handle, never a uid. */
   credit?: string;
   /** `slots` can be filled as designed; `adapt` bakes its content in and wants
@@ -62,6 +62,82 @@ export interface BlockInfo {
   overlay: boolean;
   aspects: string[];
   slots: BlockSlot[];
+  /**
+   * `hyperframes` = a block from HyperFrames' registry catalog (tier
+   * `catalog`). It has no live document here: its tile shows THEIR preview
+   * poster and video, its fields are read on demand (`loadCatalogFields`), and
+   * placing it installs it on the desktop with their installer.
+   */
+  source?: 'hyperframes';
+  /** Their display title ("Lower Third — Dark Card"); `name` stays the id. */
+  title?: string;
+  poster?: string;
+  previewVideo?: string;
+  durationSec?: number;
+  width?: number;
+  height?: number;
+}
+
+/**
+ * HyperFrames' registry catalog rows (`POST /api/studio/blocks {action:'catalog'}`)
+ * → the same BlockInfo every Library surface already renders. Slots are left
+ * empty until a block is actually used — 164 field lookups to draw a grid
+ * would be 164 requests for nothing.
+ */
+export function normalizeCatalog(raw: unknown[]): BlockInfo[] {
+  return (Array.isArray(raw) ? raw : [])
+    .map((b): BlockInfo | null => {
+      const o = b as Record<string, any>;
+      const name = String(o?.name ?? '').trim();
+      if (!/^[a-z0-9][a-z0-9-]{0,80}$/.test(name)) return null;
+      const w = Number(o.width) || 0;
+      const h = Number(o.height) || 0;
+      const tags = Array.isArray(o.tags) ? o.tags.map(String) : [];
+      const desc = typeof o.description === 'string' ? o.description : '';
+      return {
+        name,
+        title: typeof o.title === 'string' && o.title ? o.title : name,
+        description: desc,
+        tags,
+        tier: 'catalog',
+        source: 'hyperframes',
+        credit: 'HyperFrames',
+        fill: 'slots',
+        // Made to sit over footage: their own words for it.
+        overlay: /lower[- ]?third|overlay|transparent|caption|subtitle|for footage/i.test(`${name} ${desc} ${tags.join(' ')}`),
+        aspects: w && h ? [w > h ? '16:9' : w < h ? '9:16' : '1:1'] : [],
+        slots: [],
+        poster: typeof o.poster === 'string' ? o.poster : undefined,
+        previewVideo: typeof o.previewVideo === 'string' ? o.previewVideo : undefined,
+        durationSec: Number(o.durationSec) || undefined,
+        width: w || undefined,
+        height: h || undefined,
+      };
+    })
+    .filter((b): b is BlockInfo => b !== null);
+}
+
+/**
+ * A catalog block's fields (`{action:'catalog_fields'}`) as slots: its
+ * declared variables (keyed by id, sample = their default), then the words it
+ * hard-codes, keyed by SELECTOR ("#lt-name") — the render overrides those in
+ * place, which is how a block that declares no variables is still editable.
+ */
+export function catalogSlots(fields: {
+  variables?: Array<{ id: string; type?: string; label?: string; default?: unknown }>;
+  texts?: Array<{ selector: string; text: string }>;
+} | null | undefined): BlockSlot[] {
+  const kindOf = (t?: string): SlotKind => {
+    const k = String(t ?? '').toLowerCase();
+    return k === 'color' || k === 'colour' ? 'color' : k === 'image' ? 'image' : k === 'video' ? 'video' : 'text';
+  };
+  const vars = (fields?.variables ?? []).map((v) => ({
+    key: v.id,
+    kind: kindOf(v.type),
+    sample: v.default == null ? undefined : String(v.default),
+  }));
+  const texts = (fields?.texts ?? []).map((t) => ({ key: t.selector, kind: 'text' as SlotKind, sample: t.text }));
+  return [...vars, ...texts];
 }
 
 /** The slots filled with MEDIA — these become drop wells. */
@@ -139,7 +215,7 @@ export function searchBlocks(blocks: BlockInfo[], query: string): BlockInfo[] {
   if (!q) return blocks;
   const terms = q.split(/\s+/).filter(Boolean);
   return blocks.filter((b) => {
-    const hay = [b.name, b.description ?? '', b.category ?? '', ...b.tags]
+    const hay = [b.name, b.title ?? '', b.description ?? '', b.category ?? '', ...b.tags]
       .join(' ')
       .toLowerCase();
     return terms.every((t) => hay.includes(t));
@@ -178,7 +254,7 @@ export function blocksForScope(
     case 'project': return usedNames ? blocks.filter((b) => usedNames.has(b.name)) : [];
     case 'generated': return [];
     case 'mine': return blocks.filter((b) => b.tier === 'user');
-    case 'shared': return blocks.filter((b) => b.tier === 'starter' || b.tier === 'shared');
+    case 'shared': return blocks.filter((b) => b.tier === 'starter' || b.tier === 'shared' || b.tier === 'catalog');
     default: return blocks;
   }
 }

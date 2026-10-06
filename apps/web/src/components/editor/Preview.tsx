@@ -2619,6 +2619,7 @@ export const Preview: React.FC<{ readOnly?: boolean }> = ({ readOnly = false }) 
         const sinkWidth = Math.max(2, Math.round((settings.width || 1920) * s));
         const sinkHeight = Math.max(2, Math.round((settings.height || 1080) * s));
         const sink = new CanvasSink(videoTrack, {
+          alpha: await Promise.resolve((videoTrack as any).canBeTransparent?.()).then((v) => v === true, () => false),
           width: sinkWidth,
           height: sinkHeight,
           fit: "contain",

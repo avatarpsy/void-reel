@@ -2199,6 +2199,7 @@ export class VideoEngine {
         sinkOptions.height = targetHeight;
       }
 
+      sinkOptions.alpha = await Promise.resolve((videoTrack as any).canBeTransparent?.()).then((v) => v === true, () => false);
       const sink = new CanvasSink(videoTrack, sinkOptions);
       const result = await sink.getCanvas(time);
 

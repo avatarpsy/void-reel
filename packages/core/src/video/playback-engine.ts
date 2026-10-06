@@ -486,6 +486,7 @@ export class PlaybackEngine {
       const mediaTime = clip.inPoint + clipLocalTime;
 
       const sink = new CanvasSink(videoTrack, {
+        alpha: await Promise.resolve((videoTrack as any).canBeTransparent?.()).then((v) => v === true, () => false),
         width: this.config?.width,
         height: this.config?.height,
         fit: "contain",

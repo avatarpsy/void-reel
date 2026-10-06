@@ -9,7 +9,7 @@ import { usePlayableVideo } from "../../services/video-playback";
 import { loadBlocks, refreshBlocks, blockLoadError, cachedBlocks, type BlockInfo } from "../../services/blocks";
 import {
   searchBlocks, blocksForScope, lazyBlockPreview, ensureBlockPreviewStyles,
-  desktopRendersBlocks,
+  desktopRendersBlocks, loadHyperframesCatalog,
 } from "@openreel/asset-browser";
 // The SHARED asset-browser rules. Recency bucketing, page size and page merging
 // live in @openreel/asset-browser so this panel, the image editor and the board
@@ -115,23 +115,37 @@ type LibType = AssetKind | "all";
 const BlockTile: React.FC<{ block: BlockInfo; listView: boolean }> = ({ block: b, listView }) => {
   const host = useRef<HTMLDivElement | null>(null);
   const preview = useRef<ReturnType<typeof lazyBlockPreview> | null>(null);
+  /**
+   * A HYPERFRAMES CATALOG BLOCK has no document on this machine yet — it is
+   * installed when it is placed. Its tile shows THEIR preview media instead of
+   * a live render: the poster at rest, their preview video while pointed at.
+   * Same card, same grid, same drag; nothing else about it is special.
+   */
+  const catalog = b.source === "hyperframes";
+  const video = useRef<HTMLVideoElement | null>(null);
 
   useEffect(() => {
-    if (listView || !host.current) return;
+    if (catalog || listView || !host.current) return;
     // The positioning contract for a preview host — see the package's note.
     ensureBlockPreviewStyles();
     const lazy = lazyBlockPreview(host.current, { priority: "tile" });
     lazy.set(b.name);
     preview.current = lazy;
     return () => { preview.current = null; lazy.destroy(); };
-  }, [b.name, listView]);
+  }, [b.name, listView, catalog]);
 
   // Who made it — the only thing separating a Voidspace design from one
   // somebody published, now that both sit under the same pill.
   const credit = b.tier === "starter" ? "Voidspace" : b.credit;
+  const seconds = b.durationSec ? `${Math.round(b.durationSec * 10) / 10}s` : "";
   // The same detail line the board composes, in the same order, so one block
   // reads identically in both panels.
-  const detail = [
+  const detail = catalog ? [
+    b.aspects[0],
+    seconds,
+    b.overlay ? "overlay" : "",
+    ...b.tags.slice(0, 3),
+  ].filter(Boolean).join(" · ") : [
     b.category,
     b.slots.length ? `${b.slots.length} slot${b.slots.length === 1 ? "" : "s"}` : "no slots",
     b.fill === "adapt" ? "needs adapting" : "",
@@ -145,17 +159,53 @@ const BlockTile: React.FC<{ block: BlockInfo; listView: boolean }> = ({ block: b
       tabIndex={0}
       draggable
       onDragStart={(e) => {
-        e.dataTransfer.setData("application/json", JSON.stringify({ blockItem: { name: b.name } }));
+        e.dataTransfer.setData(
+          "application/json",
+          JSON.stringify({ blockItem: catalog ? { name: b.name, source: "hyperframes" } : { name: b.name } }),
+        );
         e.dataTransfer.effectAllowed = "copy";
       }}
-      onPointerEnter={() => preview.current?.setLoop(true)}
-      onPointerLeave={() => preview.current?.setLoop(false)}
-      title={`${b.name}${b.description ? ` — ${b.description}` : ""} — drag onto the timeline`}
+      onPointerEnter={() => {
+        preview.current?.setLoop(true);
+        if (video.current) { video.current.currentTime = 0; void video.current.play().catch(() => {}); }
+      }}
+      onPointerLeave={() => {
+        preview.current?.setLoop(false);
+        video.current?.pause();
+      }}
+      title={`${b.title ?? b.name}${b.description ? ` — ${b.description}` : ""} — drag onto the timeline`}
       className="group flex flex-col rounded-lg border border-border bg-background-tertiary
                  overflow-hidden hover:border-primary/50 cursor-grab active:cursor-grabbing
                  transition-colors text-left"
     >
-      {!listView && (
+      {!listView && catalog && (
+        <div className="relative w-full aspect-video bg-black/40 overflow-hidden flex items-center justify-center">
+          {b.poster ? (
+            <img
+              src={b.poster}
+              alt=""
+              loading="lazy"
+              draggable={false}
+              className="absolute inset-0 w-full h-full object-contain"
+            />
+          ) : (
+            <span className="text-text-muted/40 text-lg">◫</span>
+          )}
+          {b.previewVideo && (
+            <video
+              ref={video}
+              src={b.previewVideo}
+              muted
+              loop
+              playsInline
+              preload="none"
+              draggable={false}
+              className="absolute inset-0 w-full h-full object-contain opacity-0 group-hover:opacity-100 transition-opacity"
+            />
+          )}
+        </div>
+      )}
+      {!listView && !catalog && (
         <div
           ref={host}
           /* 16:9 so a grid of tiles is one clean rhythm regardless of what each
@@ -171,8 +221,8 @@ const BlockTile: React.FC<{ block: BlockInfo; listView: boolean }> = ({ block: b
       )}
       <div className="px-2 py-1.5 min-w-0">
         <div className="flex items-center gap-1.5 min-w-0">
-          <span className="text-[11px] font-medium text-text-primary truncate">{b.name}</span>
-          {b.tier !== "starter" && (
+          <span className="text-[11px] font-medium text-text-primary truncate">{b.title ?? b.name}</span>
+          {b.tier !== "starter" && b.tier !== "catalog" && (
             <span className="shrink-0 px-1 py-px rounded text-[9px] uppercase tracking-wide
                              bg-primary/15 text-primary">
               {b.tier}
@@ -558,6 +608,17 @@ export const LibraryPanel: React.FC = () => {
   const [blocks, setBlocks] = useState<BlockInfo[]>(() => cachedBlocks());
   const [blocksLoading, setBlocksLoading] = useState(false);
   const [blocksError, setBlocksError] = useState("");
+  /**
+   * HyperFrames' catalog, under Shared beside the designs that ship with
+   * Voidspace. Read from the server, so it is full with or without the desktop
+   * app. A block the user's library already has (many starters came from it)
+   * is shown once — theirs.
+   */
+  const [catalog, setCatalog] = useState<BlockInfo[]>([]);
+  const allBlocks = useMemo(() => {
+    const have = new Set(blocks.map((b) => b.name));
+    return [...blocks, ...catalog.filter((c) => !have.has(c.name))];
+  }, [blocks, catalog]);
 
   /**
    * What a scope pill means for a block. The RULE is shared with the board
@@ -566,8 +627,8 @@ export const LibraryPanel: React.FC = () => {
    */
   const blocksInScope = useCallback(
     (sc: LibScope): BlockInfo[] =>
-      blocksForScope(blocks, sc === "myfiles" ? "mine" : sc),
-    [blocks],
+      blocksForScope(allBlocks, sc === "myfiles" ? "mine" : sc),
+    [allBlocks],
   );
 
   // Persisted: the scope a user works in is a preference, and losing it on every
@@ -995,6 +1056,13 @@ export const LibraryPanel: React.FC = () => {
    * the desktop app and coming back recovers without a reload.
    */
   useEffect(() => {
+    if (type !== "block" || catalog.length) return;
+    let live = true;
+    void loadHyperframesCatalog().then((c) => { if (live && c.length) setCatalog(c); });
+    return () => { live = false; };
+  }, [type, catalog.length]);
+
+  useEffect(() => {
     if (type !== "block" || blocks.length || blocksLoading) return;
     setBlocksLoading(true);
     void loadBlocks()
@@ -1019,12 +1087,12 @@ export const LibraryPanel: React.FC = () => {
    * user who deliberately picked one that does.
    */
   useEffect(() => {
-    if (type !== "block" || !blocks.length) return;
+    if (type !== "block" || !allBlocks.length) return;
     if (blocksInScope(scope).length > 0) return;
     const found = (["myfiles", "shared", "device"] as const)
       .find((sc) => blocksInScope(sc).length > 0);
     if (found && found !== scope) setScope(found);
-  }, [type, blocks, scope, blocksInScope]);
+  }, [type, allBlocks, scope, blocksInScope]);
 
   /**
    * Star / un-star an asset.
@@ -1654,7 +1722,7 @@ export const LibraryPanel: React.FC = () => {
   };
 
   const renderBlockTile = (b: BlockInfo) => (
-    <BlockTile key={b.name} block={b} listView={viewMode === "list"} />
+    <BlockTile key={`${b.source ?? b.tier}:${b.name}`} block={b} listView={viewMode === "list"} />
   );
 
   /**
@@ -1665,14 +1733,14 @@ export const LibraryPanel: React.FC = () => {
     const inScope = blocksInScope(scope);
     const shown = searchBlocks(inScope, debounced);
 
-    if (blocksLoading && !blocks.length) {
+    if (blocksLoading && !allBlocks.length) {
       return (
         <div className="flex items-center justify-center py-12 text-text-muted gap-2 text-xs">
           <Loader2 size={16} className="animate-spin" /> Reading your block library…
         </div>
       );
     }
-    if (!blocks.length) {
+    if (!allBlocks.length) {
       return (
         <div className="text-center py-12 text-text-muted">
           <LayoutGrid size={28} className="mx-auto mb-2 opacity-40" />
@@ -1709,7 +1777,7 @@ export const LibraryPanel: React.FC = () => {
           <p className="text-[11px] mt-1 leading-relaxed px-6">
             {scope === "generated"
               ? "A block is a design you authored or installed, so nothing generated shows here."
-              : "Your own blocks are under My files; the designs that ship with Voidspace are under Shared."}
+              : "Your own blocks are under My files; the designs that ship with Voidspace and the HyperFrames catalog are under Shared."}
           </p>
         </div>
       );
