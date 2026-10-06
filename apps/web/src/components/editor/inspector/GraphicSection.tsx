@@ -25,6 +25,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Loader2, RefreshCw, Layers, Wand2 } from "lucide-react";
 import { useProjectStore } from "../../../stores/project-store";
 import { findBlock, type BlockInfo } from "../../../services/blocks";
+import { useLiveGraphicStore } from "../../../stores/live-graphic-store";
 import { renderBlock } from "../../../services/render-block";
 import { fetchLibraryBlob } from "../../../services/library-drop";
 import { saveMediaBlob } from "../../../services/media-storage";
@@ -175,6 +176,27 @@ export const GraphicSection: React.FC<GraphicSectionProps> = ({ clipId }) => {
     }
   }, [clip, clipId, draft, graphic]);
 
+  /**
+   * TYPE, SEE IT, KEEP IT.
+   *
+   * What is typed goes straight to the preview's live layer (the composition
+   * itself, held at the playhead), so a change is visible on the frame the
+   * moment it is made. A moment after typing stops, the clip re-renders on the
+   * desktop in the background — that file is what plays and exports — and the
+   * live layer keeps showing the values meanwhile, so nothing flickers back.
+   */
+  useEffect(() => {
+    const store = useLiveGraphicStore.getState();
+    if (changed.length) store.setDraft(clipId, draft);
+    else store.clearDraft(clipId);
+  }, [clipId, draft, changed.length]);
+
+  useEffect(() => {
+    if (!changed.length || busy) return;
+    const t = window.setTimeout(() => { void rerender(); }, 1200);
+    return () => window.clearTimeout(t);
+  }, [draft, changed.length, busy, rerender]);
+
   if (!graphic) return null;
 
   /** "#lt-name" (a catalog block's hard-coded word) reads as "name". */
@@ -251,15 +273,15 @@ export const GraphicSection: React.FC<GraphicSectionProps> = ({ clipId }) => {
           >
             {busy ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
             {busy
-              ? "Rendering on your computer…"
+              ? "Updating the render on your computer…"
               : changed.length
-                ? `Re-render with ${changed.length} change${changed.length === 1 ? "" : "s"}`
-                : "No changes to render"}
+                ? "Render now"
+                : "Up to date"}
           </button>
           <p className="text-[10px] text-text-muted leading-relaxed flex items-start gap-1">
             <Wand2 size={10} className="mt-0.5 shrink-0 opacity-60" />
-            Renders on your computer and swaps this clip's picture. Its position, trim and blend
-            stay exactly as they are.
+            Changes show in the preview as you type. A moment after you stop, the clip re-renders
+            on your computer for playback and export — position, trim and blend stay as they are.
           </p>
         </>
       )}

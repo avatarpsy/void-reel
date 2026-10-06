@@ -38,8 +38,10 @@ import { blockRuntimeScript, dropRedundantGsapTag, ensureBlockRuntime } from './
 /** One block's source, as the preview needs it. */
 export interface BlockDoc {
   name: string;
-  tier: 'user' | 'shared' | 'starter';
+  tier: 'user' | 'shared' | 'starter' | 'catalog';
   html: string;
+  /** A HyperFrames catalog block's folder on the CDN — its assets resolve here. */
+  baseUrl?: string;
   /** Native composition size, from the root element's data attributes. */
   width: number;
   height: number;
@@ -79,6 +81,41 @@ export function forgetBlockDoc(name: string): void {
   cache.delete(String(name ?? '').trim());
 }
 
+/**
+ * A HyperFrames CATALOG block's document — their registry composition at the
+ * pinned tag, with the CDN folder its assets live in. Same cache, its own key
+ * space, so a user block that shares the name is never confused with it.
+ */
+function loadCatalogDoc(name: string): Promise<BlockDoc | null> {
+  const key = `hf:${name}`;
+  const hit = cache.get(key);
+  if (hit) return hit;
+  const req = (async (): Promise<BlockDoc | null> => {
+    const token = await blockToken();
+    const res = await fetch(blockApiUrl(), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify({ action: 'catalog_doc', name }),
+    }).catch(() => null);
+    if (!res?.ok) return null;
+    const j = await res.json().catch(() => null);
+    if (!j?.ok || typeof j.html !== 'string' || !j.html) return null;
+    return {
+      name,
+      tier: 'catalog',
+      html: j.html,
+      baseUrl: typeof j.baseUrl === 'string' && /^https:\/\/cdn\.jsdelivr\.net\//.test(j.baseUrl) ? j.baseUrl : undefined,
+      slots: {},
+      variables: [],
+      width: Number(j.width) || 1920,
+      height: Number(j.height) || 1080,
+    };
+  })();
+  cache.set(key, req);
+  void req.then(doc => { if (!doc) cache.delete(key); });
+  return req;
+}
+
 /** `data-width="1080"` on the root. Absent on a hand-written block; 9:16 then. */
 function sizeOf(html: string): { width: number; height: number } {
   const w = /data-width\s*=\s*["'](\d+)["']/.exec(html);
@@ -89,9 +126,10 @@ function sizeOf(html: string): { width: number; height: number } {
   };
 }
 
-export async function loadBlock(name: string): Promise<BlockDoc | null> {
+export async function loadBlock(name: string, source?: 'hyperframes'): Promise<BlockDoc | null> {
   const key = String(name || '').trim();
   if (!key) return null;
+  if (source === 'hyperframes') return loadCatalogDoc(key);
   const hit = cache.get(key);
   if (hit) return hit;
 
@@ -282,8 +320,20 @@ const DRIVER = `<script>(function(){
   var tls = [];
   var tries = 0;
   var POSTER = 0.7;
+  // SEEK MODE: a host that drives the composition from its own playhead (the
+  // video editor's live graphic layer) sets a time; from then on every
+  // timeline is held exactly there instead of playing and settling.
+  var seekT = typeof window.__vsInitialSeek === 'number' ? window.__vsInitialSeek : null;
+
+  function hold(tl) {
+    try {
+      var d = typeof tl.duration === 'function' ? tl.duration() : 0;
+      tl.pause(Math.max(0, d > 0 ? Math.min(seekT, d) : seekT));
+    } catch (e) {}
+  }
 
   function poster(tl) {
+    if (seekT !== null) { hold(tl); return; }
     try {
       var d = typeof tl.duration === 'function' ? tl.duration() : 0;
       if (d > 0) tl.pause(d * POSTER); else tl.pause();
@@ -310,6 +360,7 @@ const DRIVER = `<script>(function(){
       tl.__vsSeen = true;
       tls.push(tl);
       found++;
+      if (seekT !== null) { try { tl.repeat(0); } catch (e) {} hold(tl); continue; }
       try { tl.repeat(0); tl.play(0); settle(tl); } catch (e) {}
     }
     // Keep watching briefly: a composition may build several, and a slow CDN
@@ -330,7 +381,13 @@ const DRIVER = `<script>(function(){
 
   window.addEventListener('message', function (e) {
     var d = e && e.data;
-    if (!d || d.type !== 'vs-block-play') return;
+    if (!d) return;
+    if (d.type === 'vs-block-seek' && typeof d.t === 'number') {
+      seekT = d.t;
+      for (var i = 0; i < tls.length; i++) hold(tls[i]);
+      return;
+    }
+    if (d.type !== 'vs-block-play') return;
     setLoop(!!d.loop);
   });
 })();<\/script>`;
@@ -498,7 +555,7 @@ export function blockSrcdoc(
   vars: Record<string, string> = {},
   previewId = '',
   slots: SlotFill[] = [],
-  opts: { untrusted?: boolean } = {},
+  opts: { untrusted?: boolean; baseUrl?: string; seek?: number } = {},
 ): string {
   // The reporter goes FIRST — its error listener has to predate the block's own
   // scripts or the failure it exists to catch happens before it is watching.
@@ -523,7 +580,8 @@ export function blockSrcdoc(
    * Empty string when the runtime has not loaded, so this stays a pure string
    * function; `ensureBlockRuntime()` is awaited by the callers that paint.
    */
-  const shim = `${csp}<script>window.__vsPreviewId=${JSON.stringify(previewId)};<\/script>${REPORTER}${blockRuntimeScript()}${shimFor(vars)}`;
+  const base = opts.baseUrl ? `<base href="${opts.baseUrl.replace(/"/g, '')}">` : '';
+  const shim = `${csp}${base}<script>window.__vsPreviewId=${JSON.stringify(previewId)};<\/script>${REPORTER}${blockRuntimeScript()}${shimFor(vars)}`;
   // Its own GSAP tag is redundant now, and only when it asks for OUR version.
   let out = withGsapPlugins(dropRedundantGsapTag(html));
   if (/<head[^>]*>/i.test(out)) out = out.replace(/<head([^>]*)>/i, `<head$1>${shim}`);
@@ -533,7 +591,9 @@ export function blockSrcdoc(
   // Patcher BEFORE the driver: the values should already be in the DOM when the
   // timeline starts, or a composition that animates its text in would animate
   // the placeholder and then snap.
-  const tail = `${patcherFor(slots)}${DRIVER}`;
+  const seek = typeof opts.seek === 'number' && isFinite(opts.seek)
+    ? `<script>window.__vsInitialSeek=${Math.max(0, opts.seek)};<\/script>` : '';
+  const tail = `${patcherFor(slots)}${seek}${DRIVER}`;
   return /<\/body>/i.test(out)
     ? out.replace(/<\/body>/i, `${tail}</body>`)
     : `${out}${tail}`;
@@ -550,7 +610,22 @@ export interface PreviewHandle {
    * and moving away gives the frame budget straight back.
    */
   setLoop(on: boolean): void;
+  /**
+   * Hold the composition at `t` seconds — the host's playhead, for a preview
+   * that stands in for a clip on a timeline. Switches the preview into seek
+   * mode for good: it no longer plays on its own.
+   */
+  seek(t: number): void;
   destroy(): void;
+}
+
+export interface MountOptions {
+  /** Where the block comes from (see BlockInfo.source). */
+  source?: 'hyperframes';
+  /** Start held at this time (seconds) instead of playing through. */
+  seek?: number;
+  /** Called once the composition has rendered (or failed to). */
+  onSettled?: (ok: boolean) => void;
 }
 
 /**
@@ -603,7 +678,9 @@ export function mountBlockPreview(
   name: string,
   vars: Record<string, string> = {},
   slots: SlotFill[] = [],
+  options: MountOptions = {},
 ): PreviewHandle {
+  let seekAt: number | undefined = options.seek;
   let frame: HTMLIFrameElement | null = null;
   let current = { ...vars };
   let currentSlots = [...slots];
@@ -640,7 +717,7 @@ export function mountBlockPreview(
     f.height = String(doc.height);
     f.style.width = `${doc.width}px`;
     f.style.height = `${doc.height}px`;
-    f.srcdoc = blockSrcdoc(doc.html, current, previewId, currentSlots);
+    f.srcdoc = blockSrcdoc(doc.html, current, previewId, currentSlots, { baseUrl: doc.baseUrl, seek: seekAt });
     frame = f;
     host.append(f);
     fit();
@@ -652,7 +729,7 @@ export function mountBlockPreview(
    * fetched and the block is painted regardless — unanimated beats absent, and
    * the block's own report already carries `gsap: false` when it matters.
    */
-  void Promise.all([loadBlock(name), ensureBlockRuntime()]).then(([d]) => {
+  void Promise.all([loadBlock(name, options.source), ensureBlockRuntime()]).then(([d]) => {
     if (dead) return;
     if (!d) {
       // NAMED, not a spinner that never resolves. A block can genuinely be
@@ -664,6 +741,7 @@ export function mountBlockPreview(
     doc = d;
     pending.set(previewId, r => {
       if (dead || r.phase !== 'settled') return;
+      options.onSettled?.(!r.errors.length && !!(r.timelines || r.nodes));
       // THREE WAYS TO SHOW NOTHING, and they are indistinguishable on screen.
       // Name the one that happened rather than leaving a blank rectangle.
       if (r.errors.length) {
@@ -715,7 +793,12 @@ export function mountBlockPreview(
           return;
         } catch { /* fall through to the rebuild */ }
       }
-      frame.srcdoc = blockSrcdoc(doc.html, current, previewId, currentSlots);
+      frame.srcdoc = blockSrcdoc(doc.html, current, previewId, currentSlots, { baseUrl: doc.baseUrl, seek: seekAt });
+    },
+    seek(t) {
+      seekAt = t;
+      try { frame?.contentWindow?.postMessage({ type: 'vs-block-seek', t }, '*'); }
+      catch { /* a frame mid-teardown */ }
     },
     setLoop(on) {
       // Fire-and-forget across the sandbox boundary: the frame may still be

@@ -5,6 +5,8 @@ import React, {
   useState,
   useMemo,
 } from "react";
+import { LiveGraphicLayer } from "./preview/LiveGraphicLayer";
+import { useLiveGraphicStore } from "../../stores/live-graphic-store";
 import {
   Volume2,
   VolumeX,
@@ -608,6 +610,14 @@ export const Preview: React.FC<{ readOnly?: boolean }> = ({ readOnly = false }) 
   }, [isScrubbing]);
 
   const isPlaying = playbackState === "playing";
+  /**
+   * The graphic clip currently drawn LIVE by its composition (LiveGraphicLayer)
+   * — its rendered frame is skipped here so the two never stack. A ref for the
+   * render path, so the paint callback keeps its identity.
+   */
+  const liveGraphicClipId = useLiveGraphicStore((s) => s.liveClipId);
+  const liveGraphicClipIdRef = useRef<string | null>(null);
+  liveGraphicClipIdRef.current = liveGraphicClipId;
 
   const motionPathClip = React.useMemo(() => {
     if (!motionPathMode || !motionPathClipId) return null;
@@ -1652,6 +1662,7 @@ export const Preview: React.FC<{ readOnly?: boolean }> = ({ readOnly = false }) 
           if (track.hidden) continue;
           for (const clip of track.clips) {
             if (!(time >= clip.startTime && time < clip.startTime + clip.duration)) continue;
+            if (clip.id === liveGraphicClipIdRef.current) continue;
             const frame = await decodeClipFrame(clip, time, canvas.width, canvas.height);
             if (!frame) continue;
             try {
@@ -3614,6 +3625,7 @@ export const Preview: React.FC<{ readOnly?: boolean }> = ({ readOnly = false }) 
     renderFallbackFrame,
     project.modifiedAt,
     isDark,
+    liveGraphicClipId,
   ]);
 
   const selectedClipId = useMemo(() => {
@@ -4965,6 +4977,19 @@ export const Preview: React.FC<{ readOnly?: boolean }> = ({ readOnly = false }) 
           )}
 
           {/* Resize/Transform Overlay */}
+          {/* A selected HyperFrames graphic, paused: drawn live by its own
+              composition at the playhead, so edits show as they are typed. */}
+          {!isPlaying && !cropMode && clipBounds && selectedClip?.metadata?.graphic
+            && playheadPosition >= selectedClip.startTime
+            && playheadPosition < selectedClip.startTime + selectedClip.duration && (
+            <LiveGraphicLayer
+              clip={selectedClip}
+              bounds={clipBounds}
+              time={playheadPosition}
+              rotation={selectedClip.transform?.rotation ?? 0}
+              opacity={selectedClip.transform?.opacity ?? 1}
+            />
+          )}
           {!cropMode && showResizeHandles && clipBounds && (
             <div
               className="absolute pointer-events-none"
