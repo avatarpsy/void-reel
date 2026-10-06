@@ -120,6 +120,8 @@ export interface LazyOptions {
    * must never happen, because a blank card looks like a lost scene.
    */
   priority?: 'card' | 'tile';
+  /** `hyperframes` = a block from their catalog (see BlockInfo.source). */
+  source?: 'hyperframes';
 }
 
 /**
@@ -175,7 +177,7 @@ export function lazyBlockPreview(host: HTMLElement, opts: LazyOptions = {}): Laz
     }
     if (!requestSlot(api)) return;
     handle?.destroy();
-    handle = mountBlockPreview(host, wantName, wantVars, wantSlots);
+    handle = mountBlockPreview(host, wantName, wantVars, wantSlots, { source: opts.source });
     if (looping) handle.setLoop(true);
     shown = sig();
   }

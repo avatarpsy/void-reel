@@ -122,17 +122,19 @@ const BlockTile: React.FC<{ block: BlockInfo; listView: boolean }> = ({ block: b
    * Same card, same grid, same drag; nothing else about it is special.
    */
   const catalog = b.source === "hyperframes";
+  // A catalog block with no preview media of theirs renders LIVE, like ours.
+  const live = !catalog || !b.poster;
   const video = useRef<HTMLVideoElement | null>(null);
 
   useEffect(() => {
-    if (catalog || listView || !host.current) return;
+    if (!live || listView || !host.current) return;
     // The positioning contract for a preview host — see the package's note.
     ensureBlockPreviewStyles();
-    const lazy = lazyBlockPreview(host.current, { priority: "tile" });
+    const lazy = lazyBlockPreview(host.current, { priority: "tile", source: catalog ? "hyperframes" : undefined });
     lazy.set(b.name);
     preview.current = lazy;
     return () => { preview.current = null; lazy.destroy(); };
-  }, [b.name, listView, catalog]);
+  }, [b.name, listView, catalog, live]);
 
   // Who made it — the only thing separating a Voidspace design from one
   // somebody published, now that both sit under the same pill.
@@ -178,7 +180,7 @@ const BlockTile: React.FC<{ block: BlockInfo; listView: boolean }> = ({ block: b
                  overflow-hidden hover:border-primary/50 cursor-grab active:cursor-grabbing
                  transition-colors text-left"
     >
-      {!listView && catalog && (
+      {!listView && !live && (
         <div className="relative w-full aspect-video bg-black/40 overflow-hidden flex items-center justify-center">
           {b.poster ? (
             <img
@@ -205,7 +207,7 @@ const BlockTile: React.FC<{ block: BlockInfo; listView: boolean }> = ({ block: b
           )}
         </div>
       )}
-      {!listView && !catalog && (
+      {!listView && live && (
         <div
           ref={host}
           /* 16:9 so a grid of tiles is one clean rhythm regardless of what each
