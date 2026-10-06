@@ -14,7 +14,8 @@ import {
   DEFAULT_CURVES,
   DEFAULT_HSL,
 } from "@openreel/core";
-import type { Effect } from "@openreel/core";
+import type { Effect, Keyframe } from "@openreel/core";
+import { animateEffects, hasEffectKeyframes } from "@openreel/core";
 import { v4 as uuidv4 } from "uuid";
 
 export type EffectsChangeCallback = (clipId: string, effects: Effect[]) => void;
@@ -441,30 +442,32 @@ export class EffectsBridge {
   async processEffects(
     clipId: string,
     image: ImageBitmap,
+    /** The clip's keyframes at a clip-local time: animated effect values
+     *  (and effects that exist only as keyframes) — see `animateEffects`. */
+    animation?: { keyframes: Keyframe[]; localTime: number },
   ): Promise<{ image: ImageBitmap; processingTime: number }> {
     if (!this.initialized || !this.videoEffectsEngine) {
       return { image, processingTime: 0 };
     }
 
-    const effects = this.getEffects(clipId);
-    if (effects.length === 0) {
-      return { image, processingTime: 0 };
-    }
-
+    const animated = !!animation && hasEffectKeyframes(animation.keyframes);
     // Filter to only enabled effects
-    const enabledEffects = effects.filter((e) => e.enabled);
-    if (enabledEffects.length === 0) {
+    const enabledEffects = this.getEffects(clipId).filter((e) => e.enabled);
+    if (enabledEffects.length === 0 && !animated) {
       return { image, processingTime: 0 };
     }
 
     try {
       // Convert VideoEffect[] to Effect[] for the engine
-      const engineEffects: Effect[] = enabledEffects.map((e) => ({
+      let engineEffects: Effect[] = enabledEffects.map((e) => ({
         id: e.id,
         type: e.type,
         enabled: e.enabled,
         params: e.params,
       }));
+      if (animated) {
+        engineEffects = animateEffects(clipId, engineEffects, animation!.keyframes, animation!.localTime);
+      }
 
       const result = await this.videoEffectsEngine.applyEffects(
         image,

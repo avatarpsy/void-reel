@@ -1,4 +1,5 @@
 export * from "./video-engine";
+export * from "./animated-effects";
 export * from "./video-effects-engine";
 export * from "./color-grading-engine";
 export * from "./frame-cache";

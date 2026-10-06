@@ -11,6 +11,7 @@ import {
   renderCaptionWordHighlight,
   wrapTextToWidth,
 } from "@openreel/core";
+import { hasEffectKeyframes } from "@openreel/core";
 import * as THREE from "three";
 
 type GraphicClipUnion = ShapeClip | SVGClip | StickerClip;
@@ -1834,6 +1835,9 @@ export const compositeTracksToCtx = (
 export const applyEffectsToFrame = async (
   clipId: string,
   frame: ImageBitmap,
+  /** The clip's keyframes and its local time, so animated effects play here
+   *  exactly as they export (`animateEffects`). */
+  animation?: { keyframes: Keyframe[]; localTime: number },
 ): Promise<ImageBitmap> => {
   try {
     let processedFrame = frame;
@@ -1871,11 +1875,12 @@ export const applyEffectsToFrame = async (
     }
 
     const enabledEffects = effects.filter((e) => e.enabled);
-    if (enabledEffects.length > 0) {
+    if (enabledEffects.length > 0 || (animation && hasEffectKeyframes(animation.keyframes))) {
       try {
         const effectsResult = await effectsBridge.processEffects(
           clipId,
           processedFrame,
+          animation,
         );
         if (
           effectsResult.image &&

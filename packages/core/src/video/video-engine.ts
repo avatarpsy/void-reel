@@ -40,6 +40,7 @@ import {
 import { GPUCompositor, initializeGPUCompositor } from "./gpu-compositor";
 import { getRendererFactory, type Renderer } from "./renderer-factory";
 import { keyframeEngine } from "./keyframe-engine";
+import { animateEffects } from "./animated-effects";
 import {
   type GifFrameCache,
   createGifFrameCache,
@@ -1447,48 +1448,7 @@ export class VideoEngine {
   }
 
   private getAnimatedEffects(clip: Clip, localTime: number): Effect[] {
-    const keyframes = clip.keyframes || [];
-    const baseEffects = clip.effects || [];
-
-    if (keyframes.length === 0) {
-      return baseEffects;
-    }
-
-    const effectPropertyMap: Record<string, string> = {
-      "effect.brightness": "brightness",
-      "effect.contrast": "contrast",
-      "effect.saturation": "saturation",
-      "effect.blur": "blur",
-    };
-
-    const animatedParams: Record<string, number> = {};
-
-    for (const [keyframeProp, paramName] of Object.entries(effectPropertyMap)) {
-      const effectKfs = keyframeEngine.getKeyframesForProperty(
-        keyframes,
-        keyframeProp,
-      );
-      if (effectKfs.length > 0) {
-        const result = keyframeEngine.getValueAtTime(effectKfs, localTime);
-        if (typeof result.value === "number") {
-          animatedParams[paramName] = result.value;
-        }
-      }
-    }
-
-    if (Object.keys(animatedParams).length === 0) {
-      return baseEffects;
-    }
-
-    return baseEffects.map((effect) => {
-      const updatedParams = { ...effect.params };
-      for (const [paramName, value] of Object.entries(animatedParams)) {
-        if (effect.type === paramName || paramName in updatedParams) {
-          updatedParams[paramName] = value;
-        }
-      }
-      return { ...effect, params: updatedParams };
-    });
+    return animateEffects(clip.id, clip.effects || [], clip.keyframes || [], localTime);
   }
 
   private getAnimatedTransform(clip: Clip, localTime: number): Transform {

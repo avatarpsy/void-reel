@@ -78,6 +78,7 @@ import {
 } from "./preview/index";
 import { ProcessingOverlay } from "./ProcessingOverlay";
 import type { MotionPathConfig, GSAPMotionPathPoint } from "@openreel/core";
+import { hasEffectKeyframes } from "@openreel/core";
 
 const getAdaptivePoolSize = (width: number, height: number): number => {
   const pixels = width * height;
@@ -1670,7 +1671,10 @@ export const Preview: React.FC<{ readOnly?: boolean }> = ({ readOnly = false }) 
             const frame = await decodeClipFrame(clip, time, canvas.width, canvas.height);
             if (!frame) continue;
             try {
-              const processed = await applyEffectsToFrame(clip.id, frame);
+              const processed = await applyEffectsToFrame(clip.id, frame, {
+                keyframes: [...(clip.keyframes ?? [])],
+                localTime: time - clip.startTime,
+              });
               frameMap.set(clip.id, processed.width > 0 && processed.height > 0 ? processed : frame);
             } catch {
               frameMap.set(clip.id, frame);
@@ -3130,8 +3134,12 @@ export const Preview: React.FC<{ readOnly?: boolean }> = ({ readOnly = false }) 
                 // the moment playback started.
                 let imgFrame: ImageBitmap | HTMLCanvasElement | OffscreenCanvas = cachedBitmap;
                 try {
-                  if (getEffectsBridge().hasClipEffects(clip.id) || (clip.effects?.length ?? 0) > 0) {
-                    imgFrame = await applyEffectsToFrame(clip.id, cachedBitmap);
+                  if (getEffectsBridge().hasClipEffects(clip.id) || (clip.effects?.length ?? 0) > 0
+                    || hasEffectKeyframes(clip.keyframes)) {
+                    imgFrame = await applyEffectsToFrame(clip.id, cachedBitmap, {
+                      keyframes: [...(clip.keyframes ?? [])],
+                      localTime: currentPlayhead - clip.startTime,
+                    });
                   }
                 } catch { /* effects pass failed — show the raw frame */ }
                 imageClipFrames.push({ clip, transform, frame: imgFrame });
@@ -3208,9 +3216,13 @@ export const Preview: React.FC<{ readOnly?: boolean }> = ({ readOnly = false }) 
                       // Same dual check as path C — bridge-stored looks
                       // never populate clip.effects.
                       const clipHasEffects = (clip.effects && clip.effects.length > 0)
+                        || hasEffectKeyframes(clip.keyframes)
                         || (() => { try { return getEffectsBridge().hasClipEffects(clip.id); } catch { return false; } })();
                       processedFrame = clipHasEffects
-                        ? await applyEffectsToFrame(clip.id, frameBitmap)
+                        ? await applyEffectsToFrame(clip.id, frameBitmap, {
+                            keyframes: [...(clip.keyframes ?? [])],
+                            localTime: currentPlayhead - clip.startTime,
+                          })
                         : frameBitmap;
                     } catch {}
 
