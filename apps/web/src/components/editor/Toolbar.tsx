@@ -25,7 +25,6 @@ import {
   Minimize2,
   Maximize2,
   Share2,
-  Clapperboard,
 } from "lucide-react";
 import { useProjectStore } from "../../stores/project-store";
 import { useUIStore } from "../../stores/ui-store";
@@ -116,8 +115,6 @@ export const Toolbar: React.FC = () => {
     centerView,
     toggleCenterView,
     toggleAllPanels,
-    editorView,
-    setEditorView,
   } = useUIStore();
   // "Any open" rather than "all open": the button's job is to clear the screen
   // while anything is still on it, and only then to bring everything back.
@@ -1160,27 +1157,6 @@ export const Toolbar: React.FC = () => {
           </TooltipTrigger>
           <TooltipContent>
             <p>Settings & API Keys</p>
-          </TooltipContent>
-        </Tooltip>
-
-        {/* Motion: HyperFrames Studio for this project, in place of the
-            timeline editor (MotionStudioView). Same toggle grammar as the
-            mixer: the icon keeps its identity, the highlight shows it is on. */}
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              onClick={() => setEditorView(editorView === "motion" ? "timeline" : "motion")}
-              className={`p-2 rounded-lg transition-colors ${
-                editorView === "motion"
-                  ? "bg-primary/20 text-primary"
-                  : "hover:bg-background-elevated text-text-secondary hover:text-text-primary"
-              }`}
-            >
-              <Clapperboard size={16} />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>
-            <p>{editorView === "motion" ? "Back to the timeline" : "Motion — HyperFrames Studio"}</p>
           </TooltipContent>
         </Tooltip>
 

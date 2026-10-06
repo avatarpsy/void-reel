@@ -78,11 +78,6 @@ export interface UIState {
    *  is shown (its playback/audio engine drives the timeline) — only its box
    *  is hidden. Not persisted, like appMode. */
   centerView: "preview" | "mixer";
-  /** The whole work area: the timeline editor, or the Motion view — HyperFrames
-   *  Studio for this project, served by the desktop app (MotionStudioView).
-   *  The timeline editor stays MOUNTED while Motion is up (playback engine,
-   *  undo, unsaved state). Not persisted: a reload always opens the timeline. */
-  editorView: "timeline" | "motion";
   /** Collapse the video preview pane to a sliver so the timeline takes
    *  the screen (transport lives on the timeline toolbar). Preview stays
    *  MOUNTED (the playback/audio engine lives in it) — collapse is CSS
@@ -139,7 +134,6 @@ export interface UIState {
   setAppMode: (mode: "video" | "music") => void;
   setCenterView: (view: "preview" | "mixer") => void;
   toggleCenterView: () => void;
-  setEditorView: (view: "timeline" | "motion") => void;
   setPreviewCollapsed: (collapsed: boolean) => void;
   togglePreviewCollapsed: () => void;
   setShowWaveforms: (show: boolean) => void;
@@ -239,7 +233,6 @@ export const useUIStore = create<UIState>()(
         theme: "dark",
         appMode: "video",
         centerView: "preview",
-        editorView: "timeline",
         previewCollapsed: false,
         showWaveforms: true,
         showThumbnails: true,
@@ -528,10 +521,6 @@ export const useUIStore = create<UIState>()(
           set((state) => ({
             centerView: state.centerView === "mixer" ? "preview" : "mixer",
           }));
-        },
-
-        setEditorView: (view: "timeline" | "motion") => {
-          set({ editorView: view });
         },
 
         setPreviewCollapsed: (collapsed: boolean) => {

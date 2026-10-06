@@ -5,7 +5,6 @@ import { AssetsPanel } from "./AssetsPanel";
 import { Preview } from "./Preview";
 import { InspectorPanel } from "./InspectorPanel";
 import { Timeline } from "./Timeline";
-import { MotionStudioView } from "./MotionStudioView";
 import { PanelResizer } from "./PanelResizer";
 import { KeyframeEditorPanel } from "./KeyframeEditorPanel";
 import { AudioMixer } from "../audio-mixer";
@@ -190,11 +189,6 @@ export const EditorInterface: React.FC = () => {
   // Preview component stays MOUNTED but hidden so its playback/audio engine
   // keeps driving the timeline — see the workspace row below.
   const showMixerCenter = centerView === "mixer";
-  const editorView = useUIStore((s) => s.editorView);
-  const [motionMounted, setMotionMounted] = useState(false);
-  useEffect(() => {
-    if (editorView === "motion") setMotionMounted(true);
-  }, [editorView]);
   const { project, updateClipKeyframes } = useProjectStore();
   const tracks = project.timeline.tracks;
 
@@ -340,18 +334,6 @@ export const EditorInterface: React.FC = () => {
       {/* Main App Toolbar */}
       <Toolbar />
 
-      {/* Motion view: HyperFrames Studio for this project. Mounted on first
-          use and kept mounted, so switching back and forth never reloads it. */}
-      {motionMounted && (
-        <PanelErrorBoundary name="Motion">
-          <MotionStudioView active={editorView === "motion"} />
-        </PanelErrorBoundary>
-      )}
-
-      {/* The timeline editor stays MOUNTED while Motion is up — its playback
-          engine, undo history and unsaved edits live in it — only hidden. */}
-      <div className={editorView === "motion" ? "hidden" : "contents"}>
-
       {/* Workspace Area — always flexes to fill whatever the timeline
           leaves. Minimizing the video grows the timeline (below), which
           shrinks this row to a strip. Preview stays mounted (its
@@ -446,7 +428,6 @@ export const EditorInterface: React.FC = () => {
         <PanelErrorBoundary name="Timeline">
           <Timeline />
         </PanelErrorBoundary>
-      </div>
       </div>
 
       <KeyboardShortcutsOverlay
