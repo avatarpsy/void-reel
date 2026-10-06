@@ -1114,7 +1114,7 @@ export function useVideoRpc(sourceBoardIdRef?: { current: string }) {
             const { url, name, graphic } = msg as {
               url?: string;
               name?: string;
-              graphic?: { block?: string; slots?: Record<string, string>; mode?: string; aspect?: string; source?: string };
+              graphic?: { block?: string; slots?: Record<string, string>; mode?: string; aspect?: string; source?: string; timing?: Record<string, { delay?: number; speed?: number }> };
             };
             if (!url || typeof url !== "string") {
               reply({ type: "voidspace:error", requestId: msg.requestId, error: "url required" });
@@ -1128,6 +1128,7 @@ export function useVideoRpc(sourceBoardIdRef?: { current: string }) {
                     mode: graphic.mode === "bake" ? ("bake" as const) : ("overlay" as const),
                     ...(graphic.aspect ? { aspect: String(graphic.aspect) } : {}),
                     ...(graphic.source === "hyperframes" ? { source: "hyperframes" as const } : {}),
+                    ...(graphic.timing && typeof graphic.timing === "object" ? { timing: graphic.timing } : {}),
                     // Overlays are VP9 with alpha, decoded as such: no `screen`.
                     ...(graphic.mode === "bake" ? {} : { alpha: true }),
                   }
