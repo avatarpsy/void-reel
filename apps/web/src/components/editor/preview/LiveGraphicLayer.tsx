@@ -95,6 +95,7 @@ export const LiveGraphicLayer: React.FC<{
       handle.current = mountBlockPreview(el, graphic.block, vars, fills, {
         source: graphic.source,
         seek: localRef.current,
+        transparent: true,
         onSettled: (ok) => { if (live && ok) setLiveClip(clip.id); },
       });
     });
@@ -116,11 +117,12 @@ export const LiveGraphicLayer: React.FC<{
   }, [local]);
 
   if (!graphic?.block) return null;
+  // Two boxes on purpose: the preview stylesheet makes `[data-block-preview]`
+  // position:relative, which would pull an absolutely-placed host back into
+  // the flow (below the canvas, clipped away). The outer box is placed; the
+  // inner one is the preview host and just fills it.
   return (
     <div
-      ref={host}
-      data-block-preview
-      data-live-graphic
       className="absolute pointer-events-none z-[25]"
       style={{
         left: bounds.x,
@@ -130,7 +132,9 @@ export const LiveGraphicLayer: React.FC<{
         transform: rotation ? `rotate(${rotation}deg)` : undefined,
         opacity,
       }}
-    />
+    >
+      <div ref={host} data-block-preview data-live-graphic className="w-full h-full" />
+    </div>
   );
 };
 

@@ -555,7 +555,7 @@ export function blockSrcdoc(
   vars: Record<string, string> = {},
   previewId = '',
   slots: SlotFill[] = [],
-  opts: { untrusted?: boolean; baseUrl?: string; seek?: number } = {},
+  opts: { untrusted?: boolean; baseUrl?: string; seek?: number; transparent?: boolean } = {},
 ): string {
   // The reporter goes FIRST — its error listener has to predate the block's own
   // scripts or the failure it exists to catch happens before it is watching.
@@ -581,7 +581,12 @@ export function blockSrcdoc(
    * function; `ensureBlockRuntime()` is awaited by the callers that paint.
    */
   const base = opts.baseUrl ? `<base href="${opts.baseUrl.replace(/"/g, '')}">` : '';
-  const shim = `${csp}${base}<script>window.__vsPreviewId=${JSON.stringify(previewId)};<\/script>${REPORTER}${blockRuntimeScript()}${shimFor(vars)}`;
+  // A LAYER over a picture: clear the page itself the way HyperFrames' own
+  // renderer does for an alpha render — html/body only; a composition's root
+  // keeps its background, so a full-frame design stays opaque.
+  const clear = opts.transparent
+    ? '<style>html,body{background:transparent!important}</style>' : '';
+  const shim = `${csp}${base}${clear}<script>window.__vsPreviewId=${JSON.stringify(previewId)};<\/script>${REPORTER}${blockRuntimeScript()}${shimFor(vars)}`;
   // Its own GSAP tag is redundant now, and only when it asks for OUR version.
   let out = withGsapPlugins(dropRedundantGsapTag(html));
   if (/<head[^>]*>/i.test(out)) out = out.replace(/<head([^>]*)>/i, `<head$1>${shim}`);
@@ -626,6 +631,8 @@ export interface MountOptions {
   seek?: number;
   /** Called once the composition has rendered (or failed to). */
   onSettled?: (ok: boolean) => void;
+  /** Drawn as a layer over a picture: no page background (see blockSrcdoc). */
+  transparent?: boolean;
 }
 
 /**
@@ -715,9 +722,13 @@ export function mountBlockPreview(
     f.setAttribute('aria-label', `${doc.name} preview`);
     f.width = String(doc.width);
     f.height = String(doc.height);
+    // A frame whose colour scheme differs from its page gets an OPAQUE
+    // backdrop in Chrome — white over the video. `normal` matches the
+    // document inside, which declares none.
+    if (options.transparent) f.style.colorScheme = 'normal';
     f.style.width = `${doc.width}px`;
     f.style.height = `${doc.height}px`;
-    f.srcdoc = blockSrcdoc(doc.html, current, previewId, currentSlots, { baseUrl: doc.baseUrl, seek: seekAt });
+    f.srcdoc = blockSrcdoc(doc.html, current, previewId, currentSlots, { baseUrl: doc.baseUrl, seek: seekAt, transparent: options.transparent });
     frame = f;
     host.append(f);
     fit();
@@ -793,7 +804,7 @@ export function mountBlockPreview(
           return;
         } catch { /* fall through to the rebuild */ }
       }
-      frame.srcdoc = blockSrcdoc(doc.html, current, previewId, currentSlots, { baseUrl: doc.baseUrl, seek: seekAt });
+      frame.srcdoc = blockSrcdoc(doc.html, current, previewId, currentSlots, { baseUrl: doc.baseUrl, seek: seekAt, transparent: options.transparent });
     },
     seek(t) {
       seekAt = t;
