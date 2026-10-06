@@ -16,7 +16,7 @@
 import { useVoidspaceStore } from "../stores/voidspace-store";
 
 /** Parent origin when embedded in the website iframe; else same origin. */
-function apiBase(): string {
+export function apiBase(): string {
   if (typeof window !== "undefined") {
     try {
       if (window.parent && window.parent !== window) {
