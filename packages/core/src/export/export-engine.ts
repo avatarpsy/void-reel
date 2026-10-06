@@ -467,10 +467,14 @@ export class ExportEngine {
             videoMediaIds.push(mediaItem.id);
             if (track.type === "video") {
               try {
+                // At the PROJECT's width, not the output's: renderFrame scales
+                // every frame by output/project itself, so a decoder already at
+                // output size was scaled twice — a 4K export of a 1080p project
+                // came out as a 2x crop of the middle of every frame.
                 await mediaEngine.createExportDecoder(
                   mediaItem.id,
                   blob,
-                  fullSettings.width,
+                  project.settings.width,
                 );
               } catch {}
             }

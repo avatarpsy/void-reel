@@ -1143,12 +1143,14 @@ export class VideoEngine {
 
       const compoundId = this.compoundIdOf(clip);
       if (compoundId) {
+        // At PROJECT size, like every other clip's frame: the caller scales
+        // by output/project when drawing (see the export decoder note).
         bitmap = await this.renderCompoundFrame(
           project,
           compoundId,
           clipInfo.sourceTime,
-          width,
-          height,
+          settings.width,
+          settings.height,
         );
         // A sequence that cannot be resolved (deleted, or a cycle) draws
         // nothing, exactly as its audio contributes nothing.
