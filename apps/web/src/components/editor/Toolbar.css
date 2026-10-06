@@ -1,0 +1,19 @@
+.video-toolbar { gap: 12px; min-width: 0; white-space: nowrap; }
+.video-toolbar-nav, .video-toolbar-actions, .video-toolbar-output { flex-shrink: 0; }
+.video-toolbar-actions > *, .video-toolbar button svg { flex-shrink: 0; }
+.video-toolbar [data-collaboration-status] { margin-left: 12px; }
+@media (max-width: 1200px) {
+  .video-toolbar { padding-inline: 12px; gap: 8px; }
+  .video-toolbar-nav, .video-toolbar-actions { gap: 6px; }
+  .video-toolbar [data-collaboration-status] { display: none; }
+}
+@media (max-width: 1000px) {
+  .video-toolbar .toolbar-action-label { display: none; }
+  .video-toolbar-actions button { padding-inline: 9px; }
+  .video-toolbar-output { gap: 4px; }
+}
+@media (max-width: 650px) {
+  .video-toolbar { padding-inline: 8px; gap: 4px; overflow-x: auto; }
+  .video-toolbar-nav > button:last-child, .video-toolbar-nav > .w-px { display: none; }
+  .video-toolbar-actions { gap: 2px; }
+}

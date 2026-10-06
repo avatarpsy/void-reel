@@ -1,3 +1,4 @@
+import './TimelineToolbar.css';
 import React, {
   useRef,
   useCallback,
@@ -1168,7 +1169,7 @@ export const Timeline: React.FC = () => {
       data-tour="timeline"
       className="h-full bg-background border-t border-border flex flex-col"
     >
-      <div className="h-12 border-b border-border flex items-center justify-between px-4 bg-background-secondary relative z-[100]">
+      <div className="timeline-toolbar h-12 border-b border-border flex items-center justify-between px-4 bg-background-secondary relative z-[100]">
         <div className="flex items-center gap-2">
           <div className="flex bg-background-tertiary rounded-lg p-1 border border-border">
             <IconButton
@@ -1199,7 +1200,7 @@ export const Timeline: React.FC = () => {
               }`}
             >
               <Scissors size={14} />
-              <span className="text-[10px] font-medium">SPLIT</span>
+              <span className="timeline-action-label text-[10px] font-medium">SPLIT</span>
             </button>
             <IconButton
               icon={Trash2}
@@ -1219,7 +1220,7 @@ export const Timeline: React.FC = () => {
                 title="Add new track"
               >
                 <Plus size={14} />
-                <span className="text-[11px] font-semibold">Add Track</span>
+                <span className="timeline-action-label text-[11px] font-semibold">Add Track</span>
                 <ChevronDownIcon size={12} className="ml-0.5 opacity-60" />
               </button>
             </DropdownMenuTrigger>
@@ -1261,7 +1262,7 @@ export const Timeline: React.FC = () => {
                 title="Manage track layers"
               >
                 <Layers size={14} />
-                <span className="text-[10px] font-medium tracking-wide">LAYERS</span>
+                <span className="timeline-action-label text-[10px] font-medium tracking-wide">LAYERS</span>
               </button>
             </PopoverTrigger>
             <PopoverContent
@@ -1341,7 +1342,7 @@ export const Timeline: React.FC = () => {
             title={snapSettings.enabled ? "Disable snapping" : "Enable snapping"}
           >
             <Magnet size={14} />
-            <span className="text-[10px] font-medium tracking-wide">SNAP</span>
+            <span className="timeline-action-label text-[10px] font-medium tracking-wide">SNAP</span>
           </button>
 
           <Popover>
@@ -1351,7 +1352,7 @@ export const Timeline: React.FC = () => {
                 title="Timeline behavior help"
               >
                 <Info size={14} />
-                <span className="text-[10px] font-medium tracking-wide">INFO</span>
+                <span className="timeline-action-label text-[10px] font-medium tracking-wide">INFO</span>
               </button>
             </PopoverTrigger>
             <PopoverContent side="top" align="start" sideOffset={8} className="w-80 p-3">

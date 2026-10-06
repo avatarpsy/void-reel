@@ -116,6 +116,7 @@ interface ProjectActions {
   runTransaction: <T>(label: string, fn: () => T) => T;
 
   addArtboard: (name: string, size: CanvasSize, position?: { x: number; y: number }) => string;
+  duplicateArtboard: (artboardId: string) => string | null;
   removeArtboard: (artboardId: string) => void;
   /** Move a page to another position. Indices are into `project.artboards`. */
   reorderArtboards: (from: number, to: number) => void;
@@ -412,6 +413,37 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
         const cmd = new AddArtboardCommand(artboard, insertIndex);
         const newProject = execCmd(project, cmd);
         set({ project: newProject, isDirty: true });
+        return id;
+      },
+
+      duplicateArtboard: (artboardId) => {
+        const { project } = get();
+        const source = project?.artboards.find(page => page.id === artboardId);
+        if (!project || !source) return null;
+        const id = generateId();
+        const ids = new Map<string, string>();
+        const collect = (layerId: string) => {
+          if (ids.has(layerId)) return;
+          const layer = project.layers[layerId];
+          if (!layer) return;
+          ids.set(layerId, generateId());
+          if (layer.type === 'group') layer.childIds.forEach(collect);
+        };
+        source.layerIds.forEach(collect);
+        const layers = [...ids].map(([oldId, newId]) => {
+          const layer = structuredClone(project.layers[oldId]);
+          layer.id = newId;
+          layer.parentId = layer.parentId ? ids.get(layer.parentId) ?? null : null;
+          if (layer.type === 'group') layer.childIds = layer.childIds.map(child => ids.get(child)!);
+          return layer;
+        });
+        const artboard: Artboard = { ...structuredClone(source), id, name: `${source.name} copy`, layerIds: [], position: { x: source.position.x + source.size.width + 100, y: source.position.y } };
+        const commands: Command[] = [new AddArtboardCommand(artboard, project.artboards.findIndex(page => page.id === artboardId) + 1)];
+        if (layers.length) {
+          commands.push(new PasteLayersCommand(id, layers, []));
+          commands.push(new UpdateArtboardCommand(id, { layerIds: source.layerIds.map(layer => ids.get(layer)!) }, { layerIds: layers.map(layer => layer.id).reverse() }));
+        }
+        set({ project: execCmd(project, new CompositeCommand(commands, 'Duplicate page')), selectedArtboardId: id, selectedLayerIds: [], isDirty: true });
         return id;
       },
 

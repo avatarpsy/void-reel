@@ -29,7 +29,7 @@ const RIGHT_TABS: Array<{ key: RightTab; label: string; Icon: typeof SlidersHori
   { key: 'history', label: 'History', Icon: History },
 ];
 
-export function EditorInterface() {
+export function EditorInterface({ readOnly = false }: { readOnly?: boolean }) {
   const {
     isPanelCollapsed,
     isInspectorCollapsed,
@@ -100,6 +100,20 @@ export function EditorInterface() {
       </div>
     );
   }
+
+  if (readOnly) return (
+    <main className="h-full w-full flex flex-col bg-background overflow-hidden" aria-label="Image project — view only">
+      <Toolbar readOnly />
+      <div className="flex-1 flex overflow-hidden min-h-0">
+        <div {...{ inert: '' }} aria-hidden="true"><PanelRail side="left" label="Layers" onExpand={() => {}} className="bg-card" /></div>
+        <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
+          <div className="flex-1 min-h-0 flex overflow-hidden"><Canvas readOnly /></div>
+          <PagesBar readOnly />
+        </div>
+        <div {...{ inert: '' }} aria-hidden="true"><PanelRail side="right" label="Design" onExpand={() => {}} className="bg-card" /></div>
+      </div>
+    </main>
+  );
 
   return (
     <div className="h-full w-full flex flex-col bg-background overflow-hidden">

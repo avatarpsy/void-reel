@@ -26,13 +26,15 @@ import './theme/document-view.css';
 import { IndexeddbPersistence } from 'y-indexeddb';
 import * as Y from 'yjs';
 
-import { defaultApiBase, installStorageFullWatch, setBlockTokenProvider } from '@openreel/asset-browser';
+import { defaultApiBase, installStorageFullWatch, setBlockTokenProvider, installSharePreparation } from '@openreel/asset-browser';
 
 import { mountBoard, type MountedBoard } from './blocksuite/editor';
+import { repairBoardRoots } from './blocksuite/repair-roots';
 import { installFrameTitleScale } from './ui/frame-title-scale';
 import * as shots from './shot/shots';
 import * as boardMeta from './board/board-meta';
 import { installCloudSync } from './board/cloud-sync';
+import { installSharedSync } from './board/shared-sync';
 import { installParentAuth, getParentToken } from './board/parent-auth';
 import { installBoardRpc, getBoardRev } from './agent/rpc';
 import { installScreenplayFocus } from './ui/screenplay-focus';
@@ -42,6 +44,7 @@ import { installDocumentDrop } from './document/import-drop';
 import { installDocumentTags } from './document/tags';
 import { installDocumentIndex } from './document/index-panel';
 import { installBoardUi } from './ui/board-ui';
+import { installMediaStorage } from './ui/media-storage';
 import { installAssetPanel } from './ui/asset-panel';
 import { installMediaInspector } from './ui/media-inspector';
 import { installCanvasMenu } from './ui/canvas-menu';
@@ -65,7 +68,8 @@ function showBootError(message: string): void {
 }
 
 const params = new URLSearchParams(location.search);
-const boardId = params.get('board') || 'scratch';
+const sharedId = params.get('shared');
+const boardId = sharedId || params.get('board') || 'scratch';
 const initialTheme = params.get('theme') === 'light' ? 'light' : 'dark';
 
 document.documentElement.dataset.theme = initialTheme;
@@ -121,20 +125,24 @@ async function boot(): Promise<void> {
   installStorageFullWatch();
 
   const ydoc = new Y.Doc({ guid: boardId });
-  const persistence = new IndexeddbPersistence(`voidspace-board-${boardId}`, ydoc);
+  const persistence = sharedId ? null : new IndexeddbPersistence(`voidspace-board-${boardId}`, ydoc);
   // IndexedDB can remain locked briefly after a crashed/reloaded editor tab.
   // Do not leave the user on an indefinite “Opening board…” screen: the cloud
   // pull below still protects an empty document from being seeded or saved over
   // a real board, and a delayed local restore will merge through Yjs normally.
-  await Promise.race([
-    persistence.whenSynced,
-    new Promise<void>((resolve) => window.setTimeout(resolve, 3_000)),
+  const hydrated = await Promise.race([
+    (persistence?.whenSynced || Promise.resolve()).then(() => true),
+    new Promise<boolean>((resolve) => window.setTimeout(() => resolve(false), 10_000)),
   ]);
+  if (!hydrated) {
+    showBootError('Local storage is still busy. Close other copies of this board and reload. Your saved board has not been replaced.');
+    return;
+  }
 
   const root = document.getElementById('board-root');
   if (!root) throw new Error('#board-root missing from index.html');
 
-  const cloud = installCloudSync({
+  const cloud = sharedId ? installSharedSync(sharedId, ydoc) : installCloudSync({
     boardId,
     doc: ydoc,
     apiBase: defaultApiBase(),
@@ -167,9 +175,14 @@ async function boot(): Promise<void> {
    * unopenable outside the signed-in Nuxt page.
    */
   const emptyLocally = ydoc.getMap('blocks').size === 0;
-  if (emptyLocally) {
+  {
     const result = await cloud.pull();
-    if (result === 'failed') {
+    if (emptyLocally && result === 'signedOut' && boardId !== 'scratch') {
+      cloud.stop();
+      showBootError('Sign in to open this saved board, then reload. No empty replacement has been created.');
+      return;
+    }
+    if (emptyLocally && result === 'failed') {
       cloud.stop();
       showBootError(
         'Couldn’t load this board. Check your connection and reload — nothing has been lost.',
@@ -178,7 +191,42 @@ async function boot(): Promise<void> {
     }
   }
 
+  repairBoardRoots(ydoc);
+
   const board: MountedBoard = mountBoard({ boardId, container: root, ydoc });
+  if (!sharedId) installSharePreparation(async () => {
+    const native = board.workspace.blobSource.native;
+    if (native) for (const key of native.records.keys()) if (!await native.mirror(key)) throw new Error('A board file has not finished uploading. Keep this tab open and try again after it is backed up.');
+    await cloud.flush(); return { kind: 'board', sourceId: boardId };
+  });
+
+  window.addEventListener('message', (e: MessageEvent) => {
+    if (e.origin !== location.origin || e.source !== window.parent) return;
+    const data = e.data as { type?: string; mode?: string; theme?: string } | null;
+    if (data?.type !== 'voidspace:theme' && data?.type !== 'voidspace:board-theme') return;
+    const next = data.mode ?? data.theme;
+    document.documentElement.dataset.theme = next === 'light' ? 'light' : 'dark';
+    repaintThemedElements();
+  });
+  if (sharedId) {
+    document.documentElement.dataset.collaborationRole = (cloud as ReturnType<typeof installSharedSync>).metadata?.role;
+    const readOnly = (cloud as ReturnType<typeof installSharedSync>).metadata?.role === 'viewer';
+
+    board.store.readonly = readOnly;
+    window.addEventListener('collaboration-role', event => {
+      const nextReadOnly = (event as CustomEvent).detail === 'viewer';
+      // A viewer has no editing chrome or draft persistence. Mount those only
+      // after reopening under the newly granted permission.
+      if (readOnly && !nextReadOnly) { location.reload(); return; }
+      board.store.readonly = nextReadOnly;
+      root.inert = nextReadOnly && !readOnly;
+    });
+    if (readOnly) {
+      document.getElementById('board-boot')?.setAttribute('hidden', '');
+      installSpacePan(board, root); installViewportAnchor(root); installFrameTitleScale(board.std);
+      return;
+    }
+  }
 
   document.getElementById('board-boot')?.setAttribute('hidden', '');
 
@@ -199,7 +247,7 @@ async function boot(): Promise<void> {
    */
   installFrameTitleScale(board.std);
 
-  shots.normaliseShotTitles(board.std);
+  if (!sharedId) shots.normaliseShotTitles(board.std);
 
   /**
    * AND LAY THE BOARD OUT AS THE FILM IT IS.
@@ -213,11 +261,12 @@ async function boot(): Promise<void> {
    * After `normaliseShotTitles` and before the chrome, so the spine draws once,
    * against the final geometry, rather than drawing the old strip and jumping.
    */
-  shots.relayoutShots(board.std, shots.readShots(board.std).map(s => s.id));
+  if (!sharedId) shots.relayoutShots(board.std, shots.readShots(board.std).map(s => s.id));
 
   // Already-known board: merge whatever another device did, without making the
   // user wait for it.
-  if (!emptyLocally) void cloud.pull();
+  // Cloud state is merged before mounting. A late root merge leaves gfx bound
+  // to a different surface from the visible page and breaks drop/paste.
 
   /** Assigned by the chrome install below; read lazily by the RPC — see the
    *  note on `BoardRpcOptions.screenplay`. */
@@ -289,6 +338,7 @@ async function boot(): Promise<void> {
   installSpine(board, chromeHost);
   installToasts(chromeHost);
   installBoardUi(board, chromeHost);
+  installMediaStorage(board, root, chromeHost);
   installAssetPanel(board, chromeHost);
   installMediaInspector(board, chromeHost);
   // Hold space and drag to pan — a gesture every other canvas tool has and
@@ -380,13 +430,7 @@ async function boot(): Promise<void> {
   // We accept the SAME `voidspace:theme` message the video and image editors
   // already receive, so the parent page reuses its existing `postThemeToEditor()`
   // verbatim instead of learning a board-specific message.
-  window.addEventListener('message', (e: MessageEvent) => {
-    const data = e.data as { type?: string; mode?: string; theme?: string } | null;
-    if (data?.type !== 'voidspace:theme' && data?.type !== 'voidspace:board-theme') return;
-    const next = data.mode ?? data.theme;
-    document.documentElement.dataset.theme = next === 'light' ? 'light' : 'dark';
-    repaintThemedElements();
-  });
+
 
   /**
    * FORWARD Ctrl/⌘+M TO THE PARENT.

@@ -127,7 +127,7 @@ interface ClipWithPlaceholder {
   isPlaceholder?: boolean;
 }
 
-export const Preview: React.FC = () => {
+export const Preview: React.FC<{ readOnly?: boolean }> = ({ readOnly = false }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
@@ -4783,7 +4783,7 @@ export const Preview: React.FC = () => {
       className="flex-1 bg-background flex flex-col relative group overflow-hidden"
     >
       {/* Crop Mode View - Full Screen Overlay */}
-      {shouldShowCropMode && (
+      {!readOnly && shouldShowCropMode && (
         <CropModeView
           clip={cropClip!}
           videoSrc={cropVideoSrc}
@@ -4812,6 +4812,7 @@ export const Preview: React.FC = () => {
           it keeps its breathing room from the free space rather than padding. */}
       <div
         ref={stageAreaRef}
+        {...(readOnly ? { inert: "" } as any : {})}
         className={`flex-1 min-h-0 overflow-hidden relative flex items-center justify-center bg-background-secondary/30 transition-all duration-300 ${
           isFullscreen ? "px-0" : "px-4"
         } ${zoomLevel > 1 ? "overflow-auto" : ""}`}
@@ -5262,7 +5263,7 @@ export const Preview: React.FC = () => {
               that move it. It was printed here as well, so the same number sat
               in two toolbars a few pixels apart — and the two used different
               formats, which made them read as two different values. */}
-          {rendererType !== "none" && (
+          {!readOnly && rendererType !== "none" && (
             <span
               className={`text-[10px] px-1.5 py-0.5 rounded ${
                 rendererType === "webgpu"
@@ -5295,6 +5296,7 @@ export const Preview: React.FC = () => {
         <div className="flex gap-2 items-center justify-end whitespace-nowrap">
           <button
             onClick={() => setIsMuted(!isMuted)}
+            aria-label={isMuted ? "Unmute" : "Mute"}
             className={`p-2 rounded-lg hover:bg-background-elevated transition-colors ${
               isMuted
                 ? "text-red-500"
@@ -5304,6 +5306,7 @@ export const Preview: React.FC = () => {
             {isMuted ? <VolumeX size={16} /> : <Volume2 size={16} />}
           </button>
 
+          {!readOnly && <>
           {/* Preview Quality */}
           <div className="relative">
             <button
@@ -5513,6 +5516,7 @@ export const Preview: React.FC = () => {
           {/* No mx-* here: the flex row already supplies gap-2 on both sides,
               and the extra margin was 16px the cluster could not spare. */}
           <div className="w-px h-4 bg-border shrink-0" />
+          </>}
           {/* ONE expand control, and it does the obvious thing: real
               fullscreen. There were two buttons here — a monitor icon for
               fullscreen and an expand icon for an in-app "maximize" — sitting

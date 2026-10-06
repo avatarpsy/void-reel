@@ -363,6 +363,9 @@ function getCachedImage(src: string): HTMLImageElement | null {
     img.onload = () => {
       imageLoadAttempts.delete(src);
       pendingImages.delete(src);
+      // Offscreen layers may contain the loading placeholder from the first
+      // paint. Their document hash is unchanged when decoding finishes.
+      clearLayerCache();
       if (renderCallback) renderCallback();
       else renderRequestedWhileUnmounted = true; // picked up when a canvas mounts
     };
@@ -383,6 +386,9 @@ function getCachedImage(src: string): HTMLImageElement | null {
       if (!selfContained || attempts >= 4) {
         failedImages.add(src);
         console.warn(`Failed to load image: ${src.substring(0, 100)}`);
+        clearLayerCache();
+        if (renderCallback) renderCallback();
+        else renderRequestedWhileUnmounted = true;
       } else {
         armLoadWatchdog(); // nudge a re-render so the retry actually happens
       }
@@ -473,7 +479,7 @@ function isLayerInViewport(layer: Layer, viewport: ViewportBounds): boolean {
   );
 }
 
-export function Canvas() {
+export function Canvas({ readOnly = false }: { readOnly?: boolean }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
@@ -564,6 +570,14 @@ export function Canvas() {
   const activeSelection = useSelectionStore((s) => s.active);
 
   const artboard = project?.artboards.find((a) => a.id === selectedArtboardId);
+
+  // Viewing starts with the selected page fully visible, using the same canvas
+  // and zoom state as editing. No raster export or document mutation is needed.
+  useEffect(() => {
+    if (!readOnly || !artboard || !containerSize.width || !containerSize.height) return;
+    setZoom(Math.min(1, (containerSize.width - 64) / artboard.size.width, (containerSize.height - 64) / artboard.size.height));
+    setPan(0, 0);
+  }, [readOnly, artboard?.id, artboard?.size.width, artboard?.size.height, containerSize.width, containerSize.height, setZoom, setPan]);
 
   useEffect(() => {
     if (canvasRef.current) {
@@ -2942,7 +2956,7 @@ export function Canvas() {
   upHandlerRef.current = handleMouseUp;
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas || readOnly) return;
     // Bind the window listeners SYNCHRONOUSLY on mousedown — NOT from an effect
     // keyed on `isDragging`, which only runs after React re-renders. A fast drag
     // fires its first moves (and can even finish) inside that gap, so those
@@ -2964,7 +2978,7 @@ export function Canvas() {
     return () => {
       canvas.removeEventListener('mousedown', onDown);
     };
-  }, []);
+  }, [readOnly]);
 
   // Double-click the canvas to select the layer under the cursor (Photoshop's
   // way to reach a layer when Auto-Select is off). Single clicks never switch.
@@ -3341,22 +3355,23 @@ export function Canvas() {
   return (
     <div
       ref={containerRef}
+      data-image-viewport
       className="flex-1 overflow-hidden relative"
-      style={{ cursor: effectiveCursor }}
-      onDragEnter={handleFileDragEnter}
-      onDragOver={handleFileDragOver}
-      onDragLeave={handleFileDragLeave}
-      onDrop={handleFileDrop}
+      style={{ cursor: readOnly ? 'default' : effectiveCursor }}
+      onDragEnter={readOnly ? undefined : handleFileDragEnter}
+      onDragOver={readOnly ? (e) => e.preventDefault() : handleFileDragOver}
+      onDragLeave={readOnly ? undefined : handleFileDragLeave}
+      onDrop={readOnly ? (e) => e.preventDefault() : handleFileDrop}
     >
       {showRulers && (
-        <Rulers
+        <div {...(readOnly ? { inert: '' } : {})}><Rulers
           containerWidth={containerSize.width}
           containerHeight={containerSize.height}
-        />
+        /></div>
       )}
       <canvas
         ref={canvasRef}
-        onMouseDown={handleMouseDown}
+        onMouseDown={readOnly ? undefined : handleMouseDown}
         // While a drag (stroke, marquee, crop…) is in flight, the WINDOW
         // listeners below own move/up so it survives the cursor leaving the
         // canvas. This element handler only serves the idle/hover case —
@@ -3364,9 +3379,9 @@ export function Canvas() {
         // crossed the canvas edge, and a fast drag outside it stopped updating.
         // Gate on the synchronous ref (not `isDragging` state) so a move can
         // never be processed twice in the tick before React re-renders.
-        onMouseMove={(e) => { if (!dragActiveRef.current) handleMouseMove(e); }}
-        onDoubleClick={handleDoubleClick}
-        onContextMenu={handleContextMenu}
+        onMouseMove={(e) => { if (!readOnly && !dragActiveRef.current) handleMouseMove(e); }}
+        onDoubleClick={readOnly ? undefined : handleDoubleClick}
+        onContextMenu={readOnly ? (e) => e.preventDefault() : handleContextMenu}
         className="absolute"
         /* The canvas ALWAYS fills its container, rulers or not.
          *
@@ -3387,7 +3402,7 @@ export function Canvas() {
           left: 0,
           width: '100%',
           height: '100%',
-          cursor: effectiveCursor,
+          cursor: readOnly ? 'default' : effectiveCursor,
         }}
       />
       {/* A composition layer's pixels are a live HTML document, which no canvas
@@ -3999,7 +4014,7 @@ function renderImageLayerInternal(
     ctx.font = '12px sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('Loading...', layer.transform.width / 2, layer.transform.height / 2);
+    ctx.fillText(!src || failedImages.has(src) ? 'Image unavailable — reload to retry' : 'Loading…', layer.transform.width / 2, layer.transform.height / 2);
     return;
   }
 

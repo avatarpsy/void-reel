@@ -39,6 +39,7 @@ const useAutoSave = () => {
   const { initializeAutoSave } = useProjectStore();
 
   useEffect(() => {
+    if (new URLSearchParams(location.search).has('shared')) return;
     initializeAutoSave().catch(console.error);
   }, [initializeAutoSave]);
 };
@@ -47,7 +48,7 @@ const useAutoSave = () => {
  * Engine and bridge initialization hook
  * Ensures all engines and bridges are fully initialized before rendering editor
  */
-const useEngineInitialization = () => {
+export const useEngineInitialization = () => {
   const { initialize, initialized, initializing, initError } = useEngineStore();
   const [bridgesReady, setBridgesReady] = useState(false);
   const [initStatus, setInitStatus] = useState("Starting...");

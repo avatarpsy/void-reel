@@ -253,7 +253,7 @@ export class BoardWorkspace implements Workspace {
     const logger = new NoopLogger();
     this.awarenessSync = new AwarenessEngine(this.awarenessStore.awareness, []);
     this.docSync = new DocEngine(this.doc, new NoopDocSource(), [], logger);
-    this.blobSource = new VoidspaceBlobSource({ boardId: opts.id });
+    this.blobSource = new VoidspaceBlobSource({ boardId: opts.id, doc: this.doc });
     this.blobSync = new BoardBlobEngine(this.blobSource, [], logger);
   }
 

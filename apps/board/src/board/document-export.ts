@@ -150,7 +150,7 @@ function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
  * at somewhere they can be fetched from. Two copies of the retry, the token
  * refresh and the quota messages would have drifted within a week.
  */
-export async function uploadBlob(blob: Blob, fileName: string): Promise<string> {
+export async function uploadBlob(blob: Blob, fileName: string, purpose: 'durable' | 'provider' = 'durable'): Promise<string> {
   const form = new FormData();
   form.append('file', blob, fileName);
 
@@ -161,10 +161,11 @@ export async function uploadBlob(blob: Blob, fileName: string): Promise<string> 
     let res: Response;
     try {
       res = await withTimeout(
-        fetch(`${defaultApiBase()}/api/studio/upload-attachment`, {
+        fetch(`${defaultApiBase()}/api/studio/${purpose === 'provider' ? 'upload-temp' : 'upload-attachment'}`, {
           method: 'POST',
           // NO Content-Type: the browser must set the multipart boundary itself.
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          headers: { 'x-voidspace-durable-only': '1', 'x-voidspace-surface': 'board',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}) },
           body: form,
         }),
         UPLOAD_WAIT_MS,
@@ -176,6 +177,9 @@ export async function uploadBlob(blob: Blob, fileName: string): Promise<string> 
     last = res;
     if (res.ok) {
       const json = await res.json().catch(() => null);
+      if (purpose === 'durable' && json?.placement !== 'durable') {
+        throw new Error(json?.note || 'Cloud backup is unavailable. The original stays on this device.');
+      }
       if (!json?.url) throw new Error('It was stored but came back without a link.');
       return String(json.url);
     }

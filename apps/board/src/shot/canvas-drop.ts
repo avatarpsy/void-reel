@@ -32,8 +32,10 @@ import {
   type ExtensionDragMoveContext,
 } from '@blocksuite/std/gfx';
 
-import { readBlockMeta } from '../board/board-meta';
+import { readBlockMeta, writeBlockMeta } from '../board/board-meta';
 import { decodeMediaRef } from '../board/media-ref';
+import type { BoardWorkspace } from '../blocksuite/workspace';
+import { uploadBlob } from '../board/document-export';
 import { toast } from '../ui/toast';
 import { findBlock } from './blocks';
 import { relayOffHostRelease } from './drag-release';
@@ -43,6 +45,18 @@ import { addMedia, readShot, setMediaRole } from './shots';
 
 /** Media blocks the canvas can hold. Everything else drags as normal. */
 const MEDIA_FLAVOURS = new Set(['affine:image', 'affine:attachment']);
+
+function isCanvasMedia(std: InteractivityExtension['std'], id: string): boolean {
+  const block = std.store.getBlock(id);
+  if (!block || !MEDIA_FLAVOURS.has(block.flavour)) return false;
+  const props = block.model.props as { sourceId?: string; type?: string };
+  return !!props.sourceId && (block.flavour === 'affine:image'
+    || /^(audio|video)\//.test(props.type ?? '') || !!mediaOf(std, id));
+}
+
+// A paste/drop uses BlockSuite's native blob store. Resolve it once to a hosted
+// asset before giving it to a shot; a blob: URL cannot reach a cloud generator.
+const materializing = new WeakMap<object, Map<string, Promise<Omit<ShotMedia, 'id' | 'role'> | null>>>();
 
 /**
  * What a canvas block IS, as a shot would hold it.
@@ -115,7 +129,7 @@ export class CanvasMediaToShotExtension extends InteractivityExtension {
        */
       const only = context.elements.length === 1 ? context.elements[0] : null;
       const id = (only as unknown as { id?: string } | null)?.id;
-      if (!id || !mediaOf(this.std, id)) return {};
+      if (!id || !isCanvasMedia(this.std, id)) return {};
 
       // Same bridge as the shot reflow uses: a release over the asset panel is
       // a release outside the editor host, and the manager never sees it. See
@@ -128,12 +142,14 @@ export class CanvasMediaToShotExtension extends InteractivityExtension {
           this.light(hit?.shotId ?? null, hit?.zone ?? null);
         },
 
-        onDragEnd: (ctx: ExtensionDragEndContext) => {
+        onDragEnd: async (ctx: ExtensionDragEndContext) => {
           this.light(null, null);
           const hit = dropZoneAt(this.std, ctx.event.clientX, ctx.event.clientY);
           if (!hit) return;   // dropped on open canvas — an ordinary move
 
-          const media = mediaOf(this.std, id);
+          let media;
+          try { media = await resolveCanvasMedia(this.std, id); }
+          catch (error) { toast(`Could not attach this media: ${String((error as Error).message || error)}`, 'error'); return; }
           const shot = readShot(this.std, hit.shotId);
           if (!media || !shot) return;
 
@@ -179,9 +195,41 @@ export class CanvasMediaToShotExtension extends InteractivityExtension {
 
 /** The payload a drop builds, exposed so a test asserts on the SAME function the
  *  gesture uses rather than on a reimplementation of it. */
-export function canvasMediaFor(
+export const canvasMediaFor = mediaOf;
+
+export async function resolveCanvasMedia(
   std: InteractivityExtension['std'],
   id: string,
-): Omit<ShotMedia, 'id' | 'role'> | null {
-  return mediaOf(std, id);
+): Promise<Omit<ShotMedia, 'id' | 'role'> | null> {
+  const ready = mediaOf(std, id);
+  if (ready) return ready;
+  if (!isCanvasMedia(std, id)) return null;
+  let pending = materializing.get(std.store);
+  if (!pending) { pending = new Map(); materializing.set(std.store, pending); }
+  if (pending.has(id)) return pending.get(id)!;
+  const task = (async () => {
+    const block = std.store.getBlock(id);
+    if (!block) return null;
+    const props = block.model.props as { sourceId?: string; type?: string; name?: string };
+    const sourceId = props.sourceId!;
+    const blob = await std.store.blobSync.get(sourceId);
+    if (!blob) throw new Error('The original file is unavailable. The canvas copy has been kept.');
+    const kind = block.flavour === 'affine:image' ? 'image' : blob.type.startsWith('audio/') ? 'audio' : 'video';
+    const ext = blob.type.split('/')[1]?.replace('jpeg', 'jpg').replace('mpeg', 'mp3') || 'bin';
+    const name = props.name || `${kind}-${id}.${ext}`;
+    const native = (std.store.doc.workspace as BoardWorkspace).blobSource.native;
+    // Attaching locally must work even without cloud quota. Generation stages
+    // a provider copy later, only when the user actually requests generation.
+    const url = native ? native.cloudUrl(sourceId) || `vs-local:${encodeURIComponent(sourceId)}` : await uploadBlob(blob, name);
+    // The user may have removed/replaced the item while the upload was running.
+    const current = std.store.getBlock(id);
+    if (!current || (current.model.props as { sourceId?: string }).sourceId !== sourceId) return null;
+    std.store.captureSync();
+    writeBlockMeta(std.store.doc.spaceDoc, id, { kind, originalUrl: url, name });
+    // Keep the immutable source key and original local bytes. The board can
+    // render offline even if the cloud copy is temporarily unreachable.
+    return mediaOf(std, id);
+  })();
+  pending.set(id, task);
+  try { return await task; } finally { pending.delete(id); }
 }

@@ -47,6 +47,13 @@ type AutoSaveEventType = "saved" | "restored" | "error" | "recoveryAvailable";
 type AutoSaveEventCallback = (data?: unknown) => void;
 
 class AutoSaveManager {
+  /** Sharing requires a positive server acknowledgement, including errors
+   * which normal background autosave reports through its status events. */
+  async prepareSharing(): Promise<void> {
+    if (!this.getProjectFn || !this.remoteSync) throw new Error('Open this video from your saved projects before sharing.');
+    if (this.remoteSyncInFlight) await this.remoteSyncInFlight;
+    await this.remoteSync(this.getProjectFn(), this.getHistoryData?.() ?? null);
+  }
   private config: AutoSaveConfig;
   private db: IDBDatabase | null = null;
   private intervalId: ReturnType<typeof setInterval> | null = null;

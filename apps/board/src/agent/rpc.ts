@@ -71,12 +71,14 @@ const TAKE_SOURCES = new Set(['generated', 'recorded', 'uploaded', 'imported']);
  * asserted where the legend is built.
  */
 const GEN_ROLE_ORDER: MediaRole[] = [
+  'narration', 'dialogue',
   'firstFrame', 'lastFrame', 'motionRef',
   'background', 'figure', 'inset', 'logo', 'texture',
   'reference', 'sfx', 'bgm',
 ];
 import { allBlocks, findBlock, searchBlocks, setBlockCatalogue } from '../shot/blocks';
-import { canvasMediaFor } from '../shot/canvas-drop';
+import { resolveCanvasMedia } from '../shot/canvas-drop';
+import { providerReference } from '../board/local-reference';
 import { clearTakeProgress, setTakeProgress } from '../shot/take-progress';
 import { readParsed, readScript, writeScript } from '../shot/screenplay-doc';
 import { coverage, nextScene, renderScene, renderScriptContext } from '../shot/resolution';
@@ -988,7 +990,7 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
      * its media, so this is an append to a list. That is why it is instant for a
      * 4K master and why fifty references cost the document a few kilobytes.
      */
-    'voidspace:board-attach-media': args => {
+    'voidspace:board-attach-media': async args => {
       const g = guard(args); if (!g.ok) return g;
       const shotId = String(args.shotId ?? '');
       const missing = needShot(shotId); if (missing) return missing;
@@ -1012,7 +1014,7 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
        */
       const canvasId = String(args.canvasId ?? '');
       if (canvasId) {
-        const from = canvasMediaFor(board.std, canvasId);
+        const from = await resolveCanvasMedia(board.std, canvasId);
         if (!from) {
           return fail(
             'not_found',
@@ -1034,9 +1036,10 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
         const newId = addMedia(board.std, shotId, { ...from, role });
         if (!newId) return fail('rejected', 'That shot would not take this asset.');
 
-        if (typeof args.tag === 'string' || typeof args.note === 'string') {
+        if (typeof args.tag === 'string' || typeof args.note === 'string' || typeof args.refKind === 'string') {
           tagMedia(board.std, shotId, newId, {
             ...(typeof args.tag === 'string' && args.tag.trim() ? { tag: args.tag } : {}),
+            ...(typeof args.refKind === 'string' ? { refKind: args.refKind as RefKind } : {}),
             ...(typeof args.note === 'string' && args.note.trim() ? { note: args.note } : {}),
           });
         }
@@ -1088,6 +1091,7 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
         // The tile draws the display variant; compile reads `url`.
         src: String(args.displayUrl ?? url),
         poster: typeof args.posterUrl === 'string' ? args.posterUrl : undefined,
+        ...(Number(args.durationSec) > 0 ? { durationSec: Number(args.durationSec) } : {}),
         name: String(args.name ?? '').trim() || kind,
         mediaId: typeof args.mediaId === 'string' ? args.mediaId : undefined,
         scope: typeof args.scope === 'string' ? args.scope : undefined,
@@ -1493,7 +1497,7 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
      * the thing that decides whether "@Image2 walks into frame" points at the
      * right picture.
      */
-    'voidspace:board-shot-gen-input': args => {
+    'voidspace:board-shot-gen-input': async args => {
       const g = guard(args); if (!g.ok) return g;
       const shotId = String(args.shotId ?? '');
       const shot = readShot(board.std, shotId);
@@ -1540,15 +1544,28 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
        * no legend, since the prompt then names the wrong picture confidently.
        */
       const ordered = [...shot.media]
-        .filter(m => m.kind !== 'audio' && (m.url || m.src))
+        .map(m => ({ ...m }))
+        .filter(m => !['sfx', 'bgm'].includes(m.role) && (m.url || m.src))
         .sort((a, b) => GEN_ROLE_ORDER.indexOf(a.role) - GEN_ROLE_ORDER.indexOf(b.role));
+
+      const images = ordered.filter(m => m.kind === 'image');
+      const videos = ordered.filter(m => m.kind === 'video');
+      const audios = ordered.filter(m => m.kind === 'audio');
+      const sync = audios.find(m => m.role === 'narration' || m.role === 'dialogue');
+      if ((caps?.maxRefAudios && audios.length > caps.maxRefAudios) || (caps?.maxRefVideos && videos.length > caps.maxRefVideos) || (caps?.maxRefImages && images.length > caps.maxRefImages)) return fail('too_many_references', 'Remove excess references to fit the selected model before generating.');
+      if (audios.length && !caps?.maxRefAudios) return fail('unsupported_reference', 'This model cannot accept audio references. Choose an audio-reference model before generating.');
+      if (videos.length && !caps?.maxRefVideos) return fail('unsupported_reference', 'This model cannot accept video references.');
+      if (audios.filter(m => m.role === 'narration' || m.role === 'dialogue').length > 1) return fail('ambiguous_audio', 'Choose one narration or dialogue sync track per shot.');
+      const audioWindow = (m: typeof ordered[number]) => ({ url: m.url || m.src, inSec: m.inSec ?? 0, outSec: m.outSec ?? m.durationSec, durationSec: m.durationSec });
+      if (audios.some(m => !((m.outSec ?? m.durationSec ?? 0) > (m.inSec ?? 0)))) return fail('unmeasured_audio', 'Measure the audio and set a valid trim window before generating.');
+      await Promise.all(ordered.map(async media => { media.url = await providerReference(board.std, media.url || media.src); }));
 
       // Only for models that read tags — for the rest it is noise that the model
       // will try to render as words on screen.
       const legend = caps?.usesReferenceTags
         ? ordered
             .map(m => {
-              const tag = referenceTag(caps, shot.media, m.id);
+              const tag = referenceTag(caps, ordered, m.id);
               const what = [m.tag, m.refKind].filter(Boolean).join(', ');
               return tag && what ? `${tag} is ${what}` : '';
             })
@@ -1593,7 +1610,12 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
         prompt: [written, legend, notes].filter(Boolean).join(' '),
         // FULL QUALITY. The card draws the display variant; a generation must
         // be given the master or the output is built from a thumbnail.
-        referenceUrls: ordered.map(m => m.url || m.src),
+        referenceUrls: images.map(m => m.url || m.src),
+        referenceVideos: videos.map(m => m.url || m.src),
+        referenceAudioWindows: audios.filter(m => m !== sync).map(audioWindow),
+        ...(sync ? { sceneSyncWindow: { ...audioWindow(sync), role: sync.role } } : {}),
+        deliveryMode: images.some(m => m.role === 'firstFrame') ? 'first-frame' : 'reference',
+        ...(images.find(m => m.role === 'lastFrame') ? { lastFrameUrl: images.find(m => m.role === 'lastFrame')!.url || images.find(m => m.role === 'lastFrame')!.src } : {}),
         model: shot.model,
         effectiveModel: caps?.id ?? '',
         /**
@@ -1623,7 +1645,7 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
          */
         ...(resolutionFor(shot) ? { resolution: resolutionFor(shot) } : {}),
         ...(aspectFor(shot) ? { aspect: aspectFor(shot) } : {}),
-        voiceMode: wantsDialogue ? 'dialogue' : 'silent',
+        voiceMode: sync?.role === 'narration' ? 'silent' : wantsDialogue ? 'dialogue' : 'silent',
         /**
          * A NARRATION IS ALWAYS SEPARATE. That is what the field means — the
          * card says so under it, in the placeholder: "spoken separately, not by
@@ -3439,6 +3461,10 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
         aspect: String(args.aspect ?? '') || '9:16',
         goal: String(args.goal ?? ''),
       });
+
+      await Promise.all(payload.shots.flatMap(shot => shot.references.map(async ref => {
+        ref.url = await providerReference(board.std, ref.url);
+      })));
 
       // The stored snapshot must not be older than the project built from it.
       await opts.flushCloud?.().catch(() => {});

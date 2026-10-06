@@ -32,12 +32,13 @@ function pageSignature(project: Project, ab: Artboard): string {
   return parts.join('|');
 }
 
-export function PagesBar() {
+export function PagesBar({ readOnly = false }: { readOnly?: boolean }) {
   const {
     project,
     selectedArtboardId,
     selectArtboard,
     addArtboard,
+    duplicateArtboard,
     removeArtboard,
     updateArtboard,
     reorderArtboards,
@@ -75,6 +76,7 @@ export function PagesBar() {
   const endDrag = () => { setDragIndex(null); setOverIndex(null); };
 
   const dropOn = (index: number) => {
+    if (readOnly) return;
     if (dragIndex !== null && dragIndex !== index) reorderArtboards(dragIndex, index);
     endDrag();
   };
@@ -149,8 +151,8 @@ export function PagesBar() {
   const handleDuplicatePage = (artboardId: string) => {
     const artboard = artboards.find((a) => a.id === artboardId);
     if (!artboard) return;
-    const newId = addArtboard(`${artboard.name} copy`, artboard.size);
-    selectArtboard(newId);
+    const newId = duplicateArtboard(artboardId);
+    if (newId) selectArtboard(newId);
   };
 
   const handleDeletePage = (artboardId: string) => {
@@ -184,7 +186,7 @@ export function PagesBar() {
           </span>
         </button>
 
-        <div className="flex items-center gap-1">
+        {!readOnly && <div className="flex items-center gap-1">
           <button
             onClick={() => setGenerateImageOpen(true, true)}
             className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-primary hover:bg-primary/10 rounded transition-colors"
@@ -200,7 +202,7 @@ export function PagesBar() {
             <Plus size={14} />
             <span>Add Page</span>
           </button>
-        </div>
+        </div>}
       </div>
 
       {isExpanded && (
@@ -220,7 +222,12 @@ export function PagesBar() {
               return (
                 <div
                   key={artboard.id}
-                  draggable={!editingId}
+                  draggable={!readOnly && !editingId}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={artboard.name}
+                  aria-pressed={isSelected}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectArtboard(artboard.id); } }}
                   onDragStart={(e) => {
                     setDragIndex(index);
                     e.dataTransfer.effectAllowed = 'move';
@@ -230,7 +237,7 @@ export function PagesBar() {
                   onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setOverIndex(index); }}
                   onDrop={(e) => { e.preventDefault(); dropOn(index); }}
                   onDragEnd={endDrag}
-                  title={`${artboard.name} — drag to reorder`}
+                  title={readOnly ? artboard.name : `${artboard.name} — drag to reorder`}
                   className={`group relative flex-shrink-0 rounded-lg border-2 transition-all cursor-pointer ${
                     isSelected
                       ? 'border-primary ring-2 ring-primary/20'
@@ -277,7 +284,7 @@ export function PagesBar() {
                     )}
                   </div>
 
-                  <div className="absolute -top-1 -right-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                  {!readOnly && <div className="absolute -top-1 -right-1 opacity-0 group-hover:opacity-100 transition-opacity">
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <button
@@ -291,7 +298,7 @@ export function PagesBar() {
                         <DropdownMenuItem onClick={() => handleStartRename(artboard.id)}>
                           Rename
                         </DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => handleDuplicatePage(artboard.id)}>
+                        <DropdownMenuItem onSelect={() => handleDuplicatePage(artboard.id)}>
                           <Copy size={14} className="mr-2" />
                           Duplicate
                         </DropdownMenuItem>
@@ -305,7 +312,7 @@ export function PagesBar() {
                         </DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
-                  </div>
+                  </div>}
 
                   <div className="absolute -bottom-5 left-0 right-0 text-center">
                     {editingId === artboard.id ? (
@@ -332,7 +339,7 @@ export function PagesBar() {
                         }`}
                         onDoubleClick={(e) => {
                           e.stopPropagation();
-                          handleStartRename(artboard.id);
+                          if (!readOnly) handleStartRename(artboard.id);
                         }}
                       >
                         {artboard.name}
@@ -343,12 +350,12 @@ export function PagesBar() {
               );
             })}
 
-            <button
+            {!readOnly && <button
               onClick={handleAddPage}
               className="flex-shrink-0 w-16 h-16 flex flex-col items-center justify-center rounded-lg border-2 border-dashed border-border hover:border-muted-foreground hover:bg-accent/50 transition-all"
             >
               <Plus size={20} className="text-muted-foreground" />
-            </button>
+            </button>}
           </div>
         </div>
       )}

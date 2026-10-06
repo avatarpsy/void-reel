@@ -15,6 +15,7 @@ import { Button } from "@openreel/ui";
 import type { SocialMediaCategory } from "@openreel/core";
 import { VoidspaceTemplateGallery } from "./VoidspaceTemplateGallery";
 import { CosmicField } from "../CosmicField";
+import { isLocalStandalone } from "../../services/local-standalone";
 import { useAnalytics, AnalyticsEvents } from "../../hooks/useAnalytics";
 import { goBack as goBackShared, projectsUrl, onTopLinkClick } from "@openreel/asset-browser";
 
@@ -99,6 +100,15 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
   // Leaving the app for `/ai` both fixes that trap and is the intended
   // studio on-ramp.
   const openStudio = useCallback((params: Record<string, string>) => {
+    if (isLocalStandalone()) {
+      const [width, height] = params.aspect === "9:16" ? [1080, 1920]
+        : params.aspect === "1:1" ? [1080, 1080] : [1920, 1080];
+      const url = new URL(window.location.href);
+      url.searchParams.delete("forceWelcome");
+      url.hash = `/new?width=${width}&height=${height}`;
+      window.location.href = url.href;
+      return;
+    }
     const query = new URLSearchParams(params).toString();
     const target = query ? `/ai?${query}` : "/ai";
     // Use the top window in case we are ever rendered inside a frame;

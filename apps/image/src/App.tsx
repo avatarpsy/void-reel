@@ -1,4 +1,7 @@
 import { useEffect, useState } from 'react';
+import SharedImage from './SharedImage';
+import { sharedProjectId, installSharePreparation } from '@openreel/asset-browser';
+import { saveProjectDocument } from './services/project-cloud-sync';
 import { ImageOff, Loader2 } from 'lucide-react';
 import { useUIStore } from './stores/ui-store';
 import { WelcomeScreen } from './components/welcome/WelcomeScreen';
@@ -88,7 +91,15 @@ function readNewPreset(p: URLSearchParams): NewPreset | null {
   return title ? { ...preset, name: title } : preset;
 }
 
-export default function App() {
+export default function App() { return sharedProjectId() ? <SharedImage /> : <LocalApp />; }
+function LocalApp() {
+  useEffect(() => installSharePreparation(async () => {
+    await bakePendingCompositions();
+    const project = useProjectStore.getState().project;
+    if (!project) throw new Error('Create or open an image project first.');
+    if (!await saveProjectDocument(project)) throw new Error('The project could not be saved. Check your connection and try again.');
+    return { kind: 'image', sourceId: project.id };
+  }), []);
   const { currentView, showShortcutsPanel, toggleShortcutsPanel, showSettingsDialog, closeSettingsDialog } = useUIStore();
   const setCurrentView = useUIStore((s) => s.setCurrentView);
   const setEditSource = useUIStore((s) => s.setEditSource);

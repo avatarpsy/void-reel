@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "node ../../scripts/sync-collaboration.mjs && tsc --noEmit && vite build",
     "preview": "vite preview",
     "deploy": "wrangler pages deploy dist --project-name=openreel",
     "deploy:preview": "wrangler pages deploy dist --project-name=openreel --branch=preview",

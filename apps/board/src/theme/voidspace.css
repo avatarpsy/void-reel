@@ -383,6 +383,16 @@ editor-host {
 .vs-board-btn:hover { background: var(--affine-hover-color); color: var(--vs-text); }
 .vs-board-btn:active { transform: translateY(0.5px); }
 .vs-board-icon { padding: 0; width: 32px; justify-content: center; }
+.vs-board-bar { max-width: calc(100% - 24px); white-space: nowrap; }
+.vs-board-bar .vs-board-btn { flex-shrink: 0; }
+@media (max-width: 900px) {
+  .vs-board-bar [data-collaboration-status] { display: none; }
+}
+@media (max-width: 650px) {
+  .vs-board-bar .vs-board-btn > span { display: none; }
+  .vs-board-bar .vs-board-btn { padding-inline: 8px; }
+  .vs-board-bar { gap: 2px; }
+}
 .vs-board-zoom { min-width: 52px; justify-content: center; font-variant-numeric: tabular-nums; }
 
 .vs-board-btn--primary {

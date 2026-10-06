@@ -22,14 +22,24 @@
  * put `tsc --noEmit` back in package.json.
  */
 import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
 
 const tsc = spawnSync(
-  process.platform === 'win32' ? 'npx.cmd' : 'npx',
-  ['tsc', '--noEmit', '--pretty', 'false'],
-  { encoding: 'utf8', shell: process.platform === 'win32' },
+  process.execPath,
+  [require.resolve('typescript/bin/tsc'), '--noEmit', '--pretty', 'false'],
+  { encoding: 'utf8' },
 );
+if (tsc.error || tsc.signal || tsc.status === null) {
+  console.error('TypeScript could not run:', tsc.error?.message || tsc.signal);
+  process.exit(1);
+}
 
 const lines = `${tsc.stdout ?? ''}${tsc.stderr ?? ''}`.split(/\r?\n/);
+if (tsc.status !== 0 && !lines.some(line => /\(\d+,\d+\): (error|warning) TS\d+:/.test(line))) {
+  console.error(lines.join('\n') || `TypeScript exited ${tsc.status} without diagnostics.`);
+  process.exit(1);
+}
 
 // A diagnostic block is "file(line,col): error TSxxxx: msg" followed by
 // optional indented continuation lines. Keep a block only if its header names

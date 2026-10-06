@@ -306,6 +306,8 @@ const REF_LABEL: Record<MediaRole, string> = {
   lastFrame: 'LAST FRAME',
   motionRef: 'MOTION REF',
   reference: 'REFERENCE',
+  narration: 'NARRATION SYNC',
+  dialogue: 'DIALOGUE SYNC',
   sfx: 'SFX',
   bgm: 'MUSIC',
   background: 'BACKGROUND',

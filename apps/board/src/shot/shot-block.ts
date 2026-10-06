@@ -23,6 +23,7 @@ import { state } from 'lit/decorators.js';
 import { repeat } from 'lit/directives/repeat.js';
 
 import { withToken } from '../board/parent-auth';
+import { displayReference } from '../board/local-reference';
 import {
   claimFieldClipboard,
   claimFormField,
@@ -2710,7 +2711,7 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
    * disagree about what the thing is called.
    */
   private tile(item: ShotMedia, ordered: ShotMedia[]) {
-    const poster = item.kind === 'image' ? item.src : item.poster;
+    const poster = item.kind === 'image' ? displayReference(this.std, item.src, () => this.requestUpdate()) : item.poster;
     const caps = effectiveModel(this.model.props.model ?? '');
     const promptTag = referenceTag(caps, ordered, item.id);
     const label = item.tag || item.name;

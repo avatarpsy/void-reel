@@ -24,6 +24,7 @@
  * document state, and must not join BlockSuite's render cycle.
  */
 import type { MountedBoard } from '../blocksuite/editor';
+import { toast } from './toast';
 import { readBlockMeta } from '../board/board-meta';
 import { stopInlinePlayback } from '../board/inline-player';
 import { decodeMediaRef } from '../board/media-ref';
@@ -627,7 +628,12 @@ export function installMediaInspector(board: MountedBoard, container: HTMLElemen
     // has different roles and no model) and its media list (for @-tag numbering).
     const shot = t.shotId ? readShot(board.std, t.shotId) : null;
 
-    const src = withToken(item.kind === 'image' ? (item.url || item.src) : item.src);
+    let mediaUrl = item.kind === 'image' ? (item.url || item.src) : item.src;
+    if (mediaUrl.startsWith('vs-local:')) {
+      try { mediaUrl = await board.workspace.blobSource.native!.previewUrl(decodeURIComponent(mediaUrl.slice(9))); }
+      catch (e) { toast(e instanceof Error ? e.message : 'Relink the original file on this device.', 'error'); return; }
+    }
+    const src = withToken(mediaUrl);
     const body = item.kind === 'image'
       ? `<img src="${src}" alt="" />`
       : item.kind === 'video'

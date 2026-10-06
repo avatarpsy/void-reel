@@ -1,0 +1,12 @@
+.timeline-toolbar { flex-shrink: 0; white-space: nowrap; gap: 12px; }
+.timeline-toolbar > div, .timeline-toolbar button, .timeline-toolbar svg { flex-shrink: 0; }
+@media (max-width: 1000px) {
+  .timeline-toolbar .timeline-action-label { display: none; }
+  .timeline-toolbar { padding-inline: 10px; gap: 8px; }
+  .timeline-toolbar > div { gap: 4px; }
+  .timeline-toolbar .w-px { margin-inline: 0; }
+}
+@media (max-width: 650px) {
+  .timeline-toolbar .timeline-zoom-slider { width: 64px; }
+  .timeline-toolbar button { padding-inline: 7px; }
+}

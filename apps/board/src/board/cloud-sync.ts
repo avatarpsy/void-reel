@@ -194,6 +194,7 @@ export function installCloudSync(opts: CloudSyncOptions): CloudSync {
       if (idleTimer) clearTimeout(idleTimer);
       dirty = true;
       await save();
+      if (dirty || !pulled || stopped || locked) throw new Error('The board could not finish saving. Reopen it and try again before sharing.');
     },
     stop() {
       stopped = true;

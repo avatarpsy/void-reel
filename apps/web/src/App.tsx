@@ -8,6 +8,8 @@ import { SharePage } from "./pages/SharePage";
 import { useUIStore } from "./stores/ui-store";
 import { useProjectStore } from "./stores/project-store";
 import { useEngineStore } from "./stores/engine-store";
+const SharedVideo = lazy(() => import('./SharedVideo'));
+import { sharedProjectId, installSharePreparation } from '@openreel/asset-browser';
 import { useVoidspaceStore } from "./stores/voidspace-store";
 import { useRouter } from "./hooks/use-router";
 import { useKieAIPoller } from "./hooks/useKieAIPoller";
@@ -526,7 +528,7 @@ function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
  * Idempotent, best-effort, non-blocking; only fills gaps, never overwrites a
  * live blob or a user edit.
  */
-async function hydrateLibraryMediaBlobs(): Promise<void> {
+export async function hydrateLibraryMediaBlobs(): Promise<void> {
   try {
     const proj = useProjectStore.getState().project;
     const items = proj.mediaLibrary?.items ?? [];
@@ -631,855 +633,13 @@ async function hydrateLibraryMediaBlobs(): Promise<void> {
   }
 }
 
-function App() {
-  const { activeModal, closeModal } = useUIStore();
-  const { openModal: openSearchModal } = useUIStore();
-
-  // Landing in the editor IS landing on voidspace.ai — kick the silent, one-time
-  // background download of the on-device Whisper model (teleprompter auto-scroll)
-  // during idle. Idempotent + shares the site-wide browser cache, so if another
-  // page already fetched it this is a no-op; it never re-downloads.
-  useEffect(() => {
-    ensureWhisperModel();
-  }, []);
-  const createNewProject = useProjectStore((state) => state.createNewProject);
-  const loadProject = useProjectStore((state) => state.loadProject);
-  const importMedia = useProjectStore((state) => state.importMedia);
-  const addClipToNewTrack = useProjectStore((state) => state.addClipToNewTrack);
-  const forceSave = useProjectStore((state) => state.forceSave);
-
-  // Auto-clean projects saved by OLDER builds that left DUPLICATE caption tracks
-  // ("Captions" x2 / "Text N") with stacked clips: collapse every caption onto
-  // the one canonical track-captions and drop the now-empty duplicate tracks.
-  // Idempotent — no-ops once the project is clean — so it's safe to run on each
-  // project change (load + live ticks).
-  const projectModifiedAt = useProjectStore((s) => s.project.modifiedAt);
-  useEffect(() => {
-    const titleEngine = useEngineStore.getState().getTitleEngine();
-    if (!titleEngine) return;
-    const tracks = useProjectStore.getState().project.timeline.tracks;
-    const captionTrackIds = new Set(
-      tracks
-        .filter(
-          (t) =>
-            t.type === "text" && (t.id === "track-captions" || t.name === "Captions"),
-        )
-        .map((t) => t.id),
-    );
-    if (captionTrackIds.size === 0) return;
-    const consolidated = consolidateCaptionTextClips(
-      titleEngine.getAllTextClips(),
-      captionTrackIds,
-    );
-    if (!consolidated) return; // already clean
-    titleEngine.loadTextClips(consolidated.clips);
-    const usedTrackIds = new Set(consolidated.clips.map((c) => c.trackId));
-    useProjectStore.setState((s) => {
-      const cleanedTracks = s.project.timeline.tracks.filter(
-        (t) =>
-          // Drop a TEXT track that HELD a caption and is now empty (the legacy
-          // duplicate "Captions" + mis-named "Text N" tracks). Keep the
-          // canonical track-captions and any track still holding clips.
-          !(
-            t.type === "text" &&
-            t.id !== "track-captions" &&
-            consolidated.captionSourceTrackIds.has(t.id) &&
-            !usedTrackIds.has(t.id)
-          ),
-      );
-      return {
-        project: {
-          ...s.project,
-          timeline: { ...s.project.timeline, tracks: cleanedTracks },
-          modifiedAt: Date.now(),
-        },
-      };
-    });
-  }, [projectModifiedAt]);
-
-  /**
-   * The storyboard this project was compiled from, if any.
-   *
-   * A ref, not state: nothing on screen here depends on it. It exists so
-   * `get-state` can answer "where did this film come from?", which is what lets
-   * the host page offer a way back without searching every board for one that
-   * claims this project.
-   */
-  const sourceBoardIdRef = useRef<string>("");
-
-  const [voidspaceLoading, setVoidspaceLoading] = useState(() => {
-    const sp = new URLSearchParams(window.location.search);
-    return sp.has("sceneListId") || sp.has("import");
-  });
-  const [voidspaceError, setVoidspaceError] = useState<string | null>(null);
-  const hasHandledImport = useRef(false);
-
-  const { route, params, navigate, parsedDimensions, fps } = useRouter();
-  const hasHandledInitialRoute = useRef(false);
-  const hasHandledVoidspace = useRef(false);
-
-  // ── Voidspace auto-load: detect sceneListId in parent URL search params ──
-  useEffect(() => {
-    if (hasHandledVoidspace.current) return;
-
-    const searchParams = new URLSearchParams(window.location.search);
-    const sceneListId = searchParams.get("sceneListId");
-
-    if (!sceneListId) return;
-
-    hasHandledVoidspace.current = true;
-    setVoidspaceLoading(true);
-
-    (async () => {
-      // Marker flipped on once we've successfully restored a project
-      // from IndexedDB. The Firestore subscription below uses it to
-      // pick its merge strategy (additive vs wholesale-replace).
-      let recoveredFromLocal = false;
-      // When the live subscription is installed, the loading spinner must
-      // stay up until the FIRST project tick actually lands (that tick can
-      // take seconds while scene media resolves). The `finally` below then
-      // skips its early clear — previously the spinner vanished the moment
-      // the subscription was merely INSTALLED, leaving a blank timeline
-      // with no loading indication for the whole resolve.
-      let spinnerClearedByFirstTick = false;
-      try {
-        const userId = await waitForAuth(10000);
-        if (!userId) {
-          console.error("[Voidspace] No authenticated user");
-          setVoidspaceError("Not signed in. Please sign in and try again.");
-          setVoidspaceLoading(false);
-          return;
-        }
-
-        // Refresh scene list metadata first so we can scope local cache by avatar.
-        try {
-          await fetchSceneListContext(userId, sceneListId);
-        } catch (contextErr) {
-          console.warn("[Voidspace] Failed to preload scene list context:", contextErr);
-        }
-
-        const avatarId = useVoidspaceStore.getState().sceneList?.avatarId;
-
-        // Check for a locally saved copy first (edited in Studio previously).
-        // New key is scoped by user + avatar + sceneList to avoid cross-avatar collisions.
-        const localProjectId = buildVoidspaceProjectId(userId, sceneListId, avatarId);
-        const userScopedLegacyProjectId = buildUserScopedVoidspaceProjectId(userId, sceneListId);
-        const legacyLocalProjectId = buildLegacyVoidspaceProjectId(sceneListId);
-        await autoSaveManager.initialize();
-
-        // Voidspace remote sync. Every time IndexedDB save succeeds,
-        // postMessage the same Project blob to the parent so it can
-        // mirror to Firestore. The parent owns the auth + endpoint
-        // call; we just hand over the bytes. If no parent listens
-        // (running standalone), the postMessage is a no-op — the
-        // local IndexedDB save is the durable copy.
-        // Latch that flips ON the first time we see a non-empty project
-        // for this scene list. Once flipped, we refuse to write an empty
-        // project to the remote blob — that's the path that historically
-        // wiped users' data: an early autosave (before per-scene rebuild
-        // populated) or a wholesale loadProject of an empty project state
-        // would race ahead of the rebuild and persist the empty state,
-        // permanently masking the per-scene Firestore docs from the
-        // loader (which prefers the blob). The latch is per-iframe and
-        // resets on reload — by which time the loader's empty-blob
-        // safety net has rebuilt from per-scene anyway.
-        let sawNonEmptyProject = false;
-        autoSaveManager.setRemoteSync(async (project, historyData) => {
-          // Round-trip via requestId so the parent can ack/error.
-          // Skip when there's no parent (running detached) — sending
-          // to ourselves would silently never resolve.
-          if (window.parent === window) return;
-          // Empty-write firewall. See `sawNonEmptyProject` comment above.
-          const tracksCount = project.timeline?.tracks?.length ?? 0;
-          const totalClips = (project.timeline?.tracks ?? []).reduce(
-            (n: number, t: any) => n + ((t?.clips?.length) ?? 0), 0,
-          );
-          const mediaCount = project.mediaLibrary?.items?.length ?? 0;
-          const textClipsCount = (project as any).textClips?.length ?? 0;
-          const isEmpty = tracksCount === 0 && totalClips === 0 && mediaCount === 0 && textClipsCount === 0;
-          if (!isEmpty) {
-            sawNonEmptyProject = true;
-          } else if (sawNonEmptyProject) {
-            console.warn(
-              "[Voidspace] BLOCKED remote sync of empty project — would have wiped non-empty server state. Use the snapshot panel to recover, or manually save once a non-empty state is restored.",
-            );
-            return;
-          }
-          const requestId = `sync_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-          const ack = new Promise<{ ok: boolean; error?: string }>((resolve) => {
-            const onMsg = (e: MessageEvent) => {
-              if (e.data?.type === "voidspace:save-project:ack" && e.data.requestId === requestId) {
-                window.removeEventListener("message", onMsg);
-                resolve({ ok: !!e.data.ok, error: e.data.error });
-              }
-            };
-            window.addEventListener("message", onMsg);
-            // 15s ceiling — Firestore writes complete in well under
-            // a second; anything longer means the parent is gone and
-            // we should let the next save try fresh instead of
-            // hanging the inflight queue.
-            setTimeout(() => {
-              window.removeEventListener("message", onMsg);
-              resolve({ ok: false, error: "timeout" });
-            }, 15000);
-          });
-          // NO SIZE GUARD — and that is the point.
-          //
-          // This used to trim (and then drop) the user's undo history whenever
-          // project + history approached 830 KB, because the parent's
-          // timeline-state endpoint returned 413 above 900 KB. That cap existed
-          // only because the blob was stored in a FIRESTORE DOCUMENT FIELD,
-          // which is capped at ~1 MiB. It cost real work: a survey of 311
-          // projects found six already past the threshold, their histories cut
-          // to 0.1–4.7 KB against 500–856 KB timelines — undo, redo and
-          // chat-message rollback silently dead on exactly the big projects
-          // where they matter most.
-          //
-          // The blob now goes to Cloud Storage (see the website's
-          // `project-state-store.ts`), which has no such ceiling, so the full
-          // history is sent every time. The server keeps a 40 MB sanity bound
-          // for genuinely pathological payloads; nothing legitimate approaches
-          // it, and a project that did should surface as an error rather than
-          // as quietly amputated undo state.
-          const historyPayload: string | null = historyData;
-          window.parent.postMessage({
-            type: "voidspace:save-project",
-            requestId,
-            sceneListId,
-            project,
-            history: historyPayload,
-          }, "*");
-          const r = await ack;
-          if (!r.ok) {
-            throw new Error(`remote sync failed: ${r.error || "unknown"}`);
-          }
-          // Fire-and-forget: upload any blob-only media the timeline uses so
-          // the project renders on OTHER machines too (bytes otherwise live
-          // only in this browser's IndexedDB → placeholder everywhere else).
-          import("./services/media-materialize")
-            .then((m) => m.sweepMaterializeTimelineMedia())
-            .catch(() => { /* best-effort */ });
-        });
-        // Capture ActionHistory state on every save so undo/redo +
-        // chat-message snapshots survive page reload via the blob.
-        // Without this, restoreSnapshot would silently no-op (the
-        // post-reload undoStack is empty, and restore expects to
-        // walk back to a stackIndex from the prior session).
-        autoSaveManager.setHistoryProvider(() => {
-          try {
-            const h = useProjectStore.getState().actionHistory as any;
-            if (h && typeof h.serialize === "function") {
-              return JSON.stringify(h.serialize());
-            }
-          } catch (e) {
-            console.warn("[Voidspace] history serialize failed:", e);
-          }
-          return null;
-        });
-
-        const saveCandidates = (
-          await Promise.all([
-            autoSaveManager.getMostRecentSave(localProjectId),
-            autoSaveManager.getMostRecentSave(userScopedLegacyProjectId),
-            autoSaveManager.getMostRecentSave(legacyLocalProjectId),
-          ])
-        ).filter((s): s is NonNullable<typeof s> => Boolean(s));
-
-        const localSave = saveCandidates
-          .sort((a, b) => b.timestamp - a.timestamp)[0] || null;
-
-        if (localSave) {
-          console.log(`[Voidspace] Found local copy for ${sceneListId}, recovering...`);
-          const recovered = await useProjectStore.getState().recoverFromAutoSave(localSave.id);
-          if (recovered) {
-            // Strip *broken* legacy caption TextClips from older saves
-            // (transform.position {x:0,y:0} → ghost-rendered at the
-            // canvas top-left corner). Voidspace now emits caption
-            // TextClips with a proper bottom-center transform, so we
-            // keep those and only filter out the stale corner ones.
-            // Also drop `timeline.subtitles` left over from when
-            // captions were drawn via the subtitle-canvas-renderer —
-            // those are no longer used and would double-render on top
-            // of the new TextClips if anything started honoring them.
-            // Recovered IndexedDB saves can carry legacy '-fallback' media
-            // ids whose blobs COLLIDE across projects in IndexedDB (scene
-            // numbers repeat in every automation project) — the "wrong
-            // video plays in every project" corruption. Re-key them before
-            // anything hydrates blobs by id.
-            try {
-              const { migrateLegacyFallbackMediaIds } = await import("./services/voidspace-loader");
-              const beforeMig = useProjectStore.getState().project;
-              const migrated = migrateLegacyFallbackMediaIds(beforeMig);
-              if (migrated !== beforeMig) {
-                useProjectStore.setState({ project: migrated });
-              }
-            } catch (e) {
-              console.warn("[Voidspace] media-id migration on recovery failed:", e);
-            }
-            /**
-             * AND THE SAME TREATMENT FOR A GRAPHIC OVERLAY'S BLEND.
-             *
-             * The loader heals this too, but healing it THERE is not enough and
-             * the reason is this branch: a local copy is recovered FIRST, and
-             * the Firestore load that follows is additive-only — so the healed
-             * clip loses to the IndexedDB one that has been here all along
-             * ("merged: no-op (already up-to-date)"). The user's symptom was
-             * exact: a lower third that stayed black over the shot until they
-             * opened the inspector and set `screen` by hand, and re-sending the
-             * board never fixed it.
-             *
-             * Undefined only, never an explicit value — see `healGraphicBlend`.
-             */
-            try {
-              const { healGraphicBlends } = await import("./services/voidspace-loader");
-              const beforeBlend = useProjectStore.getState().project;
-              const blended = healGraphicBlends(beforeBlend);
-              if (blended !== beforeBlend) {
-                useProjectStore.setState({ project: blended });
-              }
-            } catch (e) {
-              console.warn("[Voidspace] graphic-blend heal on recovery failed:", e);
-            }
-            const titleEngine = useEngineStore.getState().getTitleEngine();
-            try {
-              const cur = useProjectStore.getState().project;
-              const isBrokenCaption = (tc: import("@openreel/core").TextClip) =>
-                tc.trackId === "track-captions" &&
-                (tc.transform?.position?.y ?? 0) < 0.1;
-              const cleanTextClips = (cur.textClips ?? []).filter(
-                (tc) => !isBrokenCaption(tc),
-              );
-              const hadStaleSubtitles = (cur.timeline.subtitles ?? []).length > 0;
-              if (
-                cleanTextClips.length !== (cur.textClips?.length ?? 0) ||
-                hadStaleSubtitles
-              ) {
-                useProjectStore.setState({
-                  project: {
-                    ...cur,
-                    timeline: { ...cur.timeline, subtitles: [] },
-                    textClips: cleanTextClips,
-                  },
-                });
-              }
-              if (titleEngine) {
-                titleEngine.loadTextClips(cleanTextClips);
-              }
-            } catch {
-              /* best-effort scrub */
-            }
-
-            // Belt-and-suspenders blob: scrub. Old autosaves written
-            // before the dedicated sanitizer in auto-save.ts was added
-            // can still carry stale `blob:http://localhost:.../<uuid>`
-            // references that produce `net::ERR_FILE_NOT_FOUND` at
-            // render time. Strip them here so the renderer's hydration
-            // path picks up `originalUrl` instead, which is what the
-            // user observes as "works after refresh."
-            try {
-              const cur = useProjectStore.getState().project;
-              const isDeadBlob = (v: unknown): v is string =>
-                typeof v === "string" && v.startsWith("blob:");
-              let mutated = false;
-              const cleanedItems = cur.mediaLibrary.items.map((item) => {
-                const dirtyThumb = isDeadBlob(item.thumbnailUrl);
-                const dirtyFilmstrip = Array.isArray(item.filmstripThumbnails)
-                  && item.filmstripThumbnails.some(
-                    (f: any) => isDeadBlob(f?.url),
-                  );
-                if (!dirtyThumb && !dirtyFilmstrip) return item;
-                mutated = true;
-                return {
-                  ...item,
-                  thumbnailUrl: dirtyThumb
-                    ? item.originalUrl ?? null
-                    : item.thumbnailUrl,
-                  filmstripThumbnails: dirtyFilmstrip
-                    ? undefined
-                    : item.filmstripThumbnails,
-                };
-              });
-              if (mutated) {
-                useProjectStore.setState({
-                  project: {
-                    ...cur,
-                    mediaLibrary: { ...cur.mediaLibrary, items: cleanedItems },
-                  },
-                });
-                console.log(
-                  "[Voidspace] Stripped stale blob: URLs from recovered project; renderer will hydrate from originalUrl.",
-                );
-              }
-            } catch {
-              /* best-effort scrub */
-            }
-
-            const recoveredProject = useProjectStore.getState().project;
-            const recoveredMusicTrack = recoveredProject.timeline.tracks.find(
-              (track) => track.id === "track-music",
-            );
-            const recoveredLooksStale =
-              Boolean(recoveredMusicTrack) &&
-              recoveredMusicTrack!.clips.length > 0 &&
-              recoveredMusicTrack!.clips.every(
-                (clip) => Math.abs(clip.inPoint ?? 0) < 0.0001,
-              );
-
-            // Two reasons to immediately re-fetch from Firestore here:
-            //   1. The recovered music track has no per-scene offsets
-            //      (legacy save predates the timing rewrite).
-            //   2. ANY recovered media item is missing a blob — which
-            //      is the common case after JSON-roundtrip recovery and
-            //      causes the renderer to spend its first ~250ms (until
-            //      the live-subscription tick) trying to play
-            //      blob:/originalUrl pointers that may be dead. The
-            //      live subscription will catch this eventually but
-            //      "wait until then" is what the user observes as
-            //      "doesn't work until I refresh."
-            const recoveredHasMissingBlobs =
-              recoveredProject.mediaLibrary.items.some(
-                (m) => !(m.blob instanceof Blob) && Boolean(m.originalUrl),
-              );
-            if (recoveredLooksStale || recoveredHasMissingBlobs) {
-              try {
-                const refreshedProject = await loadSceneListAsProject(userId, sceneListId);
-                const refreshedMusicTrack = refreshedProject.timeline.tracks.find(
-                  (track) => track.id === "track-music",
-                );
-                const refreshedHasOffsets =
-                  Boolean(refreshedMusicTrack) &&
-                  refreshedMusicTrack!.clips.some(
-                    (clip) => (clip.inPoint ?? 0) > 0.0001,
-                  );
-
-                if (recoveredLooksStale && refreshedHasOffsets) {
-                  // Full replace — music timing was the issue, take
-                  // the freshly-built project as the new baseline.
-                  loadProject(refreshedProject);
-                  await forceSave();
-                  console.log(
-                    "[Voidspace] Replaced stale local cache with refreshed scene timing.",
-                  );
-                } else if (recoveredHasMissingBlobs) {
-                  // Surgical upgrade — preserve the user's recovered
-                  // edits (selection, transforms, etc.) but overlay
-                  // each item's freshly-fetched blob/originalUrl so
-                  // the renderer can paint immediately. Mirrors the
-                  // additive-merge upgrade path the live subscription
-                  // runs, just executed eagerly here.
-                  const cur = useProjectStore.getState().project;
-                  const freshById = new Map(
-                    refreshedProject.mediaLibrary.items.map((m) => [m.id, m]),
-                  );
-                  const upgraded = cur.mediaLibrary.items.map((existing) => {
-                    const fresh = freshById.get(existing.id);
-                    if (!fresh) return existing;
-                    const existingHasBlob = existing.blob instanceof Blob;
-                    const freshHasBlob = fresh.blob instanceof Blob;
-                    if (existingHasBlob || !freshHasBlob) {
-                      // Fresh-only fields that don't depend on blob.
-                      return {
-                        ...existing,
-                        originalUrl: fresh.originalUrl ?? existing.originalUrl,
-                      };
-                    }
-                    return {
-                      ...existing,
-                      blob: fresh.blob,
-                      originalUrl: fresh.originalUrl ?? existing.originalUrl,
-                      thumbnailUrl: existing.thumbnailUrl ?? fresh.thumbnailUrl,
-                      metadata: existing.metadata ?? fresh.metadata,
-                    };
-                  });
-                  useProjectStore.setState({
-                    project: {
-                      ...cur,
-                      mediaLibrary: { ...cur.mediaLibrary, items: upgraded },
-                    },
-                  });
-                  console.log(
-                    `[Voidspace] Eager-hydrated ${upgraded.filter((m) => m.blob instanceof Blob).length}/${upgraded.length} media blobs after recovery.`,
-                  );
-                }
-              } catch (refreshErr) {
-                console.warn("[Voidspace] Failed to refresh stale local cache:", refreshErr);
-              }
-            }
-
-            if (
-              localSave.projectId === legacyLocalProjectId ||
-              localSave.projectId === userScopedLegacyProjectId
-            ) {
-              const currentProject = useProjectStore.getState().project;
-              if (
-                currentProject.id === legacyLocalProjectId ||
-                currentProject.id === userScopedLegacyProjectId
-              ) {
-                loadProject({
-                  ...currentProject,
-                  id: localProjectId,
-                  modifiedAt: Date.now(),
-                });
-                await forceSave();
-                console.log(
-                  `[Voidspace] Migrated local project id to scoped key: ${localProjectId}`,
-                );
-              }
-            }
-            try {
-              await fetchSceneListContext(userId, sceneListId);
-            } catch (contextErr) {
-              console.warn("[Voidspace] Failed to refresh scene list context:", contextErr);
-            }
-
-            // Force the canvas dimensions to honor the iframe URL's
-            // `aspect=` param even when recovery loaded settings from
-            // a stale local save. The studio-ai page mints the iframe
-            // with the user's CURRENT aspect choice; recovered settings
-            // come from whatever the project was when autosave last
-            // fired. Without this override, the editor reverts to its
-            // own default (1920x1080) on every reopen of a 9:16 / 1:1
-            // project. The additive-merge path below preserves user
-            // edits but doesn't touch `settings`, so we patch it here
-            // once at recovery time.
-            try {
-              const sp = new URLSearchParams(window.location.search);
-              const urlAspect = sp.get("aspect");
-              const ASPECT_DIMS: Record<string, { width: number; height: number }> = {
-                "16:9": { width: 1920, height: 1080 },
-                "9:16": { width: 1080, height: 1920 },
-                "1:1":  { width: 1080, height: 1080 },
-                "4:3":  { width: 1440, height: 1080 },
-                "3:4":  { width: 1080, height: 1440 },
-                "21:9": { width: 2560, height: 1080 },
-              };
-              const dim = urlAspect ? ASPECT_DIMS[urlAspect] : null;
-              if (dim) {
-                const cur = useProjectStore.getState().project;
-                const drift =
-                  (cur.settings?.width ?? 0) !== dim.width ||
-                  (cur.settings?.height ?? 0) !== dim.height;
-                if (drift) {
-                  useProjectStore.setState({
-                    project: {
-                      ...cur,
-                      settings: {
-                        ...cur.settings,
-                        width: dim.width,
-                        height: dim.height,
-                      },
-                    },
-                  });
-                  console.log(
-                    `[Voidspace] Aspect override from URL: ${urlAspect} → ${dim.width}x${dim.height} (was ${cur.settings?.width}x${cur.settings?.height})`,
-                  );
-                }
-              }
-            } catch (aspectErr) {
-              console.warn("[Voidspace] Aspect override failed:", aspectErr);
-            }
-
-            navigate("editor");
-            console.log(`[Voidspace] Restored local project: ${localSave.projectName}`);
-            setVoidspaceLoading(false);
-            // Re-attach recording / imported-media blobs after local recovery
-            // too (autosave nulls blobs on JSON round-trip).
-            void hydrateLibraryMediaBlobs();
-            // ⚠️  DO NOT return — fall through and install the live
-            // Firestore subscription below in additive-only mode. The
-            // chat keeps writing assets to Firestore after this iframe
-            // mounts; without a subscription the editor would freeze on
-            // the IndexedDB snapshot and new clips would never land,
-            // which is exactly what produced the "Timeline is empty"
-            // export error. `recoveredFromLocal` flips the snapshot
-            // callback into additive-merge mode so the recovered project
-            // (and any user edits already in flight) survive the merge.
-            recoveredFromLocal = true;
-          } else {
-            console.warn("[Voidspace] Local recovery failed, falling back to Firestore import");
-          }
-        }
-
-        // Always install the Firestore live subscription. Studio chat
-        // upserts assets one-by-one as the user approves each step
-        // (frame → voiceover → clip → render); without the subscription
-        // the editor would only see the snapshot at mount time, so the
-        // timeline would never refresh and users would have to reload
-        // to see the next clip land. The subscription coalesces bursts
-        // and re-runs `loadSceneListAsProject` on every Firestore write
-        // so tracks fill in real time.
-        //
-        //   - On a clean mount: `firstLoad=true` → first snapshot wins,
-        //     subsequent ticks merge or replace based on user edits.
-        //   - After a local-save recovery: `firstLoad=false` from the
-        //     start so the recovered project is the baseline; every
-        //     snapshot tick goes through the additive merge path below.
-        console.log(
-          `[Voidspace] Loading scene list: ${sceneListId} (live${recoveredFromLocal ? ", post-recovery additive" : ""})`,
-        );
-        let firstLoad = !recoveredFromLocal;
-        let tickCount = 0;
-        // A local recovery already painted tracks — the spinner can drop at
-        // install time (the finally). Otherwise the first tick clears it.
-        spinnerClearedByFirstTick = !recoveredFromLocal;
-        if (spinnerClearedByFirstTick) {
-          // Safety net: never wedge the spinner if the first tick never
-          // fires (Firestore outage / permission error only in console).
-          setTimeout(() => setVoidspaceLoading(false), 45000);
-        }
-        const unsubscribe = subscribeSceneListAsProject(
-          userId,
-          sceneListId,
-          (project) => {
-            tickCount++;
-            // Always-on summary so chat → editor coupling is observable
-            // from the DevTools console without needing to attach to
-            // each Firestore listener manually. Format mirrors the
-            // merge-result line below so a "tick fired but no merge"
-            // case is visually distinct.
-            console.log(
-              `[Voidspace tick #${tickCount}] fresh: ${project.mediaLibrary.items.length} media, ${(project.textClips ?? []).length} captions, ${project.timeline.tracks.reduce((n, t) => n + t.clips.length, 0)} clips`,
-            );
-            if (firstLoad) {
-              firstLoad = false;
-              // Peel the persisted ActionHistory blob off the project
-              // before loadProject (which mints a fresh history). We
-              // re-hydrate it onto the just-installed history below.
-              // Without this, undo/redo + named snapshots from the
-              // prior session are silently lost on every reload —
-              // breaking chat-message rollback (the snapshot's
-              // stackIndex is for the OLD history, the new one is
-              // empty, and restoreSnapshot quietly no-ops).
-              const persistedHistory = (project as any).__historyData as string | undefined;
-              if ((project as any).__historyData) delete (project as any).__historyData;
-              /**
-               * WHICH STORYBOARD THIS FILM CAME FROM.
-               *
-               * Peeled off exactly like the history above, and for the same
-               * reason: `Project` is openreel's own type and Voidspace
-               * provenance does not belong in it. Kept in a module ref rather
-               * than state because nothing re-renders on it — it is answered
-               * on demand through `get-state`, so the host page can offer a way
-               * back to the board without having to look one up.
-               */
-              const boardId = (project as any).__sourceBoardId as string | undefined;
-              if ((project as any).__sourceBoardId) delete (project as any).__sourceBoardId;
-              if (boardId) sourceBoardIdRef.current = boardId;
-              loadProject(project);
-              if (persistedHistory) {
-                try {
-                  const h = useProjectStore.getState().actionHistory as any;
-                  if (h && typeof h.restore === "function") {
-                    h.restore(JSON.parse(persistedHistory));
-                    console.log(`[Voidspace] Restored ActionHistory (${persistedHistory.length}b)`);
-                  }
-                } catch (e) {
-                  console.warn("[Voidspace] history restore failed, starting fresh:", e);
-                }
-              }
-              navigate("editor");
-              // The project is actually on screen now — drop the spinner
-              // (deferred from the finally for the subscription path).
-              setVoidspaceLoading(false);
-              console.log(
-                `[Voidspace] Loaded project: ${project.name} (${project.mediaLibrary.items.length} media items)`,
-              );
-              // Re-attach recording / imported-media blobs (library items
-              // carry only metadata + originalUrl after a JSON round-trip).
-              void hydrateLibraryMediaBlobs();
-              return;
-            }
-            // Subsequent live update — single path: additive merge.
-            // The previous wholesale-replace branch (when canUndo()
-            // was false AND no recovery) raced against any user
-            // mid-edit and against the chat's `pingEditor` which also
-            // reloaded. One code path here means the editor's
-            // behaviour for chat-driven assets is deterministic:
-            // append what's new, upgrade what's blob-less, never
-            // wipe what already exists. User-edit preservation comes
-            // for free because we never overwrite existing items.
-            const result = applyAdditiveMerge(project);
-            if (result.dirty) {
-              console.log(
-                `[Voidspace tick #${tickCount}] merged: +${result.newMedia} media, ↑${result.upgraded} hydrated, +${result.newCaptions} captions, +${result.newClips} clips`,
-              );
-              // New library media arrived via the live subscription (e.g. a
-              // recording whose project_state landed after the initial load)
-              // carries originalUrl but no blob. Re-attach blobs from
-              // IndexedDB/disk so it isn't a broken, contentless asset card.
-              if (result.newMedia > 0) void hydrateLibraryMediaBlobs();
-            } else {
-              // Quiet no-op — useful to confirm the subscription is
-              // actually firing even when nothing changed.
-              console.log(`[Voidspace tick #${tickCount}] merged: no-op (already up-to-date)`);
-            }
-          },
-          (err) => {
-            console.warn("[Voidspace] Live subscription error:", err);
-          },
-        );
-        // Tear down the subscription when the iframe unloads. Only
-        // attached to the outer cleanup path, not the early returns,
-        // because each early return already exits without registering.
-        if (typeof window !== "undefined") {
-          window.addEventListener("beforeunload", unsubscribe, { once: true });
-        }
-
-        // Save-on-leave. Autosave runs on a 30s interval + 2s debounce, so
-        // edits made in the last couple of seconds before the user closes
-        // the tab (or switches away on mobile) were lost remotely — they
-        // survived only in this device's IndexedDB. `visibilitychange →
-        // hidden` is the RELIABLE hook: it fires while the page is still
-        // alive (tab switch, app background), so the postMessage→parent→
-        // Firestore round-trip completes. `pagehide` is the best-effort
-        // last-gasp on actual close. We only flush when genuinely dirty so
-        // a tab switch doesn't write to Firestore needlessly.
-        if (typeof document !== "undefined") {
-          const flushOnLeave = () => {
-            try {
-              if (!autoSaveManager.hasUnsavedChanges) return;
-              const proj = useProjectStore.getState().project;
-              if (proj) void autoSaveManager.forceSave(proj);
-            } catch {
-              /* best-effort — never block unload */
-            }
-          };
-          const onVisibility = () => {
-            if (document.visibilityState === "hidden") flushOnLeave();
-          };
-          document.addEventListener("visibilitychange", onVisibility);
-          window.addEventListener("pagehide", flushOnLeave);
-          // Fold the listener teardown into the same beforeunload cleanup.
-          window.addEventListener(
-            "beforeunload",
-            () => {
-              document.removeEventListener("visibilitychange", onVisibility);
-              window.removeEventListener("pagehide", flushOnLeave);
-            },
-            { once: true },
-          );
-        }
-      } catch (err) {
-        console.error("[Voidspace] Failed to load scene list:", err);
-        setVoidspaceError(
-          err instanceof Error ? err.message : "Failed to load project",
-        );
-        setVoidspaceLoading(false);
-      } finally {
-        // Subscription path: the first tick (or the 45s safety net) clears
-        // the spinner once tracks are actually visible — not install time.
-        if (!spinnerClearedByFirstTick) setVoidspaceLoading(false);
-      }
-    })();
-  }, [forceSave, loadProject, navigate]);
-
-  useKieAIPoller();
-
-  // ── Theme sync with the Voidspace site ──
-  //
-  // The site's light/dark toggle is the single source of truth — the editor's
-  // own Sun/Moon control was removed. Three channels, in order of authority:
-  //   1. ?theme=light|dark — an embedding host stating it outright
-  //   2. the site's saved preference in localStorage (SAME ORIGIN as /studio/)
-  //   3. window.postMessage({type:'voidspace:theme', mode}) on later changes
-  //
-  // (2) is what makes the LANDING pages behave. "Create a video project" opens
-  // /studio/?forceWelcome=1 as a top-level navigation — no host, no message, no
-  // ?theme — so the welcome screen used to render dark on a light site. It
-  // never needed a message: the preference is readable right there.
-  useEffect(() => {
-    const applyMode = (mode: string | null | undefined) => {
-      if (mode !== "light" && mode !== "dark" && mode !== "system") return;
-      try {
-        // Lazy-import to keep the theme store out of the boot critical
-        // path; the app already mounts ThemeProvider elsewhere.
-        import("./stores/theme-store").then(({ useThemeStore }) => {
-          useThemeStore.getState().setMode(mode as any);
-        }).catch(() => { /* ignore */ });
-      } catch { /* ignore */ }
-    };
-    let stopWatching = () => {};
-    try {
-      const params = new URLSearchParams(window.location.search);
-      applyMode(resolveBootTheme(params.get("theme")));
-      // Follow the site if the user flips the toggle in another tab.
-      stopWatching = watchSiteTheme(applyMode);
-    } catch { /* ignore */ }
-    const onMessage = (e: MessageEvent) => {
-      const msg: any = e?.data;
-      if (!msg || msg.type !== "voidspace:theme") return;
-      applyMode(msg.mode);
-    };
-    window.addEventListener("message", onMessage);
-    return () => {
-      window.removeEventListener("message", onMessage);
-      stopWatching();
-    };
-  }, []);
-
-  // ── Editor surface mode (mode=music boots the audio-first skin) ──
-  //
-  // Read once on mount from the same query the host freezes into the
-  // iframe src (/studio/index.html?...&mode=music). The project model is
-  // identical in both modes — a music project and a video project are
-  // one cross-compatible Project — so this only flips the editor's
-  // layout/emphasis: in music mode we promote the audio mixer to a
-  // first-class surface. Not persisted (see ui-store).
-  useEffect(() => {
-    try {
-      const params = new URLSearchParams(window.location.search);
-      const ui = useUIStore.getState();
-      if (params.get("mode") === "music") {
-        ui.setAppMode("music");
-        // Show the audio mixer in the centre column instead of the video
-        // player — the video canvas is not what a music project is about.
-        //
-        // But do NOT collapse the preview row to do it. That is what this used
-        // to do, reasoning that "the timeline owns the screen"; collapsing sets
-        // timelineHeight to `innerHeight - MIN_CHROME_ABOVE_TIMELINE` (see
-        // EditorInterface), which squeezes the mixer, the assets panel and the
-        // inspector into a strip and hands the rest of the window to an EMPTY
-        // timeline. The editor opened looking broken — everything crushed
-        // against the top edge, acres of nothing below.
-        //
-        // A music project opens with something to look at instead: mixer at a
-        // usable height, assets and inspector at full size, timeline at its
-        // normal 320. Minimising is still one click away on the grip for anyone
-        // who does want the timeline full-height.
-        ui.setPreviewCollapsed(false);
-        ui.setCenterView("mixer");
-      } else {
-        ui.setAppMode("video");
-        ui.setPreviewCollapsed(false);
-        ui.setCenterView("preview");
-      }
-    } catch {
-      /* ignore */
-    }
-  }, []);
-
-  // ── Voidspace chat ↔ editor RPC bridge (postMessage) ──
-  //
-  // The chat parent window can read and minimally control the editor
-  // through window.postMessage. This is the only programmatic surface
-  // the studio agent has for inspecting timeline state ("what's on the
-  // narration track?") and triggering a reload after a Firestore write
-  // it knows the live subscription will eventually catch up to (kept
-  // for redundancy).
-  //
-  // Inbound message shapes (from chat parent):
-  //   { type: 'voidspace:get-state',  requestId }
-  //   { type: 'voidspace:reload',     requestId? }
-  //   { type: 'voidspace:play',       requestId? }
-  //   { type: 'voidspace:pause',      requestId? }
-  //   { type: 'voidspace:seek',       sec, requestId? }
-  //
-  // Outbound replies post back to event.source as:
-  //   { type: 'voidspace:state',      requestId, state }
-  //   { type: 'voidspace:ack',        requestId, op }
-  //   { type: 'voidspace:error',      requestId, error }
+function App() { return sharedProjectId() ? <Suspense fallback={<LoadingSpinner message="Opening project?" />}><SharedVideo /></Suspense> : <LocalApp />; }
+export function useVideoRpc(sourceBoardIdRef?: { current: string }) {
+  const loadProject = useProjectStore(state => state.loadProject);
+  const importMedia = useProjectStore(state => state.importMedia);
   useEffect(() => {
     const onMessage = async (e: MessageEvent) => {
+      if (e.origin !== location.origin || e.source !== window.parent) return;
       const msg = e?.data;
       if (!msg || typeof msg !== "object") return;
       const t = String(msg.type || "");
@@ -1499,7 +659,8 @@ function App() {
             // round-trip to Firestore.
             try {
               const proj = useProjectStore.getState().project;
-              await autoSaveManager.forceSave(proj);
+              if (sharedProjectId()) await useProjectStore.getState().forceSave();
+              else await autoSaveManager.forceSave(proj);
               reply({ type: "voidspace:force-save:done", requestId: msg.requestId, ok: true });
             } catch (err: any) {
               reply({ type: "voidspace:force-save:done", requestId: msg.requestId, ok: false, error: err?.message ?? String(err) });
@@ -1822,7 +983,7 @@ function App() {
                 // WHERE THIS FILM CAME FROM. Empty for a project that was not
                 // compiled from a storyboard, which is how the host page knows
                 // whether a way back exists at all.
-                sourceBoardId: sourceBoardIdRef.current || undefined,
+                sourceBoardId: sourceBoardIdRef?.current || undefined,
               },
             });
             break;
@@ -4503,7 +3664,861 @@ function App() {
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [loadProject]);
+  }, [loadProject, importMedia, sourceBoardIdRef]);
+}
+
+function LocalApp() {
+  useEffect(() => installSharePreparation(async () => {
+    const sourceId = new URLSearchParams(location.search).get('sceneListId');
+    if (!sourceId) throw new Error('Save this video to your projects before sharing.');
+    await autoSaveManager.prepareSharing();
+    return { kind: 'video', sourceId };
+  }), []);
+  const { activeModal, closeModal } = useUIStore();
+  const { openModal: openSearchModal } = useUIStore();
+
+  // Landing in the editor IS landing on voidspace.ai — kick the silent, one-time
+  // background download of the on-device Whisper model (teleprompter auto-scroll)
+  // during idle. Idempotent + shares the site-wide browser cache, so if another
+  // page already fetched it this is a no-op; it never re-downloads.
+  useEffect(() => {
+    ensureWhisperModel();
+  }, []);
+  const createNewProject = useProjectStore((state) => state.createNewProject);
+  const loadProject = useProjectStore((state) => state.loadProject);
+  const importMedia = useProjectStore((state) => state.importMedia);
+  const addClipToNewTrack = useProjectStore((state) => state.addClipToNewTrack);
+  const forceSave = useProjectStore((state) => state.forceSave);
+
+  // Auto-clean projects saved by OLDER builds that left DUPLICATE caption tracks
+  // ("Captions" x2 / "Text N") with stacked clips: collapse every caption onto
+  // the one canonical track-captions and drop the now-empty duplicate tracks.
+  // Idempotent — no-ops once the project is clean — so it's safe to run on each
+  // project change (load + live ticks).
+  const projectModifiedAt = useProjectStore((s) => s.project.modifiedAt);
+  useEffect(() => {
+    const titleEngine = useEngineStore.getState().getTitleEngine();
+    if (!titleEngine) return;
+    const tracks = useProjectStore.getState().project.timeline.tracks;
+    const captionTrackIds = new Set(
+      tracks
+        .filter(
+          (t) =>
+            t.type === "text" && (t.id === "track-captions" || t.name === "Captions"),
+        )
+        .map((t) => t.id),
+    );
+    if (captionTrackIds.size === 0) return;
+    const consolidated = consolidateCaptionTextClips(
+      titleEngine.getAllTextClips(),
+      captionTrackIds,
+    );
+    if (!consolidated) return; // already clean
+    titleEngine.loadTextClips(consolidated.clips);
+    const usedTrackIds = new Set(consolidated.clips.map((c) => c.trackId));
+    useProjectStore.setState((s) => {
+      const cleanedTracks = s.project.timeline.tracks.filter(
+        (t) =>
+          // Drop a TEXT track that HELD a caption and is now empty (the legacy
+          // duplicate "Captions" + mis-named "Text N" tracks). Keep the
+          // canonical track-captions and any track still holding clips.
+          !(
+            t.type === "text" &&
+            t.id !== "track-captions" &&
+            consolidated.captionSourceTrackIds.has(t.id) &&
+            !usedTrackIds.has(t.id)
+          ),
+      );
+      return {
+        project: {
+          ...s.project,
+          timeline: { ...s.project.timeline, tracks: cleanedTracks },
+          modifiedAt: Date.now(),
+        },
+      };
+    });
+  }, [projectModifiedAt]);
+
+  /**
+   * The storyboard this project was compiled from, if any.
+   *
+   * A ref, not state: nothing on screen here depends on it. It exists so
+   * `get-state` can answer "where did this film come from?", which is what lets
+   * the host page offer a way back without searching every board for one that
+   * claims this project.
+   */
+  const sourceBoardIdRef = useRef<string>("");
+
+  const [voidspaceLoading, setVoidspaceLoading] = useState(() => {
+    const sp = new URLSearchParams(window.location.search);
+    return sp.has("sceneListId") || sp.has("import");
+  });
+  const [voidspaceError, setVoidspaceError] = useState<string | null>(null);
+  const hasHandledImport = useRef(false);
+
+  const { route, params, navigate, parsedDimensions, fps } = useRouter();
+  const hasHandledInitialRoute = useRef(false);
+  const hasHandledVoidspace = useRef(false);
+
+  // ── Voidspace auto-load: detect sceneListId in parent URL search params ──
+  useEffect(() => {
+    if (hasHandledVoidspace.current) return;
+
+    const searchParams = new URLSearchParams(window.location.search);
+    const sceneListId = searchParams.get("sceneListId");
+
+    if (!sceneListId) return;
+
+    hasHandledVoidspace.current = true;
+    setVoidspaceLoading(true);
+
+    (async () => {
+      // Marker flipped on once we've successfully restored a project
+      // from IndexedDB. The Firestore subscription below uses it to
+      // pick its merge strategy (additive vs wholesale-replace).
+      let recoveredFromLocal = false;
+      // When the live subscription is installed, the loading spinner must
+      // stay up until the FIRST project tick actually lands (that tick can
+      // take seconds while scene media resolves). The `finally` below then
+      // skips its early clear — previously the spinner vanished the moment
+      // the subscription was merely INSTALLED, leaving a blank timeline
+      // with no loading indication for the whole resolve.
+      let spinnerClearedByFirstTick = false;
+      try {
+        const userId = await waitForAuth(10000);
+        if (!userId) {
+          console.error("[Voidspace] No authenticated user");
+          setVoidspaceError("Not signed in. Please sign in and try again.");
+          setVoidspaceLoading(false);
+          return;
+        }
+
+        // Refresh scene list metadata first so we can scope local cache by avatar.
+        try {
+          await fetchSceneListContext(userId, sceneListId);
+        } catch (contextErr) {
+          console.warn("[Voidspace] Failed to preload scene list context:", contextErr);
+        }
+
+        const avatarId = useVoidspaceStore.getState().sceneList?.avatarId;
+
+        // Check for a locally saved copy first (edited in Studio previously).
+        // New key is scoped by user + avatar + sceneList to avoid cross-avatar collisions.
+        const localProjectId = buildVoidspaceProjectId(userId, sceneListId, avatarId);
+        const userScopedLegacyProjectId = buildUserScopedVoidspaceProjectId(userId, sceneListId);
+        const legacyLocalProjectId = buildLegacyVoidspaceProjectId(sceneListId);
+        await autoSaveManager.initialize();
+
+        // Voidspace remote sync. Every time IndexedDB save succeeds,
+        // postMessage the same Project blob to the parent so it can
+        // mirror to Firestore. The parent owns the auth + endpoint
+        // call; we just hand over the bytes. If no parent listens
+        // (running standalone), the postMessage is a no-op — the
+        // local IndexedDB save is the durable copy.
+        // Latch that flips ON the first time we see a non-empty project
+        // for this scene list. Once flipped, we refuse to write an empty
+        // project to the remote blob — that's the path that historically
+        // wiped users' data: an early autosave (before per-scene rebuild
+        // populated) or a wholesale loadProject of an empty project state
+        // would race ahead of the rebuild and persist the empty state,
+        // permanently masking the per-scene Firestore docs from the
+        // loader (which prefers the blob). The latch is per-iframe and
+        // resets on reload — by which time the loader's empty-blob
+        // safety net has rebuilt from per-scene anyway.
+        let sawNonEmptyProject = false;
+        autoSaveManager.setRemoteSync(async (project, historyData) => {
+          // Round-trip via requestId so the parent can ack/error.
+          // Skip when there's no parent (running detached) — sending
+          // to ourselves would silently never resolve.
+          if (window.parent === window) return;
+          // Empty-write firewall. See `sawNonEmptyProject` comment above.
+          const tracksCount = project.timeline?.tracks?.length ?? 0;
+          const totalClips = (project.timeline?.tracks ?? []).reduce(
+            (n: number, t: any) => n + ((t?.clips?.length) ?? 0), 0,
+          );
+          const mediaCount = project.mediaLibrary?.items?.length ?? 0;
+          const textClipsCount = (project as any).textClips?.length ?? 0;
+          const isEmpty = tracksCount === 0 && totalClips === 0 && mediaCount === 0 && textClipsCount === 0;
+          if (!isEmpty) {
+            sawNonEmptyProject = true;
+          } else if (sawNonEmptyProject) {
+            console.warn(
+              "[Voidspace] BLOCKED remote sync of empty project — would have wiped non-empty server state. Use the snapshot panel to recover, or manually save once a non-empty state is restored.",
+            );
+            return;
+          }
+          const requestId = `sync_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+          const ack = new Promise<{ ok: boolean; error?: string }>((resolve) => {
+            const onMsg = (e: MessageEvent) => {
+              if (e.data?.type === "voidspace:save-project:ack" && e.data.requestId === requestId) {
+                window.removeEventListener("message", onMsg);
+                resolve({ ok: !!e.data.ok, error: e.data.error });
+              }
+            };
+            window.addEventListener("message", onMsg);
+            // 15s ceiling — Firestore writes complete in well under
+            // a second; anything longer means the parent is gone and
+            // we should let the next save try fresh instead of
+            // hanging the inflight queue.
+            setTimeout(() => {
+              window.removeEventListener("message", onMsg);
+              resolve({ ok: false, error: "timeout" });
+            }, 15000);
+          });
+          // NO SIZE GUARD — and that is the point.
+          //
+          // This used to trim (and then drop) the user's undo history whenever
+          // project + history approached 830 KB, because the parent's
+          // timeline-state endpoint returned 413 above 900 KB. That cap existed
+          // only because the blob was stored in a FIRESTORE DOCUMENT FIELD,
+          // which is capped at ~1 MiB. It cost real work: a survey of 311
+          // projects found six already past the threshold, their histories cut
+          // to 0.1–4.7 KB against 500–856 KB timelines — undo, redo and
+          // chat-message rollback silently dead on exactly the big projects
+          // where they matter most.
+          //
+          // The blob now goes to Cloud Storage (see the website's
+          // `project-state-store.ts`), which has no such ceiling, so the full
+          // history is sent every time. The server keeps a 40 MB sanity bound
+          // for genuinely pathological payloads; nothing legitimate approaches
+          // it, and a project that did should surface as an error rather than
+          // as quietly amputated undo state.
+          const historyPayload: string | null = historyData;
+          window.parent.postMessage({
+            type: "voidspace:save-project",
+            requestId,
+            sceneListId,
+            project,
+            history: historyPayload,
+          }, "*");
+          const r = await ack;
+          if (!r.ok) {
+            throw new Error(`remote sync failed: ${r.error || "unknown"}`);
+          }
+          // Saving timeline metadata is NOT consent to upload source media.
+          // Local footage stays on this device, even after a successful sync.
+          // Cross-device playback requires an explicit, separately confirmed
+          // media upload; it must never be a background consequence of autosave.
+        });
+        // Capture ActionHistory state on every save so undo/redo +
+        // chat-message snapshots survive page reload via the blob.
+        // Without this, restoreSnapshot would silently no-op (the
+        // post-reload undoStack is empty, and restore expects to
+        // walk back to a stackIndex from the prior session).
+        autoSaveManager.setHistoryProvider(() => {
+          try {
+            const h = useProjectStore.getState().actionHistory as any;
+            if (h && typeof h.serialize === "function") {
+              return JSON.stringify(h.serialize());
+            }
+          } catch (e) {
+            console.warn("[Voidspace] history serialize failed:", e);
+          }
+          return null;
+        });
+
+        const saveCandidates = (
+          await Promise.all([
+            autoSaveManager.getMostRecentSave(localProjectId),
+            autoSaveManager.getMostRecentSave(userScopedLegacyProjectId),
+            autoSaveManager.getMostRecentSave(legacyLocalProjectId),
+          ])
+        ).filter((s): s is NonNullable<typeof s> => Boolean(s));
+
+        const localSave = saveCandidates
+          .sort((a, b) => b.timestamp - a.timestamp)[0] || null;
+
+        if (localSave) {
+          console.log(`[Voidspace] Found local copy for ${sceneListId}, recovering...`);
+          const recovered = await useProjectStore.getState().recoverFromAutoSave(localSave.id);
+          if (recovered) {
+            // Strip *broken* legacy caption TextClips from older saves
+            // (transform.position {x:0,y:0} → ghost-rendered at the
+            // canvas top-left corner). Voidspace now emits caption
+            // TextClips with a proper bottom-center transform, so we
+            // keep those and only filter out the stale corner ones.
+            // Also drop `timeline.subtitles` left over from when
+            // captions were drawn via the subtitle-canvas-renderer —
+            // those are no longer used and would double-render on top
+            // of the new TextClips if anything started honoring them.
+            // Recovered IndexedDB saves can carry legacy '-fallback' media
+            // ids whose blobs COLLIDE across projects in IndexedDB (scene
+            // numbers repeat in every automation project) — the "wrong
+            // video plays in every project" corruption. Re-key them before
+            // anything hydrates blobs by id.
+            try {
+              const { migrateLegacyFallbackMediaIds } = await import("./services/voidspace-loader");
+              const beforeMig = useProjectStore.getState().project;
+              const migrated = migrateLegacyFallbackMediaIds(beforeMig);
+              if (migrated !== beforeMig) {
+                useProjectStore.setState({ project: migrated });
+              }
+            } catch (e) {
+              console.warn("[Voidspace] media-id migration on recovery failed:", e);
+            }
+            /**
+             * AND THE SAME TREATMENT FOR A GRAPHIC OVERLAY'S BLEND.
+             *
+             * The loader heals this too, but healing it THERE is not enough and
+             * the reason is this branch: a local copy is recovered FIRST, and
+             * the Firestore load that follows is additive-only — so the healed
+             * clip loses to the IndexedDB one that has been here all along
+             * ("merged: no-op (already up-to-date)"). The user's symptom was
+             * exact: a lower third that stayed black over the shot until they
+             * opened the inspector and set `screen` by hand, and re-sending the
+             * board never fixed it.
+             *
+             * Undefined only, never an explicit value — see `healGraphicBlend`.
+             */
+            try {
+              const { healGraphicBlends } = await import("./services/voidspace-loader");
+              const beforeBlend = useProjectStore.getState().project;
+              const blended = healGraphicBlends(beforeBlend);
+              if (blended !== beforeBlend) {
+                useProjectStore.setState({ project: blended });
+              }
+            } catch (e) {
+              console.warn("[Voidspace] graphic-blend heal on recovery failed:", e);
+            }
+            const titleEngine = useEngineStore.getState().getTitleEngine();
+            try {
+              const cur = useProjectStore.getState().project;
+              const isBrokenCaption = (tc: import("@openreel/core").TextClip) =>
+                tc.trackId === "track-captions" &&
+                (tc.transform?.position?.y ?? 0) < 0.1;
+              const cleanTextClips = (cur.textClips ?? []).filter(
+                (tc) => !isBrokenCaption(tc),
+              );
+              const hadStaleSubtitles = (cur.timeline.subtitles ?? []).length > 0;
+              if (
+                cleanTextClips.length !== (cur.textClips?.length ?? 0) ||
+                hadStaleSubtitles
+              ) {
+                useProjectStore.setState({
+                  project: {
+                    ...cur,
+                    timeline: { ...cur.timeline, subtitles: [] },
+                    textClips: cleanTextClips,
+                  },
+                });
+              }
+              if (titleEngine) {
+                titleEngine.loadTextClips(cleanTextClips);
+              }
+            } catch {
+              /* best-effort scrub */
+            }
+
+            // Belt-and-suspenders blob: scrub. Old autosaves written
+            // before the dedicated sanitizer in auto-save.ts was added
+            // can still carry stale `blob:http://localhost:.../<uuid>`
+            // references that produce `net::ERR_FILE_NOT_FOUND` at
+            // render time. Strip them here so the renderer's hydration
+            // path picks up `originalUrl` instead, which is what the
+            // user observes as "works after refresh."
+            try {
+              const cur = useProjectStore.getState().project;
+              const isDeadBlob = (v: unknown): v is string =>
+                typeof v === "string" && v.startsWith("blob:");
+              let mutated = false;
+              const cleanedItems = cur.mediaLibrary.items.map((item) => {
+                const dirtyThumb = isDeadBlob(item.thumbnailUrl);
+                const dirtyFilmstrip = Array.isArray(item.filmstripThumbnails)
+                  && item.filmstripThumbnails.some(
+                    (f: any) => isDeadBlob(f?.url),
+                  );
+                if (!dirtyThumb && !dirtyFilmstrip) return item;
+                mutated = true;
+                return {
+                  ...item,
+                  thumbnailUrl: dirtyThumb
+                    ? item.originalUrl ?? null
+                    : item.thumbnailUrl,
+                  filmstripThumbnails: dirtyFilmstrip
+                    ? undefined
+                    : item.filmstripThumbnails,
+                };
+              });
+              if (mutated) {
+                useProjectStore.setState({
+                  project: {
+                    ...cur,
+                    mediaLibrary: { ...cur.mediaLibrary, items: cleanedItems },
+                  },
+                });
+                console.log(
+                  "[Voidspace] Stripped stale blob: URLs from recovered project; renderer will hydrate from originalUrl.",
+                );
+              }
+            } catch {
+              /* best-effort scrub */
+            }
+
+            const recoveredProject = useProjectStore.getState().project;
+            const recoveredMusicTrack = recoveredProject.timeline.tracks.find(
+              (track) => track.id === "track-music",
+            );
+            const recoveredLooksStale =
+              Boolean(recoveredMusicTrack) &&
+              recoveredMusicTrack!.clips.length > 0 &&
+              recoveredMusicTrack!.clips.every(
+                (clip) => Math.abs(clip.inPoint ?? 0) < 0.0001,
+              );
+
+            // Two reasons to immediately re-fetch from Firestore here:
+            //   1. The recovered music track has no per-scene offsets
+            //      (legacy save predates the timing rewrite).
+            //   2. ANY recovered media item is missing a blob — which
+            //      is the common case after JSON-roundtrip recovery and
+            //      causes the renderer to spend its first ~250ms (until
+            //      the live-subscription tick) trying to play
+            //      blob:/originalUrl pointers that may be dead. The
+            //      live subscription will catch this eventually but
+            //      "wait until then" is what the user observes as
+            //      "doesn't work until I refresh."
+            const recoveredHasMissingBlobs =
+              recoveredProject.mediaLibrary.items.some(
+                (m) => !(m.blob instanceof Blob) && Boolean(m.originalUrl),
+              );
+            if (recoveredLooksStale || recoveredHasMissingBlobs) {
+              try {
+                const refreshedProject = await loadSceneListAsProject(userId, sceneListId);
+                const refreshedMusicTrack = refreshedProject.timeline.tracks.find(
+                  (track) => track.id === "track-music",
+                );
+                const refreshedHasOffsets =
+                  Boolean(refreshedMusicTrack) &&
+                  refreshedMusicTrack!.clips.some(
+                    (clip) => (clip.inPoint ?? 0) > 0.0001,
+                  );
+
+                if (recoveredLooksStale && refreshedHasOffsets) {
+                  // Full replace — music timing was the issue, take
+                  // the freshly-built project as the new baseline.
+                  loadProject(refreshedProject);
+                  await forceSave();
+                  console.log(
+                    "[Voidspace] Replaced stale local cache with refreshed scene timing.",
+                  );
+                } else if (recoveredHasMissingBlobs) {
+                  // Surgical upgrade — preserve the user's recovered
+                  // edits (selection, transforms, etc.) but overlay
+                  // each item's freshly-fetched blob/originalUrl so
+                  // the renderer can paint immediately. Mirrors the
+                  // additive-merge upgrade path the live subscription
+                  // runs, just executed eagerly here.
+                  const cur = useProjectStore.getState().project;
+                  const freshById = new Map(
+                    refreshedProject.mediaLibrary.items.map((m) => [m.id, m]),
+                  );
+                  const upgraded = cur.mediaLibrary.items.map((existing) => {
+                    const fresh = freshById.get(existing.id);
+                    if (!fresh) return existing;
+                    const existingHasBlob = existing.blob instanceof Blob;
+                    const freshHasBlob = fresh.blob instanceof Blob;
+                    if (existingHasBlob || !freshHasBlob) {
+                      // Fresh-only fields that don't depend on blob.
+                      return {
+                        ...existing,
+                        originalUrl: fresh.originalUrl ?? existing.originalUrl,
+                      };
+                    }
+                    return {
+                      ...existing,
+                      blob: fresh.blob,
+                      originalUrl: fresh.originalUrl ?? existing.originalUrl,
+                      thumbnailUrl: existing.thumbnailUrl ?? fresh.thumbnailUrl,
+                      metadata: existing.metadata ?? fresh.metadata,
+                    };
+                  });
+                  useProjectStore.setState({
+                    project: {
+                      ...cur,
+                      mediaLibrary: { ...cur.mediaLibrary, items: upgraded },
+                    },
+                  });
+                  console.log(
+                    `[Voidspace] Eager-hydrated ${upgraded.filter((m) => m.blob instanceof Blob).length}/${upgraded.length} media blobs after recovery.`,
+                  );
+                }
+              } catch (refreshErr) {
+                console.warn("[Voidspace] Failed to refresh stale local cache:", refreshErr);
+              }
+            }
+
+            if (
+              localSave.projectId === legacyLocalProjectId ||
+              localSave.projectId === userScopedLegacyProjectId
+            ) {
+              const currentProject = useProjectStore.getState().project;
+              if (
+                currentProject.id === legacyLocalProjectId ||
+                currentProject.id === userScopedLegacyProjectId
+              ) {
+                loadProject({
+                  ...currentProject,
+                  id: localProjectId,
+                  modifiedAt: Date.now(),
+                });
+                await forceSave();
+                console.log(
+                  `[Voidspace] Migrated local project id to scoped key: ${localProjectId}`,
+                );
+              }
+            }
+            try {
+              await fetchSceneListContext(userId, sceneListId);
+            } catch (contextErr) {
+              console.warn("[Voidspace] Failed to refresh scene list context:", contextErr);
+            }
+
+            // Force the canvas dimensions to honor the iframe URL's
+            // `aspect=` param even when recovery loaded settings from
+            // a stale local save. The studio-ai page mints the iframe
+            // with the user's CURRENT aspect choice; recovered settings
+            // come from whatever the project was when autosave last
+            // fired. Without this override, the editor reverts to its
+            // own default (1920x1080) on every reopen of a 9:16 / 1:1
+            // project. The additive-merge path below preserves user
+            // edits but doesn't touch `settings`, so we patch it here
+            // once at recovery time.
+            try {
+              const sp = new URLSearchParams(window.location.search);
+              const urlAspect = sp.get("aspect");
+              const ASPECT_DIMS: Record<string, { width: number; height: number }> = {
+                "16:9": { width: 1920, height: 1080 },
+                "9:16": { width: 1080, height: 1920 },
+                "1:1":  { width: 1080, height: 1080 },
+                "4:3":  { width: 1440, height: 1080 },
+                "3:4":  { width: 1080, height: 1440 },
+                "21:9": { width: 2560, height: 1080 },
+              };
+              const dim = urlAspect ? ASPECT_DIMS[urlAspect] : null;
+              if (dim) {
+                const cur = useProjectStore.getState().project;
+                const drift =
+                  (cur.settings?.width ?? 0) !== dim.width ||
+                  (cur.settings?.height ?? 0) !== dim.height;
+                if (drift) {
+                  useProjectStore.setState({
+                    project: {
+                      ...cur,
+                      settings: {
+                        ...cur.settings,
+                        width: dim.width,
+                        height: dim.height,
+                      },
+                    },
+                  });
+                  console.log(
+                    `[Voidspace] Aspect override from URL: ${urlAspect} → ${dim.width}x${dim.height} (was ${cur.settings?.width}x${cur.settings?.height})`,
+                  );
+                }
+              }
+            } catch (aspectErr) {
+              console.warn("[Voidspace] Aspect override failed:", aspectErr);
+            }
+
+            navigate("editor");
+            console.log(`[Voidspace] Restored local project: ${localSave.projectName}`);
+            setVoidspaceLoading(false);
+            // Re-attach recording / imported-media blobs after local recovery
+            // too (autosave nulls blobs on JSON round-trip).
+            void hydrateLibraryMediaBlobs();
+            // ⚠️  DO NOT return — fall through and install the live
+            // Firestore subscription below in additive-only mode. The
+            // chat keeps writing assets to Firestore after this iframe
+            // mounts; without a subscription the editor would freeze on
+            // the IndexedDB snapshot and new clips would never land,
+            // which is exactly what produced the "Timeline is empty"
+            // export error. `recoveredFromLocal` flips the snapshot
+            // callback into additive-merge mode so the recovered project
+            // (and any user edits already in flight) survive the merge.
+            recoveredFromLocal = true;
+          } else {
+            console.warn("[Voidspace] Local recovery failed, falling back to Firestore import");
+          }
+        }
+
+        // Always install the Firestore live subscription. Studio chat
+        // upserts assets one-by-one as the user approves each step
+        // (frame → voiceover → clip → render); without the subscription
+        // the editor would only see the snapshot at mount time, so the
+        // timeline would never refresh and users would have to reload
+        // to see the next clip land. The subscription coalesces bursts
+        // and re-runs `loadSceneListAsProject` on every Firestore write
+        // so tracks fill in real time.
+        //
+        //   - On a clean mount: `firstLoad=true` → first snapshot wins,
+        //     subsequent ticks merge or replace based on user edits.
+        //   - After a local-save recovery: `firstLoad=false` from the
+        //     start so the recovered project is the baseline; every
+        //     snapshot tick goes through the additive merge path below.
+        console.log(
+          `[Voidspace] Loading scene list: ${sceneListId} (live${recoveredFromLocal ? ", post-recovery additive" : ""})`,
+        );
+        let firstLoad = !recoveredFromLocal;
+        let tickCount = 0;
+        // A local recovery already painted tracks — the spinner can drop at
+        // install time (the finally). Otherwise the first tick clears it.
+        spinnerClearedByFirstTick = !recoveredFromLocal;
+        if (spinnerClearedByFirstTick) {
+          // Safety net: never wedge the spinner if the first tick never
+          // fires (Firestore outage / permission error only in console).
+          setTimeout(() => setVoidspaceLoading(false), 45000);
+        }
+        const unsubscribe = subscribeSceneListAsProject(
+          userId,
+          sceneListId,
+          (project) => {
+            tickCount++;
+            // Always-on summary so chat → editor coupling is observable
+            // from the DevTools console without needing to attach to
+            // each Firestore listener manually. Format mirrors the
+            // merge-result line below so a "tick fired but no merge"
+            // case is visually distinct.
+            console.log(
+              `[Voidspace tick #${tickCount}] fresh: ${project.mediaLibrary.items.length} media, ${(project.textClips ?? []).length} captions, ${project.timeline.tracks.reduce((n, t) => n + t.clips.length, 0)} clips`,
+            );
+            if (firstLoad) {
+              firstLoad = false;
+              // Peel the persisted ActionHistory blob off the project
+              // before loadProject (which mints a fresh history). We
+              // re-hydrate it onto the just-installed history below.
+              // Without this, undo/redo + named snapshots from the
+              // prior session are silently lost on every reload —
+              // breaking chat-message rollback (the snapshot's
+              // stackIndex is for the OLD history, the new one is
+              // empty, and restoreSnapshot quietly no-ops).
+              const persistedHistory = (project as any).__historyData as string | undefined;
+              if ((project as any).__historyData) delete (project as any).__historyData;
+              /**
+               * WHICH STORYBOARD THIS FILM CAME FROM.
+               *
+               * Peeled off exactly like the history above, and for the same
+               * reason: `Project` is openreel's own type and Voidspace
+               * provenance does not belong in it. Kept in a module ref rather
+               * than state because nothing re-renders on it — it is answered
+               * on demand through `get-state`, so the host page can offer a way
+               * back to the board without having to look one up.
+               */
+              const boardId = (project as any).__sourceBoardId as string | undefined;
+              if ((project as any).__sourceBoardId) delete (project as any).__sourceBoardId;
+              if (boardId) sourceBoardIdRef.current = boardId;
+              loadProject(project);
+              if (persistedHistory) {
+                try {
+                  const h = useProjectStore.getState().actionHistory as any;
+                  if (h && typeof h.restore === "function") {
+                    h.restore(JSON.parse(persistedHistory));
+                    console.log(`[Voidspace] Restored ActionHistory (${persistedHistory.length}b)`);
+                  }
+                } catch (e) {
+                  console.warn("[Voidspace] history restore failed, starting fresh:", e);
+                }
+              }
+              navigate("editor");
+              // The project is actually on screen now — drop the spinner
+              // (deferred from the finally for the subscription path).
+              setVoidspaceLoading(false);
+              console.log(
+                `[Voidspace] Loaded project: ${project.name} (${project.mediaLibrary.items.length} media items)`,
+              );
+              // Re-attach recording / imported-media blobs (library items
+              // carry only metadata + originalUrl after a JSON round-trip).
+              void hydrateLibraryMediaBlobs();
+              return;
+            }
+            // Subsequent live update — single path: additive merge.
+            // The previous wholesale-replace branch (when canUndo()
+            // was false AND no recovery) raced against any user
+            // mid-edit and against the chat's `pingEditor` which also
+            // reloaded. One code path here means the editor's
+            // behaviour for chat-driven assets is deterministic:
+            // append what's new, upgrade what's blob-less, never
+            // wipe what already exists. User-edit preservation comes
+            // for free because we never overwrite existing items.
+            const result = applyAdditiveMerge(project);
+            if (result.dirty) {
+              console.log(
+                `[Voidspace tick #${tickCount}] merged: +${result.newMedia} media, ↑${result.upgraded} hydrated, +${result.newCaptions} captions, +${result.newClips} clips`,
+              );
+              // New library media arrived via the live subscription (e.g. a
+              // recording whose project_state landed after the initial load)
+              // carries originalUrl but no blob. Re-attach blobs from
+              // IndexedDB/disk so it isn't a broken, contentless asset card.
+              if (result.newMedia > 0) void hydrateLibraryMediaBlobs();
+            } else {
+              // Quiet no-op — useful to confirm the subscription is
+              // actually firing even when nothing changed.
+              console.log(`[Voidspace tick #${tickCount}] merged: no-op (already up-to-date)`);
+            }
+          },
+          (err) => {
+            console.warn("[Voidspace] Live subscription error:", err);
+          },
+        );
+        // Tear down the subscription when the iframe unloads. Only
+        // attached to the outer cleanup path, not the early returns,
+        // because each early return already exits without registering.
+        if (typeof window !== "undefined") {
+          window.addEventListener("beforeunload", unsubscribe, { once: true });
+        }
+
+        // Save-on-leave. Autosave runs on a 30s interval + 2s debounce, so
+        // edits made in the last couple of seconds before the user closes
+        // the tab (or switches away on mobile) were lost remotely — they
+        // survived only in this device's IndexedDB. `visibilitychange →
+        // hidden` is the RELIABLE hook: it fires while the page is still
+        // alive (tab switch, app background), so the postMessage→parent→
+        // Firestore round-trip completes. `pagehide` is the best-effort
+        // last-gasp on actual close. We only flush when genuinely dirty so
+        // a tab switch doesn't write to Firestore needlessly.
+        if (typeof document !== "undefined") {
+          const flushOnLeave = () => {
+            try {
+              if (!autoSaveManager.hasUnsavedChanges) return;
+              const proj = useProjectStore.getState().project;
+              if (proj) void autoSaveManager.forceSave(proj);
+            } catch {
+              /* best-effort — never block unload */
+            }
+          };
+          const onVisibility = () => {
+            if (document.visibilityState === "hidden") flushOnLeave();
+          };
+          document.addEventListener("visibilitychange", onVisibility);
+          window.addEventListener("pagehide", flushOnLeave);
+          // Fold the listener teardown into the same beforeunload cleanup.
+          window.addEventListener(
+            "beforeunload",
+            () => {
+              document.removeEventListener("visibilitychange", onVisibility);
+              window.removeEventListener("pagehide", flushOnLeave);
+            },
+            { once: true },
+          );
+        }
+      } catch (err) {
+        console.error("[Voidspace] Failed to load scene list:", err);
+        setVoidspaceError(
+          err instanceof Error ? err.message : "Failed to load project",
+        );
+        setVoidspaceLoading(false);
+      } finally {
+        // Subscription path: the first tick (or the 45s safety net) clears
+        // the spinner once tracks are actually visible — not install time.
+        if (!spinnerClearedByFirstTick) setVoidspaceLoading(false);
+      }
+    })();
+  }, [forceSave, loadProject, navigate]);
+
+  useKieAIPoller();
+
+  // ── Theme sync with the Voidspace site ──
+  //
+  // The site's light/dark toggle is the single source of truth — the editor's
+  // own Sun/Moon control was removed. Three channels, in order of authority:
+  //   1. ?theme=light|dark — an embedding host stating it outright
+  //   2. the site's saved preference in localStorage (SAME ORIGIN as /studio/)
+  //   3. window.postMessage({type:'voidspace:theme', mode}) on later changes
+  //
+  // (2) is what makes the LANDING pages behave. "Create a video project" opens
+  // /studio/?forceWelcome=1 as a top-level navigation — no host, no message, no
+  // ?theme — so the welcome screen used to render dark on a light site. It
+  // never needed a message: the preference is readable right there.
+  useEffect(() => {
+    const applyMode = (mode: string | null | undefined) => {
+      if (mode !== "light" && mode !== "dark" && mode !== "system") return;
+      try {
+        // Lazy-import to keep the theme store out of the boot critical
+        // path; the app already mounts ThemeProvider elsewhere.
+        import("./stores/theme-store").then(({ useThemeStore }) => {
+          useThemeStore.getState().setMode(mode as any);
+        }).catch(() => { /* ignore */ });
+      } catch { /* ignore */ }
+    };
+    let stopWatching = () => {};
+    try {
+      const params = new URLSearchParams(window.location.search);
+      applyMode(resolveBootTheme(params.get("theme")));
+      // Follow the site if the user flips the toggle in another tab.
+      stopWatching = watchSiteTheme(applyMode);
+    } catch { /* ignore */ }
+    const onMessage = (e: MessageEvent) => {
+      const msg: any = e?.data;
+      if (!msg || msg.type !== "voidspace:theme") return;
+      applyMode(msg.mode);
+    };
+    window.addEventListener("message", onMessage);
+    return () => {
+      window.removeEventListener("message", onMessage);
+      stopWatching();
+    };
+  }, []);
+
+  // ── Editor surface mode (mode=music boots the audio-first skin) ──
+  //
+  // Read once on mount from the same query the host freezes into the
+  // iframe src (/studio/index.html?...&mode=music). The project model is
+  // identical in both modes — a music project and a video project are
+  // one cross-compatible Project — so this only flips the editor's
+  // layout/emphasis: in music mode we promote the audio mixer to a
+  // first-class surface. Not persisted (see ui-store).
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const ui = useUIStore.getState();
+      if (params.get("mode") === "music") {
+        ui.setAppMode("music");
+        // Show the audio mixer in the centre column instead of the video
+        // player — the video canvas is not what a music project is about.
+        //
+        // But do NOT collapse the preview row to do it. That is what this used
+        // to do, reasoning that "the timeline owns the screen"; collapsing sets
+        // timelineHeight to `innerHeight - MIN_CHROME_ABOVE_TIMELINE` (see
+        // EditorInterface), which squeezes the mixer, the assets panel and the
+        // inspector into a strip and hands the rest of the window to an EMPTY
+        // timeline. The editor opened looking broken — everything crushed
+        // against the top edge, acres of nothing below.
+        //
+        // A music project opens with something to look at instead: mixer at a
+        // usable height, assets and inspector at full size, timeline at its
+        // normal 320. Minimising is still one click away on the grip for anyone
+        // who does want the timeline full-height.
+        ui.setPreviewCollapsed(false);
+        ui.setCenterView("mixer");
+      } else {
+        ui.setAppMode("video");
+        ui.setPreviewCollapsed(false);
+        ui.setCenterView("preview");
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  // ── Voidspace chat ↔ editor RPC bridge (postMessage) ──
+  //
+  // The chat parent window can read and minimally control the editor
+  // through window.postMessage. This is the only programmatic surface
+  // the studio agent has for inspecting timeline state ("what's on the
+  // narration track?") and triggering a reload after a Firestore write
+  // it knows the live subscription will eventually catch up to (kept
+  // for redundancy).
+  //
+  // Inbound message shapes (from chat parent):
+  //   { type: 'voidspace:get-state',  requestId }
+  //   { type: 'voidspace:reload',     requestId? }
+  //   { type: 'voidspace:play',       requestId? }
+  //   { type: 'voidspace:pause',      requestId? }
+  //   { type: 'voidspace:seek',       sec, requestId? }
+  //
+  // Outbound replies post back to event.source as:
+  //   { type: 'voidspace:state',      requestId, state }
+  //   { type: 'voidspace:ack',        requestId, op }
+  //   { type: 'voidspace:error',      requestId, error }
+  useVideoRpc(sourceBoardIdRef);
 
   // ── ?import=<videoUrl> auto-import: drop a remote MP4 into a fresh project ──
   useEffect(() => {

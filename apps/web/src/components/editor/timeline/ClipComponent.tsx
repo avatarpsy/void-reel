@@ -1,4 +1,5 @@
-import React, { useRef, useState, useEffect, useMemo } from "react";
+import React, { useRef, useState, useEffect, useLayoutEffect, useMemo } from "react";
+import { flushSync } from "react-dom";
 import { Image } from "lucide-react";
 import type { Clip, Track } from "@openreel/core";
 import { useProjectStore } from "../../../stores/project-store";
@@ -143,7 +144,7 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
       document.body.style.cursor = "ew-resize";
     };
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!isPendingDrag) return;
 
     const handlePendingMouseMove = (e: MouseEvent) => {
@@ -153,8 +154,9 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
 
       if (distance >= DRAG_THRESHOLD) {
         dragPendingRef.current.active = false;
-        setIsPendingDrag(false);
-        setIsDragging(true);
+        // A fast gesture can release before React's next scheduled render.
+        // Install the active drag's layout listeners in this same event.
+        flushSync(() => { setIsPendingDrag(false); setIsDragging(true); });
       }
     };
 
@@ -173,7 +175,7 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
     };
   }, [isPendingDrag, clip.id, onSelect]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!isDragging) return;
 
     let animationFrameId: number | null = null;
@@ -258,7 +260,10 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
       onSnapIndicator(snapResult.snapped && snapResult.snapPoint ? snapResult.snapPoint.time : null);
     };
 
-    const handleMouseUp = () => {
+    const handleMouseUp = (event: MouseEvent) => {
+      // The first move may only cross the drag threshold. Always commit the
+      // actual release position, even when no further move event was delivered.
+      handleMouseMove(event);
       if (animationFrameId !== null) {
         cancelAnimationFrame(animationFrameId);
       }
@@ -300,7 +305,7 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
     onSnapIndicator,
   ]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!isTrimming || !trimEdge || !onTrimClip) return;
 
     const handleMouseMove = (e: MouseEvent) => {

@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "node scripts/typecheck.mjs && vite build",
+    "build": "node ../../scripts/sync-collaboration.mjs && node scripts/typecheck.mjs && vite build",
     "preview": "vite preview",
     "test": "vitest",
     "test:run": "vitest run",

@@ -1,4 +1,6 @@
 import { useState, useRef, useEffect, useSyncExternalStore } from 'react';
+import './Toolbar.css';
+import { createPortal } from 'react-dom';
 import {
   MousePointer2,
   HelpCircle,
@@ -36,6 +38,8 @@ import {
   SquareStack,
   Send,
   Play,
+  Share2,
+  History,
 } from 'lucide-react';
 import { AllPanelsButton } from '@openreel/ui';
 import { useUIStore, Tool } from '../../../stores/ui-store';
@@ -149,6 +153,8 @@ function ToolGroupButton({
   const [isOpen, setIsOpen] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const menuRef = useRef<HTMLDivElement>(null);
+  const popupRef = useRef<HTMLDivElement>(null);
+  const [menuPosition, setMenuPosition] = useState({ left: 0, top: 0 });
 
   const isGroupActive = group.tools.some((t) => t.id === activeTool);
   const currentTool = group.tools.find((t) => t.id === activeTool) || group.tools[selectedIndex];
@@ -156,7 +162,7 @@ function ToolGroupButton({
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node) && !popupRef.current?.contains(e.target as Node)) {
         setIsOpen(false);
       }
     };
@@ -164,7 +170,9 @@ function ToolGroupButton({
     if (isOpen) {
       document.addEventListener('mousedown', handleClickOutside);
     }
-    return () => document.removeEventListener('mousedown', handleClickOutside);
+    const close = () => setIsOpen(false);
+    if (isOpen) { window.addEventListener('resize', close); window.addEventListener('scroll', close, true); }
+    return () => { document.removeEventListener('mousedown', handleClickOutside); window.removeEventListener('resize', close); window.removeEventListener('scroll', close, true); };
   }, [isOpen]);
 
   const handleToolSelect = (tool: ToolItem, index: number) => {
@@ -195,6 +203,8 @@ function ToolGroupButton({
         onClick={() => onSelectTool(currentTool.id)}
         onContextMenu={(e) => {
           e.preventDefault();
+          const rect = e.currentTarget.getBoundingClientRect();
+          setMenuPosition({ left: Math.max(8, Math.min(rect.left, window.innerWidth - 196)), top: rect.bottom + 4 });
           setIsOpen(!isOpen);
         }}
         className={`relative p-2 rounded-md transition-all group ${
@@ -212,8 +222,8 @@ function ToolGroupButton({
         />
       </button>
 
-      {isOpen && (
-        <div className="absolute left-full top-0 ml-1 z-50 py-1 bg-popover border border-border rounded-lg shadow-lg min-w-[180px]">
+      {isOpen && createPortal(
+        <div ref={popupRef} style={menuPosition} className="fixed z-50 py-1 bg-popover border border-border rounded-lg shadow-lg min-w-[180px]">
           {group.tools.map((tool, index) => {
             const ToolIcon = tool.icon;
             return (
@@ -234,13 +244,13 @@ function ToolGroupButton({
               </button>
             );
           })}
-        </div>
+        </div>, document.body
       )}
     </div>
   );
 }
 
-export function Toolbar() {
+export function Toolbar({ readOnly = false }: { readOnly?: boolean }) {
   const {
     activeTool,
     setActiveTool,
@@ -277,7 +287,7 @@ export function Toolbar() {
   };
 
   return (
-    <div className="h-12 bg-card border-b border-border flex items-center px-3 gap-2">
+    <div data-readonly={readOnly || undefined} className="image-toolbar h-12 bg-card border-b border-border flex items-center px-3 gap-2">
       {/* BACK MEANS WHERE YOU CAME FROM — the shared rule, identical in all
           three editors (@openreel/asset-browser/editor-nav). This used to go
           to the projects hub unconditionally, so arriving from the agent chat
@@ -318,13 +328,15 @@ export function Toolbar() {
           nowhere near the thing it closed. Per-panel collapse now sits on each
           panel's header (LeftPanel / EditorInterface), which is where the video
           editor and the board put it. */}
-      <AllPanelsButton anyOpen={anyPanelOpen} onToggle={toggleAllPanels} />
+      <span {...(readOnly ? { inert: '' } : {})} className={readOnly ? 'opacity-40' : ''}><AllPanelsButton anyOpen={anyPanelOpen} onToggle={toggleAllPanels} /></span>
 
       <div className="w-px h-6 bg-border mx-1" />
 
-      <div className="flex items-center">
+      <div className="image-toolbar-title flex items-center">
         <input
           type="text"
+          readOnly={readOnly}
+          aria-label="Project name"
           value={project?.name ?? 'Untitled'}
           onChange={(e) => setProjectName(e.target.value)}
           className="w-48 px-3 py-1.5 text-sm font-medium bg-transparent border border-transparent hover:border-border focus:border-primary focus:outline-none rounded-lg text-foreground"
@@ -332,9 +344,10 @@ export function Toolbar() {
         <ChevronDown size={14} className="text-muted-foreground -ml-6" />
       </div>
 
+      {new URLSearchParams(location.search).has('shared') && <span {...(!readOnly ? { 'data-collaboration-status': '' } : {})} role="status" className={`${readOnly ? 'block' : 'hidden xl:block'} max-w-32 truncate text-[10px] text-muted-foreground`}>{readOnly ? 'View only' : 'All changes saved'}</span>}
       <div className="flex-1" />
 
-      <div className="flex items-center gap-0.5 bg-secondary/50 rounded-lg p-1">
+      <div {...(readOnly ? { inert: '' } : {})} aria-disabled={readOnly || undefined} className={`image-toolbar-tools flex items-center gap-0.5 bg-secondary/50 rounded-lg p-1 ${readOnly ? 'opacity-40' : ''}`}>
         <button
           onClick={toggleShortcutsPanel}
           className="p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
@@ -358,7 +371,7 @@ export function Toolbar() {
       <div className="flex items-center gap-1">
         <button
           onClick={handleUndo}
-          disabled={!canUndo()}
+          disabled={readOnly || !canUndo()}
           className="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           title="Undo (Ctrl+Z)"
         >
@@ -366,7 +379,7 @@ export function Toolbar() {
         </button>
         <button
           onClick={handleRedo}
-          disabled={!canRedo()}
+          disabled={readOnly || !canRedo()}
           className="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           title="Redo (Ctrl+Shift+Z)"
         >
@@ -376,18 +389,19 @@ export function Toolbar() {
 
       <div className="w-px h-6 bg-border mx-1" />
 
-      <ZoomControl />
+      <div className="image-toolbar-zoom"><ZoomControl /></div>
 
       <div className="w-px h-6 bg-border mx-1" />
 
       <button
         onClick={handleSaveProject}
+        disabled={readOnly}
         className="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
         title="Download editable project (Ctrl+S)"
       >
         <Save size={18} />
       </button>
-      {cloudStatus?.state === 'error' ? (
+      {!readOnly && (cloudStatus?.state === 'error' ? (
         <button type="button"
           title={cloudStatus.message}
           aria-label={`Retry cloud backup. ${cloudStatus.message}`}
@@ -397,37 +411,56 @@ export function Toolbar() {
         </button>
       ) : cloudStatus && <span className="px-2 text-xs whitespace-nowrap text-muted-foreground" title={cloudStatus.message}>
         {cloudStatus.state === 'saving' ? 'Backing up…' : 'Cloud saved'}
-      </span>}
+      </span>)}
 
       {/* Only for a multi-page project: presenting one image is not a thing
           anybody wants, and a toolbar stays readable by not offering it. */}
       {(project?.artboards.length ?? 0) > 1 && (
         <button
           onClick={() => setPresenting(true)}
+          disabled={readOnly}
           className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
           title="Present full screen"
         >
           <Play size={16} />
-          Present
+          <span className="toolbar-action-label">Present</span>
         </button>
       )}
 
       <button
         onClick={() => setPublishCarouselOpen(true)}
+        disabled={readOnly}
         className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
         title={(project?.artboards.length ?? 0) > 1 ? 'Publish carousel' : 'Publish as a post'}
       >
         <Send size={16} />
-        Publish
+        <span className="toolbar-action-label">Publish</span>
       </button>
 
+      {new URLSearchParams(location.search).has('shared') && <button
+        disabled={readOnly}
+        onClick={() => window.parent.postMessage({ type: 'voidspace:collaboration-history-open' }, location.origin)}
+        className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-muted-foreground hover:text-foreground hover:bg-accent"
+        title="Version history" aria-label="Version history"
+      ><History size={16}/><span className="toolbar-action-label">History</span></button>}
+      {window.parent !== window && (!new URLSearchParams(location.search).has('shared') || document.documentElement.dataset.collaborationRole === 'owner') && <button
+        onClick={() => window.parent.postMessage({ type: 'voidspace:share-project' }, location.origin)}
+        className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+        title="Share project" aria-label="Share project"
+      ><Share2 size={16}/><span className="toolbar-action-label">Share</span></button>}
       <button
         onClick={openExportDialog}
+        disabled={readOnly}
+        title="Export image" aria-label="Export image"
         className="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:bg-primary/90 active:scale-[0.98] transition-all"
       >
         <Download size={16} />
-        Export
+        <span className="toolbar-action-label">Export</span>
       </button>
+      {readOnly && document.documentElement.dataset.collaborationSignedIn !== 'true' && <button
+        onClick={() => window.parent.postMessage({ type: 'voidspace:collaboration-signin' }, location.origin)}
+        className="px-3 py-2 rounded-lg border border-border text-sm text-foreground hover:bg-accent"
+      >Sign in</button>}
     </div>
   );
 }

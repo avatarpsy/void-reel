@@ -1,5 +1,6 @@
 import React, { useCallback, useState, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
+import './Toolbar.css';
 import {
   Command,
   ChevronDown,
@@ -23,11 +24,14 @@ import {
   Save,
   Minimize2,
   Maximize2,
+  Share2,
 } from "lucide-react";
 import { useProjectStore } from "../../stores/project-store";
 import { useUIStore } from "../../stores/ui-store";
 import { goBack, projectsUrl } from "@openreel/asset-browser";
 import { autoSaveManager } from "../../services/auto-save";
+import { projectManager } from "../../services/project-manager";
+import { isLocalStandalone } from "../../services/local-standalone";
 import { saveMediaToCloud } from "../../services/cloud-save";
 import {
   getExportEngine,
@@ -138,6 +142,12 @@ export const Toolbar: React.FC = () => {
   const [saveFlash, setSaveFlash] = useState(false);
   const { importMedia } = useProjectStore();
   const { track } = useAnalytics();
+  const localStandalone = isLocalStandalone();
+
+  const handleOpenLocalProject = useCallback(async () => {
+    const opened = await projectManager.openProject();
+    if (opened) useProjectStore.getState().loadProject(opened);
+  }, []);
 
   const handleSave = useCallback(async () => {
     if (isSaving) return;
@@ -150,6 +160,7 @@ export const Toolbar: React.FC = () => {
       // the parent for Firestore persistence. No more per-track
       // stripping — captions, animations, transforms, all round-trip.
       const proj = useProjectStore.getState().project;
+      if (localStandalone && !(await projectManager.saveProject(proj))) return;
       await autoSaveManager.forceSave(proj);
       console.log("[save] forceSave done");
       setSaveFlash(true);
@@ -159,7 +170,7 @@ export const Toolbar: React.FC = () => {
     } finally {
       setIsSaving(false);
     }
-  }, [isSaving]);
+  }, [isSaving, localStandalone]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -1043,8 +1054,8 @@ export const Toolbar: React.FC = () => {
   ];
 
   return (
-    <div className="h-16 border-b border-border flex items-center px-6 justify-between bg-background shrink-0 z-30 relative">
-      <div className="flex items-center gap-4">
+    <div className="video-toolbar h-16 border-b border-border flex items-center px-6 justify-between bg-background shrink-0 z-30 relative">
+      <div className="video-toolbar-nav flex items-center gap-4">
         <Tooltip>
           <TooltipTrigger asChild>
             <button
@@ -1083,9 +1094,10 @@ export const Toolbar: React.FC = () => {
           shell, so duplicating it in the editor toolbar was both
           visually noisy and confusing for users who couldn't tell
           which AI surface they were talking to. */}
+      {new URLSearchParams(location.search).has('shared') && <span data-collaboration-status role="status" className="max-w-40 truncate text-[11px] text-text-secondary">All changes saved</span>}
       <div className="flex-1" />
 
-      <div className="flex items-center gap-4">
+      <div className="video-toolbar-actions flex items-center gap-4">
         {/* The ONE panel control that belongs in a toolbar: it acts on the
             whole set, so it belongs to no single panel. Per-panel collapse
             lives on each panel's own header — same button, same place, in
@@ -1236,7 +1248,8 @@ export const Toolbar: React.FC = () => {
         <Tooltip>
           <TooltipTrigger asChild>
             <button
-              onClick={() => setIsHistoryOpen(!isHistoryOpen)}
+              onClick={() => new URLSearchParams(location.search).has('shared') ? window.parent.postMessage({ type: 'voidspace:collaboration-history-open' }, location.origin) : setIsHistoryOpen(!isHistoryOpen)}
+              aria-label="History"
               className={`p-2 rounded-lg transition-colors ${
                 isHistoryOpen
                   ? "bg-primary/20 text-primary"
@@ -1255,6 +1268,7 @@ export const Toolbar: React.FC = () => {
           <TooltipTrigger asChild>
             <button
               onClick={handleSave}
+              aria-label={saveFlash ? 'Saved' : 'Save project'}
               disabled={isSaving}
               className={`flex items-center gap-2 px-3 py-2 rounded-lg transition-colors ${
                 saveFlash
@@ -1263,22 +1277,30 @@ export const Toolbar: React.FC = () => {
               } ${isSaving ? "opacity-50 cursor-not-allowed" : ""}`}
             >
               <Save size={14} />
-              <span className="text-sm font-medium">{saveFlash ? "Saved" : "Save"}</span>
+              <span className="toolbar-action-label text-sm font-medium">{saveFlash ? "Saved" : "Save"}</span>
             </button>
           </TooltipTrigger>
           <TooltipContent>
-            <p>Save project + chat (Ctrl+S)</p>
+            <p>{localStandalone ? "Save local project (Ctrl+S)" : "Save project + chat (Ctrl+S)"}</p>
           </TooltipContent>
         </Tooltip>
+
+        {localStandalone && (
+          <button onClick={handleOpenLocalProject}
+            className="px-3 py-2 rounded-lg bg-background-secondary text-sm text-text-secondary hover:text-text-primary">
+            Open project
+          </button>
+        )}
 
         <Tooltip>
           <TooltipTrigger asChild>
             <button
               onClick={() => setIsRecorderOpen(true)}
+              aria-label="Record"
               className="flex items-center gap-2 px-3 py-2 bg-error/10 hover:bg-error/20 text-error rounded-lg transition-colors"
             >
               <Circle size={14} className="fill-current" />
-              <span className="text-sm font-medium">Record</span>
+              <span className="toolbar-action-label text-sm font-medium">Record</span>
             </button>
           </TooltipTrigger>
           <TooltipContent>
@@ -1286,7 +1308,12 @@ export const Toolbar: React.FC = () => {
           </TooltipContent>
         </Tooltip>
 
-        <div className="relative">
+        <div className="video-toolbar-output relative flex items-center gap-2">
+          {window.parent !== window && (!new URLSearchParams(location.search).has('shared') || document.documentElement.dataset.collaborationRole === 'owner') && <button
+            onClick={() => window.parent.postMessage({ type: 'voidspace:share-project' }, location.origin)}
+            aria-label="Share project" title="Share project"
+            className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-text-secondary hover:text-text-primary hover:bg-background-tertiary transition-colors"
+          ><Share2 size={16}/><span className="toolbar-action-label">Share</span></button>}
           {exportState.isExporting ? (
             <div className="h-10 px-4 bg-background-secondary border border-border rounded-lg flex items-center gap-3 min-w-[200px]">
               <Loader2 size={14} className="text-primary animate-spin" />
@@ -1353,7 +1380,7 @@ export const Toolbar: React.FC = () => {
                       className="h-10 px-4 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-bold rounded-lg flex items-center gap-2 transition-all shadow-[0_0_20px_rgba(59,130,246,0.3)] hover:shadow-[0_0_30px_rgba(59,130,246,0.5)] transform hover:-translate-y-0.5"
                     >
                       <Send size={14} />
-                      <span className="text-sm tracking-wider">PUBLISH</span>
+                      <span className="toolbar-action-label text-sm tracking-wider">PUBLISH</span>
                     </button>
                   </TooltipTrigger>
                   <TooltipContent>Publish to your social platforms</TooltipContent>
@@ -1364,9 +1391,10 @@ export const Toolbar: React.FC = () => {
                   onClick={() => setIsExportDialogOpen(true)}
                   className="h-10 px-4 bg-primary/10 border border-primary/30 hover:bg-primary/20 text-primary font-bold rounded-l-lg flex items-center gap-2 transition-all hover:-translate-y-0.5"
                   title="Open render settings"
+                  aria-label="Render video"
                 >
                   <Download size={14} />
-                  <span className="text-sm tracking-wider">RENDER</span>
+                  <span className="toolbar-action-label text-sm tracking-wider">RENDER</span>
                 </button>
               <DropdownMenu open={isExportOpen} onOpenChange={setIsExportOpen}>
                 <DropdownMenuTrigger asChild>

@@ -321,7 +321,8 @@ export function installImageRpc(): () => void {
   void import('./mutation-rpc');
   void import('./output-rpc');
 
-  const onMessage = async (e: MessageEvent) => {
+    const onMessage = async (e: MessageEvent) => {
+      if (e.origin !== location.origin || e.source !== window.parent) return;
     const msg = e?.data;
     if (!msg || typeof msg !== 'object') return;
     if (!isImageRpc(String(msg.type ?? ''))) return;

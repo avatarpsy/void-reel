@@ -1,3 +1,4 @@
+import { sharedProjectId } from '@openreel/asset-browser';
 import { useState } from 'react';
 import {
   History,
@@ -17,7 +18,7 @@ import { useHistoryStore } from '../../../stores/history-store';
 import { useProjectStore } from '../../../stores/project-store';
 import { formatDistanceToNow } from '../../../utils/time';
 
-export function HistoryPanel() {
+function LocalHistoryPanel() {
   const entries = useHistoryStore((s) => s.getEntries());
   const currentIndex = useHistoryStore((s) => s.getCurrentIndex());
   const snapshots = useHistoryStore((s) => s.getSnapshots());
@@ -272,4 +273,12 @@ export function HistoryPanel() {
       </div>
     </div>
   );
+}
+
+export function HistoryPanel() {
+  return sharedProjectId() ? <div className="p-4 space-y-3 text-xs text-text-secondary">
+    <h3 className="font-medium text-text-primary">Version history</h3>
+    <p>Changes are saved automatically with each editor?s name. Use Undo to reverse your own edits.</p>
+    <button className="w-full rounded-lg border border-border px-3 py-2 text-text-primary hover:bg-background-tertiary" onClick={() => window.parent.postMessage({ type: 'voidspace:collaboration-history-open' }, location.origin)}>Open version history</button>
+  </div> : <LocalHistoryPanel />;
 }

@@ -28,6 +28,8 @@ import { requestOpenDocument } from '../document/toolbar';
 import type { MountedBoard } from '../blocksuite/editor';
 
 const ICONS = {
+  share: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 10.5 6.8-4M8.6 13.5l6.8 4"/></svg>',
+  history: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11a9 9 0 1 1 2.8 7M3 4v7h7m2-4v5l3 2"/></svg>',
   plus: '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M8 3.5v9M3.5 8h9"/></svg>',
   fit: '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2H2v4M10 2h4v4M6 14H2v-4M10 14h4v-4"/></svg>',
   expand: '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2H14v4.5M6.5 14H2V9.5M14 2l-5 5M2 14l5-5"/></svg>',
@@ -139,6 +141,8 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
       looking for a page you cannot see. Every document tool has a list.
     -->
     <button type="button" class="vs-board-btn vs-board-icon" data-act="doc-index" title="All documents — on this board and in your library">${ICONS.list}</button>
+    ${new URLSearchParams(location.search).has('shared') ? `<button type="button" class="vs-board-btn" data-act="history" title="Version history" aria-label="Version history">${ICONS.history}<span>History</span></button><span data-collaboration-status role="status" style="font-size:11px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">All changes saved</span>` : ''}
+    ${window.parent !== window && (!new URLSearchParams(location.search).has('shared') || document.documentElement.dataset.collaborationRole === 'owner') ? `<button type="button" class="vs-board-btn" data-act="share" title="Share project" aria-label="Share project">${ICONS.share}<span>Share</span></button>` : ''}
     <!--
       NO "EXPORT BOARD" HERE ANY MORE.
 
@@ -375,6 +379,8 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
       // Only the empty state raises this now — the toolbar button is gone.
       case 'first-shot': addShot(); break;
       case 'undo': board.store.undo(); break;
+      case 'share': window.parent.postMessage({ type: 'voidspace:share-project' }, location.origin); break;
+      case 'history': window.parent.postMessage({ type: 'voidspace:collaboration-history-open' }, location.origin); break;
       case 'redo': board.store.redo(); break;
       case 'fit': fitBoard(); break;
       // The index owns itself; the bar only raises the intent, as everywhere.

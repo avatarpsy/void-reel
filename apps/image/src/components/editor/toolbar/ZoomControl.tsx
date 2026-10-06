@@ -32,8 +32,9 @@ export function ZoomControl() {
       return;
     }
 
-    const viewportWidth = window.innerWidth - 600;
-    const viewportHeight = window.innerHeight - 200;
+    const viewport = document.querySelector('[data-image-viewport]');
+    const viewportWidth = viewport?.clientWidth || window.innerWidth - 600;
+    const viewportHeight = viewport?.clientHeight || window.innerHeight - 200;
 
     if (artboard.size.width <= 0 || artboard.size.height <= 0) {
       resetView();
@@ -47,6 +48,7 @@ export function ZoomControl() {
     );
 
     setZoom(Math.max(0.1, Math.min(fitZoom * 0.9, 1)));
+    useUIStore.getState().setPan(0, 0);
   };
 
   const handleZoomToFill = () => {
@@ -57,8 +59,9 @@ export function ZoomControl() {
       return;
     }
 
-    const viewportWidth = window.innerWidth - 600;
-    const viewportHeight = window.innerHeight - 200;
+    const viewport = document.querySelector('[data-image-viewport]');
+    const viewportWidth = viewport?.clientWidth || window.innerWidth - 600;
+    const viewportHeight = viewport?.clientHeight || window.innerHeight - 200;
 
     if (artboard.size.width <= 0 || artboard.size.height <= 0) {
       resetView();

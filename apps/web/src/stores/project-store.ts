@@ -3145,43 +3145,7 @@ export const useProjectStore = create<ProjectState>()(
       initializeAutoSave: async () => {
         await initializeAutoSave();
         autoSaveManager.start(
-          () => {
-            const { project } = get();
-            const titleEngine = useEngineStore.getState().getTitleEngine();
-            const graphicsEngine = useEngineStore.getState().getGraphicsEngine();
-
-            // Video effects + color grading live in the EffectsBridge's
-            // in-memory maps, NOT on the clips — without embedding them
-            // here every agent/inspector-applied effect silently vanished
-            // on reload while the autosave "succeeded".
-            let effectsState: Record<string, unknown> | undefined;
-            try {
-              const eb = getEffectsBridge();
-              const all = eb.serializeAllEffects();
-              if (Object.keys(all).length > 0) effectsState = all;
-            } catch { /* bridge unavailable — save proceeds without */ }
-
-            // Retiming lives in the SpeedEngine's map for exactly the same
-            // reason, and losing it is worse than losing an effect: the
-            // Inspector also shortens `clip.duration`, so a reload that
-            // forgets the speed leaves a 1x clip in a window sized for 2x —
-            // the back half of the shot simply stops existing.
-            let speedState: Record<string, unknown> | undefined;
-            try {
-              const all = getSpeedEngine().serializeAll();
-              if (Object.keys(all).length > 0) speedState = all;
-            } catch { /* engine unavailable — save proceeds without */ }
-
-            return {
-              ...project,
-              textClips: titleEngine?.getAllTextClips() || [],
-              shapeClips: graphicsEngine?.getAllShapeClips() || [],
-              svgClips: graphicsEngine?.getAllSVGClips() || [],
-              stickerClips: graphicsEngine?.getAllStickerClips() || [],
-              ...(effectsState ? { effectsState } : {}),
-              ...(speedState ? { speedState } : {}),
-            } as Project;
-          },
+          projectSnapshotForSave,
           // Capture serialised ActionHistory alongside every autosave
           // so undo/redo + named snapshots survive page reloads. Without
           // this the chat's per-message rewind bookmarks become dangling
@@ -5006,3 +4970,42 @@ export const useProjectStore = create<ProjectState>()(
     };
   }),
 );
+
+/** The same engine snapshot feeds autosave and shared editing. */
+export function projectSnapshotForSave(): Project {
+            const { project } = useProjectStore.getState();
+            const titleEngine = useEngineStore.getState().getTitleEngine();
+            const graphicsEngine = useEngineStore.getState().getGraphicsEngine();
+
+            // Video effects + color grading live in the EffectsBridge's
+            // in-memory maps, NOT on the clips — without embedding them
+            // here every agent/inspector-applied effect silently vanished
+            // on reload while the autosave "succeeded".
+            let effectsState: Record<string, unknown> | undefined;
+            try {
+              const eb = getEffectsBridge();
+              const all = eb.serializeAllEffects();
+              if (Object.keys(all).length > 0) effectsState = all;
+            } catch { /* bridge unavailable — save proceeds without */ }
+
+            // Retiming lives in the SpeedEngine's map for exactly the same
+            // reason, and losing it is worse than losing an effect: the
+            // Inspector also shortens `clip.duration`, so a reload that
+            // forgets the speed leaves a 1x clip in a window sized for 2x —
+            // the back half of the shot simply stops existing.
+            let speedState: Record<string, unknown> | undefined;
+            try {
+              const all = getSpeedEngine().serializeAll();
+              if (Object.keys(all).length > 0) speedState = all;
+            } catch { /* engine unavailable — save proceeds without */ }
+
+            return {
+              ...project,
+              textClips: titleEngine?.getAllTextClips() || [],
+              shapeClips: graphicsEngine?.getAllShapeClips() || [],
+              svgClips: graphicsEngine?.getAllSVGClips() || [],
+              stickerClips: graphicsEngine?.getAllStickerClips() || [],
+              ...(effectsState ? { effectsState } : {}),
+              ...(speedState ? { speedState } : {}),
+            } as Project;
+          }

@@ -34,6 +34,8 @@ import { BehaviorSubject, Observable } from 'rxjs';
 
 import { decodeMediaRef, isMediaRef, type MediaRef } from '../board/media-ref';
 import { fetchMediaBlob } from '../board/media-fetch';
+import type * as Y from 'yjs';
+import { NativeMediaStore } from '../board/native-media';
 
 /** Parallel media fetches. Six matches what a browser gives one origin anyway. */
 const CONCURRENCY = 6;
@@ -63,6 +65,7 @@ const idle: BlobState = {
 export interface VoidspaceBlobSourceOptions {
   /** Names the IndexedDB database for locally-owned blobs. */
   boardId: string;
+  doc?: Y.Doc;
 }
 
 interface Pending {
@@ -85,6 +88,7 @@ export class VoidspaceBlobSource implements BlobSource {
   visibleKeys: (() => Set<string>) | null = null;
 
   private readonly boardId: string;
+  readonly native?: NativeMediaStore;
   private _local: IndexedDBBlobSource | null = null;
   private readonly mem = new Map<string, Blob>();
   private readonly states = new Map<string, BehaviorSubject<BlobState>>();
@@ -95,6 +99,7 @@ export class VoidspaceBlobSource implements BlobSource {
 
   constructor(opts: VoidspaceBlobSourceOptions) {
     this.boardId = opts.boardId;
+    if (opts.doc) this.native = new NativeMediaStore(opts.boardId, opts.doc, () => this.local);
   }
 
   /**
@@ -116,7 +121,7 @@ export class VoidspaceBlobSource implements BlobSource {
   }
 
   async get(key: string): Promise<Blob | null> {
-    if (!isMediaRef(key)) return this.local.get(key);
+    if (!isMediaRef(key)) return this.native ? this.native.get(key) : this.local.get(key);
 
     const ref = decodeMediaRef(key);
     if (!ref) return null;
@@ -150,7 +155,7 @@ export class VoidspaceBlobSource implements BlobSource {
   }
 
   async set(key: string, value: Blob): Promise<string> {
-    if (!isMediaRef(key)) return this.local.set(key, value);
+    if (!isMediaRef(key)) return this.native ? this.native.set(key, value) : this.local.set(key, value);
 
     const ref = decodeMediaRef(key);
     // A zero-length placeholder is what the streaming path hands us on insert;
