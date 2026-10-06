@@ -859,17 +859,40 @@ export function installMediaInspector(board: MountedBoard, container: HTMLElemen
   /** Build the viewer's target from a loose canvas block. Null when the block is
    *  not media, or its link is gone. */
   function openCanvasBlock(id: string): boolean {
-    const meta = readBlockMeta(board.doc, id);
-    if (!meta?.kind) return false;
-    const props = board.store.getBlock(id)?.model.props as { sourceId?: string } | undefined;
-    const ref = props?.sourceId ? decodeMediaRef(props.sourceId) : null;
-    const src = ref?.src ?? meta.originalUrl;
+    const model = board.store.getBlock(id)?.model;
+    const meta = readBlockMeta(board.doc, id) ?? {};
+    const props = (model?.props ?? {}) as { sourceId?: string; type?: string; name?: string };
+    const sourceId = props.sourceId ?? '';
+    const ref = sourceId ? decodeMediaRef(sourceId) : null;
+    /**
+     * WHAT IT IS, even when nobody wrote it down. A picture dragged off the
+     * desktop has meta `{ name, kind }` at best, and one pasted through
+     * BlockSuite's own path or placed by an older build has no meta at all —
+     * the block itself still says what it holds.
+     */
+    const mime = props.type ?? '';
+    const kind = meta.kind ?? ref?.kind ?? (
+      model?.flavour === 'affine:image' ? 'image'
+        : model?.flavour === 'affine:attachment'
+          ? (mime.startsWith('image/') ? 'image' : mime.startsWith('video/') ? 'video' : mime.startsWith('audio/') ? 'audio' : undefined)
+          : undefined);
+    if (!kind) return false;
+    /**
+     * WHERE THE FULL-QUALITY FILE IS. A Library image names its url (in the
+     * `vsmedia:` ref or meta); a LOCAL one — dropped, pasted, added from Files —
+     * is a content key in the board's own blob store and has no url anywhere.
+     * That was the whole "PNGs don't open" bug: no url, so `src` was empty and
+     * the double-click fell through. `vs-local:` is the address `open` already
+     * resolves through the native store (device → folder → cloud backup).
+     */
+    const local = sourceId && !ref ? `vs-local:${encodeURIComponent(sourceId)}` : '';
+    const src = ref?.src || meta.originalUrl || local;
     if (!src) return false;
     void open({
       shotId: '',
       media: {
-        id, kind: meta.kind, role: 'reference',
-        src, url: meta.originalUrl || src, name: meta.name || meta.kind,
+        id, kind, role: 'reference',
+        src, url: meta.originalUrl || src, name: meta.name || props.name || kind,
         ...(ref?.poster ? { poster: ref.poster } : {}),
       },
     });

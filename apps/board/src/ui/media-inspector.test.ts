@@ -345,3 +345,91 @@ describe('the playhead clamp', () => {
     expect(stage().currentTime).toBe(4);
   });
 });
+
+/**
+ * DOUBLE-CLICKING A PICTURE THE USER BROUGHT THEMSELVES.
+ *
+ * Reported as "PNGs don't open, JPGs do". The format was a coincidence: the JPGs
+ * were Library/URL images (`vsmedia:` sourceId, or `originalUrl` in meta) and the
+ * PNGs were files dragged off the desktop. Those are stored by content key in the
+ * board's own blob store and carry NO url anywhere — `media-storage` writes
+ * `{ name, kind }` and nothing else — so the viewer found no `src`, returned
+ * false, and the double-click fell through to BlockSuite as if nothing was there.
+ */
+describe('double-clicking a local picture on the canvas', () => {
+  const KEY = 'local-sha256-abc';
+
+  function placeLocal(flavour: 'affine:image' | 'affine:attachment', props: Record<string, unknown> = {}): string {
+    return board.store.addBlock(flavour, {
+      sourceId: KEY, xywh: '[0,0,420,420]', index: 'a1', size: 1,
+      ...props,
+    }, board.surfaceId);
+  }
+
+  async function dblclick(id: string): Promise<boolean> {
+    const host = document.createElement('div');
+    host.dataset.blockId = id;
+    const inner = document.createElement('img');
+    host.append(inner);
+    container.append(host);
+    const e = new MouseEvent('dblclick', { bubbles: true, cancelable: true });
+    inner.dispatchEvent(e);
+    await settle();
+    return e.defaultPrevented;
+  }
+
+  function stubLocalStore(): string[] {
+    const asked: string[] = [];
+    const native = board.workspace.blobSource.native!;
+    native.previewUrl = async (key: string) => { asked.push(key); return `blob:full/${key}`; };
+    return asked;
+  }
+
+  it('opens a dropped PNG at full resolution from the board blob store', async () => {
+    const asked = stubLocalStore();
+    const id = placeLocal('affine:image');
+    // Exactly what `media-storage.insert` records for a dropped file.
+    writeBlockMeta(board.doc, id, { name: 'Cosmic Blue Mystic Character Sheet.png', kind: 'image', createdBy: 'user' });
+
+    expect(await dblclick(id)).toBe(true);
+    expect(dialog()).not.toBeNull();
+    expect(asked).toEqual([KEY]);
+    expect(stageSrc()).toBe(`blob:full/${KEY}`);
+    expect(dialog()!.querySelector('.vs-inspect__name')!.textContent).toBe('Cosmic Blue Mystic Character Sheet.png');
+  });
+
+  it('opens an image block that has no board meta at all', async () => {
+    // Pasted through BlockSuite's own path, or placed by an older build.
+    const asked = stubLocalStore();
+    const id = placeLocal('affine:image');
+
+    expect(await dblclick(id)).toBe(true);
+    expect(asked).toEqual([KEY]);
+    expect(stageSrc()).toBe(`blob:full/${KEY}`);
+  });
+
+  it('opens an image stored as an attachment, by its MIME type', async () => {
+    const asked = stubLocalStore();
+    const id = placeLocal('affine:attachment', { name: 'sheet.webp', type: 'image/webp' });
+
+    expect(await dblclick(id)).toBe(true);
+    expect(asked).toEqual([KEY]);
+    expect(dialog()!.querySelector('img')).not.toBeNull();
+  });
+
+  it('still opens a Library image by its full-quality url, not the blob store', async () => {
+    const asked = stubLocalStore();
+    const id = placeLocal('affine:image', { sourceId: 'vsmedia:x' });
+    writeBlockMeta(board.doc, id, { kind: 'image', originalUrl: 'https://example.test/engineer45.jpg' });
+
+    expect(await dblclick(id)).toBe(true);
+    expect(asked).toEqual([]);
+    expect(stageSrc()).toBe('https://example.test/engineer45.jpg');
+  });
+
+  it('leaves a non-media block to the editor', async () => {
+    const id = board.store.addBlock('affine:note', { xywh: '[0,0,100,100]', index: 'a2' }, board.pageId);
+    expect(await dblclick(id)).toBe(false);
+    expect(dialog()).toBeNull();
+  });
+});
