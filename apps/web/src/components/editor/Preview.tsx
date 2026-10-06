@@ -1528,8 +1528,12 @@ export const Preview: React.FC<{ readOnly?: boolean }> = ({ readOnly = false }) 
           offsetX = (canvasWidth - drawWidth) / 2;
         }
 
-        tempCtx.fillStyle = "#000000";
-        tempCtx.fillRect(0, 0, canvasWidth, canvasHeight);
+        // A graphic rendered with ALPHA keeps its transparent pixels: no black
+        // underlay, or it would cover the picture below as an opaque frame.
+        if (!(mediaItem as any).metadata?.graphic?.alpha) {
+          tempCtx.fillStyle = "#000000";
+          tempCtx.fillRect(0, 0, canvasWidth, canvasHeight);
+        }
         tempCtx.drawImage(video, offsetX, offsetY, drawWidth, drawHeight);
 
         return await createImageBitmap(tempCanvas);
@@ -1939,6 +1943,11 @@ export const Preview: React.FC<{ readOnly?: boolean }> = ({ readOnly = false }) 
             // opaque, no globalCompositeOperation).
             const bm = (clip as { blendMode?: string }).blendMode;
             if (bm && bm !== "normal") {
+              return { canUse: false, clips: [] };
+            }
+            // So does a HyperFrames graphic: it composites by its ALPHA now,
+            // which the opaque native path would paint as a black frame.
+            if ((getMediaItem(clip.mediaId) as any)?.metadata?.graphic) {
               return { canUse: false, clips: [] };
             }
             const emph = (clip as any).emphasisAnimation;
