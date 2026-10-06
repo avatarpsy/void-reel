@@ -146,6 +146,9 @@ export async function renderBlock(args: RenderBlockArgs): Promise<RenderedBlock>
           : { block: args.block, slots: args.slots ?? {} }),
         ...(Number(args.durationSec) > 0 ? { durationSec: args.durationSec } : {}),
         ...(args.timing && Object.keys(args.timing).length ? { layerTiming: args.timing } : {}),
+        // Placed in this browser: it must load from any device, not only from
+        // a site that shares the desktop's disk.
+        upload: true,
         fillMode: args.useSampleContent ? "preview" : "render",
         format: baked ? "mp4" : "webm",
         ...(baked ? { backdrop: args.backdropUrl } : {}),
