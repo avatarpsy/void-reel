@@ -263,7 +263,7 @@ export async function publishToVoidspaceNative(params: {
         source: "studio",
         status: "published",
         sourceType: "loop",
-        sourceCollection: "loops",
+        sourceCollection: "videos",
         sourceId: loopResult.loop_id,
       }),
     },
