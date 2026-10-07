@@ -4,7 +4,7 @@ import { useProjectStore } from '../../stores/project-store';
 import { useUIStore } from '../../stores/ui-store';
 import { exportArtboard } from '../../services/export-service';
 import { getVoidspaceIdToken, NotSignedInError } from '../../services/voidspace-storage';
-import { uploadReferenceImage } from '../../services/generative-fill';
+import { DurableUploadRefusedError, resolvePublishAvatar, uploadDurablePage } from '../../services/carousel-publish';
 import { sizeToAspectRatio } from '../../services/image-generation';
 
 // Platforms the user can target. Voidspace is always available; the others
@@ -97,13 +97,18 @@ export function PublishCarouselModal({ open, onClose }: { open: boolean; onClose
       const uid = uidFromToken(token);
       if (!uid) throw new NotSignedInError();
 
-      // Render + upload each page to a public URL.
+      // The avatar it is published as — the same pick the video editor makes.
+      // Looked up alongside the uploads; a draft without one still saves.
+      const avatarLookup = resolvePublishAvatar(token, uid);
+
+      // Render + upload each page DURABLY: a draft approved or scheduled later,
+      // and the feed copy, must not point at a 3-day temp link.
       const urls: string[] = [];
       for (let i = 0; i < pages.length; i++) {
         setProgress(`Uploading page ${i + 1} of ${pages.length}…`);
         const blob = await exportArtboard(project, pages[i], { scale: 1, format: 'jpg', quality: 'high', background: 'include' });
         const file = new File([blob], `slide-${i + 1}.jpg`, { type: 'image/jpeg' });
-        urls.push(await uploadReferenceImage(file));
+        urls.push(await uploadDurablePage(file, token));
       }
 
       setProgress(publishNow ? 'Publishing…' : 'Saving draft…');
@@ -113,10 +118,13 @@ export function PublishCarouselModal({ open, onClose }: { open: boolean; onClose
       const draftId = `imgedit-carousel-${Date.now()}`;
       const aspect = sizeToAspectRatio(pages[0].size.width, pages[0].size.height, ['1:1', '4:5', '9:16', '16:9', '4:3', '3:4']);
 
+      const avatar = await avatarLookup;
       const body: Record<string, unknown> = {
         user_id: uid,
         draft_id: draftId,
-        avatar_name: 'You',
+        // The name is the server's to fill when we do not know it.
+        ...(avatar ? { avatar_id: avatar.avatarId } : {}),
+        ...(avatar?.avatarName ? { avatar_name: avatar.avatarName } : {}),
         platforms,
         content_type: isCarousel ? 'carousel' : 'image',
         title: '',
@@ -154,6 +162,7 @@ export function PublishCarouselModal({ open, onClose }: { open: boolean; onClose
       setTimeout(() => { setDone(false); onClose(); }, 1200);
     } catch (e) {
       if (e instanceof NotSignedInError) setError('Sign in to Voidspace to publish.');
+      else if (e instanceof DurableUploadRefusedError) setError(e.message);
       else setError("Couldn't publish. Please try again.");
     } finally {
       setBusy(false);
