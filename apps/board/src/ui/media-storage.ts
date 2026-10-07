@@ -55,6 +55,7 @@ export function installMediaStorage(board: MountedBoard, root: HTMLElement, chro
     requestAnimationFrame(() => {
       rendering = false;
       const keys = originalKeys(); let issues = 0;
+      syncQuestion(keys);
       for (const [key, ids] of keys) {
         const status = store.status(key);
         if (['missing', 'unsaved', 'browser'].includes(status.state)) issues++;
@@ -67,7 +68,7 @@ export function installMediaStorage(board: MountedBoard, root: HTMLElement, chro
               : status.state === 'uploading' ? 'Uploading…' : status.state === 'unsaved' ? 'Not saved · Download original'
                 : status.state === 'checking' ? 'Checking file…'
                   // Said yes, and it did not finish: say so, and where to retry.
-                  : choice === 'cloud' ? 'Upload failed · Open Files to retry'
+                  : choice === 'cloud' || choice === 'refused' ? 'Upload failed · Open Files to retry'
                     : status.state === 'folder' ? 'Saved to folder'
                       : choice === 'local' ? 'This browser only' : 'This browser only · Open Files to upload';
             node.title = status.message;
@@ -84,7 +85,7 @@ export function installMediaStorage(board: MountedBoard, root: HTMLElement, chro
         const status = document.createElement('p'); status.textContent = store.status(key).message;
         const actions = document.createElement('div'); actions.className = 'vs-media-storage-actions';
         const action = (label: string, fn: () => Promise<unknown>) => { const b = document.createElement('button'); b.textContent = label; b.onclick = () => { b.disabled = true; void fn().catch(reportError).finally(() => { b.disabled = false; render(); }); }; actions.append(b); };
-        if (!store.cloudUrl(key)) action('Upload to Voidspace', () => uploadKeys([key]));
+        if (!store.cloudUrl(key)) action(store.records.get(key)?.upload === 'refused' ? 'Retry upload' : 'Upload to Voidspace', () => uploadKeys([key]));
         action('Download original', () => store.download(key));
         action('Relink original', async () => {
           const picker = document.createElement('input'); picker.type = 'file'; picker.accept = 'image/*,audio/*,video/*';
@@ -132,28 +133,84 @@ export function installMediaStorage(board: MountedBoard, root: HTMLElement, chro
     await Promise.all(keys.map(async key => { if (!await store.upload(key)) failed.push(key); }));
     if (failed.length) {
       // The reason (storage full, signed out, offline) is in the status message.
-      toast(store.status(failed[0]).message.replace(/^Saved in this browser\.\s*/, '') || 'Upload did not work. Try again from Files.', 'error');
+      toast(store.status(failed[0]).message.replace(/^Saved in (this browser|your Voidspace folder)\.\s*/, '') || 'Upload did not work. Try again from Files.', 'error');
     } else if (keys.length) toast(keys.length > 1 ? `${keys.length} files uploaded to your Voidspace.` : 'Uploaded to your Voidspace.', 'info');
     render();
   }
   const asked = new Set<string>();
+  /** Keys whose card has been seen on the board since they were asked about. */
+  const seen = new Set<string>();
   let question: HTMLElement | null = null;
   let questionKeys: string[] = [];
+  let returnFocus: HTMLElement | null = null;
+  const buttons = () => [...question?.querySelectorAll<HTMLButtonElement>('button') || []];
+  // Focus stays in the question while it is open; Escape = the safe answer.
+  const onKey = (e: KeyboardEvent) => {
+    if (!question) return;
+    if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); answer(false); return; }
+    if (e.key !== 'Tab') return;
+    const list = buttons(); if (!list.length) return;
+    const at = list.indexOf(document.activeElement as HTMLButtonElement);
+    e.preventDefault();
+    list[(at + (e.shiftKey ? -1 : 1) + list.length) % list.length].focus();
+  };
+  const onFocusIn = (e: FocusEvent) => {
+    if (question && !question.contains(e.target as Node)) buttons()[0]?.focus();
+  };
+  const closeQuestion = (): string[] => {
+    const keys = questionKeys; questionKeys = [];
+    for (const k of keys) seen.delete(k);
+    question?.remove(); question = null;
+    document.removeEventListener('keydown', onKey, true);
+    document.removeEventListener('focusin', onFocusIn, true);
+    const back = returnFocus; returnFocus = null;
+    if (back?.isConnected) back.focus();
+    return keys;
+  };
+  const answer = (yes: boolean) => {
+    const keys = closeQuestion();
+    if (yes) void uploadKeys(keys);
+    else { for (const k of keys) store.keepLocal(k); render(); }
+  };
   const ask = (key: string) => {
     if (asked.has(key)) return;
     asked.add(key);
     questionKeys.push(key);
     if (question) { question.querySelector('[data-q]')!.textContent = questionText(questionKeys.length); return; }
+    returnFocus = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null;
     question = document.createElement('div');
-    question.className = 'vs-upload-ask'; question.setAttribute('role', 'dialog'); question.setAttribute('aria-label', 'Upload to your Voidspace?');
-    question.innerHTML = '<p data-q></p><div class="vs-media-storage-actions"><button data-yes class="is-primary">Upload</button><button data-no>Keep in this browser only</button></div>';
+    question.className = 'vs-upload-ask'; question.setAttribute('role', 'dialog');
+    question.setAttribute('aria-modal', 'true'); question.setAttribute('aria-label', 'Upload to your Voidspace?');
+    question.tabIndex = -1;
+    question.innerHTML = '<p data-q id="vs-upload-ask-text"></p><div class="vs-media-storage-actions"><button type="button" data-yes class="is-primary">Upload</button><button type="button" data-no>Keep in this browser only</button></div>';
+    question.setAttribute('aria-describedby', 'vs-upload-ask-text');
     question.querySelector('[data-q]')!.textContent = questionText(1);
-    const close = (fn: (keys: string[]) => void) => () => {
-      const keys = questionKeys; questionKeys = []; question?.remove(); question = null; fn(keys);
-    };
-    question.querySelector<HTMLButtonElement>('[data-yes]')!.onclick = close(keys => { void uploadKeys(keys); });
-    question.querySelector<HTMLButtonElement>('[data-no]')!.onclick = close(keys => { for (const k of keys) store.keepLocal(k); render(); });
+    question.querySelector<HTMLButtonElement>('[data-yes]')!.onclick = () => answer(true);
+    question.querySelector<HTMLButtonElement>('[data-no]')!.onclick = () => answer(false);
     chrome.append(question);
+    document.addEventListener('keydown', onKey, true);
+    document.addEventListener('focusin', onFocusIn, true);
+    question.querySelector<HTMLButtonElement>('[data-yes]')!.focus();
+  };
+  /**
+   * Keep the open question in step with the board: a drop that was undone is
+   * taken out of it (closing it when nothing is left), and a question nobody
+   * answered before a reload — or a redo that brings the card back — is asked
+   * again.
+   */
+  const syncQuestion = (keys: Map<string, string[]>) => {
+    for (const key of keys.keys()) {
+      if (asked.has(key)) seen.add(key);
+      else if (store.awaitingAnswer(key)) ask(key);
+    }
+    const gone = questionKeys.filter(k => seen.has(k) && !keys.has(k));
+    if (!gone.length) return;
+    // The record keeps 'ask': a redo brings the card back and asks again, and a
+    // card that stays deleted is never on the board to be asked about.
+    for (const k of gone) { asked.delete(k); seen.delete(k); }
+    questionKeys = questionKeys.filter(k => !gone.includes(k));
+    if (!questionKeys.length) closeQuestion();
+    else question!.querySelector('[data-q]')!.textContent = questionText(questionKeys.length);
   };
   const questionText = (n: number) => `Upload ${n > 1 ? `these ${n} files` : 'this'} to your Voidspace? `
     + 'Then it works on every device and your agents can use it.';

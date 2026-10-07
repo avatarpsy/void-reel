@@ -18,7 +18,7 @@ vi.mock('./parent-auth', () => ({ getParentToken: (force?: boolean) => getParent
 // never depends on the board's media proxy being reachable.
 vi.mock('../document/images', () => ({ loadImages: async () => new Map() }));
 
-import { makeDocument, saveDocument, uploadDocument } from './document-export';
+import { makeDocument, saveDocument, uploadBlob, uploadDocument, UploadRefusedError } from './document-export';
 
 function res(status: number, body: any = null): Response {
   return {
@@ -181,5 +181,29 @@ describe('uploadDocument — the ONLY path that touches the network', () => {
   it('treats a 200 with no link as a failure rather than a success', async () => {
     (globalThis.fetch as any).mockResolvedValue(res(200, { ok: true }));
     await expect(uploadDocument(made)).rejects.toThrow(/without a link/i);
+  });
+});
+
+describe('uploadBlob: a refusal is told apart from a hiccup', () => {
+  const blob = new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' });
+
+  it('storage full (durable-only, no room) is a refusal', async () => {
+    (globalThis.fetch as any).mockResolvedValue(res(200, { ok: false, placement: 'local', reason: 'temp_quota', note: 'Your storage is full, so this was not uploaded.' }));
+    const e = await uploadBlob(blob, 'a.png').catch(x => x);
+    expect(e).toBeInstanceOf(UploadRefusedError);
+    expect(e.message).toContain('storage is full');
+  });
+
+  it('507 and other 4xx are refusals; 5xx and temp_failed are not', async () => {
+    (globalThis.fetch as any).mockResolvedValue(res(507, 'No room.'));
+    expect(await uploadBlob(blob, 'a.png').catch(x => x)).toBeInstanceOf(UploadRefusedError);
+    (globalThis.fetch as any).mockResolvedValue(res(415, 'nope'));
+    expect(await uploadBlob(blob, 'a.png').catch(x => x)).toBeInstanceOf(UploadRefusedError);
+    (globalThis.fetch as any).mockResolvedValue(res(502));
+    const e502 = await uploadBlob(blob, 'a.png').catch(x => x);
+    expect(e502).toBeInstanceOf(Error);
+    expect(e502).not.toBeInstanceOf(UploadRefusedError);
+    (globalThis.fetch as any).mockResolvedValue(res(200, { ok: false, placement: 'local', reason: 'temp_failed', note: 'Upload did not work just now.' }));
+    expect(await uploadBlob(blob, 'a.png').catch(x => x)).not.toBeInstanceOf(UploadRefusedError);
   });
 });
