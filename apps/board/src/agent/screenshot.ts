@@ -33,6 +33,7 @@ import { defaultApiBase } from '@openreel/asset-browser';
 import { getParentToken } from '../board/parent-auth';
 import { settleFrame } from './settle-frame';
 import { gateImages, type MissingPicture } from './screenshot-images';
+import { BROWSER_ONLY_MESSAGE } from '../board/native-media';
 
 export type ShotScope = 'viewport' | 'all' | 'selection' | 'ids' | 'auto';
 
@@ -71,6 +72,11 @@ export interface ScreenshotResult {
    * cards are blank in the image; do not describe them from it.
    */
   missing?: MissingPicture[];
+  /**
+   * Pictures drawn from a file kept only in this browser. Visible here, but no
+   * generator or other device can read them until the person uploads them.
+   */
+  browserOnly?: { ids: string[]; note: string };
   /**
    * HOW LONG EACH STEP TOOK, in milliseconds.
    *
@@ -631,6 +637,7 @@ async function captureNow(
     box,
     legible: scale >= LEGIBLE_SCALE,
     ...(gate.missing.length ? { missing: gate.missing } : {}),
+    ...(gate.browserOnly.length ? { browserOnly: { ids: gate.browserOnly, note: BROWSER_ONLY_MESSAGE } } : {}),
     timing: {
       render: rendered - t0,
       upload: Date.now() - rendered,
