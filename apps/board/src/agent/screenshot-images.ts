@@ -118,6 +118,12 @@ export function describePictureSource(board: MountedBoard, id: string): string {
 export interface ImageGate {
   /** Pictures in frame that could not be drawn. */
   missing: MissingPicture[];
+  /**
+   * Pictures in frame whose file exists only in this browser (never uploaded).
+   * They draw here, but no server tool — a generator, another device — can read
+   * them, so the agent is told before it tries to use one as a reference.
+   */
+  browserOnly: string[];
   /** Take the ignore marks back off. Always call it. */
   release(): void;
 }
@@ -154,9 +160,22 @@ export async function gateImages(
     if (!owner.has(img) && isPending(img)) mark(img);
   }
 
+  // A dropped file that is not on this device and has no cloud copy will never
+  // load: name it now rather than spending the wait on it.
+  const missing = new Map<string, MissingPicture>();
+  const native = board.workspace.blobSource.native;
+  const browserOnly: string[] = [];
+  for (const id of subjectIds) {
+    const key = String((board.store.getBlock(id)?.model.props as { sourceId?: string } | undefined)?.sourceId ?? '');
+    if (!key || decodeMediaRef(key) || !native?.records.has(key)) continue;
+    if (native.status(key).state === 'missing') {
+      missing.set(id, { id, source: describePictureSource(board, id), problem: 'its file was never uploaded and is stored only in another browser' });
+      for (const [img, owned] of owner) if (owned === id) { owner.delete(img); mark(img); }
+    } else if (native.isBrowserOnly(key)) browserOnly.push(id);
+  }
+
   // In the picture: worth a short wait, then named.
   await settleImages([...owner.keys()], waitMs);
-  const missing = new Map<string, MissingPicture>();
 
   // A picture block with no `<img>` at all never got its bytes — the card is a
   // spinner or an error. It does not stall html2canvas, but it is not in the
@@ -167,7 +186,7 @@ export async function gateImages(
     const flavour = board.store.getBlock(id)?.model.flavour;
     const type = (board.store.getBlock(id)?.model.props as { type?: string } | undefined)?.type ?? '';
     const isPicture = flavour === 'affine:image' || (flavour === 'affine:attachment' && type.startsWith('image/'));
-    if (!isPicture || !board.std.view.getBlock(id)) continue;
+    if (!isPicture || !board.std.view.getBlock(id) || missing.has(id)) continue;
     missing.set(id, { id, source: describePictureSource(board, id), problem: 'its picture never arrived on this device' });
   }
   for (const [img, id] of owner) {
@@ -187,6 +206,7 @@ export async function gateImages(
 
   return {
     missing: [...missing.values()],
+    browserOnly: browserOnly.filter(id => !missing.has(id)),
     release() {
       for (const img of marked) img.removeAttribute(IGNORE_ATTR);
       marked.length = 0;

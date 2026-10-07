@@ -7,6 +7,7 @@ import { writeBlockMeta } from '../board/board-meta';
 import { toast } from './toast';
 import { readShots } from '../shot/shots';
 import { localReferenceKey } from '../board/local-reference';
+import { NEEDS_UPLOAD_CHOICE } from '../board/native-media';
 import '../theme/media-storage.css';
 
 /** Explicit file entry points share the native insert helpers and blob store.
@@ -61,9 +62,14 @@ export function installMediaStorage(board: MountedBoard, root: HTMLElement, chro
           const node = board.std.view.getBlock(id) as unknown as HTMLElement | null;
           if (node) {
             node.dataset.mediaSave = status.state;
-            node.dataset.mediaSaveLabel = status.state === 'cloud' ? 'Cloud backup' : status.state === 'missing' ? 'Original missing · Open Files to relink'
-              : status.state === 'uploading' ? 'Backing up…' : status.state === 'folder' ? 'Saved to folder'
-                : status.state === 'unsaved' ? 'Not saved · Download original' : status.state === 'checking' ? 'Checking file…' : 'This browser only · Open Files';
+            const choice = store.records.get(key)?.upload;
+            node.dataset.mediaSaveLabel = status.state === 'cloud' ? 'In your Voidspace' : status.state === 'missing' ? 'Original missing · Open Files to relink'
+              : status.state === 'uploading' ? 'Uploading…' : status.state === 'unsaved' ? 'Not saved · Download original'
+                : status.state === 'checking' ? 'Checking file…'
+                  // Said yes, and it did not finish: say so, and where to retry.
+                  : choice === 'cloud' ? 'Upload failed · Open Files to retry'
+                    : status.state === 'folder' ? 'Saved to folder'
+                      : choice === 'local' ? 'This browser only' : 'This browser only · Open Files to upload';
             node.title = status.message;
           }
         }
@@ -78,7 +84,7 @@ export function installMediaStorage(board: MountedBoard, root: HTMLElement, chro
         const status = document.createElement('p'); status.textContent = store.status(key).message;
         const actions = document.createElement('div'); actions.className = 'vs-media-storage-actions';
         const action = (label: string, fn: () => Promise<unknown>) => { const b = document.createElement('button'); b.textContent = label; b.onclick = () => { b.disabled = true; void fn().catch(reportError).finally(() => { b.disabled = false; render(); }); }; actions.append(b); };
-        action('Retry backup', () => store.mirror(key));
+        if (!store.cloudUrl(key)) action('Upload to Voidspace', () => uploadKeys([key]));
         action('Download original', () => store.download(key));
         action('Relink original', async () => {
           const picker = document.createElement('input'); picker.type = 'file'; picker.accept = 'image/*,audio/*,video/*';
@@ -113,6 +119,45 @@ export function installMediaStorage(board: MountedBoard, root: HTMLElement, chro
       }
     });
   };
+
+  /**
+   * THE ONE QUESTION. Founder, 7 Oct 2026: "when user drags and drops media on
+   * board, ask them if they want to upload, dont complicate things for users."
+   * A picture kept only in this browser is invisible to agents and generators
+   * and missing on every other device, so the person decides, once per drop
+   * (however many files it carried), and the answer is remembered on the file.
+   */
+  async function uploadKeys(keys: string[]): Promise<void> {
+    const failed: string[] = [];
+    await Promise.all(keys.map(async key => { if (!await store.upload(key)) failed.push(key); }));
+    if (failed.length) {
+      // The reason (storage full, signed out, offline) is in the status message.
+      toast(store.status(failed[0]).message.replace(/^Saved in this browser\.\s*/, '') || 'Upload did not work. Try again from Files.', 'error');
+    } else if (keys.length) toast(keys.length > 1 ? `${keys.length} files uploaded to your Voidspace.` : 'Uploaded to your Voidspace.', 'info');
+    render();
+  }
+  const asked = new Set<string>();
+  let question: HTMLElement | null = null;
+  let questionKeys: string[] = [];
+  const ask = (key: string) => {
+    if (asked.has(key)) return;
+    asked.add(key);
+    questionKeys.push(key);
+    if (question) { question.querySelector('[data-q]')!.textContent = questionText(questionKeys.length); return; }
+    question = document.createElement('div');
+    question.className = 'vs-upload-ask'; question.setAttribute('role', 'dialog'); question.setAttribute('aria-label', 'Upload to your Voidspace?');
+    question.innerHTML = '<p data-q></p><div class="vs-media-storage-actions"><button data-yes class="is-primary">Upload</button><button data-no>Keep in this browser only</button></div>';
+    question.querySelector('[data-q]')!.textContent = questionText(1);
+    const close = (fn: (keys: string[]) => void) => () => {
+      const keys = questionKeys; questionKeys = []; question?.remove(); question = null; fn(keys);
+    };
+    question.querySelector<HTMLButtonElement>('[data-yes]')!.onclick = close(keys => { void uploadKeys(keys); });
+    question.querySelector<HTMLButtonElement>('[data-no]')!.onclick = close(keys => { for (const k of keys) store.keepLocal(k); render(); });
+    chrome.append(question);
+  };
+  const questionText = (n: number) => `Upload ${n > 1 ? `these ${n} files` : 'this'} to your Voidspace? `
+    + 'Then it works on every device and your agents can use it.';
+  store.addEventListener(NEEDS_UPLOAD_CHOICE, e => ask((e as CustomEvent<string>).detail));
 
   async function insert(files: File[], point?: [number, number]): Promise<void> {
     for (const file of files) {
