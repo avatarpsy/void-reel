@@ -637,7 +637,7 @@ async function captureNow(
     box,
     legible: scale >= LEGIBLE_SCALE,
     ...(gate.missing.length ? { missing: gate.missing } : {}),
-    ...(gate.browserOnly.length ? { browserOnly: { ids: gate.browserOnly, note: BROWSER_ONLY_MESSAGE } } : {}),
+    ...(gate.browserOnly.length ? { browserOnly: { ids: gate.browserOnly, note: gate.browserOnlyNote || BROWSER_ONLY_MESSAGE } } : {}),
     timing: {
       render: rendered - t0,
       upload: Date.now() - rendered,

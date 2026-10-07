@@ -1,15 +1,27 @@
 import type { IndexedDBBlobSource } from '@blocksuite/sync';
 import * as Y from 'yjs';
-import { uploadBlob } from './document-export';
-import { sharedProjectId, uploadSharedMedia } from '@openreel/asset-browser';
+import { uploadBlob, UploadRefusedError } from './document-export';
+import { SharedError, sharedProjectId, uploadSharedMedia } from '@openreel/asset-browser';
 
 /**
  * `upload` is the person's answer to the one question the board asks when they
  * drop or paste media: 'cloud' = upload it to their Voidspace, 'local' = keep it
- * in this browser only. Absent = not asked yet (boards from before 7 Oct 2026).
- * It travels with the board, so the question is never asked twice for a file.
+ * in this browser only. 'ask' = the question is on screen and not answered yet
+ * (kept so a reload asks again). 'refused' = they said yes but the server said
+ * no (storage full, file rejected): never retried by itself, only when the
+ * person presses Upload again in Files. Absent = never asked (boards from
+ * before 7 Oct 2026). It travels with the board, so an answer is never asked
+ * for twice.
+ *
+ * `refusal` is the server's words for a 'refused' upload. `retryAt`/`attempts`
+ * back off an upload that failed on the network, so a board reopened on a bad
+ * connection does not resend a 200 MB file every time.
  */
-export interface NativeMediaRecord { name: string; mime: string; bytes: number; cloudUrl?: string; upload?: 'cloud' | 'local' }
+export type UploadChoice = 'cloud' | 'local' | 'ask' | 'refused';
+export interface NativeMediaRecord {
+  name: string; mime: string; bytes: number; cloudUrl?: string; upload?: UploadChoice;
+  refusal?: string; retryAt?: number; attempts?: number;
+}
 export interface MediaSaveState { state: 'checking' | 'browser' | 'folder' | 'uploading' | 'cloud' | 'missing' | 'unsaved'; message: string }
 type Directory = FileSystemDirectoryHandle & {
   queryPermission(opts: { mode: string }): Promise<string>;
@@ -35,6 +47,27 @@ async function folderSetting(value?: Directory): Promise<Directory | undefined> 
 /** What an agent or generator is told about a picture the person kept in this browser. */
 export const BROWSER_ONLY_MESSAGE = 'This picture is kept in this browser only (the person chose not to upload it), '
   + 'so server tools cannot read it. Ask them to upload it: Files on the board, then "Upload to Voidspace".';
+/** The same, for a picture nobody has decided about yet (never asked, or the question is still open). */
+export const NOT_UPLOADED_MESSAGE = 'This picture is in this browser only: it has not been uploaded to Voidspace yet, '
+  + 'so server tools cannot read it. The person has been asked whether to upload it; ask them to answer, '
+  + 'or to use Files on the board, then "Upload to Voidspace".';
+
+/** Network back-off for an upload the person said yes to: 1 min, doubling, at most 6 h. */
+export function retryDelayMs(attempts: number): number {
+  return Math.min(60_000 * 2 ** Math.max(0, attempts - 1), 6 * 60 * 60_000);
+}
+
+/**
+ * Whether an upload failure is the SERVER saying no (storage full, file
+ * rejected) rather than the network failing. A refusal is not retried by
+ * itself: resending the same bytes gets the same answer, costs the person the
+ * bandwidth and reopens the storage-full sheet every time.
+ */
+export function isUploadRefusal(e: unknown): boolean {
+  if (e instanceof UploadRefusedError) return true;
+  if (e instanceof SharedError) return e.status === 507 || (e.status >= 400 && e.status < 500 && ![401, 408, 429].includes(e.status));
+  return false;
+}
 
 async function fileKey(key: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(key));
@@ -88,6 +121,10 @@ export class NativeMediaStore extends EventTarget {
    * provider copy is never persisted as the board's original or cloud backup. */
   async providerReference(key: string): Promise<string> {
     if (this.cloudUrl(key)) return this.cloudUrl(key)!;
+    // A temporary copy is still the person's file leaving this browser: it
+    // needs their yes like any other upload ('refused' was a yes the durable
+    // store could not hold; a temporary copy does not count against it).
+    this.requireYes(key);
     const cached = this.providerCopies.get(key);
     if (cached && cached.until > Date.now()) return cached.url;
     const blob = await this.get(key);
@@ -112,10 +149,45 @@ export class NativeMediaStore extends EventTarget {
     if (saved) return saved;
     // The person said "keep it in this browser". An agent must not override
     // that by uploading behind their back; it says so, and they can change it.
-    if (this.records.get(key)?.upload === 'local') throw new Error(BROWSER_ONLY_MESSAGE);
+    this.requireYes(key);
+    // The server already said no (storage full): resending the same bytes for
+    // an agent gets the same answer. The person retries from Files.
+    const record = this.records.get(key);
+    if (record?.upload === 'refused') throw new Error(record.refusal || 'Your Voidspace refused this upload. Open Files on the board to retry.');
     const url = await this.mirror(key);
     if (url) return url;
     throw new Error(this.mirrorErrors.get(key) || this.status(key).message || 'Cloud backup failed.');
+  }
+
+  /**
+   * Throws unless the person said yes to uploading `key`. Kept in this browser
+   * → says so. Never answered → puts the question in front of them and tells
+   * the caller (an agent) it is not uploaded yet, so it can tell them.
+   */
+  private requireYes(key: string): void {
+    const choice = this.records.get(key)?.upload;
+    if (choice === 'cloud' || choice === 'refused') return;
+    if (choice === 'local') throw new Error(BROWSER_ONLY_MESSAGE);
+    if (this.records.has(key)) this.askFor(key);
+    throw new Error(NOT_UPLOADED_MESSAGE);
+  }
+
+  /** What an agent is told about a key with no cloud copy, in the right words for its state. */
+  browserOnlyMessage(key: string): string {
+    return this.records.get(key)?.upload === 'local' ? BROWSER_ONLY_MESSAGE : NOT_UPLOADED_MESSAGE;
+  }
+
+  /** Put the question in front of the person, and remember it is open so a reload asks again. */
+  private askFor(key: string): void {
+    const record = this.records.get(key);
+    if (record && !record.upload && !record.cloudUrl) this.records.set(key, { ...record, upload: 'ask' });
+    this.dispatchEvent(new CustomEvent(NEEDS_UPLOAD_CHOICE, { detail: key }));
+  }
+
+  /** Whether the question was put for `key` and never answered (survives a reload). */
+  awaitingAnswer(key: string): boolean {
+    const record = this.records.get(key);
+    return record?.upload === 'ask' && !record.cloudUrl;
   }
 
   constructor(readonly boardId: string, private doc: Y.Doc, private local: () => IndexedDBBlobSource) {
@@ -188,7 +260,7 @@ export class NativeMediaStore extends EventTarget {
     // or a relink) → honour that answer; otherwise ask.
     const choice = this.records.get(key)?.upload;
     if (choice === 'cloud') void this.mirror(key, blob);
-    else if (!choice && !this.cloudUrl(key)) this.dispatchEvent(new CustomEvent(NEEDS_UPLOAD_CHOICE, { detail: key }));
+    else if ((!choice || choice === 'ask') && !this.cloudUrl(key)) this.askFor(key);
     return key;
   }
 
@@ -204,8 +276,9 @@ export class NativeMediaStore extends EventTarget {
         if (!this.records.has(key)) this.records.set(key, { name: 'Dropped file', mime: blob.type, bytes: blob.size });
         this.report(key, this.cloudUrl(key) ? 'cloud' : disk ? 'folder' : 'browser', this.cloudUrl(key) ? 'Backed up to cloud.' : disk ? 'Saved in your Voidspace folder.' : 'Saved in this browser.');
         // Finish an upload the person already said yes to (it was interrupted
-        // or failed). Nothing else uploads without being asked.
-        if (this.records.get(key)?.upload === 'cloud') void this.mirror(key, blob);
+        // or failed on the network), once its back-off has passed. A refused
+        // upload waits for the person; nothing uploads without being asked.
+        this.resume(key, blob);
       }
       return blob;
     }
@@ -228,6 +301,22 @@ export class NativeMediaStore extends EventTarget {
     return null;
   }
 
+  private retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Resume a yes'd upload now, or when its network back-off ends. */
+  private resume(key: string, blob?: Blob): void {
+    const record = this.records.get(key);
+    if (record?.upload !== 'cloud' || record.cloudUrl) return;
+    const wait = (record.retryAt || 0) - Date.now();
+    if (wait <= 0) { void this.mirror(key, blob); return; }
+    if (this.retryTimers.has(key)) return;
+    this.retryTimers.set(key, setTimeout(() => { this.retryTimers.delete(key); this.resume(key); }, wait));
+  }
+
+  /**
+   * Upload `key`. Only for an upload the person said yes to. On failure the
+   * record says why and when to try again: a server refusal → 'refused', no
+   * automatic retry; a network failure → back off, then retry.
+   */
   mirror(key: string, blob?: Blob): Promise<string | undefined> {
     const saved = this.cloudUrl(key);
     if (saved) return Promise.resolve(saved);
@@ -241,7 +330,7 @@ export class NativeMediaStore extends EventTarget {
       try {
         const shared = sharedProjectId();
         const url = shared ? await uploadSharedMedia(shared, original) : await uploadBlob(original, this.records.get(key)?.name || 'board-media');
-        const record = this.records.get(key)!;
+        const { refusal: _r, retryAt: _t, attempts: _a, ...record } = this.records.get(key)!;
         this.records.set(key, { ...record, cloudUrl: url, upload: 'cloud' });
         this.mirrorErrors.delete(key);
         this.report(key, 'cloud', 'Backed up to cloud.');
@@ -252,6 +341,15 @@ export class NativeMediaStore extends EventTarget {
         const prior = this.mirrorErrors.get(key);
         const base = prior ? localState.message.replace(prior, '').trim() : localState.message;
         this.mirrorErrors.set(key, reason);
+        const record = this.records.get(key);
+        if (record && isUploadRefusal(e)) {
+          const { retryAt: _t, attempts: _a, ...rest } = record;
+          this.records.set(key, { ...rest, upload: 'refused', refusal: reason });
+        } else if (record?.upload === 'cloud') {
+          const attempts = (record.attempts || 0) + 1;
+          this.records.set(key, { ...record, attempts, retryAt: Date.now() + retryDelayMs(attempts) });
+          queueMicrotask(() => this.resume(key));
+        }
         this.report(key, localState.state === 'unsaved' ? 'unsaved' : localState.state === 'folder' ? 'folder' : 'browser', `${base} ${reason}`);
       }
     }).finally(() => { this.mirrors.delete(key); });
@@ -260,10 +358,14 @@ export class NativeMediaStore extends EventTarget {
     return task;
   }
 
-  /** The person's "Upload": remember the yes (so an interrupted upload resumes) and upload. */
+  /** The person's "Upload" (or retry): remember the yes (so an interrupted upload resumes) and upload now. */
   upload(key: string): Promise<string | undefined> {
     const record = this.records.get(key);
-    if (record && record.upload !== 'cloud') this.records.set(key, { ...record, upload: 'cloud' });
+    if (record && (record.upload !== 'cloud' || record.refusal || record.retryAt || record.attempts)) {
+      const { refusal: _r, retryAt: _t, attempts: _a, ...rest } = record;
+      this.records.set(key, { ...rest, upload: 'cloud' });
+    }
+    clearTimeout(this.retryTimers.get(key)); this.retryTimers.delete(key);
     return this.mirror(key);
   }
 
@@ -272,6 +374,30 @@ export class NativeMediaStore extends EventTarget {
     const record = this.records.get(key);
     if (record && !record.cloudUrl) this.records.set(key, { ...record, upload: 'local' });
     this.dispatchEvent(new Event('change'));
+  }
+
+  /**
+   * Before a board is shared, every file the person said yes to must be in the
+   * cloud (others cannot see this browser). Files they kept in this browser,
+   * or never answered for, are NOT uploaded behind their back: they are left
+   * out and returned, so the caller can say so. `keys` limits it to the files
+   * on the board (default: every record).
+   */
+  async prepareForSharing(keys: Iterable<string> = this.records.keys()): Promise<{ skipped: string[] }> {
+    const skipped: string[] = [];
+    for (const key of [...keys]) {
+      const record = this.records.get(key);
+      if (!record || record.cloudUrl) continue;
+      if (record.upload !== 'cloud' && record.upload !== 'refused') { skipped.push(key); continue; }
+      // Sharing is the person's own gesture: a refused file is worth one more try.
+      if (!await this.upload(key)) {
+        const why = this.mirrorErrors.get(key);
+        throw new Error(why
+          ? `${record.name} could not be uploaded for sharing: ${why}`
+          : 'A board file has not finished uploading. Keep this tab open and try again after it is backed up.');
+      }
+    }
+    return { skipped };
   }
 
   /** Whether this key's bytes exist only in this browser (or folder): no cloud copy. */

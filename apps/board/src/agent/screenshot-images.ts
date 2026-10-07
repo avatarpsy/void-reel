@@ -29,6 +29,7 @@
 import type { MountedBoard } from '../blocksuite/editor';
 import { readBlockMeta } from '../board/board-meta';
 import { decodeMediaRef } from '../board/media-ref';
+import { NOT_UPLOADED_MESSAGE } from '../board/native-media';
 
 /** html2canvas's own opt-out: an element with it is not cloned at all. */
 export const IGNORE_ATTR = 'data-html2canvas-ignore';
@@ -124,6 +125,8 @@ export interface ImageGate {
    * them, so the agent is told before it tries to use one as a reference.
    */
   browserOnly: string[];
+  /** What the agent is told about them: kept here by choice, or simply not uploaded yet. */
+  browserOnlyNote?: string;
   /** Take the ignore marks back off. Always call it. */
   release(): void;
 }
@@ -165,13 +168,14 @@ export async function gateImages(
   const missing = new Map<string, MissingPicture>();
   const native = board.workspace.blobSource.native;
   const browserOnly: string[] = [];
+  const browserOnlyNotes = new Set<string>();
   for (const id of subjectIds) {
     const key = String((board.store.getBlock(id)?.model.props as { sourceId?: string } | undefined)?.sourceId ?? '');
     if (!key || decodeMediaRef(key) || !native?.records.has(key)) continue;
     if (native.status(key).state === 'missing') {
       missing.set(id, { id, source: describePictureSource(board, id), problem: 'its file was never uploaded and is stored only in another browser' });
       for (const [img, owned] of owner) if (owned === id) { owner.delete(img); mark(img); }
-    } else if (native.isBrowserOnly(key)) browserOnly.push(id);
+    } else if (native.isBrowserOnly(key)) { browserOnly.push(id); browserOnlyNotes.add(native.browserOnlyMessage(key)); }
   }
 
   // In the picture: worth a short wait, then named.
@@ -207,6 +211,9 @@ export async function gateImages(
   return {
     missing: [...missing.values()],
     browserOnly: browserOnly.filter(id => !missing.has(id)),
+    // One note for the lot; "not uploaded yet" wins when they differ, since
+    // it is the one that asks the person something.
+    browserOnlyNote: [...browserOnlyNotes].sort((a, b) => (a === NOT_UPLOADED_MESSAGE ? -1 : b === NOT_UPLOADED_MESSAGE ? 1 : 0))[0],
     release() {
       for (const img of marked) img.removeAttribute(IGNORE_ATTR);
       marked.length = 0;
