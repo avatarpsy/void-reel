@@ -938,6 +938,32 @@ export class ActionExecutor {
         break;
       }
 
+      case "clip/replaceMedia": {
+        // Same clip (id, track, startTime, effects, transform…); only what it
+        // plays changes. Undo restores the whole prior clip via clip/applyState.
+        const params = action.params as {
+          clipId: string;
+          mediaId: string;
+          inPoint: number;
+          outPoint: number;
+        };
+        timeline.tracks = timeline.tracks.map((track: MutableTrack) => ({
+          ...track,
+          clips: track.clips.map((clip: MutableClip) =>
+            clip.id === params.clipId
+              ? {
+                  ...clip,
+                  mediaId: params.mediaId,
+                  inPoint: params.inPoint,
+                  outPoint: params.outPoint,
+                  duration: Math.max(0.05, params.outPoint - params.inPoint),
+                }
+              : clip,
+          ),
+        }));
+        break;
+      }
+
       case "clip/split": {
         const params = action.params as { clipId: string; time: number };
         const clip = this.findClip(timeline, params.clipId);
@@ -1727,9 +1753,13 @@ export class ActionExecutor {
         params.textClip,
       ];
       this.lastAddedIds.set("text", params.textClip.id);
+      untombstoneClip(project, params.textClip.id);
     } else if (type === "text/remove") {
       const params = action.params;
       engine.deleteTextClip(params.clipId);
+      // Same tombstone a deleted media clip gets: captions are re-derived on
+      // every rebuild, and the additive merge would hand this one straight back.
+      tombstoneClip(project, params.clipId);
       mProject.textClips = (mProject.textClips ?? []).filter(
         (c) => c.id !== params.clipId,
       );

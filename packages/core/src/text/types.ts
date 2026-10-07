@@ -33,6 +33,13 @@ export interface TextClip {
   readonly captionHighlightColor?: string;
   /** Which kinetic animation to draw (default "word-highlight"). */
   readonly captionAnimation?: CaptionAnimationStyle;
+  /**
+   * The media clip this caption belongs to (its narration or scene clip).
+   * Removing that clip removes this caption; moving or trimming it carries the
+   * caption along. Absent = timeline-anchored (typed lyrics, titles, end card):
+   * no clip edit ever moves or deletes it. See `caption-ownership.ts`.
+   */
+  readonly linkedClipId?: string;
 }
 
 export interface CaptionWord {

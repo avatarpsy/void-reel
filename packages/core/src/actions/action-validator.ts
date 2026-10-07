@@ -626,6 +626,44 @@ export class ActionValidator {
         }
         break;
 
+      case "clip/replaceMedia": {
+        const clip = this.findClip(timeline, action.params.clipId);
+        if (!clip) {
+          errors.push({
+            code: "CLIP_NOT_FOUND",
+            message: `Clip with ID ${action.params.clipId} not found`,
+            path: "params.clipId",
+          });
+        } else if (this.findTrack(timeline, clip.trackId)?.locked) {
+          errors.push({
+            code: "TRACK_LOCKED",
+            message: `Track containing clip ${action.params.clipId} is locked`,
+            path: "params.clipId",
+          });
+        }
+        if (!project.mediaLibrary.items.some((m) => m.id === action.params.mediaId)) {
+          errors.push({
+            code: "MEDIA_NOT_FOUND",
+            message: `Media with ID ${action.params.mediaId} not found`,
+            path: "params.mediaId",
+          });
+        }
+        const { inPoint, outPoint } = action.params;
+        if (
+          typeof inPoint !== "number" ||
+          typeof outPoint !== "number" ||
+          inPoint < 0 ||
+          outPoint <= inPoint
+        ) {
+          errors.push({
+            code: "INVALID_TIME_RANGE",
+            message: "replaceMedia needs 0 <= inPoint < outPoint",
+            path: "params",
+          });
+        }
+        break;
+      }
+
       case "clip/split":
         if (!action.params.clipId || typeof action.params.clipId !== "string") {
           errors.push({

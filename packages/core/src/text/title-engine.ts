@@ -38,6 +38,8 @@ export interface UpdateTextClipOptions {
   blendMode?: import("../video/types").BlendMode;
   blendOpacity?: number;
   emphasisAnimation?: import("../graphics/types").EmphasisAnimation;
+  /** Owner clip id (see TextClip.linkedClipId); "" unlinks. */
+  linkedClipId?: string;
   captionWords?: readonly CaptionWord[];
   captionHighlight?: boolean;
   captionHighlightColor?: string;
@@ -139,6 +141,10 @@ export class TitleEngine {
       captionHighlightColor:
         updates.captionHighlightColor ?? existing.captionHighlightColor,
       captionAnimation: updates.captionAnimation ?? existing.captionAnimation,
+      linkedClipId:
+        updates.linkedClipId === undefined
+          ? existing.linkedClipId
+          : updates.linkedClipId || undefined,
     };
 
     this.textClips.set(id, updatedClip);
