@@ -196,7 +196,15 @@ async function boot(): Promise<void> {
   const board: MountedBoard = mountBoard({ boardId, container: root, ydoc });
   if (!sharedId) installSharePreparation(async () => {
     const native = board.workspace.blobSource.native;
-    if (native) for (const key of native.records.keys()) if (!await native.mirror(key)) throw new Error('A board file has not finished uploading. Keep this tab open and try again after it is backed up.');
+    // Files the person kept in this browser (or never answered for) are not
+    // uploaded behind their back to make the share work: they stay out, and
+    // the person is told which and how to include them.
+    if (native) {
+      const { skipped } = await native.prepareForSharing();
+      if (skipped.length) {
+        toast(`${skipped.length > 1 ? `${skipped.length} files are` : '1 file is'} kept in this browser only, so people you share with will not see ${skipped.length > 1 ? 'them' : 'it'}. To include ${skipped.length > 1 ? 'them' : 'it'}: Files, then "Upload to Voidspace".`, 'info');
+      }
+    }
     await cloud.flush(); return { kind: 'board', sourceId: boardId };
   });
 

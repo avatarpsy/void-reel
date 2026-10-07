@@ -56,6 +56,9 @@ async function dropPng(name: string, x = 0): Promise<{ id: string; key: string }
   const key = `sha-${name}`;
   const native = board.workspace.blobSource.native!;
   await native.set(key, new File([new Uint8Array([137, 80, 78, 71])], name, { type: 'image/png' }));
+  // The person answered the board's question with Upload (the upload itself
+  // is left to the request below, as when the drop-time upload is still pending).
+  native.records.set(key, { ...native.records.get(key)!, upload: 'cloud' });
   const id = placeTestImage(board, `[${x},1200,320,180]`, { sourceId: key });
   writeBlockMeta(board.doc, id, { name, kind: 'image', createdBy: 'user' });
   return { id, key };
@@ -127,6 +130,18 @@ describe('dropped pictures as generation references', () => {
     expect(r.problems[0]).toMatchObject({ id, reason: 'storage_full' });
     expect(r.problems[0].message).toContain('not enough space');
     expect(readBlockMeta(board.doc, id)?.originalUrl).toBeUndefined();
+  });
+
+  it('does not upload a drop nobody said yes to; the agent is told it is not uploaded yet', async () => {
+    const key = 'sha-unanswered.png';
+    await board.workspace.blobSource.native!.set(key, new File([new Uint8Array([137, 80, 78, 71])], 'unanswered.png', { type: 'image/png' }));
+    const id = placeTestImage(board, '[0,1200,320,180]', { sourceId: key });
+    writeBlockMeta(board.doc, id, { name: 'unanswered.png', kind: 'image', createdBy: 'user' });
+    const r = await call('voidspace:board-selection', { ids: [id] });
+    expect(r.mediaUrls).toEqual([]);
+    expect(r.problems[0]).toMatchObject({ id, reason: 'unavailable' });
+    expect(r.problems[0].message).toContain('has not been uploaded to Voidspace yet');
+    expect(upload.calls).toBe(0);
   });
 
   it('never hands a vs-local: original to the server', async () => {

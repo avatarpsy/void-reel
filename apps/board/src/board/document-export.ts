@@ -135,6 +135,24 @@ export interface UploadedDocument extends RenderedDocument {
 const TOKEN_WAIT_MS = 8_000;
 const UPLOAD_WAIT_MS = 60_000;
 
+/**
+ * How long one upload may take: a minute, plus time for the bytes at a slow
+ * 250 KB/s. A flat minute failed every large video on an ordinary uplink and,
+ * worse, made it look like a network error worth retrying.
+ */
+export function uploadWaitMs(bytes: number): number {
+  return UPLOAD_WAIT_MS + Math.ceil(Math.max(0, bytes) / 250);
+}
+
+/**
+ * The server said NO to this upload (storage full, file rejected), as opposed
+ * to the network failing. Resending the same bytes gets the same answer, so a
+ * caller must not retry it by itself.
+ */
+export class UploadRefusedError extends Error {
+  constructor(message: string, readonly status?: number) { super(message); this.name = 'UploadRefusedError'; }
+}
+
 function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   return Promise.race([
     p,
@@ -168,7 +186,7 @@ export async function uploadBlob(blob: Blob, fileName: string, purpose: 'durable
             ...(token ? { Authorization: `Bearer ${token}` } : {}) },
           body: form,
         }),
-        UPLOAD_WAIT_MS,
+        uploadWaitMs(blob.size),
         'upload timeout',
       );
     } catch {
@@ -178,7 +196,7 @@ export async function uploadBlob(blob: Blob, fileName: string, purpose: 'durable
     if (res.ok) {
       const json = await res.json().catch(() => null);
       if (purpose === 'durable' && json?.placement !== 'durable') {
-        throw new Error(json?.note || 'Cloud backup is unavailable. The original stays on this device.');
+        throw new UploadRefusedError(json?.note || 'Cloud backup is unavailable. The original stays on this device.');
       }
       if (!json?.url) throw new Error('It was stored but came back without a link.');
       return String(json.url);
@@ -189,7 +207,12 @@ export async function uploadBlob(blob: Blob, fileName: string, purpose: 'durable
   if (last?.status === 401) throw new Error('Sign in to Voidspace to store files.');
   if (last && (last.status === 507 || last.status === 413)) {
     const msg = await last.text().catch(() => '');
-    throw new Error(msg || 'There is not enough space in your account for this.');
+    throw new UploadRefusedError(msg || 'There is not enough space in your account for this.', last.status);
+  }
+  // Any other 4xx (bad type, too large, forbidden) is the server's answer too;
+  // 5xx, 408 and 429 are worth trying again later.
+  if (last && last.status >= 400 && last.status < 500 && ![401, 408, 429].includes(last.status)) {
+    throw new UploadRefusedError('That file was not accepted for upload.', last.status);
   }
   throw new Error('That could not be uploaded.');
 }
