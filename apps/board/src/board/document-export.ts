@@ -196,7 +196,11 @@ export async function uploadBlob(blob: Blob, fileName: string, purpose: 'durable
     if (res.ok) {
       const json = await res.json().catch(() => null);
       if (purpose === 'durable' && json?.placement !== 'durable') {
-        throw new UploadRefusedError(json?.note || 'Cloud backup is unavailable. The original stays on this device.');
+        const note = json?.note || 'Cloud backup is unavailable. The original stays on this device.';
+        // `temp_failed` is the server's storage hiccuping, worth a later retry;
+        // any other reason (the quota) is a no until the person acts.
+        if (json?.reason === 'temp_failed') throw new Error(note);
+        throw new UploadRefusedError(note);
       }
       if (!json?.url) throw new Error('It was stored but came back without a link.');
       return String(json.url);
