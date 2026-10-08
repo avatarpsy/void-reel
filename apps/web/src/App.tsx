@@ -14,7 +14,11 @@ import { useVoidspaceStore } from "./stores/voidspace-store";
 import { useRouter } from "./hooks/use-router";
 import { useKieAIPoller } from "./hooks/useKieAIPoller";
 import { ensureWhisperModel } from "./services/teleprompter-asr";
-import { SOCIAL_MEDIA_PRESETS, getSpeedEngine, getMediaEngine, type MediaMetadata, type SocialMediaCategory } from "@openreel/core";
+import { SOCIAL_MEDIA_PRESETS, getSpeedEngine, getMediaEngine, captionOwnerId, type MediaMetadata, type SocialMediaCategory } from "@openreel/core";
+import {
+  asOneUndoStep, carryOwnedCaptions, clipWindow, ownedCaptions, removeOwnedCaptions,
+  timelineClipExists, type DescribedCaption,
+} from "./services/caption-cascade";
 import { readClipLooks, readTrackTransitions, readbackSourcesFrom } from "./agent/clip-readback";
 import { TooltipProvider } from "@openreel/ui";
 import {
@@ -864,15 +868,23 @@ export function useVideoRpc(sourceBoardIdRef?: { current: string }) {
               }));
             // Bucket live text clips into a single captions track.
             // All Voidspace caption clips share trackId "track-captions".
-            const captionClips = liveTextClips.map((tc: any) => ({
-              id: tc.id,
-              kind: 'text' as const,
-              trackId: tc.trackId ?? 'track-captions',
-              startTime: tc.startTime,
-              duration: tc.duration,
-              endTime: tc.startTime + tc.duration,
-              text: typeof tc.text === 'string' ? tc.text.slice(0, 200) : '',
-            }));
+            const mediaClipIds = new Set((proj.timeline?.tracks ?? []).flatMap((tr) => tr.clips.map((c) => c.id)));
+            const captionClips = liveTextClips.map((tc: any) => {
+              // Which clip this caption belongs to (explicit, or a legacy loader
+              // caption's scene clip). Absent = timeline-anchored: no clip edit
+              // moves or deletes it.
+              const owner = captionOwnerId(tc, (id) => mediaClipIds.has(id));
+              return {
+                id: tc.id,
+                kind: 'text' as const,
+                trackId: tc.trackId ?? 'track-captions',
+                startTime: tc.startTime,
+                duration: tc.duration,
+                endTime: tc.startTime + tc.duration,
+                text: typeof tc.text === 'string' ? tc.text.slice(0, 200) : '',
+                ...(owner ? { linkedClipId: owner } : {}),
+              };
+            });
             const captionTracks = captionClips.length > 0
               ? [{ id: 'track-captions', name: 'Captions', kind: 'captions' as const, clips: captionClips }]
               : [];
@@ -1196,6 +1208,20 @@ export function useVideoRpc(sourceBoardIdRef?: { current: string }) {
               reply({ type: "voidspace:error", requestId: msg.requestId, error: "text and startTime required" });
               break;
             }
+            // Optional owner. Default UNLINKED: lyrics, titles and on-screen
+            // words stay where they are put whatever happens to the clips.
+            // Linked captions go with their clip (remove/move/trim).
+            const linkTo = typeof (msg as any).linkTo === "string" ? String((msg as any).linkTo) : "";
+            if (linkTo && !timelineClipExists(linkTo)) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: `LINK_TARGET_NOT_FOUND: no media clip ${linkTo} on the timeline` });
+              break;
+            }
+            const applyLink = (id: string | null | undefined) => {
+              if (!linkTo || !id) return;
+              const eng = useEngineStore.getState().getTitleEngine();
+              if (!eng?.updateTextClip(id, { linkedClipId: linkTo })) return;
+              useProjectStore.setState((s) => ({ project: { ...s.project, textClips: eng.getAllTextClips(), modifiedAt: Date.now() } }));
+            };
             try {
               // IDEMPOTENT. The page gives this call a fixed time to answer; when
               // the editor is busy (Episode 3: captions added right before an
@@ -1206,7 +1232,8 @@ export function useVideoRpc(sourceBoardIdRef?: { current: string }) {
               const existingClip = (useEngineStore.getState().getTitleEngine()?.getAllTextClips() ?? [])
                 .find((tc: any) => Math.abs((tc.startTime ?? 0) - startTime) < 0.05 && tc.text === text.trim());
               if (existingClip) {
-                reply({ type: "voidspace:text-clip-added", requestId: msg.requestId, ok: true, clipId: existingClip.id ?? null, trackId: "track-captions", existing: true });
+                applyLink(existingClip.id);
+                reply({ type: "voidspace:text-clip-added", requestId: msg.requestId, ok: true, clipId: existingClip.id ?? null, trackId: "track-captions", existing: true, linkedClipId: linkTo || existingClip.linkedClipId || null });
                 break;
               }
               const endTime = startTime + (typeof durationSec === "number" && durationSec > 0 ? durationSec : 3);
@@ -1234,12 +1261,14 @@ export function useVideoRpc(sourceBoardIdRef?: { current: string }) {
               const createdClip = (titleEng?.getAllTextClips() ?? [])
                 .filter((tc: any) => Math.abs((tc.startTime ?? 0) - startTime) < 0.05 && tc.text === text.trim())
                 .pop();
+              applyLink(createdClip?.id);
               reply({
                 type: "voidspace:text-clip-added",
                 requestId: msg.requestId,
                 ok: true,
                 clipId: createdClip?.id ?? null,
                 trackId: "track-captions",
+                linkedClipId: linkTo || null,
               });
             } catch (err: any) {
               reply({ type: "voidspace:error", requestId: msg.requestId, error: err?.message ?? String(err) });
@@ -1314,23 +1343,35 @@ export function useVideoRpc(sourceBoardIdRef?: { current: string }) {
               break;
             }
             const errors: string[] = [];
-            if (typeof patch.startTime === "number") {
-              const r = await store.moveClip(clipId, patch.startTime, foundTrackId ?? undefined);
-              if (!r.success) errors.push(`moveClip: ${r.error ?? "failed"}`);
-            }
-            if (typeof patch.inPoint === "number" || typeof patch.outPoint === "number") {
-              const r = await store.trimClip(
-                clipId,
-                typeof patch.inPoint === "number" ? patch.inPoint : undefined,
-                typeof patch.outPoint === "number" ? patch.outPoint : undefined,
-              );
-              if (!r.success) errors.push(`trimClip: ${r.error ?? "failed"}`);
-            }
-            if (typeof patch.duration === "number") {
-              const inP = typeof patch.inPoint === "number" ? patch.inPoint : (foundClip.inPoint ?? 0);
-              const r = await store.trimClip(clipId, inP, inP + patch.duration);
-              if (!r.success) errors.push(`trimClip(duration): ${r.error ?? "failed"}`);
-            }
+            // Move/trim carry the clip's OWN captions (shifted with it; the ones
+            // now wholly outside it removed and reported). Unlinked captions are
+            // never touched. `cascade: false` is for callers that already shift
+            // every track themselves (a ripple pass).
+            const owned = (msg as any).cascade === false ? [] : ownedCaptions(clipId);
+            const windowBefore = clipWindow(clipId);
+            let cascade: Awaited<ReturnType<typeof carryOwnedCaptions>> = { captionsRemoved: [], captionsMoved: 0 };
+            await asOneUndoStep("Edit clip", async () => {
+              if (typeof patch.startTime === "number") {
+                const r = await store.moveClip(clipId, patch.startTime, foundTrackId ?? undefined);
+                if (!r.success) errors.push(`moveClip: ${r.error ?? "failed"}`);
+              }
+              if (typeof patch.inPoint === "number" || typeof patch.outPoint === "number") {
+                const r = await store.trimClip(
+                  clipId,
+                  typeof patch.inPoint === "number" ? patch.inPoint : undefined,
+                  typeof patch.outPoint === "number" ? patch.outPoint : undefined,
+                );
+                if (!r.success) errors.push(`trimClip: ${r.error ?? "failed"}`);
+              }
+              if (typeof patch.duration === "number") {
+                const inP = typeof patch.inPoint === "number" ? patch.inPoint : (foundClip.inPoint ?? 0);
+                const r = await store.trimClip(clipId, inP, inP + patch.duration);
+                if (!r.success) errors.push(`trimClip(duration): ${r.error ?? "failed"}`);
+              }
+              if (windowBefore && owned.length > 0) {
+                cascade = await carryOwnedCaptions(clipId, windowBefore, owned);
+              }
+            });
             if (typeof patch.volume === "number") {
               const volStore = useProjectStore.getState() as any;
               const volAction = {
@@ -1372,6 +1413,8 @@ export function useVideoRpc(sourceBoardIdRef?: { current: string }) {
               clip: finalClip,
               errors: errors.length ? errors : undefined,
               ok: errors.length === 0,
+              captionsRemoved: cascade.captionsRemoved,
+              captionsMoved: cascade.captionsMoved,
             });
             break;
           }
@@ -1891,9 +1934,17 @@ export function useVideoRpc(sourceBoardIdRef?: { current: string }) {
             // ActionExecutor (so it's undoable). Autosave commits the
             // updated project_state blob. Old media item stays in the
             // library — cheap, and lets undo restore the prior version.
+            //
+            // Also the agent's `replace_clip_media {clipId, mediaId, inPoint?,
+            // outPoint?}`: pass a library `mediaId` instead of a url. Either
+            // way it is ONE clip/replaceMedia action — same clip id, track and
+            // startTime, undoable — and the clip's captions are left alone.
             const { clipId, url, name, posterUrl, durationSec } = msg as any;
-            if (!clipId || !url) {
-              reply({ type: "voidspace:error", requestId: msg.requestId, error: "clipId + url required" });
+            const wantMediaId = typeof (msg as any).mediaId === "string" ? (msg as any).mediaId as string : "";
+            const reqIn = typeof (msg as any).inPoint === "number" ? (msg as any).inPoint as number : undefined;
+            const reqOut = typeof (msg as any).outPoint === "number" ? (msg as any).outPoint as number : undefined;
+            if (!clipId || (!url && !wantMediaId)) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: "clipId + (mediaId or url) required" });
               break;
             }
             try {
@@ -1934,11 +1985,24 @@ export function useVideoRpc(sourceBoardIdRef?: { current: string }) {
                 setTimeout(() => done(0), 5000);
                 el.src = obj;
               });
-              const newMediaId = `media-${trackKind || "asset"}-${stableHashFn(url)}`;
-              let item = proj.mediaLibrary?.items?.find((m: any) => m.id === newMediaId);
+              let newMediaId = wantMediaId;
+              let item: any = null;
               // Real length of the swapped-in media (passed value wins, else probe,
               // else fall back to the old clip's duration so nothing breaks).
               let newMediaDuration = (typeof durationSec === "number" && durationSec > 0) ? durationSec : 0;
+              if (wantMediaId) {
+                // A media item already in the library (agent: list_media / a
+                // regenerated take the chat imported).
+                item = proj.mediaLibrary?.items?.find((m: any) => m.id === wantMediaId) ?? null;
+                if (!item) {
+                  reply({ type: "voidspace:error", requestId: msg.requestId, error: `MEDIA_NOT_FOUND: no media ${wantMediaId} in this project's library` });
+                  break;
+                }
+                if (!newMediaDuration) newMediaDuration = Number(item.metadata?.duration) || 0;
+              } else {
+                newMediaId = `media-${trackKind || "asset"}-${stableHashFn(url)}`;
+                item = proj.mediaLibrary?.items?.find((m: any) => m.id === newMediaId) ?? null;
+              }
               if (!item) {
                 let blob: Blob | null = null;
                 try {
@@ -1974,78 +2038,72 @@ export function useVideoRpc(sourceBoardIdRef?: { current: string }) {
               } else if (!newMediaDuration) {
                 newMediaDuration = Number(item.metadata?.duration) || 0;
               }
-              // KNOWN LIMITATION: this swap bypasses ActionExecutor /
-              // ActionHistory because the openreel core doesn't ship a
-              // `clip/setMediaId` action type. Consequence: the user
-              // can't Ctrl+Z a regen swap (the inverse isn't in
-              // history). The agent's regen flow is destructive intent
-              // anyway — the user clicked Approve on a regenerated
-              // variation, not "tweak this clip". The OLD media item
-              // stays in mediaLibrary so a future "revert this regen"
-              // tool could swap back without re-fetching. If history
-              // round-trip becomes a requirement, add `clip/setMediaId`
-              // to packages/core/src/actions and route through
-              // actionExecutor.execute here.
-              useProjectStore.setState((s: any) => {
-                const tracks = (s.project.timeline?.tracks ?? []).map((tr: any) => {
-                  if (!(tr.clips ?? []).some((c: any) => c.id === clipId)) return tr;
-                  // Free room on THIS track: the clip may grow until the next
-                  // clip starts (never overlap, never ripple).
-                  const target = (tr.clips ?? []).find((c: any) => c.id === clipId);
-                  const nextStart = (tr.clips ?? [])
-                    .filter((c: any) => c.id !== clipId && c.startTime > (target?.startTime ?? 0) + 1e-6)
-                    .reduce((min: number, c: any) => Math.min(min, c.startTime), Infinity);
-                  return {
-                    ...tr,
-                    clips: (tr.clips ?? []).map((c: any) => {
-                      if (c.id !== clipId) return c;
-                      // CLEAN SWAP: spread `c` so every prior edit is kept —
-                      // effects, audioEffects, transform, volume, fades,
-                      // keyframes, startTime — only the media + trim change.
-                      const md = newMediaDuration > 0 ? newMediaDuration : (c.outPoint ?? c.duration ?? 0);
-                      let inPoint = c.inPoint ?? 0;
-                      let outPoint = c.outPoint ?? md;
-                      let duration = c.duration;
-                      if (md > 0) {
-                        inPoint = Math.max(0, Math.min(inPoint, Math.max(0, md - 0.05)));
-                        // Was the OLD clip showing its media in full (the
-                        // normal scene-take shape), or a deliberate trim?
-                        const oldMd = (s.project.mediaLibrary?.items ?? [])
-                          .find((m: any) => m.id === c.mediaId)?.metadata?.duration ?? 0;
-                        const wasFullTake = oldMd > 0
-                          ? inPoint <= 0.05 && (c.outPoint ?? oldMd) >= oldMd - 0.1
-                          : true;
-                        const room = Number.isFinite(nextStart)
-                          ? Math.max(0.05, nextStart - (c.startTime ?? 0))
-                          : Infinity;
-                        if (wasFullTake) {
-                          // Full-take clip stays a full take: a LONGER regen
-                          // extends into the free gap (the old min() clamp
-                          // silently CUT the tail off longer narrations); a
-                          // shorter regen shrinks (no EOF black tail).
-                          duration = Math.max(0.05, Math.min(md - inPoint, room));
-                          outPoint = inPoint + duration;
-                        } else {
-                          // User trimmed this clip deliberately — preserve
-                          // the window, only clamp to the new media length.
-                          outPoint = Math.min(outPoint, md);
-                          if (outPoint <= inPoint) outPoint = md;
-                          duration = Math.max(0.05, Math.min(outPoint - inPoint, room));
-                          outPoint = inPoint + duration;
-                        }
-                      }
-                      return { ...c, mediaId: newMediaId, inPoint, outPoint, duration };
-                    }),
-                  };
-                });
-                return { project: { ...s.project, timeline: { ...s.project.timeline, tracks }, modifiedAt: Date.now() } };
-              });
+
+              // ── The new trim ────────────────────────────────────────────
+              // Free room on THIS track: the clip may grow until the next clip
+              // starts (never overlap, never ripple).
+              const c = foundClip;
+              const nextStart = (foundTrack?.clips ?? [])
+                .filter((o: any) => o.id !== clipId && o.startTime > (c.startTime ?? 0) + 1e-6)
+                .reduce((min: number, o: any) => Math.min(min, o.startTime), Infinity);
+              const room = Number.isFinite(nextStart) ? Math.max(0.05, nextStart - (c.startTime ?? 0)) : Infinity;
+              const md = newMediaDuration > 0 ? newMediaDuration : 0;
+              let inPoint: number;
+              let outPoint: number;
+              if (wantMediaId || reqIn !== undefined || reqOut !== undefined) {
+                // replace_clip_media: keep the clip's visible length unless told
+                // otherwise, clamped to the new media.
+                inPoint = Math.max(0, reqIn ?? 0);
+                if (md > 0) inPoint = Math.min(inPoint, Math.max(0, md - 0.05));
+                outPoint = reqOut ?? inPoint + (c.duration ?? 0);
+                if (md > 0) outPoint = Math.min(outPoint, md);
+                if (outPoint <= inPoint) outPoint = md > 0 ? md : inPoint + Math.max(0.05, c.duration ?? 0);
+              } else {
+                // Regenerate flows (url): a full-take clip stays a full take — a
+                // LONGER regen extends into the free gap, a shorter one shrinks
+                // (no EOF black tail); a deliberately trimmed clip keeps its
+                // window, clamped to the new media length.
+                const mdOrOld = md > 0 ? md : (c.outPoint ?? c.duration ?? 0);
+                inPoint = Math.max(0, Math.min(c.inPoint ?? 0, Math.max(0, mdOrOld - 0.05)));
+                const oldMd = (proj.mediaLibrary?.items ?? []).find((m: any) => m.id === c.mediaId)?.metadata?.duration ?? 0;
+                const wasFullTake = oldMd > 0 ? inPoint <= 0.05 && (c.outPoint ?? oldMd) >= oldMd - 0.1 : true;
+                if (wasFullTake && md > 0) {
+                  outPoint = md;
+                } else {
+                  outPoint = Math.min(c.outPoint ?? mdOrOld, mdOrOld);
+                  if (outPoint <= inPoint) outPoint = mdOrOld;
+                }
+              }
+              outPoint = inPoint + Math.max(0.05, Math.min(outPoint - inPoint, room));
+
+              // ONE undoable action. Every prior edit (effects, transform,
+              // volume, fades, keyframes, startTime) is kept; the OLD media item
+              // stays in the library so undo plays it again.
+              const exStore = useProjectStore.getState() as any;
+              const rr = await exStore.actionExecutor.execute({
+                type: "clip/replaceMedia",
+                id: `replace-media-${Date.now().toString(36)}`,
+                timestamp: Date.now(),
+                params: { clipId, mediaId: newMediaId, inPoint, outPoint },
+              }, exStore.project);
+              if (!rr.success) {
+                reply({ type: "voidspace:error", requestId: msg.requestId, error: `${rr.error?.code ?? "ERROR"}: ${rr.error?.message ?? "replace failed"}` });
+                break;
+              }
+              useProjectStore.setState({ project: { ...exStore.project, modifiedAt: Date.now() } });
+              useEngineStore.getState().getPlaybackController()?.invalidateAudioForMedia([c.mediaId, newMediaId][Symbol.iterator]());
               // Record the authoritative swap (keyed on the swapped-to URL, not
               // the mediaId, since a per-scene rebuild mints a different mediaId
               // scheme for the same take) so a stale rebuild can't revert it
               // before the durable source catches up — see liveSwapAuthority.
-              recordLiveSwap(clipId, url);
-              reply({ type: "voidspace:clip-media-replaced", requestId: msg.requestId, ok: true, clipId, mediaId: newMediaId });
+              const swappedUrl = url || item?.originalUrl;
+              if (swappedUrl) recordLiveSwap(clipId, swappedUrl);
+              reply({
+                type: "voidspace:clip-media-replaced", requestId: msg.requestId, ok: true, clipId, mediaId: newMediaId,
+                inPoint, outPoint, duration: outPoint - inPoint,
+                // Nothing was removed: the clip keeps its id, so its captions stay.
+                captionsKept: ownedCaptions(clipId).length,
+              });
             } catch (err: any) {
               reply({ type: "voidspace:error", requestId: msg.requestId, error: err?.message ?? String(err) });
             }
@@ -2344,7 +2402,17 @@ export function useVideoRpc(sourceBoardIdRef?: { current: string }) {
               reply({ type: "voidspace:clip-removed", requestId: msg.requestId, clipId, ok: true, kind: "caption" });
               break;
             }
-            const r = await _store.removeClip(clipId);
+            // The clip's OWN captions go with it (and are reported); captions
+            // that are not linked to it — typed lyrics, titles — never do.
+            // Captured before the removal: a legacy caption's owner is derived
+            // from which scene clips exist.
+            const owned = ownedCaptions(clipId);
+            let captionsRemoved: DescribedCaption[] = [];
+            const r = await asOneUndoStep("Delete clip", async () => {
+              const res = await _store.removeClip(clipId);
+              if (res.success) captionsRemoved = await removeOwnedCaptions(owned);
+              return res;
+            });
             if (!r.success) {
               // r.error is an ActionError object { code, message, details? }.
               // Pass the .message string (with the code prefixed) so the
@@ -2357,7 +2425,7 @@ export function useVideoRpc(sourceBoardIdRef?: { current: string }) {
               reply({ type: "voidspace:error", requestId: msg.requestId, error: errStr });
               break;
             }
-            reply({ type: "voidspace:clip-removed", requestId: msg.requestId, clipId, ok: true });
+            reply({ type: "voidspace:clip-removed", requestId: msg.requestId, clipId, ok: true, captionsRemoved });
             break;
           }
           case "voidspace:split-clip": {
@@ -2537,15 +2605,24 @@ export function useVideoRpc(sourceBoardIdRef?: { current: string }) {
               reply({ type: "voidspace:clip-moved", requestId: msg.requestId, clipId, ok: true });
               break;
             }
-            // Media clip path.
-            const r = await useProjectStore.getState().moveClip(clipId, startTime, trackId);
+            // Media clip path. Its OWN captions move with it; unlinked ones never.
+            const ownedMove = (msg as any).cascade === false ? [] : ownedCaptions(clipId);
+            const moveBefore = clipWindow(clipId);
+            let moveCascade: Awaited<ReturnType<typeof carryOwnedCaptions>> = { captionsRemoved: [], captionsMoved: 0 };
+            const r = await asOneUndoStep("Move clip", async () => {
+              const res = await useProjectStore.getState().moveClip(clipId, startTime, trackId);
+              if (res.success && moveBefore && ownedMove.length > 0) {
+                moveCascade = await carryOwnedCaptions(clipId, moveBefore, ownedMove);
+              }
+              return res;
+            });
             if (!r.success) {
               const e: any = r.error;
               const errStr = e && typeof e === "object" ? `${e.code ?? "ERROR"}: ${e.message ?? "moveClip failed"}` : (typeof e === "string" ? e : "moveClip failed");
               reply({ type: "voidspace:error", requestId: msg.requestId, error: errStr });
               break;
             }
-            reply({ type: "voidspace:clip-moved", requestId: msg.requestId, clipId, ok: true });
+            reply({ type: "voidspace:clip-moved", requestId: msg.requestId, clipId, ok: true, ...moveCascade });
             break;
           }
           // voidspace:apply-editor-state handler removed (2026-05-09).

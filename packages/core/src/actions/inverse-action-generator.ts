@@ -349,6 +349,15 @@ export class InverseActionGenerator {
     }
 
     switch (action.type) {
+      case "clip/replaceMedia": {
+        const clip = this.findClip(timeline, action.params.clipId);
+        if (!clip) return null;
+        return this.createInverseAction(action, "clip/applyState", {
+          label: "Undo replace media",
+          clips: [{ clipId: clip.id, state: this.cloneClip(clip) }],
+        });
+      }
+
       case "clip/add":
         return this.createInverseAction(action, "clip/remove", {
           clipId: "__LAST_ADDED__",

@@ -36,6 +36,7 @@ import type {
 // below; the mapping is built and tested, and gated until the editor can open
 // one.
 import { buildSequenceCompounds } from "@openreel/core";
+import { sceneCaptionOwnerId } from "@openreel/core";
 
 // ────────────────────────────────────────────
 // Types matching Firestore document shapes
@@ -2332,8 +2333,16 @@ export async function loadSceneListAsProject(
     words?: { text: string; start: number; end: number }[],
   ) => {
     const duration = Math.max(0.1, endTime - startTime);
+    // OWNED BY ITS SCENE'S CLIP (narration, else picture), by id: removing,
+    // moving or trimming that clip carries this caption — and nothing else.
+    // Same rule `captionOwnerId` derives for captions saved before the link.
+    const linkedClipId = sceneCaptionOwnerId(sceneDocId, (id) =>
+      narrationTrackClips.some((c) => c.id === id)
+      || videoTrackClips.some((c) => c.id === id)
+      || imageTrackClips.some((c) => c.id === id));
     captionTextClips.push({
       id: `caption-${sceneDocId}-${chunkIdx}`,
+      ...(linkedClipId ? { linkedClipId } : {}),
       trackId: "track-captions",
       startTime,
       duration,

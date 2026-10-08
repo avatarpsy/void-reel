@@ -113,7 +113,17 @@ export type ClipAction =
       params: { clipId: string; inPoint?: number; outPoint?: number };
     }
   | { type: "clip/split"; params: { clipId: string; time: number } }
-  | { type: "clip/rippleDelete"; params: { clipId: string } };
+  | { type: "clip/rippleDelete"; params: { clipId: string } }
+  /**
+   * Swap the media a clip plays, in place: same clip id, track and startTime,
+   * every effect/transform/volume kept. This is how a regenerated or alternate
+   * take goes on the timeline — never remove + add, which loses the clip's id
+   * and with it everything that refers to it (linked captions, edits).
+   */
+  | {
+      type: "clip/replaceMedia";
+      params: { clipId: string; mediaId: string; inPoint: number; outPoint: number };
+    };
 
 // Effect actions
 export type EffectAction =
