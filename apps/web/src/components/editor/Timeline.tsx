@@ -29,7 +29,7 @@ import { useProjectStore } from "../../stores/project-store";
 import { useTimelineStore, ZOOM_PRESETS } from "../../stores/timeline-store";
 import { useUIStore } from "../../stores/ui-store";
 
-import { resolveDroppedMediaId } from "../../services/library-drop";
+import { resolveDroppedMediaId, lastDropFailure } from "../../services/library-drop";
 import { toast } from "../../stores/notification-store";
 import { useEngineStore } from "../../stores/engine-store";
 import { getPlaybackBridge } from "../../bridges/playback-bridge";
@@ -564,6 +564,14 @@ export const Timeline: React.FC = () => {
     return () => el.removeEventListener("wheel", onWheel);
   }, [setZoom]);
 
+  /** The media resolved but the clip could not be placed — say why rather
+   *  than leaving the drop looking ignored. */
+  const reportPlacement = (res: { success?: boolean; error?: { message?: string } } | undefined) => {
+    if (res && res.success === false) {
+      toast.error("Couldn't add to timeline", res.error?.message ?? "The clip could not be placed there.");
+    }
+  };
+
   const handleDropMedia = useCallback(
     async (trackId: string, mediaId: string, startTime: number) => {
       const store = useProjectStore.getState();
@@ -623,18 +631,16 @@ export const Timeline: React.FC = () => {
         const free = store.project.timeline.tracks.find(
           (t) => t.type === targetType && !occupied(t) && (!isGraphic || isGraphicLane(t)),
         );
-        if (free) {
-          await addClip(free.id, mediaId, startTime);
-        } else {
-          await addClipToNewTrack(mediaId, startTime);
-        }
+        const res = free
+          ? await addClip(free.id, mediaId, startTime)
+          : await addClipToNewTrack(mediaId, startTime);
+        reportPlacement(res);
         return;
       }
-      if (trackId) {
-        await addClip(trackId, mediaId, startTime);
-      } else {
-        await addClipToNewTrack(mediaId, startTime);
-      }
+      const res = trackId
+        ? await addClip(trackId, mediaId, startTime)
+        : await addClipToNewTrack(mediaId, startTime);
+      reportPlacement(res);
     },
     [],
   );
@@ -1558,9 +1564,15 @@ export const Timeline: React.FC = () => {
                 const rawData = e.dataTransfer.getData("application/json");
                 if (!rawData) return;
                 const mediaId = await resolveDroppedMediaId(rawData);
-                if (mediaId) handleDropMedia("", mediaId, snappedTime);
-              } catch {
-                // ignore
+                if (mediaId) {
+                  handleDropMedia("", mediaId, snappedTime);
+                } else {
+                  const why = lastDropFailure();
+                  if (why) toast.error("Couldn't add to timeline", why);
+                }
+              } catch (err) {
+                console.error("[Timeline] Drop failed:", err);
+                toast.error("Couldn't add to timeline", String((err as Error)?.message ?? err).slice(0, 160));
               }
             }}
           >

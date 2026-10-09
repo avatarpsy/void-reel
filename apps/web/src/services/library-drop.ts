@@ -95,11 +95,23 @@ export function lastBlockDropFailure(): string {
   return lastBlockDropError;
 }
 
+/** Same idea for a Library item: why the last import failed, in words a person
+ *  can act on. Before this a failed Library drop returned null and the drop
+ *  handlers swallowed it — the card simply did not land and nothing said why. */
+let lastLibraryDropError = "";
+
+/** Why the most recent drop (Library item OR block) produced nothing. */
+export function lastDropFailure(): string {
+  return lastBlockDropError || lastLibraryDropError;
+}
+
 /** Read a timeline drop payload that may be a native media item, a Library
  *  item, OR a block from the block library. Returns the project mediaId to
  *  place, importing (and for a block, rendering) it first if needed. Returns
  *  null if the payload is none of those / the import failed. */
 export async function resolveDroppedMediaId(rawJson: string): Promise<string | null> {
+  lastLibraryDropError = "";
+  lastBlockDropError = "";
   if (!rawJson) return null;
   let data: any;
   try { data = JSON.parse(rawJson); } catch { return null; }
@@ -248,19 +260,30 @@ export async function importLibraryItemToProject(li: DroppedLibraryItem): Promis
   const store = useProjectStore.getState();
   const existing = store.project.mediaLibrary.items.find((m: any) => m.originalUrl === li.url);
   if (existing) return existing.id;
+  const name = li.label || li.kind || "that file";
   try {
-    // Local-asset fetches are auth-stamped by the main.tsx hook; absolute
-    // cloud URLs fall back to the media-proxy when CORS blocks them.
+    // Authenticated media paths (local-asset, media-library file/thumb/proxy)
+    // are auth-stamped by the main.tsx hook; absolute cloud URLs fall back to
+    // the media-proxy when CORS blocks them.
     const blob = await fetchLibraryBlob(li.url);
-    if (!blob) return null;
+    if (!blob) {
+      lastLibraryDropError = `Couldn't download ${name}. Check you're signed in and online, then try again.`;
+      return null;
+    }
     const ext = li.kind === "image" ? "jpg" : li.type === "video" ? "mp4" : "mp3";
     const safe = (li.label || li.kind).replace(/[^a-z0-9._-]+/gi, "-").slice(0, 48) || li.kind;
     const file = new File([blob], `${safe}.${ext}`, { type: blob.type || "application/octet-stream" });
     const before = new Set(store.project.mediaLibrary.items.map((i: any) => i.id));
-    const result = await useProjectStore.getState().importMedia(file);
-    if (!result.success) return null;
+    const result: any = await useProjectStore.getState().importMedia(file);
+    if (!result.success) {
+      lastLibraryDropError = `Couldn't import ${name}: ${result?.error?.message ?? "the file format was not accepted"}.`;
+      return null;
+    }
     const newItem = useProjectStore.getState().project.mediaLibrary.items.find((i: any) => !before.has(i.id));
-    if (!newItem) return null;
+    if (!newItem) {
+      lastLibraryDropError = `Imported ${name}, but it could not be found in the project.`;
+      return null;
+    }
     // Tag originalUrl (dedup + reload hydration) + a Library category, and
     // cache the blob under the new id so a reload restores it instantly.
     useProjectStore.setState((s: any) => ({
@@ -279,7 +302,8 @@ export async function importLibraryItemToProject(li: DroppedLibraryItem): Promis
     }));
     saveMediaBlob(useProjectStore.getState().project.id, newItem.id, blob, (newItem as any).metadata ?? {}).catch(() => {});
     return newItem.id;
-  } catch {
+  } catch (e: any) {
+    lastLibraryDropError = `Couldn't add ${name}: ${String(e?.message ?? e).slice(0, 160)}`;
     return null;
   }
 }

@@ -9,6 +9,7 @@ import {
   registerServiceWorker,
 } from "./services/service-worker";
 import { auth } from "./config/firebase-config";
+import { isAuthedMediaUrl, hasTokenParam } from "./services/authed-media";
 import { installStorageFullWatch, setBlockTokenProvider } from "@openreel/asset-browser";
 
 /**
@@ -30,9 +31,14 @@ setBlockTokenProvider(async () => {
   }
 });
 
-// Auth-stamp every fetch that targets `/api/studio/local-asset`. The
-// endpoint requires a Firebase ID token (via Authorization: Bearer …
-// header, OR ?t=<idToken> query fallback), but multiple consumers
+// Auth-stamp every same-origin fetch of an authenticated media path —
+// `/api/studio/local-asset` AND the media-library file/thumb/proxy routes.
+// The list lives in services/authed-media.ts and is shared with the loader:
+// this hook used to know only local-asset, so a Library item dragged onto
+// the timeline fetched `/api/media-library/file` bare, got 401, and the drop
+// silently did nothing (9 Oct 2026). These endpoints require a Firebase ID
+// token (via Authorization: Bearer … header, OR ?t=<idToken> query
+// fallback), but multiple consumers
 // downstream — playback-controller's HTMLAudioElement fallback,
 // export-engine's audio prefetch, voidspace-loader's blob fetcher —
 // hit the URL with a plain `fetch()`. Without auth, they all 401, the
@@ -54,7 +60,7 @@ if (typeof window !== "undefined") {
         : input instanceof URL
           ? input.toString()
           : (input as Request).url;
-    if (rawUrl && /\/api\/studio\/local-asset(\?|$)/.test(rawUrl) && !/[?&]t=/.test(rawUrl)) {
+    if (rawUrl && isAuthedMediaUrl(rawUrl) && !hasTokenParam(rawUrl)) {
       try {
         const u = auth.currentUser;
         const token = u ? await u.getIdToken(false) : "";

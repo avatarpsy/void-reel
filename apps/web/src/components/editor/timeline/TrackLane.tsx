@@ -15,7 +15,7 @@ import { useTimelineStore } from "../../../stores/timeline-store";
 import { useUIStore } from "../../../stores/ui-store";
 import { useProjectStore } from "../../../stores/project-store";
 import { toast } from "../../../stores/notification-store";
-import { resolveDroppedMediaId } from "../../../services/library-drop";
+import { resolveDroppedMediaId, lastDropFailure } from "../../../services/library-drop";
 
 type GraphicClipUnion = ShapeClip | SVGClip | StickerClip;
 
@@ -178,9 +178,18 @@ export const TrackLane: React.FC<TrackLaneProps> = ({
           pixelsPerSecond,
         );
         const mediaId = await resolveDroppedMediaId(rawData);
-        if (mediaId) onDropMedia(track.id, mediaId, snapResult.time);
-      } catch {
-        // Silently ignore parse errors
+        if (mediaId) {
+          onDropMedia(track.id, mediaId, snapResult.time);
+        } else {
+          // A drop that lands nothing must SAY so — a silent no-op is the one
+          // outcome a person cannot act on (9 Oct 2026: Library drops 401'd and
+          // looked like the timeline ignoring the mouse).
+          const why = lastDropFailure();
+          if (why) toast.error("Couldn't add to timeline", why);
+        }
+      } catch (err) {
+        console.error("[TrackLane] Drop failed:", err);
+        toast.error("Couldn't add to timeline", String((err as Error)?.message ?? err).slice(0, 160));
       }
     },
     [
