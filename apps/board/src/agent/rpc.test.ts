@@ -246,6 +246,25 @@ describe('board_read', () => {
     expect(one.shots[0].order).toBe(5);
   });
 
+  it('a trimmed read still indexes EVERY shot by id, number and title', () => {
+    const longUrl = `https://storage.googleapis.com/voidspace-x/${'a'.repeat(900)}.mp4`;
+    const shots = Array.from({ length: 79 }, (_, i) => ({
+      id: `shot-${i}`, order: i, title: `Shot ${i + 1}: ${'a long descriptive title '.repeat(4)}`,
+      action: 'x'.repeat(500), takes: [{ id: `t${i}`, status: 'ready', url: longUrl }],
+      chosenTakeUrl: longUrl, media: [], graphics: [], warnings: [],
+    }));
+    const read = fitDigest({ shots, script: {}, documents: [] });
+    expect(JSON.stringify(read).length).toBeLessThanOrEqual(READ_BUDGET_CHARS);
+    expect(read.shotsOmitted).toBeGreaterThan(0);
+    expect(read.shots.length).toBeLessThan(79);
+    expect(read.shotIndex).toHaveLength(79);
+    expect(read.shotIndex!.map(r => r.id)).toEqual(shots.map(s => s.id));
+    expect(read.shotIndex![73]).toMatchObject({ id: 'shot-73', n: 74 });
+    expect(read.shotIndex![73].title.length).toBeLessThanOrEqual(40);
+    expect(read.omitted).toMatch(/shotIndex/);
+    expect(read.omitted).toMatch(/detail: "full"/);
+  });
+
   it('leaves a small board exactly as it was', () => {
     const d = { shots: [{ id: 'a' }], script: {}, documents: [] };
     expect(fitDigest(d)).toBe(d);
