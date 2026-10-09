@@ -10,6 +10,8 @@ import { useProjectStore } from "./stores/project-store";
 import { useEngineStore } from "./stores/engine-store";
 import { liveSwapAuthority, LIVE_SWAP_AUTHORITY_TTL_MS, normSwapUrl, recordLiveSwap } from "./services/live-swap-authority";
 import { planTakeWindow } from "./services/replace-clip-take";
+import { ensureUrlMedia } from "./services/url-media";
+import { applyBoardUpdatesFor, isBoardLinkedClip, markBoardProjectReady, type BoardUpdate } from "./services/board-updates";
 const SharedVideo = lazy(() => import('./SharedVideo'));
 import { sharedProjectId, installSharePreparation } from '@openreel/asset-browser';
 import { useVoidspaceStore } from "./stores/voidspace-store";
@@ -387,6 +389,14 @@ function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
       // live-swap TTL ends. Only a new upstream take (regen, new url) is news.
       const prevUrl = lastRebuildUrlByClip.get(freshClip.id);
       lastRebuildUrlByClip.set(freshClip.id, freshUrl);
+      // A BOARD-LINKED CLIP IS NEVER CHANGED BY A REBUILD. Its take, length,
+      // removal and order reach the editor only as structured board updates
+      // (services/board-updates.ts), applied in place through undoable actions.
+      // A rebuild is a re-derivation from scene docs that any save, recompile
+      // or unrelated write can trigger — on 8 Oct one put BETTER ME's cut back
+      // at shotIndex × 6.04 s. New board clips (a shot the cut does not hold
+      // yet) still stream in below; existing ones are the editor's.
+      if (isBoardLinkedClip(existing) || isBoardLinkedClip(freshClip)) continue;
       const upstreamChanged = prevUrl !== undefined && !!freshUrl && prevUrl !== freshUrl;
       if (existing.mediaId !== freshClip.mediaId && upstreamChanged) {
         // Suppress the stale-rebuild revert: while the user's live swap is
@@ -541,6 +551,11 @@ function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
 // (see main.tsx's __test). Tree-shaken out of the production bundle.
 if (import.meta.env.DEV && typeof window !== "undefined") {
   (window as unknown as { __testMerge?: unknown }).__testMerge = applyAdditiveMerge;
+  // …and a board update through the same entry the RPC uses.
+  (window as unknown as { __testBoardUpdate?: unknown }).__testBoardUpdate = {
+    apply: applyBoardUpdatesFor,
+    markReady: markBoardProjectReady,
+  };
 }
 
 /**
@@ -2009,30 +2024,10 @@ export function useVideoRpc(sourceBoardIdRef?: { current: string }) {
                 break;
               }
               const trackKind = String(foundTrack?.type || foundTrack?.kind || "").toLowerCase();
-              const mediaType = trackKind === "video" ? "video" : "audio";
-              // Import / reuse media item.
-              const stableHashFn = (s: string) => {
-                let h = 0;
-                for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
-                return Math.abs(h).toString(36);
-              };
-              // Probe a blob's real playable length (so the swap reconciles the
-              // clip's trim against the NEW media instead of keeping the old
-              // outPoint — which left a black tail / decode-past-EOF when the
-              // regen was shorter). Caller may also pass durationSec (the chat
-              // already knows it) to skip the probe.
-              const probeDuration = (blob: Blob | null): Promise<number> => new Promise((resolve) => {
-                if (!blob) return resolve(0);
-                let settled = false;
-                const el = document.createElement(mediaType === "video" ? "video" : "audio");
-                const obj = URL.createObjectURL(blob);
-                const done = (d: number) => { if (settled) return; settled = true; try { URL.revokeObjectURL(obj); } catch {} resolve(Number.isFinite(d) && d > 0 ? d : 0); };
-                el.preload = "metadata";
-                el.onloadedmetadata = () => done(el.duration);
-                el.onerror = () => done(0);
-                setTimeout(() => done(0), 5000);
-                el.src = obj;
-              });
+              // Import / reuse media item — the same helper a board update uses
+              // (services/url-media.ts), so one take is one library item. The
+              // helper probes the new media's real length so the swap fits the
+              // clip to it (a shorter regen left a black tail / decode-past-EOF).
               let newMediaId = wantMediaId;
               let item: any = null;
               // Real length of the swapped-in media (passed value wins, else probe,
@@ -2048,43 +2043,16 @@ export function useVideoRpc(sourceBoardIdRef?: { current: string }) {
                 }
                 if (!newMediaDuration) newMediaDuration = Number(item.metadata?.duration) || 0;
               } else {
-                newMediaId = `media-${trackKind || "asset"}-${stableHashFn(url)}`;
-                item = proj.mediaLibrary?.items?.find((m: any) => m.id === newMediaId) ?? null;
-              }
-              if (!item) {
-                let blob: Blob | null = null;
-                try {
-                  const r = await fetch(url);
-                  if (r.ok) blob = await r.blob();
-                } catch { /* hydrate later */ }
-                if (!newMediaDuration) newMediaDuration = await probeDuration(blob);
-                const resolvedDur = newMediaDuration || foundClip.duration || 0;
-                const newItem: any = {
-                  id: newMediaId,
-                  name: typeof name === "string" && name ? name : `Replaced ${trackKind || "asset"}`,
-                  type: mediaType,
-                  fileHandle: null,
-                  blob,
-                  metadata: { duration: resolvedDur, fileSize: blob?.size ?? 0, sampleRate: 44100, channels: 2 },
-                  // Carry the scene's poster (first frame) so the Assets panel
-                  // shows a real thumbnail for the regen instead of a blank
-                  // placeholder. Falls back to null → placeholder icon.
-                  thumbnailUrl: (typeof posterUrl === "string" && posterUrl) ? posterUrl : null,
-                  waveformData: null,
-                  originalUrl: url,
-                  category: trackKind === "video" ? "Scene Videos" : trackKind === "narration" ? "Narration" : "Audio",
-                  role: trackKind || "asset",
-                };
-                useProjectStore.setState((s: any) => ({
-                  project: {
-                    ...s.project,
-                    mediaLibrary: { ...s.project.mediaLibrary, items: [...(s.project.mediaLibrary?.items ?? []), newItem] },
-                    modifiedAt: Date.now(),
-                  },
-                }));
-                item = newItem;
-              } else if (!newMediaDuration) {
-                newMediaDuration = Number(item.metadata?.duration) || 0;
+                const ensured = await ensureUrlMedia({
+                  url, trackKind,
+                  name: typeof name === "string" && name ? name : undefined,
+                  posterUrl: typeof posterUrl === "string" && posterUrl ? posterUrl : undefined,
+                  durationSec: newMediaDuration,
+                  fallbackDuration: foundClip.duration || 0,
+                });
+                newMediaId = ensured.mediaId;
+                item = ensured.item;
+                newMediaDuration = ensured.duration;
               }
 
               // ── The new trim ────────────────────────────────────────────
@@ -2152,6 +2120,25 @@ export function useVideoRpc(sourceBoardIdRef?: { current: string }) {
                 // Nothing was removed: the clip keeps its id, so its captions stay.
                 captionsKept: ownedCaptions(clipId).length,
               });
+            } catch (err: any) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: err?.message ?? String(err) });
+            }
+            break;
+          }
+          case "voidspace:apply-board-update": {
+            // Board → video changes for THIS project, applied in place (see
+            // services/board-updates.ts). Waits for the project to finish
+            // loading, and refuses a batch addressed to another project.
+            const projectId = String((msg as any).projectId ?? "");
+            const updates = Array.isArray((msg as any).updates) ? (msg as any).updates as BoardUpdate[] : [];
+            const here = new URLSearchParams(location.search).get("sceneListId") ?? "";
+            if (!projectId || (here && projectId !== here)) {
+              reply({ type: "voidspace:error", requestId: msg.requestId, error: `This editor holds project ${here || "(none)"}, not ${projectId || "(none)"}. Nothing was changed.` });
+              break;
+            }
+            try {
+              const results = await applyBoardUpdatesFor(projectId, updates);
+              reply({ type: "voidspace:board-update-applied", requestId: msg.requestId, ok: true, results });
             } catch (err: any) {
               reply({ type: "voidspace:error", requestId: msg.requestId, error: err?.message ?? String(err) });
             }
@@ -4402,8 +4389,14 @@ function LocalApp() {
               // Re-attach recording / imported-media blobs (library items
               // carry only metadata + originalUrl after a JSON round-trip).
               void hydrateLibraryMediaBlobs();
+              // Board updates queued while this project was closed may now be
+              // applied — the cut they edit is on screen.
+              markBoardProjectReady(sceneListId);
               return;
             }
+            // Recovered from a local autosave: the first tick is a merge, and
+            // after it the saved cut is what board updates must edit.
+            if (tickCount === 1) markBoardProjectReady(sceneListId);
             // Subsequent live update — single path: additive merge.
             // The previous wholesale-replace branch (when canUndo()
             // was false AND no recovery) raced against any user
