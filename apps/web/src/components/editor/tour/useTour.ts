@@ -107,18 +107,11 @@ export function useTour() {
     }
   }, []);
 
-  useEffect(() => {
-    // The host already owns onboarding and may be opening an agent task.
-    // Keep Help's explicit start action, without covering embedded work.
-    if (new URLSearchParams(window.location.search).get("embed") === "1") return;
-    const completed = localStorage.getItem(ONBOARDING_KEY);
-    if (!completed) {
-      const timer = setTimeout(() => {
-        start();
-      }, 500);
-      return () => clearTimeout(timer);
-    }
-  }, [start]);
+  // No auto-start. The tour opened by itself on every first visit — over
+  // people mid-task and over agents driving the editor (9 Oct 2026: "it's
+  // annoying, it shows up for agents too"). It runs only when asked, from
+  // Help → Editor Tour.
+
 
   useEffect(() => {
     if (!state.isActive) return;

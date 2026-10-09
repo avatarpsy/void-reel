@@ -86,6 +86,18 @@ const sliderToZoom = (v: number): number => {
   return MIN * Math.pow(MAX / MIN, t);
 };
 
+/** The INFO card's gesture list — what each spot on the timeline does. */
+const TIMELINE_GESTURES: [string, string][] = [
+  ["Drag a clip", "Move it."],
+  ["Drag a clip edge", "Trim it. Playback speed stays the same."],
+  ["Drag a cut", "Roll it: where two clips touch, one gets longer and the other shorter."],
+  ["Alt + drag a clip", "Slip it: same place and length, different frames. Alt + , / . moves one frame (Shift: ten)."],
+  ["Alt + drop media", "Replace the take under the pointer, keeping its timing and fades."],
+  ["Drag a corner dot", "Fade the clip's sound in or out."],
+  ["Hover the tracks", "Skim frames without moving the playhead. SKIM turns it off."],
+  ["Ctrl + scroll", "Zoom around the pointer."],
+];
+
 export const Timeline: React.FC = () => {
   const containerRef = useRef<HTMLDivElement>(null);
   const tracksRef = useRef<HTMLDivElement>(null);
@@ -1464,14 +1476,18 @@ export const Timeline: React.FC = () => {
             <PopoverContent side="top" align="start" sideOffset={8} className="w-80 p-3">
               <div className="space-y-2">
                 <h4 className="text-xs font-semibold text-text-primary">How Timeline Editing Works</h4>
-                <p className="text-xs text-text-secondary leading-relaxed">
-                  Drag a clip body to move it on the timeline. Drag clip edges to trim content.
-                </p>
-                <p className="text-xs text-text-secondary leading-relaxed">
-                  Edge trim does not change playback speed. It cuts from the start or end and keeps the same media rate.
-                </p>
-                <p className="text-xs text-text-secondary leading-relaxed">
-                  Snap aligns moves to nearby clip edges, the playhead, and timeline markers.
+                {/* One row per gesture — keep in step with fine-edit.ts. */}
+                <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-xs leading-snug">
+                  {TIMELINE_GESTURES.map(([how, what]) => (
+                    <React.Fragment key={how}>
+                      <dt className="font-medium text-text-primary whitespace-nowrap">{how}</dt>
+                      <dd className="text-text-secondary">{what}</dd>
+                    </React.Fragment>
+                  ))}
+                </dl>
+                <p className="text-xs text-text-secondary leading-relaxed pt-1 border-t border-border">
+                  Snap aligns to clip edges, the playhead and markers. Esc cancels a drag, and every
+                  gesture is a single undo.
                 </p>
               </div>
             </PopoverContent>
