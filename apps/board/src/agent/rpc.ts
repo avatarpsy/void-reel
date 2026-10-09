@@ -279,9 +279,137 @@ function checkRev(expectRev: unknown): { ok: true } | ReturnType<typeof fail> {
  * Returned by every mutation as well as by the read, so the agent's next call is
  * always planned against post-edit state rather than its own guess at what its
  * write did.
+ *
+ * ── AND BOUNDED, BECAUSE "COMPLETE" STOPPED FITTING ─────────────────────────
+ * A 70-shot board answered one read with 203,824 characters — more than a
+ * model's whole working context on some clients, so the read that was meant to
+ * ground the next edit pushed everything else out. `detail: 'full'` still gets
+ * the whole thing (the page asks for that); everything else is fitted to
+ * `READ_BUDGET_CHARS` by `fitDigest`, which says what it left out and how to
+ * get it back (`shotIds`).
  */
-function digest(board: MountedBoard) {
+export interface DigestOptions {
+  /** 'full' = never trimmed. Anything else is fitted to the read budget. */
+  detail?: 'full' | 'auto';
+  /** Only these shots, in filmstrip order. Counts and the script map stay whole. */
+  shotIds?: readonly string[];
+}
+
+function digestShotIds(args: Record<string, unknown> | undefined): Pick<DigestOptions, 'shotIds'> {
+  const ids = Array.isArray(args?.shotIds)
+    ? (args!.shotIds as unknown[]).map(String).filter(Boolean)
+    : undefined;
+  return ids?.length ? { shotIds: ids } : {};
+}
+
+function digest(board: MountedBoard, opts: DigestOptions = {}) {
+  const full = fullDigest(board, opts.shotIds);
+  return opts.detail === 'full' ? full : fitDigest(full);
+}
+
+/**
+ * What one read may cost, in characters of JSON. Well under the 50k a client
+ * can reasonably hold beside its own work, with room for the envelope.
+ */
+export const READ_BUDGET_CHARS = 40_000;
+
+const clip = (s: unknown, n: number) => {
+  const t = String(s ?? '');
+  return t.length > n ? `${t.slice(0, n - 1)}…` : t;
+};
+
+/**
+ * Shrink a digest until it fits, in three steps that each say what they cut.
+ *
+ *   lean   drop what is provenance or can be fetched again: take prompts,
+ *          graphic slot values, composition variables, scene synopses, all
+ *          but ten documents; long shot text is clipped.
+ *   brief  one row per shot: ids, model, length, takes (status + url),
+ *          warnings. The written fields are one `shotIds` read away.
+ *   cut    the brief, for as many shots as fit, with the count omitted.
+ *
+ * A small board never reaches any of these — it comes back exactly as before.
+ */
+export function fitDigest<D extends { shots: any[]; script: any; documents: any[] }>(
+  d: D, budget = READ_BUDGET_CHARS,
+): D & { detail?: string; omitted?: string; shotsOmitted?: number } {
+  const size = (v: unknown) => JSON.stringify(v).length;
+  if (size(d) <= budget) return d;
+
+  const again = 'board_read with shotIds: [...] (and detail: "full") returns those shots whole.';
+  const lean = {
+    ...d,
+    documents: d.documents.slice(0, 10),
+    script: {
+      ...d.script,
+      acts: (d.script?.acts ?? []).map((a: any) => ({ title: a.title })),
+      sequences: (d.script?.sequences ?? []).map((q: any) => ({ n: q.n, title: q.title })),
+      scenes: (d.script?.scenes ?? []).map(({ synopsis: _s, ...rest }: any) => rest),
+    },
+    shots: d.shots.map(({ compositionVars: _c, ...s }: any) => ({
+      ...s,
+      action: clip(s.action, 400),
+      voiceover: clip(s.voiceover, 400),
+      camera: clip(s.camera, 200),
+      media: (s.media ?? []).map((m: any) => ({ ...m, note: clip(m.note, 200) })),
+      takes: (s.takes ?? []).map(({ promptUsed: _p, seed: _sd, source: _src, ...t }: any) => ({
+        ...t, ...(t.error ? { error: clip(t.error, 160) } : {}),
+      })),
+      graphics: (s.graphics ?? []).map(({ slots: _sl, ...g }: any) => g),
+    })),
+    detail: 'lean',
+    omitted: `Over the read budget: take prompts, graphic slot values, composition variables and scene synopses were left out and long text was clipped. ${again}`,
+  };
+  if (size(lean) <= budget) return lean;
+
+  const brief = {
+    ...lean,
+    script: { ...lean.script, sequences: [], acts: [] },
+    shots: lean.shots.map((s: any) => ({
+      id: s.id,
+      order: s.order,
+      sceneKey: s.sceneKey,
+      title: clip(s.title, 120),
+      kind: s.kind,
+      model: s.model,
+      modelLabel: s.modelLabel,
+      durationSec: s.durationSec,
+      resolution: s.resolution,
+      aspect: s.aspect,
+      summary: s.summary,
+      mediaCount: (s.media ?? []).length,
+      graphicCount: (s.graphics ?? []).length,
+      takes: (s.takes ?? []).map((t: any) => ({
+        id: t.id, status: t.status,
+        ...(t.url ? { url: t.url } : {}),
+        ...(t.error ? { error: clip(t.error, 120) } : {}),
+      })),
+      chosenTakeId: s.chosenTakeId,
+      ...(s.chosenTakeUrl ? { chosenTakeUrl: s.chosenTakeUrl } : {}),
+      warnings: (s.warnings ?? []).slice(0, 3).map((w: string) => clip(w, 160)),
+      estimatedCredits: s.estimatedCredits,
+    })),
+    detail: 'brief',
+    omitted: `Over the read budget: one row per shot — action, voiceover, camera, references and layers were left out. ${again}`,
+  };
+  if (size(brief) <= budget) return brief as any;
+
+  // Last resort: as many shots as fit, never zero when there is one.
+  let keep = brief.shots.length;
+  while (keep > 1 && size({ ...brief, shots: brief.shots.slice(0, keep) }) > budget) {
+    keep = Math.max(1, Math.floor(keep * 0.85));
+  }
+  return {
+    ...brief,
+    shots: brief.shots.slice(0, keep),
+    shotsOmitted: brief.shots.length - keep,
+    omitted: `Over the read budget: only the first ${keep} of ${brief.shots.length} shots are listed, one row each. ${again}`,
+  } as any;
+}
+
+function fullDigest(board: MountedBoard, shotIds?: readonly string[]) {
   const shots = readShots(board.std);
+  const only = shotIds?.length ? new Set(shotIds) : null;
   const script = readParsed(board.std);
   const cov = coverage(script, shots);
 
@@ -429,10 +557,12 @@ function digest(board: MountedBoard) {
          * times from one that has never been attempted, so it re-offers work
          * that is already done and cannot answer "is this shot finished?".
          *
-         * NO URLS — the same rule the reference list above follows, and for the
-         * same reasons: signed Library urls are long, burn context, and are not
-         * something a language model should be holding. `takeId` is what every
-         * take op takes, and it is enough to act on.
+         * THE URL OF A READY TAKE, and only of a ready one (9 Oct 2026). This
+         * used to carry none, on the theory that `takeId` was enough to act on —
+         * but inspecting, reviewing or reusing a finished take needs the file,
+         * and agents recovered it by calling `search_media` on the prompt text,
+         * which is slower, costlier and sometimes found the wrong take. One url
+         * per finished take is cheap; `fitDigest` bounds the read regardless.
          *
          * `promptUsed` is truncated: it is what makes "that one, but warmer" an
          * EDIT of a known thing rather than a fresh guess, but a shot with six
@@ -451,6 +581,7 @@ function digest(board: MountedBoard) {
           ...(t.seed !== undefined ? { seed: t.seed } : {}),
           ...(t.costCredits !== undefined ? { costCredits: t.costCredits } : {}),
           ...(t.error ? { error: t.error } : {}),
+          ...(t.status === 'ready' && (t.url || t.src) ? { url: t.url || t.src } : {}),
           ...(t.promptUsed ? { promptUsed: t.promptUsed.slice(0, 160) } : {}),
         })),
         /**
@@ -463,6 +594,11 @@ function digest(board: MountedBoard) {
          * fallback the card draws and compile will use, so all three agree.
          */
         chosenTakeId: chosenTake(s.takes, s.chosenTakeId)?.id ?? '',
+        /** The file that plays — what `inspect_media` and a review want. */
+        chosenTakeUrl: (() => {
+          const c = chosenTake(s.takes, s.chosenTakeId);
+          return c ? (c.url || c.src) : '';
+        })(),
         /**
          * WHAT IS DRAWN OVER THIS SHOT.
          *
@@ -508,7 +644,7 @@ function digest(board: MountedBoard) {
         // known, which is not the same as free.
         estimatedCredits: credits,
       };
-    }),
+    }).filter(s => !only || only.has(s.id)),
   };
 }
 
@@ -699,7 +835,12 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
 
   const handlers: Record<string, (args: Record<string, unknown>) => unknown | Promise<unknown>> = {
     /** Read the board. Cheap, no side effects — the agent may call it freely. */
-    'voidspace:board-read': () => digest(board),
+    'voidspace:board-read': args => digest(board, {
+      // No `detail` means the page asking for its own state — whole, as before.
+      // The agent's read passes 'auto' and is fitted to the budget.
+      ...digestShotIds(args),
+      detail: args?.detail === undefined || args?.detail === 'full' ? 'full' : 'auto',
+    }),
 
     /**
      * THE SCREENPLAY — written whole, as Fountain.
@@ -1637,6 +1778,24 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
          */
         narrationIsSeparate: !!shot.voiceover.trim(),
         takeNumber: shot.takes.length + 1,
+        /**
+         * THE SHOT'S TAKES, so the page can refuse to pay twice for one ask.
+         *
+         * A retried agent call (an edge timeout, a model that did not see its
+         * answer) arrives as a second, identical request. The page compares it
+         * with what is already running or just landed — same model, same
+         * composed prompt — from the persisted takes rather than its own memory,
+         * which a reload wipes. Page-only, like the rest of this reply.
+         */
+        takes: shot.takes.map(t => ({
+          id: t.id,
+          status: t.status,
+          model: t.model ?? '',
+          promptUsed: t.promptUsed ?? '',
+          durationSec: t.durationSec,
+          createdAt: t.createdAt,
+          url: t.url || t.src || '',
+        })),
       };
     },
 
@@ -1765,7 +1924,15 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
           `Could not choose take ${takeId} on shot ${shotId} — it does not exist, or it is not ready yet.`,
         );
       }
-      return digest(board);
+      // The file that now plays, so the caller does not have to read the
+      // whole board (or search the Library) to inspect what it just chose.
+      const picked = readShot(board.std, shotId)?.takes?.find(t => t.id === takeId);
+      return {
+        ...digest(board),
+        shotId,
+        chosenTakeId: takeId,
+        chosenTakeUrl: picked ? (picked.url || picked.src) : '',
+      };
     },
 
     /** Discard a take. The Library keeps the file; a cut already using it plays on. */
