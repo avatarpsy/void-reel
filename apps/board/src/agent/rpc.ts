@@ -330,13 +330,17 @@ const clip = (s: unknown, n: number) => {
  *          but ten documents; long shot text is clipped.
  *   brief  one row per shot: ids, model, length, takes (status + url),
  *          warnings. The written fields are one `shotIds` read away.
- *   cut    the brief, for as many shots as fit, with the count omitted.
+ *   cut    the brief, for as many shots as fit, plus `shotIndex` — id, number
+ *          and short title of EVERY shot, so none is out of reach.
  *
  * A small board never reaches any of these — it comes back exactly as before.
  */
 export function fitDigest<D extends { shots: any[]; script: any; documents: any[] }>(
   d: D, budget = READ_BUDGET_CHARS,
-): D & { detail?: string; omitted?: string; shotsOmitted?: number } {
+): D & {
+  detail?: string; omitted?: string; shotsOmitted?: number;
+  shotIndex?: Array<{ id: string; n: number; title: string }>;
+} {
   const size = (v: unknown) => JSON.stringify(v).length;
   if (size(d) <= budget) return d;
 
@@ -398,16 +402,24 @@ export function fitDigest<D extends { shots: any[]; script: any; documents: any[
   };
   if (size(brief) <= budget) return brief as any;
 
-  // Last resort: as many shots as fit, never zero when there is one.
+  /**
+   * Last resort: full rows for as many shots as fit, never zero when there is
+   * one — beside an INDEX OF EVERY SHOT (id, film-order number, short title).
+   * The cut used to leave shots past the budget as a bare count, so an agent
+   * could not address shot 74 without reading the whole canvas. The index is
+   * a few kilobytes even on an 80-shot board.
+   */
+  const shotIndex = brief.shots.map((s: any) => ({ id: s.id, n: s.order + 1, title: clip(s.title, 40) }));
+  const cut = (k: number) => ({ ...brief, shotIndex, shots: brief.shots.slice(0, k) });
   let keep = brief.shots.length;
-  while (keep > 1 && size({ ...brief, shots: brief.shots.slice(0, keep) }) > budget) {
+  while (keep > 1 && size(cut(keep)) > budget) {
     keep = Math.max(1, Math.floor(keep * 0.85));
   }
   return {
-    ...brief,
-    shots: brief.shots.slice(0, keep),
+    ...cut(keep),
     shotsOmitted: brief.shots.length - keep,
-    omitted: `Over the read budget: only the first ${keep} of ${brief.shots.length} shots are listed, one row each. ${again}`,
+    omitted: `Over the read budget: one row each for the first ${keep} of ${brief.shots.length} shots; `
+      + `\`shotIndex\` lists every shot (id, n, title). ${again}`,
   } as any;
 }
 

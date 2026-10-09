@@ -419,7 +419,7 @@ async function applyPicture(u: BoardUpdate, mediaType: "video" | "image"): Promi
     return {
       ...base, status: "skipped",
       detail: `No clip in the cut is linked to ${label(u)}, so the new take was not placed. Ask the video agent `
-        + `to link the clip that plays this shot (edit_clip with linkShotId), then send the update again.`,
+        + `to link the clip that plays this shot (edit_clip with linkShotId), then re-send this shot with board_update_video.`,
     };
   }
   // A shot the cut does not have yet.

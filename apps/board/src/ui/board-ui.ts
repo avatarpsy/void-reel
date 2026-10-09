@@ -290,8 +290,8 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
     // Before a video exists: make it. After: open it — edits already flow there.
     sendLabel.textContent = sentProject ? 'Open video' : 'Make video';
     sendBtn.title = sentProject
-      ? 'Send what has changed to the project this board already made. It ADDS new shots, '
-        + 'takes and text — it never reorders or removes anything you have cut.'
+      ? 'Open the video this board made. Changes on the board already reach it by themselves, '
+        + 'in place — nothing you have cut is moved.'
       : 'Build a video project from this storyboard and open it in the editor. '
         + 'The board stays yours to keep editing.';
   }
