@@ -3,6 +3,7 @@ import React, {
   useRef,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useState,
 } from "react";
@@ -536,32 +537,78 @@ export const Timeline: React.FC = () => {
     return () => document.removeEventListener("mouseup", handleMouseUp);
   }, [isBoxSelecting, handleBoxSelectionEnd]);
 
-  // Ctrl/⌘ + mouse-wheel = zoom the timeline (same as the +/- buttons), zooming
-  // around the cursor so the time under the pointer stays put — like Premiere.
-  // Trackpad pinch also arrives as ctrlKey wheel events, so pinch-zoom works
-  // too. Attached natively with { passive:false } because React's synthetic
-  // onWheel is passive and can't preventDefault the browser's page zoom.
-  useEffect(() => {
+  /**
+   * ZOOM KEEPS ONE TIME STILL ON SCREEN — the After Effects / Premiere rule.
+   *
+   * Every zoom names an anchor: a time, and the viewport x it must stay at.
+   * Ctrl/⌘+wheel anchors on the pointer; anything else (slider, keys, the
+   * agent) anchors on the playhead when it is in view, else the viewport centre.
+   *
+   * The scroll is re-anchored in a layout effect AFTER the new width renders.
+   * Setting scrollLeft in the wheel handler itself (the old code) ran against
+   * the OLD content width, so the browser clamped it and zooming in slid away
+   * from the pointer (9 Oct 2026). Wheel events that arrive before the render
+   * keep the FIRST anchor, so a fast flick still converges on the same spot.
+   */
+  const zoomAnchorRef = useRef<{ time: number; viewX: number } | null>(null);
+  const lastPpsRef = useRef(pixelsPerSecond);
+
+  useLayoutEffect(() => {
     const el = tracksRef.current;
-    if (!el) return;
+    const prevPps = lastPpsRef.current;
+    lastPpsRef.current = pixelsPerSecond;
+    if (!el || prevPps === pixelsPerSecond) {
+      zoomAnchorRef.current = null;
+      return;
+    }
+    let anchor = zoomAnchorRef.current;
+    zoomAnchorRef.current = null;
+    if (!anchor) {
+      const width = el.clientWidth;
+      const prevScroll = el.scrollLeft;
+      const { playheadPosition: ph } = useTimelineStore.getState();
+      const phX = ph * prevPps - prevScroll;
+      anchor =
+        phX >= 0 && phX <= width
+          ? { time: ph, viewX: phX }
+          : { time: (prevScroll + width / 2) / (prevPps || 1), viewX: width / 2 };
+    }
+    el.scrollLeft = Math.max(0, anchor.time * pixelsPerSecond - anchor.viewX);
+    // onScroll does not fire when the value is unchanged or clamped to 0,
+    // and the ruler reads the store, so sync it directly.
+    setScrollX(el.scrollLeft);
+  }, [pixelsPerSecond, setScrollX]);
+
+  // Ctrl/⌘ + mouse-wheel (and trackpad pinch, which arrives as ctrlKey wheel)
+  // zooms anywhere in the timeline panel — ruler, lanes or track headers.
+  // Native listener with { passive:false }: React's onWheel is passive and
+  // cannot stop the browser's own page zoom.
+  useEffect(() => {
+    const panel = containerRef.current;
+    const el = tracksRef.current;
+    if (!panel || !el) return;
     const onWheel = (e: WheelEvent) => {
       if (!e.ctrlKey && !e.metaKey) return; // plain scroll is untouched
       e.preventDefault();
-      const rect = el.getBoundingClientRect();
-      const cursorX = e.clientX - rect.left; // px into the scrolling content
-      const { pixelsPerSecond: curPps, scrollX: curScrollX } =
-        useTimelineStore.getState();
-      const timeAtCursor = (curScrollX + cursorX) / (curPps || 1);
+      const { pixelsPerSecond: curPps } = useTimelineStore.getState();
+      if (!zoomAnchorRef.current) {
+        const rect = el.getBoundingClientRect();
+        const viewX = e.clientX - rect.left;
+        // Over the lanes or ruler: the time under the pointer. Over the track
+        // headers (left of the lanes) there is no time under the pointer, so
+        // leave the anchor empty and the layout effect uses the playhead.
+        if (viewX >= 0 && viewX <= rect.width) {
+          zoomAnchorRef.current = { time: (el.scrollLeft + viewX) / (curPps || 1), viewX };
+        }
+      }
       // wheel up → zoom in, down → zoom out; exp keeps it smooth + symmetric.
       const factor = Math.exp(-e.deltaY * 0.0015);
       setZoom(curPps * factor);
-      // Re-anchor scroll so the same time stays under the cursor (setZoom clamps,
-      // so read back the applied value). onScroll syncs the store from scrollLeft.
-      const appliedPps = useTimelineStore.getState().pixelsPerSecond;
-      el.scrollLeft = Math.max(0, timeAtCursor * appliedPps - cursorX);
+      // Clamped at a limit → no re-render → drop the anchor so it can't go stale.
+      if (useTimelineStore.getState().pixelsPerSecond === curPps) zoomAnchorRef.current = null;
     };
-    el.addEventListener("wheel", onWheel, { passive: false });
-    return () => el.removeEventListener("wheel", onWheel);
+    panel.addEventListener("wheel", onWheel, { passive: false });
+    return () => panel.removeEventListener("wheel", onWheel);
   }, [setZoom]);
 
   /** The media resolved but the clip could not be placed — say why rather

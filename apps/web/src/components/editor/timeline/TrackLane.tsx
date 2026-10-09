@@ -80,7 +80,6 @@ export const TrackLane: React.FC<TrackLaneProps> = ({
   onTrimEnd,
   onTrimTextClip,
   onTrimShapeClip,
-  scrollX,
   trackHeight,
   onResizeTrack,
   onKeyframeSelect,
@@ -121,7 +120,7 @@ export const TrackLane: React.FC<TrackLaneProps> = ({
       if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
         const rect = laneRef.current?.getBoundingClientRect();
         if (!rect) return;
-        const x = e.clientX - rect.left + scrollX;
+        const x = e.clientX - rect.left;
         const rawTime = Math.max(0, x / pixelsPerSecond);
         const snapResult = calculateSnap(
           rawTime,
@@ -167,7 +166,11 @@ export const TrackLane: React.FC<TrackLaneProps> = ({
         if (!rawData) return;
         const rect = laneRef.current?.getBoundingClientRect();
         if (!rect) return;
-        const x = e.clientX - rect.left + scrollX;
+        // The lane lives INSIDE the scrolled content, so its rect already moves
+        // with the scroll: clientX - rect.left is the content x. Adding scrollX
+        // again put every drop one scroll-width late (9 Oct 2026: a whoosh
+        // dropped at 3:02 landed minutes away).
+        const x = e.clientX - rect.left;
         const rawTime = Math.max(0, x / pixelsPerSecond);
         const snapResult = calculateSnap(
           rawTime,
@@ -196,7 +199,6 @@ export const TrackLane: React.FC<TrackLaneProps> = ({
       track.id,
       track.name,
       pixelsPerSecond,
-      scrollX,
       onDropMedia,
       allTracks,
       playheadPosition,
