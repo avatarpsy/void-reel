@@ -287,7 +287,8 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
     const n = shotCount();
     sendBtn.hidden = n === 0;
     if (sendBtn.hasAttribute('data-busy')) return;
-    sendLabel.textContent = sentProject ? 'Send changes' : 'Send to editor';
+    // Before a video exists: make it. After: open it — edits already flow there.
+    sendLabel.textContent = sentProject ? 'Open video' : 'Make video';
     sendBtn.title = sentProject
       ? 'Send what has changed to the project this board already made. It ADDS new shots, '
         + 'takes and text — it never reorders or removes anything you have cut.'

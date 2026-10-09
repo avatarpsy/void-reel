@@ -11,7 +11,7 @@ import { useEngineStore } from "./stores/engine-store";
 import { liveSwapAuthority, LIVE_SWAP_AUTHORITY_TTL_MS, normSwapUrl, recordLiveSwap } from "./services/live-swap-authority";
 import { planTakeWindow } from "./services/replace-clip-take";
 import { ensureUrlMedia } from "./services/url-media";
-import { applyBoardUpdatesFor, isBoardLinkedClip, markBoardProjectReady, type BoardUpdate } from "./services/board-updates";
+import { applyBoardUpdatesFor, isBoardLinkedClip, linkClipToShot, markBoardProjectReady, type BoardUpdate } from "./services/board-updates";
 const SharedVideo = lazy(() => import('./SharedVideo'));
 import { sharedProjectId, installSharePreparation } from '@openreel/asset-browser';
 import { useVoidspaceStore } from "./stores/voidspace-store";
@@ -1406,6 +1406,17 @@ export function useVideoRpc(sourceBoardIdRef?: { current: string }) {
               break;
             }
             const errors: string[] = [];
+            // Link this clip to a board shot (edit_clip linkShotId); "" unlinks.
+            // Metadata only — the board's updates then land on this clip.
+            if (typeof patch.shotId === "string") {
+              linkClipToShot(clipId, patch.shotId.trim());
+              const rest = Object.keys(patch).filter((k) => k !== "shotId");
+              if (rest.length === 0) {
+                const now = useProjectStore.getState().project.timeline.tracks.flatMap((t) => t.clips).find((c) => c.id === clipId);
+                reply({ type: "voidspace:clip-patched", requestId: msg.requestId, clip: now ?? foundClip, ok: true, linkedShotId: patch.shotId.trim() || null });
+                break;
+              }
+            }
             // Move/trim carry the clip's OWN captions (shifted with it; the ones
             // now wholly outside it removed and reported). Unlinked captions are
             // never touched. `cascade: false` is for callers that already shift

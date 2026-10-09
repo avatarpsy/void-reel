@@ -51,6 +51,10 @@ export interface BoardUpdate {
   durationSec?: number;
   /** `take` for a shot the cut does not have yet: the shot before it on the board. */
   afterShotId?: string;
+  /** `take`: every take url this shot has had — finds a hand-placed clip that plays one. */
+  takeUrls?: string[];
+  /** `take`: the shot is new to this video (not in its last compile) — only then append. */
+  newShot?: boolean;
   /** `reorder`: every shot id in board order. */
   order?: string[];
   /** The shot's title, for names and messages. */
@@ -294,6 +298,48 @@ function clipNow(clipId: string): Located | null {
   return null;
 }
 
+/**
+ * Make a clip the one that IS this board shot, so the board's updates land on
+ * it. Hand-placed clips (a take swapped in from the Library, a local re-render)
+ * carry no shotId; without the link a new take for that shot had nowhere to go.
+ * One shot, one clip: any other clip holding the shot is unlinked.
+ */
+export function linkClipToShot(clipId: string, shotId: string): boolean {
+  let found = false;
+  useProjectStore.setState((s) => ({
+    project: {
+      ...s.project,
+      timeline: {
+        ...s.project.timeline,
+        tracks: s.project.timeline.tracks.map((tr) => ({
+          ...tr,
+          clips: tr.clips.map((c) => {
+            if (c.id === clipId) { found = true; return { ...c, shotId: shotId || undefined } as Clip; }
+            if (shotId && (c as Clip).shotId === shotId && !isAuxShotClip(c.id)) return { ...c, shotId: undefined } as Clip;
+            return c;
+          }),
+        })),
+      },
+      modifiedAt: Date.now(),
+    },
+  }));
+  return found;
+}
+
+/** A picture clip on the timeline playing one of these urls (a take of the shot). */
+function clipPlayingOneOf(urls: string[]): Located | null {
+  const want = new Set(urls.map(normSwapUrl).filter(Boolean));
+  if (!want.size) return null;
+  for (const track of project().timeline.tracks) {
+    if (track.type !== "video" && track.type !== "image") continue;
+    for (const clip of track.clips) {
+      const u = mediaOf(clip.mediaId)?.originalUrl;
+      if (u && want.has(normSwapUrl(u))) return { clip, track };
+    }
+  }
+  return null;
+}
+
 function mediaOf(mediaId: string): MediaItem | undefined {
   return store().getMediaItem(mediaId);
 }
@@ -307,7 +353,15 @@ async function applyPicture(u: BoardUpdate, mediaType: "video" | "image"): Promi
   if (!shotId || !url) return { ...base, status: "failed", detail: "A take update needs a shotId and a url." };
   if (!isFetchableMediaUrl(url)) return { ...base, status: "failed", detail: "That media url cannot be fetched by the editor." };
 
-  const found = findShotClip(project(), shotId);
+  let found = findShotClip(project(), shotId);
+  if (!found && Array.isArray(u.takeUrls) && u.takeUrls.length) {
+    // A clip placed by hand that plays one of this shot's takes IS the shot.
+    const playing = clipPlayingOneOf(u.takeUrls);
+    if (playing && !(playing.clip as Clip).shotId) {
+      linkClipToShot(playing.clip.id, shotId);
+      found = clipNow(playing.clip.id) ?? playing;
+    }
+  }
   if (found) {
     const current = mediaOf(found.clip.mediaId);
     if (u.kind === "first_frame" && current && current.type !== "image") {
@@ -339,6 +393,16 @@ async function applyPicture(u: BoardUpdate, mediaType: "video" | "image"): Promi
 
   if (u.kind === "first_frame") {
     return { ...base, status: "skipped", detail: `${label(u)} has no clip on the timeline, so there is nothing to show its first frame on.` };
+  }
+  // The cut already has this shot, but no clip is linked to it (placed by
+  // hand from a re-render). Appending would put a stray copy at the end of the
+  // track; say what is missing instead.
+  if (!u.newShot) {
+    return {
+      ...base, status: "skipped",
+      detail: `No clip in the cut is linked to ${label(u)}, so the new take was not placed. Ask the video agent `
+        + `to link the clip that plays this shot (edit_clip with linkShotId), then send the update again.`,
+    };
   }
   // A shot the cut does not have yet.
   const track = mainVideoTrack(project());

@@ -16,7 +16,7 @@ vi.mock("./auto-save", () => ({
 import type { Clip, MediaItem, Project, Track } from "@openreel/core";
 import { useProjectStore } from "../stores/project-store";
 import {
-  _resetBoardProjectReady, applyBoardUpdates, applyBoardUpdatesFor, findShotClip, isBoardLinkedClip,
+  _resetBoardProjectReady, applyBoardUpdates, applyBoardUpdatesFor, findShotClip, isBoardLinkedClip, linkClipToShot,
   isFetchableMediaUrl, markBoardProjectReady, planAppendStart, planReorder, planRetime, shotFamily,
 } from "./board-updates";
 
@@ -179,12 +179,43 @@ describe("applied in place through the editor's actions", () => {
   it("a removed shot leaves its gap; a new shot lands after the one before it or at the end", async () => {
     const res = await applyBoardUpdates([
       { kind: "remove", shotId: "s1" },
-      { kind: "take", shotId: "s3", url: "https://x/s3.mp4", durationSec: 2, afterShotId: "s2" },
+      { kind: "take", shotId: "s3", url: "https://x/s3.mp4", durationSec: 2, afterShotId: "s2", newShot: true },
     ]);
     expect(res.map((r) => r.status)).toEqual(["applied", "applied"]);
     expect(at("clip-video-s1")).toBeUndefined();
     expect(at("clip-video-s2")!.startTime).toBe(4);
     expect(at("clip-video-s3")!.startTime).toBe(7);
+  });
+
+  it("an existing shot with no linked clip is reported, never appended as a stray copy", async () => {
+    const before = useProjectStore.getState().project.timeline.tracks.flatMap((x) => x.clips).length;
+    const [r] = await applyBoardUpdates([{ kind: "take", shotId: "s9", url: "https://x/s9.mp4", durationSec: 2 }]);
+    expect(r.status).toBe("skipped");
+    expect(r.detail).toMatch(/linkShotId/);
+    expect(useProjectStore.getState().project.timeline.tracks.flatMap((x) => x.clips).length).toBe(before);
+  });
+
+  it("a hand-placed clip playing one of the shot's takes is linked and updated in place", async () => {
+    // A clip swapped in by hand: no shotId, plays the shot's OLD take.
+    const s = useProjectStore.getState();
+    useProjectStore.setState({ project: { ...s.project,
+      mediaLibrary: { items: [...s.project.mediaLibrary.items, media("media-hand", "https://x/s7-take1.mp4", 6)] },
+      timeline: { ...s.project.timeline, tracks: s.project.timeline.tracks.map((tr) => ({ ...tr,
+        clips: [...tr.clips, clip("hand-7", 8, 2, { mediaId: "media-hand", inPoint: 0.5, outPoint: 2.5 })] })) } } });
+    const [r] = await applyBoardUpdates([{ kind: "take", shotId: "s7", url: "https://x/s7-take2.mp4", durationSec: 6,
+      takeUrls: ["https://x/s7-take1.mp4", "https://x/s7-take2.mp4"] }]);
+    expect(r.status, r.detail).toBe("applied");
+    const c = at("hand-7")!;
+    expect(c.shotId).toBe("s7");
+    expect(c.startTime).toBe(8);
+    expect(c.inPoint).toBe(0.5);
+    expect(c.mediaId).not.toBe("media-hand");
+  });
+
+  it("linkClipToShot makes one clip the shot and unlinks any other", () => {
+    expect(linkClipToShot("clip-video-s2", "s1")).toBe(true);
+    expect(at("clip-video-s2")!.shotId).toBe("s1");
+    expect(at("clip-video-s1")!.shotId).toBeUndefined();
   });
 
   it("waits for the project to load, and refuses another project", async () => {

@@ -787,6 +787,14 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
       window.parent?.postMessage({
         type: 'voidspace:board-canvas-changed',
         digest: canvasDigest(board.std),
+        // What each shot PLAYS, in film order — the page diffs this against the
+        // last one and sends the linked video only what changed, so a take
+        // chosen here (by the person or the agent) reaches the open editor
+        // without a button.
+        plays: readShots(board.std).map((s) => {
+          const c = chosenTake(s.takes, s.chosenTakeId);
+          return { id: s.id, url: c ? (c.url || c.src || '') : '', sec: Number(s.durationSec) || 0 };
+        }),
       }, '*');
     } catch { /* the parent went away; the canvas is unaffected */ }
   };
