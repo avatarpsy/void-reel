@@ -3,6 +3,7 @@ import {
   getBeatDetectionProcessor,
   initWasmBeatDetection,
 } from "../wasm/beat-detection";
+import { trackBeats } from "./tempo-tracker";
 
 export interface Beat {
   readonly time: number;
@@ -63,6 +64,30 @@ export class BeatDetectionEngine {
     const channelData = audioBuffer.getChannelData(0);
     const sampleRate = audioBuffer.sampleRate;
     const duration = audioBuffer.duration;
+
+    // Spectral-flux tracker first (see tempo-tracker.ts): it reads dense,
+    // mastered mixes that the loudness-onset path below cannot. Mono mix so a
+    // hard-panned part is not missed.
+    const mono = new Float32Array(channelData.length);
+    for (let c = 0; c < audioBuffer.numberOfChannels; c++) {
+      const ch = audioBuffer.getChannelData(c);
+      for (let i = 0; i < mono.length; i++) mono[i] += ch[i] / audioBuffer.numberOfChannels;
+    }
+    const tracked = trackBeats(mono, sampleRate, this.config);
+    if (tracked.beatTimes.length >= 4) {
+      const beats: Beat[] = tracked.beatTimes.map((time, index) => ({
+        time,
+        strength: tracked.strengths[index],
+        index,
+      }));
+      return {
+        bpm: tracked.bpm,
+        confidence: tracked.confidence,
+        beats,
+        duration,
+        downbeats: this.detectDownbeats(beats),
+      };
+    }
 
     const onsets = this.detectOnsets(channelData, sampleRate);
     const { bpm, confidence } = this.calculateBpm(onsets, duration);
@@ -300,28 +325,18 @@ export class BeatDetectionEngine {
     return nearest;
   }
 
+  /**
+   * Bar lines, assuming 4/4: the beat phase (0–3) whose beats are strongest
+   * across the whole song. It used to count from the first beat above a fixed
+   * strength, which skipped every bar before it when strengths are relative.
+   */
   private detectDownbeats(beats: Beat[]): number[] {
-    if (beats.length < 4) {
-      return beats.filter((_, i) => i % 4 === 0).map((b) => b.time);
-    }
-
-    const downbeats: number[] = [];
-    const strongBeats = beats.filter((b) => b.strength > 0.7);
-
-    if (strongBeats.length > 0) {
-      const firstStrong = strongBeats[0];
-      const firstIndex = beats.findIndex((b) => b.time === firstStrong.time);
-
-      for (let i = firstIndex; i < beats.length; i += 4) {
-        downbeats.push(beats[i].time);
-      }
-    } else {
-      for (let i = 0; i < beats.length; i += 4) {
-        downbeats.push(beats[i].time);
-      }
-    }
-
-    return downbeats;
+    const sum = [0, 0, 0, 0];
+    beats.forEach((b, i) => {
+      sum[i % 4] += b.strength;
+    });
+    const phase = sum.indexOf(Math.max(...sum));
+    return beats.filter((_, i) => i % 4 === phase).map((b) => b.time);
   }
 
   generateBeatMarkersAtInterval(

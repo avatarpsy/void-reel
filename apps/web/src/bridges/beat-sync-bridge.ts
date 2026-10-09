@@ -230,7 +230,9 @@ class BeatSyncBridge {
       time: beat.time,
       strength: beat.strength,
       index: beat.index,
-      isDownbeat: downbeatSet.has(beat.time) || beat.index % 4 === 0,
+      // The analysis picks the bar phase; OR-ing in index % 4 marked two
+      // phases at once (every other beat a "downbeat") whenever it was not 0.
+      isDownbeat: downbeatSet.size > 0 ? downbeatSet.has(beat.time) : beat.index % 4 === 0,
     }));
   }
 

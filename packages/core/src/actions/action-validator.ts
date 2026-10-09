@@ -613,16 +613,28 @@ export class ActionValidator {
             path: "params.outPoint",
           });
         }
-        if (
-          action.params.inPoint !== undefined &&
-          action.params.outPoint !== undefined &&
-          action.params.outPoint <= action.params.inPoint
-        ) {
-          errors.push({
-            code: "INVALID_TIME_RANGE",
-            message: "Out-point must be greater than in-point",
-            path: "params",
-          });
+        {
+          // Check the RESULTING window, not just the params: a one-sided trim
+          // ({outPoint} alone) is measured against the clip's live in-point.
+          // Without this, an out-only trim after a replace that moved the
+          // in-point produced in 3.05 > out 1.60 and a 0.05 s clip (8 Oct).
+          const live = typeof action.params.clipId === "string"
+            ? this.findClip(timeline, action.params.clipId)
+            : null;
+          const nextIn = action.params.inPoint ?? live?.inPoint;
+          const nextOut = action.params.outPoint ?? live?.outPoint;
+          if (
+            (action.params.inPoint !== undefined || action.params.outPoint !== undefined) &&
+            typeof nextIn === "number" &&
+            typeof nextOut === "number" &&
+            nextOut <= nextIn
+          ) {
+            errors.push({
+              code: "INVALID_TIME_RANGE",
+              message: `Out-point (${nextOut}) must be after in-point (${nextIn})`,
+              path: "params",
+            });
+          }
         }
         break;
 

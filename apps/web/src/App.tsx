@@ -9,6 +9,7 @@ import { useUIStore } from "./stores/ui-store";
 import { useProjectStore } from "./stores/project-store";
 import { useEngineStore } from "./stores/engine-store";
 import { liveSwapAuthority, LIVE_SWAP_AUTHORITY_TTL_MS, normSwapUrl, recordLiveSwap } from "./services/live-swap-authority";
+import { planTakeWindow } from "./services/replace-clip-take";
 const SharedVideo = lazy(() => import('./SharedVideo'));
 import { sharedProjectId, installSharePreparation } from '@openreel/asset-browser';
 import { useVoidspaceStore } from "./stores/voidspace-store";
@@ -135,6 +136,8 @@ function reloadSingleFlight(
 // music_url field) resolves back to the chosen url, the authority retires so
 // genuine later changes flow through. A generous TTL (120s) outlives slow GCS
 // mirror uploads that would otherwise leave a late rebuild unguarded.
+// Source url each clip had in the previous rebuild — see applyAdditiveMerge.
+const lastRebuildUrlByClip = new Map<string, string>();
 // (The map and recordLiveSwap live in services/live-swap-authority.ts so the
 // timeline's own take replacement can record a swap too.)
 
@@ -356,8 +359,10 @@ function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
   // loader mint DIFFERENT mediaId schemes for the same take, so only the
   // resolved originalUrl is a reliable cross-rebuild identity.
   const freshUrlByMediaId = new Map<string, string>();
+  const freshMediaById = new Map<string, import("@openreel/core").MediaItem>();
   for (const m of fresh.mediaLibrary?.items ?? []) {
     if (m.id && m.originalUrl) freshUrlByMediaId.set(m.id, normSwapUrl(m.originalUrl));
+    if (m.id) freshMediaById.set(m.id, m);
   }
   const updatedClips = new Map<string, import("@openreel/core").Clip>();
   for (const tr of fresh.timeline.tracks) {
@@ -376,7 +381,14 @@ function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
       // clip back to the chosen url — regardless of mediaId scheme — so genuine
       // LATER changes propagate instead of being shadow-suppressed until TTL.
       if (auth && freshUrl && freshUrl === auth.url) liveSwapAuthority.delete(freshClip.id);
-      if (existing.mediaId !== freshClip.mediaId) {
+      // Did the SOURCE change since the last rebuild? A rebuild that merely
+      // disagrees with the editor is stale (the person swapped the take here;
+      // the scene doc never heard of it) and must not undo that once the
+      // live-swap TTL ends. Only a new upstream take (regen, new url) is news.
+      const prevUrl = lastRebuildUrlByClip.get(freshClip.id);
+      lastRebuildUrlByClip.set(freshClip.id, freshUrl);
+      const upstreamChanged = prevUrl !== undefined && !!freshUrl && prevUrl !== freshUrl;
+      if (existing.mediaId !== freshClip.mediaId && upstreamChanged) {
         // Suppress the stale-rebuild revert: while the user's live swap is
         // authoritative, never let a rebuild repoint this clip at media whose
         // URL differs from the swapped-to URL (the actual symptom — narration
@@ -386,7 +398,21 @@ function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
         if (authLive && freshUrl !== auth!.url) {
           continue; // stale rebuild → would revert to a different take; keep swap
         }
-        updatedClips.set(freshClip.id, freshClip);
+        // Adopt the new TAKE, never the rebuild's LAYOUT. The rebuild lays
+        // clips at running scene totals, full length, inPoint 0; taking the
+        // whole fresh clip threw away every move and trim made in the editor
+        // (8 Oct: board edits sent BETTER ME's opening clips back to
+        // index × 6.04 s, leaving holes). Keep the clip where it is, and fit
+        // its window to the new media — same rule as a hand swap.
+        const media = freshMediaById.get(freshClip.mediaId);
+        const win = planTakeWindow(existing, media?.metadata?.duration ?? 0, media?.type === "image");
+        updatedClips.set(freshClip.id, {
+          ...existing,
+          mediaId: freshClip.mediaId,
+          inPoint: win.inPoint,
+          outPoint: win.outPoint,
+          duration: Math.max(0.05, (win.outPoint - win.inPoint) / (existing.speed || 1)),
+        });
       }
     }
   }
@@ -509,6 +535,12 @@ function applyAdditiveMerge(fresh: import("@openreel/core").Project): {
     newClips: newClipsCount,
     newCaptions: newTextClips.length,
   };
+}
+
+// DEV/TEST-ONLY: headless tests drive a project rebuild through the real merge
+// (see main.tsx's __test). Tree-shaken out of the production bundle.
+if (import.meta.env.DEV && typeof window !== "undefined") {
+  (window as unknown as { __testMerge?: unknown }).__testMerge = applyAdditiveMerge;
 }
 
 /**
@@ -1229,7 +1261,27 @@ export function useVideoRpc(sourceBoardIdRef?: { current: string }) {
                 .find((tc: any) => Math.abs((tc.startTime ?? 0) - startTime) < 0.05 && tc.text === text.trim());
               if (existingClip) {
                 applyLink(existingClip.id);
-                reply({ type: "voidspace:text-clip-added", requestId: msg.requestId, ok: true, clipId: existingClip.id ?? null, trackId: "track-captions", existing: true, linkedClipId: linkTo || existingClip.linkedClipId || null });
+                // Same caption, now WITH per-word timing: apply the words
+                // instead of dropping them. Agents re-add a lyric line to give
+                // it a word highlight; this used to answer "existing" and
+                // ignore the words, so the highlight never appeared (7 Oct).
+                let wordsUpdated = false;
+                if (Array.isArray(words) && words.length > 0 && existingClip.id) {
+                  const eng = useEngineStore.getState().getTitleEngine();
+                  const clipWords = words
+                    .filter((w) => w && typeof w.text === "string")
+                    .map((w) => ({ text: w.text, start: Math.max(0, w.start - startTime), end: Math.max(0, w.end - startTime) }));
+                  wordsUpdated = !!eng?.updateTextClip(existingClip.id, {
+                    captionWords: clipWords,
+                    captionHighlight: existingClip.captionHighlight ?? animationStyle !== "none",
+                    captionAnimation: existingClip.captionAnimation ?? (animationStyle as any) ?? "word-highlight",
+                    captionHighlightColor: existingClip.captionHighlightColor ?? "#FFE600",
+                  });
+                  if (wordsUpdated) {
+                    useProjectStore.setState((s) => ({ project: { ...s.project, textClips: eng!.getAllTextClips(), modifiedAt: Date.now() } }));
+                  }
+                }
+                reply({ type: "voidspace:text-clip-added", requestId: msg.requestId, ok: true, clipId: existingClip.id ?? null, trackId: "track-captions", existing: true, wordsUpdated, linkedClipId: linkTo || existingClip.linkedClipId || null });
                 break;
               }
               const endTime = startTime + (typeof durationSec === "number" && durationSec > 0 ? durationSec : 3);

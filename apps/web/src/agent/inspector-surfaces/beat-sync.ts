@@ -33,6 +33,9 @@
 import type { InspectorSurface, InspectorSurfaceClip, ApplyContext } from "./types";
 import type { Clip, Track, TimelineBeatMarker } from "@openreel/core";
 
+/** Below this the "grid" is not a beat anyone can hear (noise scores ~0, music ~1). */
+const MIN_SNAP_CONFIDENCE = 0.35;
+
 export interface BeatSyncConfig {
   op?: "analyze" | "snap" | "clear";
   /** snap only: ignore a cut already within this many seconds of a beat. */
@@ -140,6 +143,18 @@ export const surface: InspectorSurface<BeatSyncConfig> = {
         // sound-library `BeatMarker` is the one with `type`; these are not the
         // same shape and the compiler is the only thing that says so.)
         const markers = state.beatMarkers ?? [];
+        // A grid nobody can hear is worse than none: `snap` would move every
+        // cut onto it (8 Oct: a confidence-0 120 BPM placeholder on a 92 BPM
+        // song). Report it as a failure and keep the grid off the timeline.
+        if (result.confidence < MIN_SNAP_CONFIDENCE) {
+          bridge.clearBeatMarkers();
+          (store as any).setBeatGrid([], null);
+          return {
+            ok: false,
+            error: `no steady beat found (confidence ${result.confidence.toFixed(2)}) — this audio has no clear pulse to cut to; place cuts on lyric or sound cues instead`,
+            confidence: Number(result.confidence.toFixed(2)),
+          };
+        }
         const at = (t: number) => Number(t.toFixed(3));
         const downbeats = markers.filter((m) => m.isDownbeat).map((m) => at(m.time));
         return {
@@ -161,9 +176,12 @@ export const surface: InspectorSurface<BeatSyncConfig> = {
     }
 
     // ── snap ──────────────────────────────────────────────────────────────
-    const beats = bridge.getState().beatMarkers;
+    const { beatMarkers: beats, beatAnalysis } = bridge.getState();
     if (!beats || beats.length === 0) {
       return { ok: false, error: "no beat grid yet — run op:\"analyze\" on the music clip first" };
+    }
+    if ((beatAnalysis?.confidence ?? 0) < MIN_SNAP_CONFIDENCE) {
+      return { ok: false, error: `the beat grid is unreliable (confidence ${(beatAnalysis?.confidence ?? 0).toFixed(2)}) — re-run op:"analyze"; never snap to it` };
     }
     const tolerance = typeof config.toleranceSec === "number" ? config.toleranceSec : 0.03;
     const maxShift = typeof config.maxShiftSec === "number" ? config.maxShiftSec : 0.25;
