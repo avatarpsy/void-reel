@@ -212,10 +212,26 @@ describe("applied in place through the editor's actions", () => {
     expect(c.mediaId).not.toBe("media-hand");
   });
 
-  it("linkClipToShot makes one clip the shot and unlinks any other", () => {
+  it("linkClipToShot links a clip without unlinking the shot's other pieces", () => {
     expect(linkClipToShot("clip-video-s2", "s1")).toBe(true);
     expect(at("clip-video-s2")!.shotId).toBe("s1");
-    expect(at("clip-video-s1")!.shotId).toBeUndefined();
+    expect(at("clip-video-s1")!.shotId).toBe("s1");
+  });
+
+  it("a split, scattered shot: every piece takes the new take and keeps its own place and trim", async () => {
+    // s1 was split; its second piece was moved to 9s and trimmed differently.
+    const s = useProjectStore.getState();
+    useProjectStore.setState({ project: { ...s.project,
+      timeline: { ...s.project.timeline, tracks: s.project.timeline.tracks.map((tr) => ({ ...tr,
+        clips: [...tr.clips, clip("piece-2", 9, 1, { shotId: "s1", mediaId: "media-old", inPoint: 4, outPoint: 5 })] })) } } });
+    const [r] = await applyBoardUpdates([{ kind: "take", shotId: "s1", url: "https://x/new.mp4", durationSec: 6.04 }]);
+    expect(r.status, r.detail).toBe("applied");
+    expect(r.detail).toMatch(/all 2 of its pieces/);
+    const a = at("clip-video-s1")!, b = at("piece-2")!;
+    expect(a.mediaId).toBe(b.mediaId);
+    expect(a.mediaId).not.toBe("media-old");
+    expect([a.startTime, a.inPoint, a.outPoint]).toEqual([1.5, 1, 3]);
+    expect([b.startTime, b.inPoint, b.outPoint]).toEqual([9, 4, 5]);
   });
 
   it("waits for the project to load, and refuses another project", async () => {

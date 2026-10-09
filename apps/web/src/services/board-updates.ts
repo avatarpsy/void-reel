@@ -302,7 +302,8 @@ function clipNow(clipId: string): Located | null {
  * Make a clip the one that IS this board shot, so the board's updates land on
  * it. Hand-placed clips (a take swapped in from the Library, a local re-render)
  * carry no shotId; without the link a new take for that shot had nowhere to go.
- * One shot, one clip: any other clip holding the shot is unlinked.
+ * Other clips already holding the shot keep it — pieces of a split shot are
+ * all that shot, and all of them take its new take.
  */
 export function linkClipToShot(clipId: string, shotId: string): boolean {
   let found = false;
@@ -315,7 +316,6 @@ export function linkClipToShot(clipId: string, shotId: string): boolean {
           ...tr,
           clips: tr.clips.map((c) => {
             if (c.id === clipId) { found = true; return { ...c, shotId: shotId || undefined } as Clip; }
-            if (shotId && (c as Clip).shotId === shotId && !isAuxShotClip(c.id)) return { ...c, shotId: undefined } as Clip;
             return c;
           }),
         })),
@@ -324,6 +324,17 @@ export function linkClipToShot(clipId: string, shotId: string): boolean {
     },
   }));
   return found;
+}
+
+/** Every clip that IS this shot (the main one first), aux takes/graphics excluded. */
+function shotPieces(p: Project, shotId: string, mainId: string): string[] {
+  const ids = [mainId];
+  for (const track of p.timeline.tracks) {
+    for (const c of track.clips) {
+      if (c.id !== mainId && (c as Clip).shotId === shotId && !isAuxShotClip(c.id)) ids.push(c.id);
+    }
+  }
+  return ids;
 }
 
 /** A picture clip on the timeline playing one of these urls (a take of the shot). */
@@ -378,16 +389,23 @@ async function applyPicture(u: BoardUpdate, mediaType: "video" | "image"): Promi
       name: u.title ? `${u.title} · board take` : "Board take",
       posterUrl: u.posterUrl, durationSec: u.durationSec,
     });
-    const r = await replaceClipTake(found.clip.id, ensured.mediaId);
-    if (!r.ok) {
-      if (/already uses/i.test(r.reason)) return { ...base, status: "unchanged", clipId: found.clip.id, detail: `${label(u)} already plays this take.` };
-      return { ...base, status: "failed", clipId: found.clip.id, detail: r.reason };
+    // EVERY PIECE OF THE SHOT. A shot the editor split and scattered is several
+    // clips carrying its shotId (split keeps it); each takes the new take and
+    // keeps its OWN start and trim, so every piece shows the same moment of it.
+    const pieces = shotPieces(project(), shotId, found.clip.id);
+    let done = 0;
+    let lastReason = "";
+    for (const piece of pieces) {
+      const r = await replaceClipTake(piece, ensured.mediaId);
+      if (r.ok || /already uses/i.test(r.reason)) done++;
+      else lastReason = r.reason;
     }
+    if (!done) return { ...base, status: "failed", clipId: found.clip.id, detail: lastReason || "The take could not be placed." };
     const after = clipNow(found.clip.id)?.clip ?? found.clip;
     return {
       ...base, status: "applied", clipId: after.id, startTime: round(after.startTime), duration: round(after.duration),
-      detail: `${label(u)} now plays the new take at ${round(after.startTime)}s — same start, `
-        + `${round(after.duration)}s long, trim kept${Math.abs(after.duration - found.clip.duration) > 0.02 ? " (shortened to fit the new take)" : ""}. Ctrl+Z restores the old take.`,
+      detail: `${label(u)} now plays the new take${pieces.length > 1 ? ` in all ${done} of its pieces` : ""} — same place, `
+        + `same trim${Math.abs(after.duration - found.clip.duration) > 0.02 ? " (shortened to fit the new take)" : ""}. Ctrl+Z restores the old take.`,
     };
   }
 
