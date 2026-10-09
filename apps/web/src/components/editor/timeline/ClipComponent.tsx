@@ -12,6 +12,21 @@ import { WaveformCanvas } from "./WaveformCanvas";
 import { VolumeAutomationOverlay } from "./VolumeAutomationOverlay";
 import { ClipContextMenu } from "./ClipContextMenu";
 import { ContextMenu, ContextMenuTrigger } from "@openreel/ui";
+import { useEditMonitorStore, formatFrameDelta } from "../../../stores/edit-monitor-store";
+import {
+  canSlip,
+  clampFade,
+  clampSlipIn,
+  commitFade,
+  commitSlip,
+  geomOf,
+  patchClips,
+  sourceDurationOf,
+  useFineEditDrag,
+  sourceSpan,
+  SLIP_CURSOR,
+  type ClipGeom,
+} from "./fine-edit";
 
 interface ClipComponentProps {
   clip: Clip;
@@ -36,6 +51,27 @@ interface ClipComponentProps {
   /** Fired on trim-handle release — commits the gesture to undo history. */
   onTrimEnd?: (clipId: string) => void;
 }
+
+/** The source-anchored filmstrip: fixed 64px tiles, each the frame at its
+ *  source time. Shared by the clip body and the slip ghost. */
+const FilmstripTiles: React.FC<{
+  band: { tiles: { url: string }[]; width: number };
+  offsetPx: number;
+  className: string;
+}> = ({ band, offsetPx, className }) => (
+  <div
+    className={`absolute top-0 bottom-0 flex ${className}`}
+    style={{ width: `${band.width}px`, transform: `translateX(${offsetPx}px)` }}
+  >
+    {band.tiles.map((tile, i) => (
+      <div
+        key={i}
+        className="h-full flex-none bg-cover bg-center"
+        style={{ width: "64px", backgroundImage: `url(${tile.url})` }}
+      />
+    ))}
+  </div>
+);
 
 const AUTO_SCROLL_THRESHOLD = 80;
 const AUTO_SCROLL_SPEED = 10;
@@ -89,6 +125,28 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
   });
   const clipRef = useRef<HTMLDivElement>(null);
 
+  // ── Fine edits (see fine-edit.ts): Alt+drag slip, corner fade handles ──
+  const fps = useProjectStore((s) => s.project.settings.frameRate) || 30;
+  const setMonitor = useEditMonitorStore((s) => s.setMonitor);
+  const slippable = canSlip(mediaItem) && !track.locked;
+  const [isSlipping, setIsSlipping] = useState(false);
+  const slipRef = useRef({ mouseX: 0, orig: geomOf(clip) as ClipGeom, span: 0, srcDur: Infinity, lastIn: 0 });
+  const [fadeDrag, setFadeDrag] = useState<"in" | "out" | null>(null);
+  const fadeRef = useRef({ mouseX: 0, orig: { fadeIn: 0, fadeOut: 0 }, last: { fadeIn: 0, fadeOut: 0 } });
+  // Alt held over the clip → show the slip cursor before the press.
+  const [hovered, setHovered] = useState(false);
+  const [altHeld, setAltHeld] = useState(false);
+  useEffect(() => {
+    if (!hovered) return;
+    const sync = (e: KeyboardEvent) => setAltHeld(e.altKey);
+    window.addEventListener("keydown", sync);
+    window.addEventListener("keyup", sync);
+    return () => {
+      window.removeEventListener("keydown", sync);
+      window.removeEventListener("keyup", sync);
+    };
+  }, [hovered]);
+
   const left = clip.startTime * pixelsPerSecond;
   const width = clip.duration * pixelsPerSecond;
 
@@ -108,6 +166,22 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
     if (e.button !== 0) return;
     if (track.locked || isTrimming) return;
     e.stopPropagation();
+
+    // Alt + drag = SLIP: same place, same length, different frames.
+    if (e.altKey && slippable) {
+      e.preventDefault();
+      const orig = geomOf(clip);
+      slipRef.current = {
+        mouseX: e.clientX,
+        orig,
+        span: sourceSpan(clip),
+        srcDur: sourceDurationOf(mediaItem),
+        lastIn: orig.inPoint,
+      };
+      onSelect(clip.id, false);
+      setIsSlipping(true);
+      return;
+    }
 
     const rect = clipRef.current?.parentElement?.getBoundingClientRect();
     const clipRect = clipRef.current?.getBoundingClientRect();
@@ -349,6 +423,76 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
     };
   }, [isTrimming, trimEdge, clip.id, pixelsPerSecond, onTrimClip, onTrimEnd]);
 
+  // SLIP — grabbing the film: drag right and the frames move right, so the
+  // clip starts on an EARLIER source frame. Frame-quantised, held inside the
+  // source, shown two-up in the viewer, committed as one undo step.
+  const showSlip = (inPoint: number) => {
+    const { orig, span } = slipRef.current;
+    setMonitor({
+      title: "Slip",
+      badge: formatFrameDelta(inPoint - orig.inPoint, fps),
+      frames: [
+        { mediaId: clip.mediaId, time: inPoint, label: "First frame" },
+        { mediaId: clip.mediaId, time: Math.max(inPoint, inPoint + span - 1 / fps), label: "Last frame" },
+      ],
+    });
+  };
+  useLayoutEffect(() => {
+    if (isSlipping) showSlip(slipRef.current.orig.inPoint);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSlipping]);
+  useFineEditDrag(
+    isSlipping,
+    SLIP_CURSOR,
+    (e) => {
+      const sess = slipRef.current;
+      const want = Math.round((sess.orig.inPoint - (e.clientX - sess.mouseX) / pixelsPerSecond) * fps) / fps;
+      const inPoint = clampSlipIn(want, sess.span, sess.srcDur);
+      if (Math.abs(inPoint - sess.lastIn) < 1e-9) return;
+      sess.lastIn = inPoint;
+      patchClips({ [clip.id]: { inPoint, outPoint: inPoint + sess.span } });
+      showSlip(inPoint);
+    },
+    (commit) => {
+      const sess = slipRef.current;
+      setIsSlipping(false);
+      setMonitor(null);
+      void commitSlip(clip.id, sess.orig, commit ? sess.lastIn : sess.orig.inPoint);
+    },
+  );
+
+  // FADES — the corner handle sits at the end of the ramp; pull it inward to
+  // lengthen the fade. clip.fade is the audio fade playback and export apply.
+  const handleFadeMouseDown = (which: "in" | "out") => (e: React.MouseEvent) => {
+    if (e.button !== 0 || track.locked) return;
+    e.stopPropagation();
+    e.preventDefault();
+    const cur = { fadeIn: clip.fade?.fadeIn ?? 0, fadeOut: clip.fade?.fadeOut ?? 0 };
+    fadeRef.current = { mouseX: e.clientX, orig: cur, last: cur };
+    onSelect(clip.id, false);
+    setFadeDrag(which);
+  };
+  useFineEditDrag(
+    fadeDrag !== null,
+    "ew-resize",
+    (e) => {
+      const sess = fadeRef.current;
+      const dx = (e.clientX - sess.mouseX) / pixelsPerSecond;
+      const q = (v: number) => Math.round(v * fps) / fps;
+      const { fadeIn: fi, fadeOut: fo } = sess.orig;
+      sess.last =
+        fadeDrag === "in"
+          ? { fadeIn: clampFade(q(fi + dx), fo, clip.duration), fadeOut: fo }
+          : { fadeIn: fi, fadeOut: clampFade(q(fo - dx), fi, clip.duration) };
+      patchClips({ [clip.id]: { fade: sess.last } });
+    },
+    (commit) => {
+      const sess = fadeRef.current;
+      setFadeDrag(null);
+      void commitFade(clip.id, sess.orig, commit ? sess.last : sess.orig);
+    },
+  );
+
   // Lazily generate + cache waveform peaks for any audio/video media
   // that arrived without them (remote Voidspace assets, agent-added
   // clips). Deduped + concurrency-limited in the service; the store
@@ -438,7 +582,7 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
   // Degrade to a placeholder label instead.
   const clipName = mediaItem?.name || clip.mediaId?.slice(0, 8) || "untitled clip";
 
-  const isInteracting = isDragging || isTrimming;
+  const isInteracting = isDragging || isTrimming || isSlipping || fadeDrag !== null;
 
   // Filmstrip — a SOURCE-ANCHORED band, not per-clip-window tiles. Each tile is
   // a fixed 64px cell whose frame is the source time at that band position
@@ -488,13 +632,59 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isVideo, hasFilmstrip, pixelsPerSecond, mediaItem?.filmstripThumbnails, mediaItem?.metadata?.duration]);
 
+  const fadeIn = clip.fade?.fadeIn ?? 0;
+  const fadeOut = clip.fade?.fadeOut ?? 0;
+  const fadeInPx = Math.min(fadeIn * pixelsPerSecond, width);
+  const fadeOutPx = Math.min(fadeOut * pixelsPerSecond, width);
+  const showFadeHandles = (isAudio || isVideo) && width >= 40 && !track.locked;
+  const ghostSrcDur = sourceDurationOf(mediaItem);
+
+  // The handle hangs INWARD from the end of its ramp, so it sits exactly where
+  // the fade ends and moves 1:1 with the pointer — no jump when grabbed.
+  const fadeHandle = (which: "in" | "out", x: number, len: number) => (
+    <div
+      data-fade-handle={which}
+      onMouseDown={handleFadeMouseDown(which)}
+      onClick={(e) => e.stopPropagation()}
+      title={
+        len > 0
+          ? `Sound fades ${which} over ${len.toFixed(2)}s — drag to change`
+          : `Drag ${which === "in" ? "right" : "left"} to fade the sound ${which}`
+      }
+      className={`absolute top-0.5 w-2.5 h-2.5 rounded-full bg-white border border-black/60 shadow z-30 cursor-ew-resize transition-opacity ${
+        fadeDrag === which || len > 0 ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+      }`}
+      style={{ left: `${which === "in" ? Math.min(x, width - 10) : Math.max(x - 10, 0)}px` }}
+    />
+  );
+
   return (
+    <>
+    {/* While slipping: the WHOLE source, faded, behind the clip — how much
+        picture is left on either side of the window. */}
+    {isSlipping && (
+      <div
+        data-slip-ghost
+        className="absolute top-1 bottom-1 z-[5] rounded-lg border border-dashed border-white/40 bg-white/5 overflow-hidden pointer-events-none"
+        style={{
+          left: `${(clip.startTime - (clip.inPoint || 0)) * pixelsPerSecond}px`,
+          width: `${(Number.isFinite(ghostSrcDur) ? ghostSrcDur : sourceSpan(clip)) * pixelsPerSecond}px`,
+        }}
+      >
+        {isVideo && filmstripBand.tiles.length > 0 && (
+          <FilmstripTiles band={filmstripBand} offsetPx={0} className="opacity-30" />
+        )}
+      </div>
+    )}
     <ContextMenu>
       <ContextMenuTrigger asChild>
         <div
           ref={clipRef}
           data-clip-id={clip.id}
           data-track-id={track.id}
+          title={slippable ? `${clipName}\nDrag to move · Alt+drag to slip` : clipName}
+          onMouseEnter={(e) => { setHovered(true); setAltHeld(e.altKey); }}
+          onMouseLeave={() => { setHovered(false); setAltHeld(false); }}
           onClick={handleClick}
           onMouseDown={handleMouseDown}
           className={`clip-component group absolute top-1 bottom-1 rounded-lg overflow-hidden shadow-sm ${
@@ -513,6 +703,8 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
               ? `translate(${left}px, ${dragYOffset}px)`
               : `translateX(${left}px)`,
             width: `${width}px`,
+            ...(isSlipping || (altHeld && slippable && !isDragging) ? { cursor: SLIP_CURSOR } : {}),
+            ...(isSlipping ? { zIndex: 20 } : {}),
             willChange: isInteracting ? 'transform, width' : 'auto',
             transition: isInteracting ? 'none' : 'opacity 150ms, box-shadow 150ms',
             pointerEvents: isDragging ? 'none' : 'auto',
@@ -529,21 +721,11 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
         <div className="absolute inset-0 overflow-hidden pointer-events-none">
           {/* Band offset so source-time inPoint sits at the clip's left edge.
               (startTime−inPoint) is trim-invariant, so frames stay put. */}
-          <div
-            className="absolute top-0 bottom-0 flex"
-            style={{
-              width: `${filmstripBand.width}px`,
-              transform: `translateX(${-(clip.inPoint || 0) * pixelsPerSecond}px)`,
-            }}
-          >
-            {filmstripBand.tiles.map((tile, i) => (
-              <div
-                key={i}
-                className="h-full flex-none bg-cover bg-center opacity-70"
-                style={{ width: "64px", backgroundImage: `url(${tile.url})` }}
-              />
-            ))}
-          </div>
+          <FilmstripTiles
+            band={filmstripBand}
+            offsetPx={-(clip.inPoint || 0) * pixelsPerSecond}
+            className="opacity-70"
+          />
         </div>
       )}
 
@@ -655,6 +837,44 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
         <div className="absolute inset-0 border-2 border-primary rounded-lg pointer-events-none shadow-[inset_0_0_10px_rgba(34,197,94,0.2)]" />
       )}
 
+      {/* Audio fade ramps — the shaded corners are the shape the volume takes. */}
+      {(fadeInPx > 0 || fadeOutPx > 0) && (
+        <svg
+          data-fade-ramps
+          className="absolute inset-0 w-full h-full pointer-events-none z-10"
+          viewBox={`0 0 ${Math.max(1, width)} 100`}
+          preserveAspectRatio="none"
+        >
+          {fadeInPx > 0 && (
+            <>
+              <polygon points={`0,0 ${fadeInPx},0 0,100`} className="fill-black/45" />
+              <line x1="0" y1="100" x2={fadeInPx} y2="0" className="stroke-white/70" strokeWidth={1} vectorEffect="non-scaling-stroke" />
+            </>
+          )}
+          {fadeOutPx > 0 && (
+            <>
+              <polygon points={`${width - fadeOutPx},0 ${width},0 ${width},100`} className="fill-black/45" />
+              <line x1={width - fadeOutPx} y1="0" x2={width} y2="100" className="stroke-white/70" strokeWidth={1} vectorEffect="non-scaling-stroke" />
+            </>
+          )}
+        </svg>
+      )}
+
+      {showFadeHandles && fadeHandle("in", fadeInPx, fadeIn)}
+      {showFadeHandles && fadeHandle("out", width - fadeOutPx, fadeOut)}
+
+      {/* Live readout while a fine edit is in progress. */}
+      {(isSlipping || fadeDrag) && (
+        <div
+          data-fine-edit-badge
+          className="absolute top-1 left-1/2 -translate-x-1/2 z-40 px-1.5 py-0.5 rounded bg-black/80 text-white text-[10px] font-mono whitespace-nowrap pointer-events-none"
+        >
+          {isSlipping
+            ? `Slip ${formatFrameDelta((clip.inPoint || 0) - slipRef.current.orig.inPoint, fps)}`
+            : `Fade ${fadeDrag} ${(fadeDrag === "in" ? fadeIn : fadeOut).toFixed(2)}s`}
+        </div>
+      )}
+
       {(isVideo || isImage || isAudio) && onTrimClip && (
         <>
           <div
@@ -680,5 +900,6 @@ export const ClipComponent: React.FC<ClipComponentProps> = ({
       </ContextMenuTrigger>
       <ClipContextMenu clip={clip} track={track} />
     </ContextMenu>
+    </>
   );
 };

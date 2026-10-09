@@ -275,7 +275,9 @@ export const VolumeAutomationOverlay: React.FC<Props> = ({ clip, isSelected, int
   }, [active, clip.id, clip.duration]);
 
   const onLineDown = (e: React.MouseEvent) => {
-    if (!interactive) return;
+    // Alt+drag anywhere on a clip is SLIP (fine-edit.ts) — the line has no
+    // Alt meaning, so let it reach the clip instead of swallowing it.
+    if (!interactive || e.altKey) return;
     e.stopPropagation();
     committedRef.current = committed;
     gesture.current = { kind: "line", startX: e.clientX, startY: e.clientY, moved: false };

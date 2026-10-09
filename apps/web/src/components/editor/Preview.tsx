@@ -77,6 +77,8 @@ import {
   ParticleRenderer,
 } from "./preview/index";
 import { ProcessingOverlay } from "./ProcessingOverlay";
+import { EditMonitorOverlay } from "./EditMonitorOverlay";
+import { useEditMonitorStore } from "../../stores/edit-monitor-store";
 import type { MotionPathConfig, GSAPMotionPathPoint } from "@openreel/core";
 import { hasEffectKeyframes } from "@openreel/core";
 
@@ -605,6 +607,10 @@ export const Preview: React.FC<{ readOnly?: boolean }> = ({ readOnly = false }) 
     previewQuality,
     setPreviewQuality,
   } = useTimelineStore();
+  // Skimming: while the pointer hovers the timeline lanes, the PAUSED viewer
+  // paints the time under it instead of the playhead (the playhead itself
+  // never moves). Playback always shows the playhead.
+  const skimTime = useEditMonitorStore((s) => s.skimTime);
 
   useEffect(() => {
     isScrubbingRef.current = isScrubbing;
@@ -3580,14 +3586,15 @@ export const Preview: React.FC<{ readOnly?: boolean }> = ({ readOnly = false }) 
 
     // Identifies THIS frame request; recorded only after a paint completes so
     // the watchdog can tell "painted" from "skipped/failed".
-    const renderKey = `${playheadPosition}|${project.modifiedAt}|${isDark}`;
+    const paintTime = skimTime ?? playheadPosition;
+    const renderKey = `${paintTime}|${project.modifiedAt}|${isDark}`;
 
     const renderFrame = async () => {
       pausedRenderInFlightRef.current = true;
       try {
-        const rendered = await renderFrameDirectly(playheadPosition);
+        const rendered = await renderFrameDirectly(paintTime);
         if (!rendered) {
-          renderFallbackFrame(playheadPosition);
+          renderFallbackFrame(paintTime);
         }
       } catch (e) {
         // A rejected direct render used to skip the fallback entirely
@@ -3595,7 +3602,7 @@ export const Preview: React.FC<{ readOnly?: boolean }> = ({ readOnly = false }) 
         // after a playback gap. Always land on SOME deliberate frame.
         console.warn("[Preview] paused frame render failed — using fallback:", e);
         try {
-          renderFallbackFrame(playheadPosition);
+          renderFallbackFrame(paintTime);
         } catch { /* keep the last frame — never leave a half-drawn canvas */ }
       } finally {
         pausedRenderInFlightRef.current = false;
@@ -3641,6 +3648,7 @@ export const Preview: React.FC<{ readOnly?: boolean }> = ({ readOnly = false }) 
     return () => window.clearInterval(watchdog);
   }, [
     playheadPosition,
+    skimTime,
     isPlaying,
     renderFrameDirectly,
     renderFallbackFrame,
@@ -4952,6 +4960,9 @@ export const Preview: React.FC<{ readOnly?: boolean }> = ({ readOnly = false }) 
               (framed to the project aspect) while recording, so the user sees
               exactly what the take will look like on the timeline. */}
           <InlineRecordingPreview />
+
+          {/* Slip / roll two-up: first+last frame, or out+in across a cut. */}
+          <EditMonitorOverlay />
 
           {/* Motion Path Overlay */}
           {motionPathMode && motionPathConfig && motionPathClip && (

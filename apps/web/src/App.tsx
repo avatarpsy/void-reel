@@ -8,6 +8,7 @@ import { SharePage } from "./pages/SharePage";
 import { useUIStore } from "./stores/ui-store";
 import { useProjectStore } from "./stores/project-store";
 import { useEngineStore } from "./stores/engine-store";
+import { liveSwapAuthority, LIVE_SWAP_AUTHORITY_TTL_MS, normSwapUrl, recordLiveSwap } from "./services/live-swap-authority";
 const SharedVideo = lazy(() => import('./SharedVideo'));
 import { sharedProjectId, installSharePreparation } from '@openreel/asset-browser';
 import { useVoidspaceStore } from "./stores/voidspace-store";
@@ -134,13 +135,8 @@ function reloadSingleFlight(
 // music_url field) resolves back to the chosen url, the authority retires so
 // genuine later changes flow through. A generous TTL (120s) outlives slow GCS
 // mirror uploads that would otherwise leave a late rebuild unguarded.
-const liveSwapAuthority = new Map<string, { url: string; at: number }>();
-const LIVE_SWAP_AUTHORITY_TTL_MS = 120_000;
-const normSwapUrl = (u: unknown): string => String(u || "").split(/[?#]/)[0];
-function recordLiveSwap(clipId: string, url: string): void {
-  if (!clipId || !url) return;
-  liveSwapAuthority.set(clipId, { url: normSwapUrl(url), at: Date.now() });
-}
+// (The map and recordLiveSwap live in services/live-swap-authority.ts so the
+// timeline's own take replacement can record a swap too.)
 
 const isCaptionTextClip = (tc: import("@openreel/core").TextClip): boolean =>
   tc.trackId === "track-captions" || tc.id.startsWith("caption-");

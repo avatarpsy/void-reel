@@ -1077,7 +1077,11 @@ export class ActionExecutor {
         const clip = this.findClip(timeline, params.clipId);
         if (clip) {
           const newInPoint = Math.max(0, clip.inPoint + params.delta);
-          const newOutPoint = newInPoint + clip.duration;
+          // Keep the SOURCE span (out - in), not the timeline duration: they
+          // differ on a sped-up or slowed clip, and a slip must never change
+          // how much of the source plays — only which part.
+          const span = clip.outPoint > clip.inPoint ? clip.outPoint - clip.inPoint : clip.duration;
+          const newOutPoint = newInPoint + span;
           timeline.tracks = timeline.tracks.map((track: MutableTrack) => ({
             ...track,
             clips: track.clips.map((c: MutableClip) =>

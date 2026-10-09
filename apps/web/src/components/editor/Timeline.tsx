@@ -23,6 +23,7 @@ import {
   Plus,
   ChevronDown as ChevronDownIcon,
   Magnet,
+  ScanLine,
   Info,
   ZoomIn,
 } from "lucide-react";
@@ -45,6 +46,14 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
 } from "@openreel/ui";
+import { useEditMonitorStore } from "../../stores/edit-monitor-store";
+import {
+  canSlip,
+  clampSlipIn,
+  patchClips,
+  sourceDurationOf,
+  sourceSpan,
+} from "./timeline/fine-edit";
 import {
   Playhead,
   TimeRuler,
@@ -536,6 +545,59 @@ export const Timeline: React.FC = () => {
     document.addEventListener("mouseup", handleMouseUp);
     return () => document.removeEventListener("mouseup", handleMouseUp);
   }, [isBoxSelecting, handleBoxSelectionEnd]);
+
+  /**
+   * SKIMMING — hover the lanes and the paused viewer shows the frame under the
+   * pointer; the playhead does not move (Final Cut's skimmer). Off while
+   * playing, while a mouse button is down (drags, marquee) and outside the
+   * lanes. Toggle next to SNAP; the choice is remembered per browser.
+   */
+  const { skimEnabled, skimTime, setSkimEnabled, setSkimTime } = useEditMonitorStore();
+  const updateSkim = useCallback(
+    (e: React.MouseEvent) => {
+      const el = tracksRef.current;
+      if (!el || !skimEnabled || e.buttons !== 0 || useTimelineStore.getState().playbackState === "playing") {
+        setSkimTime(null);
+        return;
+      }
+      const rect = el.getBoundingClientRect();
+      const pps = useTimelineStore.getState().pixelsPerSecond || 1;
+      setSkimTime(Math.max(0, (e.clientX - rect.left + el.scrollLeft) / pps));
+    },
+    [skimEnabled, setSkimTime],
+  );
+  useEffect(() => {
+    if (playbackState === "playing") setSkimTime(null);
+  }, [playbackState, setSkimTime]);
+  useEffect(() => () => setSkimTime(null), [setSkimTime]);
+
+  /**
+   * Alt + , / Alt + .  slip the selected clip one frame earlier / later in its
+   * source (Shift: ten frames) — the keyboard half of Alt+drag slip.
+   */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.altKey || (e.code !== "Comma" && e.code !== "Period")) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      const store = useProjectStore.getState();
+      const fps = store.project.settings.frameRate || 30;
+      const step = ((e.code === "Period" ? 1 : -1) * (e.shiftKey ? 10 : 1)) / fps;
+      const ids = new Set(getSelectedClipIds());
+      const clips = store.project.timeline.tracks.flatMap((tr) => (tr.locked ? [] : tr.clips)).filter((c) => ids.has(c.id));
+      if (clips.length === 0) return;
+      e.preventDefault();
+      for (const c of clips) {
+        const media = store.getMediaItem(c.mediaId);
+        if (!canSlip(media)) continue;
+        const next = clampSlipIn((c.inPoint ?? 0) + step, sourceSpan(c), sourceDurationOf(media));
+        const delta = next - (c.inPoint ?? 0);
+        if (Math.abs(delta) > 1e-9) void store.slipClip(c.id, delta);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [getSelectedClipIds]);
 
   /**
    * ZOOM KEEPS ONE TIME STILL ON SCREEN — the After Effects / Premiere rule.
@@ -1080,18 +1142,7 @@ export const Timeline: React.FC = () => {
     // during the drag stay — they track the final duration), then commit
     // the final geometry as ONE executor action so the inverse generator
     // captures the correct "before".
-    useProjectStore.setState((state) => ({
-      project: {
-        ...state.project,
-        timeline: {
-          ...state.project.timeline,
-          tracks: state.project.timeline.tracks.map((track) => ({
-            ...track,
-            clips: track.clips.map((c) => (c.id === clipId ? { ...c, ...o } : c)),
-          })),
-        },
-      },
-    }));
+    patchClips({ [clipId]: o });
     void store.trimClip(clipId, finalGeom.inPoint, finalGeom.outPoint, finalGeom.startTime);
   }, []);
 
@@ -1194,23 +1245,7 @@ export const Timeline: React.FC = () => {
         return kf;
       });
 
-      useProjectStore.setState((state) => ({
-        project: {
-          ...state.project,
-          timeline: {
-            ...state.project.timeline,
-            tracks: state.project.timeline.tracks.map((track) => ({
-              ...track,
-              clips: track.clips.map((c) =>
-                c.id === clipId
-                  ? { ...c, ...updates, keyframes: adjustedKeyframes }
-                  : c,
-              ),
-            })),
-          },
-          modifiedAt: Date.now(),
-        },
-      }));
+      patchClips({ [clipId]: { ...updates, keyframes: adjustedKeyframes } });
     },
     [tracks, snapTrimEdge],
   );
@@ -1398,6 +1433,24 @@ export const Timeline: React.FC = () => {
             <span className="timeline-action-label text-[10px] font-medium tracking-wide">SNAP</span>
           </button>
 
+          <button
+            onClick={() => setSkimEnabled(!skimEnabled)}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg transition-colors ${
+              skimEnabled
+                ? "bg-pink-500/15 text-pink-700 dark:text-pink-300 border border-pink-500/30"
+                : "hover:bg-background-elevated text-text-muted hover:text-text-secondary"
+            }`}
+            title={
+              skimEnabled
+                ? "Skimming on — hover a clip to see its frames without moving the playhead"
+                : "Skimming off — turn on to preview frames by hovering"
+            }
+            data-skim-toggle
+          >
+            <ScanLine size={14} />
+            <span className="timeline-action-label text-[10px] font-medium tracking-wide">SKIM</span>
+          </button>
+
           <Popover>
             <PopoverTrigger asChild>
               <button
@@ -1532,7 +1585,11 @@ export const Timeline: React.FC = () => {
               setScrollY(e.currentTarget.scrollTop);
             }}
             onMouseDown={handleBoxSelectionStart}
-            onMouseMove={handleBoxSelectionMove}
+            onMouseMove={(e) => {
+              handleBoxSelectionMove(e);
+              updateSkim(e);
+            }}
+            onMouseLeave={() => setSkimTime(null)}
             onDragOver={(e) => {
               e.preventDefault();
               e.dataTransfer.dropEffect = "copy";
@@ -1690,6 +1747,14 @@ export const Timeline: React.FC = () => {
                   onUpdate={updateMarker}
                 />
               ))}
+
+              {skimTime !== null && (
+                <div
+                  data-skimmer
+                  className="absolute top-0 bottom-0 w-px bg-pink-500/80 z-30 pointer-events-none"
+                  style={{ left: `${skimTime * pixelsPerSecond}px` }}
+                />
+              )}
 
               {snapIndicatorTime !== null && (
                 <div

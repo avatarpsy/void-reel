@@ -16,6 +16,9 @@ import { useUIStore } from "../../../stores/ui-store";
 import { useProjectStore } from "../../../stores/project-store";
 import { toast } from "../../../stores/notification-store";
 import { resolveDroppedMediaId, lastDropFailure } from "../../../services/library-drop";
+import { replaceClipTake } from "../../../services/replace-clip-take";
+import { RollSeam } from "./RollSeam";
+import { areButted, canRoll } from "./fine-edit";
 
 type GraphicClipUnion = ShapeClip | SVGClip | StickerClip;
 
@@ -96,18 +99,58 @@ export const TrackLane: React.FC<TrackLaneProps> = ({
   const resizeStartY = useRef<number>(0);
   const resizeStartHeight = useRef<number>(0);
 
+  // Media clips drawn by ClipComponent (text / graphic clips draw themselves).
+  const mediaClips = useMemo(
+    () =>
+      track.clips.filter(
+        (clip) => !textClips.some((tc) => tc.id === clip.id) && !shapeClips.some((sc) => sc.id === clip.id),
+      ),
+    [track.clips, textClips, shapeClips],
+  );
+
+  // Every cut between two butted clips gets a roll handle.
+  const seams = useMemo(() => {
+    if (track.locked || (track.type !== "video" && track.type !== "audio")) return [];
+    const sorted = [...mediaClips].sort((a, b) => a.startTime - b.startTime);
+    const out: { left: (typeof sorted)[number]; right: (typeof sorted)[number] }[] = [];
+    for (let i = 0; i + 1 < sorted.length; i++) {
+      if (areButted(sorted[i], sorted[i + 1]) && canRoll(sorted[i], sorted[i + 1])) {
+        out.push({ left: sorted[i], right: sorted[i + 1] });
+      }
+    }
+    return out;
+  }, [mediaClips, track.locked, track.type]);
+
+  // Alt + drop on a clip REPLACES its take (same place, length, fades).
+  const [replaceTargetId, setReplaceTargetId] = useState<string | null>(null);
+  const clipAtPointer = useCallback(
+    (clientX: number) => {
+      const rect = laneRef.current?.getBoundingClientRect();
+      if (!rect) return undefined;
+      const t = (clientX - rect.left) / pixelsPerSecond;
+      return mediaClips.find((c) => t >= c.startTime && t < c.startTime + c.duration);
+    },
+    [mediaClips, pixelsPerSecond],
+  );
+  const replaceTarget = mediaClips.find((c) => c.id === replaceTargetId);
+
   const clipsWithKeyframes = useMemo(() => {
     return track.clips.filter((clip) => clip.keyframes && clip.keyframes.length > 0);
   }, [track.clips]);
 
-  const handleDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "copy";
-    setIsDragOver(true);
-  }, []);
+  const handleDragOver = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+      setIsDragOver(true);
+      setReplaceTargetId(e.altKey && !track.locked ? clipAtPointer(e.clientX)?.id ?? null : null);
+    },
+    [clipAtPointer, track.locked],
+  );
 
   const handleDragLeave = useCallback(() => {
     setIsDragOver(false);
+    setReplaceTargetId(null);
   }, []);
 
   const handleDrop = useCallback(
@@ -115,6 +158,20 @@ export const TrackLane: React.FC<TrackLaneProps> = ({
       e.preventDefault();
       e.stopPropagation();
       setIsDragOver(false);
+      setReplaceTargetId(null);
+
+      // Alt held over a clip → swap its take; otherwise add a clip.
+      const target = e.altKey && !track.locked ? clipAtPointer(e.clientX) : undefined;
+      const place = async (mediaId: string, time: number, name?: string) => {
+        if (!target) {
+          onDropMedia(track.id, mediaId, time);
+          if (name) toast.success("Added to timeline", name);
+          return;
+        }
+        const res = await replaceClipTake(target.id, mediaId);
+        if (res.ok) toast.success("Take replaced", name ?? "Same place, length and fades");
+        else toast.error("Couldn't replace the take", res.reason);
+      };
 
       // External OS file drop (e.g. from Windows Explorer)
       if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
@@ -145,8 +202,7 @@ export const TrackLane: React.FC<TrackLaneProps> = ({
                 // onDropMedia routes by MEDIA type (an image dropped on a
                 // video lane lands on an image track) — same path internal
                 // drags take, so both drop flavors behave identically.
-                onDropMedia(track.id, newItem.id, snapResult.time);
-                toast.success("Added to timeline", file.name);
+                await place(newItem.id, snapResult.time, file.name);
               }
             }
           } catch (err) {
@@ -182,7 +238,7 @@ export const TrackLane: React.FC<TrackLaneProps> = ({
         );
         const mediaId = await resolveDroppedMediaId(rawData);
         if (mediaId) {
-          onDropMedia(track.id, mediaId, snapResult.time);
+          await place(mediaId, snapResult.time);
         } else {
           // A drop that lands nothing must SAY so — a silent no-op is the one
           // outcome a person cannot act on (9 Oct 2026: Library drops 401'd and
@@ -198,6 +254,8 @@ export const TrackLane: React.FC<TrackLaneProps> = ({
     [
       track.id,
       track.name,
+      track.locked,
+      clipAtPointer,
       pixelsPerSecond,
       onDropMedia,
       allTracks,
@@ -257,10 +315,7 @@ export const TrackLane: React.FC<TrackLaneProps> = ({
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
-        {track.clips
-          .filter((clip) => !textClips.some((tc) => tc.id === clip.id))
-          .filter((clip) => !shapeClips.some((sc) => sc.id === clip.id))
-          .map((clip) => (
+        {mediaClips.map((clip) => (
             <ClipComponent
               key={clip.id}
               clip={clip}
@@ -277,6 +332,9 @@ export const TrackLane: React.FC<TrackLaneProps> = ({
               onTrimEnd={onTrimEnd}
             />
           ))}
+        {seams.map(({ left, right }) => (
+          <RollSeam key={`${left.id}|${right.id}`} left={left} right={right} pixelsPerSecond={pixelsPerSecond} />
+        ))}
         {textClips.map((textClip) => (
           <TextClipComponent
             key={textClip.id}
@@ -301,10 +359,24 @@ export const TrackLane: React.FC<TrackLaneProps> = ({
             onMoveClip={onMoveClip}
           />
         ))}
-        {isDragOver && (
+        {isDragOver && !replaceTarget && (
           <div className="absolute inset-0 border-2 border-dashed border-primary/50 rounded pointer-events-none flex items-center justify-center">
             <span className="text-xs text-primary bg-background/80 px-2 py-1 rounded">
-              Drop to add clip
+              Drop to add clip · hold Alt over a clip to replace it
+            </span>
+          </div>
+        )}
+        {replaceTarget && (
+          <div
+            data-replace-target={replaceTarget.id}
+            className="absolute top-0.5 bottom-0.5 z-40 rounded-lg border-2 border-primary bg-primary/25 pointer-events-none flex items-center justify-center"
+            style={{
+              left: `${replaceTarget.startTime * pixelsPerSecond}px`,
+              width: `${replaceTarget.duration * pixelsPerSecond}px`,
+            }}
+          >
+            <span className="text-xs font-medium text-white bg-primary px-2 py-0.5 rounded whitespace-nowrap">
+              Replace take
             </span>
           </div>
         )}
