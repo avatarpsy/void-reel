@@ -34,7 +34,7 @@ import { installScreenplayFocus, type ScreenplayFocus } from '../ui/screenplay-f
 import { installDocumentView, type DocumentView } from '../ui/document-view';
 import { installDocumentFocus, type DocumentFocus } from '../ui/document-focus';
 import { drawOnCanvas, readCanvas } from '../board/canvas';
-import { READ_ONLY_RPC, installBoardRpc } from './rpc';
+import { READ_BUDGET_CHARS, READ_ONLY_RPC, fitDigest, installBoardRpc } from './rpc';
 
 const SEEDANCE: ModelCaps = {
   id: 'bytedance/seedance-2',
@@ -196,6 +196,59 @@ describe('board_read', () => {
     });
     const read = await call('voidspace:board-read');
     expect(read.shots[0].estimatedCredits).toBeCloseTo(19.2, 5);
+  });
+
+  it('carries the url of a ready take and of the chosen take, never of a running one', async () => {
+    const add = await call('voidspace:board-add-shots', { titles: ['A'] });
+    const shotId = add.shots[0].id;
+    const running = await call('voidspace:board-add-take', { shotId, status: 'running', url: '' });
+    const ready = await call('voidspace:board-add-take', { shotId, status: 'ready', url: 'https://x/a.mp4' });
+    const read = await call('voidspace:board-read', { detail: 'auto' });
+    const takes = read.shots[0].takes;
+    expect(takes.find((t: any) => t.id === running.takeId).url).toBeUndefined();
+    expect(takes.find((t: any) => t.id === ready.takeId).url).toBe('https://x/a.mp4');
+    expect(read.shots[0].chosenTakeUrl).toBe('https://x/a.mp4');
+  });
+
+  it('board_choose_take answers with the url that now plays', async () => {
+    const add = await call('voidspace:board-add-shots', { titles: ['A'] });
+    const shotId = add.shots[0].id;
+    await call('voidspace:board-add-take', { shotId, status: 'ready', url: 'https://x/1.mp4' });
+    const two = await call('voidspace:board-add-take', { shotId, status: 'ready', url: 'https://x/2.mp4' });
+    const res = await call('voidspace:board-choose-take', { shotId, takeId: two.takeId });
+    expect(res.chosenTakeId).toBe(two.takeId);
+    expect(res.chosenTakeUrl).toBe('https://x/2.mp4');
+  });
+
+  it('fits a big board to the read budget, and `shotIds` brings any shot back whole', async () => {
+    const titles = Array.from({ length: 70 }, (_, i) => `Shot ${i + 1}`);
+    const add = await call('voidspace:board-add-shots', { titles });
+    const long = 'A slow push in through rain-streaked glass, neon bleeding across the frame. '.repeat(12);
+    for (const s of add.shots) {
+      await call('voidspace:board-update-shot', { shotId: s.id, action: long, camera: long, voiceover: long });
+      await call('voidspace:board-add-take', {
+        shotId: s.id, status: 'ready', url: `https://x/${s.id}.mp4`, promptUsed: long,
+      });
+    }
+    const full = await call('voidspace:board-read');
+    expect(JSON.stringify(full).length).toBeGreaterThan(READ_BUDGET_CHARS);
+
+    const read = await call('voidspace:board-read', { detail: 'auto' });
+    expect(JSON.stringify(read).length).toBeLessThanOrEqual(READ_BUDGET_CHARS);
+    expect(read.omitted).toMatch(/shotIds/);
+    expect(read.shotCount).toBe(70);
+    // The url of what plays survives every stage of trimming.
+    expect(read.shots[0].chosenTakeUrl).toBe(`https://x/${add.shots[0].id}.mp4`);
+
+    const one = await call('voidspace:board-read', { detail: 'full', shotIds: [add.shots[5].id] });
+    expect(one.shots).toHaveLength(1);
+    expect(one.shots[0].action.length).toBeGreaterThan(400);
+    expect(one.shots[0].order).toBe(5);
+  });
+
+  it('leaves a small board exactly as it was', () => {
+    const d = { shots: [{ id: 'a' }], script: {}, documents: [] };
+    expect(fitDigest(d)).toBe(d);
   });
 });
 
