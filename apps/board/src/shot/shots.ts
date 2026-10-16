@@ -36,7 +36,7 @@ export interface ShotView {
   action: string;
   voiceover: string;
   /** The person's own on-camera lines for a shot they record. '' = none. */
-  script: string;
+  lines: string;
   camera: string;
   media: ShotMedia[];
   /** Every attempt this shot has produced, oldest first. */
@@ -184,7 +184,7 @@ function viewOf(std: BlockStdScope, id: string, x: number): ShotView | null {
     action: p.action ?? '',
     voiceover: p.voiceover ?? '',
     // `?? ''`: boards written before YOUR LINES existed have no such key.
-    script: p.script ?? '',
+    lines: p.lines ?? '',
     camera: p.camera ?? '',
     media: p.media ?? [],
     /**
@@ -459,7 +459,7 @@ export function setShotFields(
   std: BlockStdScope,
   id: string,
   patch: Partial<Pick<ShotView,
-    'title' | 'action' | 'voiceover' | 'script' | 'camera' | 'model' | 'durationSec' | 'kind'
+    'title' | 'action' | 'voiceover' | 'lines' | 'camera' | 'model' | 'durationSec' | 'kind'
     | 'voiceMode'
     | 'composition' | 'compositionVars' | 'sceneKey'
   >>,

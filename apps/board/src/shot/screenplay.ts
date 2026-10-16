@@ -127,7 +127,7 @@ export interface CompiledShot {
    * cleans the recording against it (keep the last clean read of each line).
    * Absent when empty, like every written field.
    */
-  script?: string;
+  lines?: string;
   camera?: string;
   /** Chosen per shot; empty means the project default. */
   model?: string;
@@ -493,7 +493,7 @@ export function compileBoard(
       // in the screenplay: the planner would treat it as an approved description.
       ...(shot.action.trim() ? { action: shot.action.trim() } : {}),
       ...(shot.voiceover.trim() ? { voiceover: shot.voiceover.trim() } : {}),
-      ...((shot.script ?? '').trim() ? { script: shot.script.trim() } : {}),
+      ...((shot.lines ?? '').trim() ? { lines: shot.lines.trim() } : {}),
       // CAMERA is a clip's framing and movement. A graphic has neither — it is
       // rendered from a layout — so carrying it would put a camera direction on
       // a scene with no camera.
@@ -565,7 +565,7 @@ export function compileBoard(
     if (shot.action) lines.push(`  ACTION: ${shot.action.replace(/\s+/g, ' ')}`);
     if (shot.voiceover) lines.push(`  VO: ${shot.voiceover.replace(/\s+/g, ' ')}`);
     // Said ON CAMERA by the person, who records this shot — not a narrator.
-    if (shot.script) lines.push(`  LINES (recorded by the person): ${shot.script.replace(/\s+/g, ' ')}`);
+    if (shot.lines) lines.push(`  LINES (recorded by the person): ${shot.lines.replace(/\s+/g, ' ')}`);
     if (shot.camera) lines.push(`  CAMERA: ${shot.camera.replace(/\s+/g, ' ')}`);
     if (shot.durationSec) lines.push(`  LENGTH: ${shot.durationSec}s`);
     if (shot.kind === 'hyperframes') {

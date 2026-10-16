@@ -222,11 +222,11 @@ describe('shots', () => {
   it('starts with no lines to say, and keeps the ones written', () => {
     const board = makeTestBoard();
     const [id] = createShots(board.std, board.surfaceId, ['A']);
-    expect(readShot(board.std, id)!.script).toBe('');
+    expect(readShot(board.std, id)!.lines).toBe('');
 
-    setShotFields(board.std, id, { script: 'Three things I wish I knew.' });
+    setShotFields(board.std, id, { lines: 'Three things I wish I knew.' });
     const shot = readShot(board.std, id)!;
-    expect(shot.script).toBe('Three things I wish I knew.');
+    expect(shot.lines).toBe('Three things I wish I knew.');
     // YOUR LINES is not narration: the voiceover stays empty.
     expect(shot.voiceover).toBe('');
   });
@@ -234,10 +234,10 @@ describe('shots', () => {
   it('reads a board made before YOUR LINES existed as having none', () => {
     const board = makeTestBoard();
     const [id] = createShots(board.std, board.surfaceId, ['A']);
-    // Old Yjs docs have no `script` key at all.
+    // Old Yjs docs have no `lines` key at all.
     const block = board.store.getBlock(id)!;
-    board.store.updateBlock(block.model, { script: undefined } as never);
-    expect(readShot(board.std, id)!.script).toBe('');
+    board.store.updateBlock(block.model, { lines: undefined } as never);
+    expect(readShot(board.std, id)!.lines).toBe('');
   });
 
   it('hit-tests a point against the panel that is actually under it', () => {
@@ -538,13 +538,13 @@ describe('which written boxes the card shows', () => {
   });
 
   it('shows YOUR LINES only when it holds text or the shot has a recorded take', () => {
-    expect(isFieldShown('script', { script: '' }, false)).toBe(false);
-    expect(isFieldShown('script', { script: '   ' }, false)).toBe(false);
-    expect(isFieldShown('script', { script: 'Hello' }, false)).toBe(true);
-    expect(isFieldShown('script', { takes: [{ source: 'generated' }] }, false)).toBe(false);
-    expect(isFieldShown('script', { takes: [{ source: 'generated' }, { source: 'recorded' }] }, false)).toBe(true);
+    expect(isFieldShown('lines', { lines: '' }, false)).toBe(false);
+    expect(isFieldShown('lines', { lines: '   ' }, false)).toBe(false);
+    expect(isFieldShown('lines', { lines: 'Hello' }, false)).toBe(true);
+    expect(isFieldShown('lines', { takes: [{ source: 'generated' }] }, false)).toBe(false);
+    expect(isFieldShown('lines', { takes: [{ source: 'generated' }, { source: 'recorded' }] }, false)).toBe(true);
     // A board made before the field existed: no key, no takes key.
-    expect(isFieldShown('script', {}, false)).toBe(false);
+    expect(isFieldShown('lines', {}, false)).toBe(false);
   });
 
   it('keeps the legacy CAMERA box for shots that still hold text, never on a graphic', () => {

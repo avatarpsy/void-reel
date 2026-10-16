@@ -1154,7 +1154,7 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
     .field[data-field='action'] .field__text { min-height: 4.4em; }
     .field[data-field='voiceover'] .field__text { min-height: 2.2em; }
     .field[data-field='camera'] .field__text { min-height: 2.2em; }
-    .field[data-field='script'] .field__text { min-height: 2.2em; }
+    .field[data-field='lines'] .field__text { min-height: 2.2em; }
     /* The legacy CAMERA box is a leftover to empty out, not a control to fill
        in. Dimmed so it reads that way without hiding what it holds. */
     .field[data-field='camera'] { opacity: 0.72; }
@@ -2378,7 +2378,7 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
    * under the caret. Blur is also when the user has finished a thought, which is
    * the right granularity for an undo step.
    */
-  private commit(key: 'title' | 'action' | 'voiceover' | 'script' | 'camera', el: HTMLElement): void {
+  private commit(key: 'title' | 'action' | 'voiceover' | 'lines' | 'camera', el: HTMLElement): void {
     const value = (el.textContent ?? '').trim();
     if (value !== this.model.props[key]) {
       this.store.captureSync();

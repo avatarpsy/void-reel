@@ -806,7 +806,7 @@ export interface ShotFields {
   voiceover: string;
   /** What the PERSON says on camera when they record this shot themselves —
    *  their teleprompter text. See the YOUR LINES spec below. */
-  script: string;
+  lines: string;
   camera: string;
 }
 
@@ -872,7 +872,7 @@ export const FIELD_SPECS: ReadonlyArray<{
    * recorded take — see `isFieldShown` — so an AI-only board never sees it.
    */
   {
-    key: 'script',
+    key: 'lines',
     label: 'YOUR LINES',
     placeholder: 'What you say on camera when you record this shot',
   },
@@ -895,12 +895,12 @@ export const FIELD_SPECS: ReadonlyArray<{
  */
 export function isFieldShown(
   key: keyof ShotFields,
-  shot: { camera?: string; script?: string; takes?: ReadonlyArray<{ source?: string }> },
+  shot: { camera?: string; lines?: string; takes?: ReadonlyArray<{ source?: string }> },
   isGraphic: boolean,
 ): boolean {
   if (key === 'camera') return !isGraphic && !!(shot.camera ?? '').trim();
-  if (key === 'script') {
-    return !!(shot.script ?? '').trim()
+  if (key === 'lines') {
+    return !!(shot.lines ?? '').trim()
       || (shot.takes ?? []).some(t => t?.source === 'recorded');
   }
   return true;
@@ -911,8 +911,8 @@ type ShotProps = {
   action: string;
   voiceover: string;
   /** The person's on-camera lines (teleprompter text). '' = none. Read as
-   *  `props.script ?? ''` — boards made before this have no such key. */
-  script: string;
+   *  `props.lines ?? ''` — boards made before this have no such key. */
+  lines: string;
   camera: string;
   media: ShotMedia[];
   /**
@@ -1109,7 +1109,7 @@ export const ShotBlockSchema = defineBlockSchema({
     title: '',
     action: '',
     voiceover: '',
-    script: '',
+    lines: '',
     camera: '',
     media: [],
     takes: [],

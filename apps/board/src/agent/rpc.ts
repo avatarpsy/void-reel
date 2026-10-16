@@ -358,7 +358,7 @@ export function fitDigest<D extends { shots: any[]; script: any; documents: any[
       ...s,
       action: clip(s.action, 400),
       voiceover: clip(s.voiceover, 400),
-      script: clip(s.script, 400),
+      lines: clip(s.lines, 400),
       camera: clip(s.camera, 200),
       media: (s.media ?? []).map((m: any) => ({ ...m, note: clip(m.note, 200) })),
       takes: (s.takes ?? []).map(({ promptUsed: _p, seed: _sd, source: _src, ...t }: any) => ({
@@ -399,7 +399,7 @@ export function fitDigest<D extends { shots: any[]; script: any; documents: any[
       estimatedCredits: s.estimatedCredits,
     })),
     detail: 'brief',
-    omitted: `Over the read budget: one row per shot — action, voiceover, script, camera, references and layers were left out. ${again}`,
+    omitted: `Over the read budget: one row per shot — action, voiceover, lines, camera, references and layers were left out. ${again}`,
   };
   if (size(brief) <= budget) return brief as any;
 
@@ -525,7 +525,7 @@ function fullDigest(board: MountedBoard, shotIds?: readonly string[]) {
         action: s.action,
         voiceover: s.voiceover,
         /** The person's own on-camera lines (they record this shot). '' = none. */
-        script: s.script,
+        lines: s.lines,
         camera: s.camera,
         /** '' means the agent has not asked yet — see `ShotProps.model`. */
         model: s.model,
@@ -1114,11 +1114,11 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
       const missing = needShot(id); if (missing) return missing;
 
       const patch: Record<string, string> = {};
-      for (const key of ['title', 'action', 'voiceover', 'script', 'camera'] as const) {
+      for (const key of ['title', 'action', 'voiceover', 'lines', 'camera'] as const) {
         if (typeof args[key] === 'string') patch[key] = args[key] as string;
       }
       if (!Object.keys(patch).length) {
-        return fail('empty', 'Give at least one of title, action, voiceover, script or camera.');
+        return fail('empty', 'Give at least one of title, action, voiceover, lines or camera.');
       }
       setShotFields(board.std, id, patch);
       return digest(board);
