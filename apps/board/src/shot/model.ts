@@ -868,8 +868,8 @@ export const FIELD_SPECS: ReadonlyArray<{
    * Not NARRATION (an AI voice laid over the picture) and not SHOT (a
    * description a video model films). This is what the person reads off the
    * prompter when they press Record, and the reference the editor cleans the
-   * recording against. Shown only when it holds text or the shot already has a
-   * recorded take — see `isFieldShown` — so an AI-only board never sees it.
+   * recording against. Shown only when it holds text
+   * — see `isFieldShown` — so an AI-only board never sees it.
    */
   {
     key: 'lines',
@@ -889,19 +889,19 @@ export const FIELD_SPECS: ReadonlyArray<{
  * ACTION and NARRATION always. The other two appear only when they have
  * something to say:
  *   • CAMERA — legacy, shown when it still holds text, never on a graphic.
- *   • YOUR LINES — shown when it holds text, or when the shot already has a
- *     take the person recorded (so they can write lines for a re-take).
+ *   • YOUR LINES — shown when it holds text. A shot without lines gets its
+ *     lines box inside the recorder, so library footage (also a `recorded`
+ *     take) never grows an empty box here.
  * A pure rule so the card and the tests agree on it.
  */
 export function isFieldShown(
   key: keyof ShotFields,
-  shot: { camera?: string; lines?: string; takes?: ReadonlyArray<{ source?: string }> },
+  shot: { camera?: string; lines?: string },
   isGraphic: boolean,
 ): boolean {
   if (key === 'camera') return !isGraphic && !!(shot.camera ?? '').trim();
   if (key === 'lines') {
-    return !!(shot.lines ?? '').trim()
-      || (shot.takes ?? []).some(t => t?.source === 'recorded');
+    return !!(shot.lines ?? '').trim();
   }
   return true;
 }

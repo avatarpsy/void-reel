@@ -537,12 +537,10 @@ describe('which written boxes the card shows', () => {
     expect(isFieldShown('voiceover', {}, true)).toBe(true);
   });
 
-  it('shows YOUR LINES only when it holds text or the shot has a recorded take', () => {
+  it('shows YOUR LINES only when it holds text', () => {
     expect(isFieldShown('lines', { lines: '' }, false)).toBe(false);
     expect(isFieldShown('lines', { lines: '   ' }, false)).toBe(false);
     expect(isFieldShown('lines', { lines: 'Hello' }, false)).toBe(true);
-    expect(isFieldShown('lines', { takes: [{ source: 'generated' }] }, false)).toBe(false);
-    expect(isFieldShown('lines', { takes: [{ source: 'generated' }, { source: 'recorded' }] }, false)).toBe(true);
     // A board made before the field existed: no key, no takes key.
     expect(isFieldShown('lines', {}, false)).toBe(false);
   });
