@@ -25,49 +25,22 @@
  * copy either way.
  */
 import { useVoidspaceStore } from "../stores/voidspace-store";
+import { saveMediaToCloudFor, type CloudKind, type CloudSaveOptions } from "./cloud-save-host";
 
-export type CloudKind = "sfx" | "music" | "narration" | "image" | "recordings";
+export type { CloudKind, CloudSaveOptions } from "./cloud-save-host";
 
-type HostSave = (
-  blob: Blob,
-  meta: { projectId: string; kind: CloudKind; ext: string; mimeType: string; title?: string },
-) => Promise<{ url: string } | null>;
-
-function hostSave(): HostSave | null {
-  try {
-    const fn = (window.parent as any)?.__voidspaceSaveToCloud;
-    return typeof fn === "function" ? (fn as HostSave) : null;
-  } catch {
-    return null; // not embedded same-origin
-  }
-}
-
-const MIME_FOR_EXT: Record<string, string> = {
-  webm: "video/webm", mp4: "video/mp4", mov: "video/quicktime",
-  mp3: "audio/mpeg", wav: "audio/wav", m4a: "audio/mp4", ogg: "audio/ogg",
-  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp",
-};
-
+/**
+ * `opts.projectId` files the take under that id instead of the open project
+ * (the shot recorder has a board, not a project). Without it, behaviour is
+ * unchanged: the open project's id, or nothing is stored.
+ */
 export async function saveMediaToCloud(
   blob: Blob,
   label: string,
   ext: string,
   kind: CloudKind,
+  opts?: CloudSaveOptions,
 ): Promise<{ url: string } | null> {
-  try {
-    if (!blob || blob.size === 0) return null;
-    const projectId = useVoidspaceStore.getState().sceneList?.sceneListId;
-    const save = hostSave();
-    if (!projectId || !save) return null;
-    // Storage accepts media types only; a take recorded as audio-only webm is
-    // still audio, so name it by what the blob says before falling back.
-    const mimeType = blob.type && /^(audio|video|image)\//.test(blob.type)
-      ? blob.type
-      : MIME_FOR_EXT[ext] ?? (kind === "image" ? "image/png" : "audio/mpeg");
-    const saved = await save(blob, { projectId, kind, ext, mimeType, title: label });
-    return saved?.url ? { url: saved.url } : null;
-  } catch (e) {
-    console.warn("[cloud-save] not stored:", e);
-    return null;
-  }
+  const projectId = opts?.projectId ?? useVoidspaceStore.getState().sceneList?.sceneListId;
+  return saveMediaToCloudFor(blob, label, ext, kind, { ...opts, projectId });
 }

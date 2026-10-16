@@ -30,6 +30,13 @@ export default defineConfig({
   build: {
     target: "esnext",
     rollupOptions: {
+      // Two pages in one dist: the editor (index.html) and the board's one-shot
+      // recorder (record.html → /studio/record.html), which must stay light —
+      // it imports the recorder and teleprompter modules, never the editor App.
+      input: {
+        index: path.resolve(__dirname, "index.html"),
+        record: path.resolve(__dirname, "record.html"),
+      },
       output: {
         manualChunks: (id) => {
           if (id.includes("node_modules/react") || id.includes("node_modules/react-dom")) {
