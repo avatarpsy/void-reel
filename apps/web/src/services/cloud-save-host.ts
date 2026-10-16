@@ -19,6 +19,12 @@ export interface CloudSaveOptions {
   projectId?: string;
   /** Upload progress, 0..1, when the host reports it. */
   onProgress?: (fraction: number) => void;
+  /**
+   * The person pressed a button whose whole meaning is "store this" (the
+   * recorder's "Use this take"), so the host skips its own upload prompt.
+   * Never set it for an agent-initiated save.
+   */
+  confirmed?: boolean;
 }
 
 type HostSave = (
@@ -30,6 +36,7 @@ type HostSave = (
     mimeType: string;
     title?: string;
     onProgress?: (fraction: number) => void;
+    confirmed?: boolean;
   },
 ) => Promise<{ url: string } | null>;
 
@@ -77,6 +84,7 @@ export async function saveMediaToCloudFor(
       mimeType,
       title: label,
       ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
+      ...(opts.confirmed ? { confirmed: true } : {}),
     });
     return saved?.url ? { url: saved.url } : null;
   } catch (e) {

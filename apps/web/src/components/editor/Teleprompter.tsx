@@ -64,6 +64,12 @@ interface TeleprompterProps {
   /** Header text while live but not scrolling (e.g. "Starting…", "Paused"). */
   holdLabel?: string;
   onClose?: () => void;
+  /**
+   * Cover only the TOP part of the player, as a fraction of its height. The
+   * shot recorder uses it so the lines sit near the lens and the person can
+   * still see their own framing below. Default: the whole player.
+   */
+  coverTop?: number;
 }
 
 interface Box {
@@ -148,7 +154,7 @@ function loadSettings(): PrompterSettings {
 }
 
 /** Measure the editor player so the prompter overlays it exactly. */
-function measurePlayerRect(): Box | null {
+function measurePlayerRect(coverTop = 1): Box | null {
   if (typeof document === "undefined") return null;
   const el =
     document.querySelector("[data-tour='preview']") ||
@@ -157,7 +163,8 @@ function measurePlayerRect(): Box | null {
   if (!el) return null;
   const r = (el as HTMLElement).getBoundingClientRect();
   if (r.width < 80 || r.height < 80) return null;
-  return { left: r.left, top: r.top, width: r.width, height: r.height };
+  const frac = coverTop > 0 && coverTop < 1 ? coverTop : 1;
+  return { left: r.left, top: r.top, width: r.width, height: Math.max(80, r.height * frac) };
 }
 
 export const Teleprompter: React.FC<TeleprompterProps> = ({
@@ -166,11 +173,12 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
   live: liveProp,
   holdLabel,
   onClose,
+  coverTop = 1,
 }) => {
   const live = liveProp ?? active;
   const [settings, setSettings] = useState<PrompterSettings>(loadSettings);
   const [paused, setPaused] = useState(false);
-  const [rect, setRect] = useState<Box | null>(measurePlayerRect);
+  const [rect, setRect] = useState<Box | null>(() => measurePlayerRect(coverTop));
   const [asrStatus, setAsrStatus] = useState<AsrStatus>("idle");
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -231,7 +239,7 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
   // ── Keep the panel pinned over the player (only while auto-positioned) ──────
   useEffect(() => {
     if (settings.pos) return; // user dragged it — don't fight them
-    const update = () => setRect(measurePlayerRect());
+    const update = () => setRect(measurePlayerRect(coverTop));
     update();
     const timers = [120, 320, 700, 1400].map((ms) => window.setTimeout(update, ms));
     window.addEventListener("resize", update);

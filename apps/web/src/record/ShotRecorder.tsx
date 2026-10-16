@@ -429,6 +429,8 @@ export const ShotRecorder: React.FC = () => {
         "recordings",
         {
           projectId: params.boardId,
+          // Pressing "Use this take" IS the consent to store it.
+          confirmed: true,
           onProgress: (f) => patchTake(take.id, { progress: (idx + Math.min(1, Math.max(0, f))) / todo.length }),
         },
       );
@@ -656,6 +658,7 @@ export const ShotRecorder: React.FC = () => {
           active={status === "recording"}
           live={live}
           holdLabel={status === "countdown" ? "Starting…" : "Paused"}
+          coverTop={0.42}
           onClose={() => setShowLines(false)}
         />
       )}

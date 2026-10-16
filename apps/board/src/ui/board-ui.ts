@@ -20,6 +20,7 @@
  */
 import { GfxControllerIdentifier } from '@blocksuite/std/gfx';
 
+import { chosenTake } from '../shot/model';
 import { estimateShotCredits, onModelCatalogue, plannedSeconds } from '../shot/models';
 import { createShots, readShots } from '../shot/shots';
 import { installBoardFullscreen, installChromeAutohide } from './chrome-autohide';
@@ -243,6 +244,15 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
     let unknown = 0;
     let seconds = 0;
     for (const s of shots) {
+      // A shot that already PLAYS a take — recorded footage, a library clip, a
+      // finished generation — costs nothing at compile and runs as long as
+      // that take. Pricing it as a fresh generation put "~6 cr" on a board
+      // made entirely of the person's own recordings.
+      const playing = chosenTake(s.takes, s.chosenTakeId);
+      if (playing) {
+        seconds += playing.durationSec > 0 ? playing.durationSec : plannedSeconds(s);
+        continue;
+      }
       // The SAME rule the cost uses — see `plannedSeconds`.
       seconds += plannedSeconds(s);
       const c = estimateShotCredits(s);
