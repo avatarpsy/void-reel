@@ -23,7 +23,7 @@ import { buildScriptIndex, SpeechTracker, type ScriptIndex } from "../../service
  * ancestor has a transform.
  *
  * Scroll model (speech-PRIMARY, voice-PACED):
- *   • On-device Whisper re-transcribes the trailing few seconds every ~3 s and
+ *   • On-device Whisper re-transcribes the trailing few seconds every 2.6–5 s and
  *     the aligner ANCHORS the read position to the word you actually just said.
  *     (The recorder owns the mic, so Web Speech gets no audio on Chrome; we tap
  *     the recorder's live mic track — see teleprompter-asr.ts.)
@@ -31,7 +31,7 @@ import { buildScriptIndex, SpeechTracker, type ScriptIndex } from "../../service
  *     rate and advanced only by time the mic actually heard voice. Pause and it
  *     freezes; resume and it continues. This is what makes it feel continuous
  *     instead of the stall-then-jump of anchoring alone — and it's why we can
- *     afford to recognise every ~3 s instead of every second, which is what was
+ *     afford to recognise every 2.6–5 s instead of every second, which is what was
  *     stealing frames from the live preview.
  *   • FALLBACK: if the model is still warming, the mic is unavailable, or speech
  *     tracking is unsupported, a gentle crawl at the chosen speed carries the
@@ -52,8 +52,17 @@ import { buildScriptIndex, SpeechTracker, type ScriptIndex } from "../../service
 
 interface TeleprompterProps {
   script: string;
-  /** True while actively recording (drives the scroll + speech tracking). */
+  /** True while actively recording (drives the scroll). */
   active: boolean;
+  /**
+   * True for the whole take: countdown, recording AND paused. The mic is
+   * listened to for as long as this is on, so pausing keeps the speech session
+   * and the read position. Only a new take (live turning on) starts from the
+   * top. Defaults to `active`.
+   */
+  live?: boolean;
+  /** Header text while live but not scrolling (e.g. "Starting…", "Paused"). */
+  holdLabel?: string;
   onClose?: () => void;
 }
 
@@ -154,8 +163,11 @@ function measurePlayerRect(): Box | null {
 export const Teleprompter: React.FC<TeleprompterProps> = ({
   script,
   active,
+  live: liveProp,
+  holdLabel,
   onClose,
 }) => {
+  const live = liveProp ?? active;
   const [settings, setSettings] = useState<PrompterSettings>(loadSettings);
   const [paused, setPaused] = useState(false);
   const [rect, setRect] = useState<Box | null>(measurePlayerRect);
@@ -230,7 +242,7 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
   }, [active, settings.pos]);
 
   // ── Speech → script alignment (phonetic + locality + re-anchor) ──────────
-  // Called ~1×/s with the recent spoken words. The SpeechTracker aligns them to
+  // Called every 2.6–5 s (each recognizer result) with the recent spoken words. The SpeechTracker aligns them to
   // the script near the cursor, advances FORWARD past a confidence gate, and
   // after a streak of misses re-anchors globally (skip / re-read — which may
   // legitimately jump the read position, incl. backward).
@@ -249,8 +261,10 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
   }, []);
 
   // ── On-device Whisper (English) — the PRIMARY driver when listening ──────
+  // Runs for the whole take (`live`), not just while recording: a pause must
+  // not tear down and re-warm the session. Results are ignored while paused.
   useEffect(() => {
-    if (!active) return;
+    if (!live) return;
     let disposed = false;
     let asr: TeleprompterAsr | null = null;
     let pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -303,7 +317,7 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
       asr?.stop();
       setAsrStatus("idle");
     };
-  }, [active, onRecognized]);
+  }, [live, onRecognized]);
 
   // ── Repaint only the spans that changed ─────────────────────────────────
   // Called from the RAF loop when the active word moves. Touching two or three
@@ -424,9 +438,10 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
     return () => cancelAnimationFrame(raf);
   }, [tokens.length, paintIndex]);
 
-  // Reset to the top whenever a new take begins, or the script is edited.
+  // Reset to the top when a new take begins. Pause → resume keeps `live` on,
+  // so the read position and the speech session survive it.
   useEffect(() => {
-    if (active) {
+    if (live) {
       readPosRef.current = 0;
       trackerRef.current?.reset(speedRef.current);
       voiceActiveRef.current = false;
@@ -441,7 +456,7 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
       paintedIdxRef.current = -1;
       if (scrollRef.current) scrollRef.current.scrollTop = 0;
     }
-  }, [active]);
+  }, [live]);
 
   // A new script replaces every span, so any painted state is stale.
   useEffect(() => {
@@ -510,7 +525,9 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
     : asrStatus === "warming" || syncLost
       ? "#f5c451"
       : "rgba(150,160,190,0.7)";
-  const statusLabel = syncLost
+  const statusLabel = live && !active
+    ? holdLabel ?? "Paused"
+    : syncLost
     ? "Auto-scroll · voice sync lost"
     : asrStatus === "listening"
       ? "Following your voice"
@@ -585,7 +602,7 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
           {paused ? <Play size={13} /> : <Pause size={13} />}
         </button>
         {/* Fallback crawl speed (used when voice tracking isn't live) */}
-        <div style={chip} title="Fallback scroll speed (words per minute) — used when voice tracking isn't active">
+        <div style={chip} title="Scroll speed in words per minute. Used when voice follow is off">
           <button type="button" onClick={() => bumpSpeed(-0.2)} style={ctrlBtn} title="Slower"><Minus size={13} /></button>
           <Gauge size={13} style={{ color: "rgba(241,244,255,0.6)" }} />
           <span style={{ fontSize: 11, color: "rgba(241,244,255,0.7)", width: 30, textAlign: "center", fontVariantNumeric: "tabular-nums" }}>

@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import { Square, Pause, Play, X, Minimize2 } from "lucide-react";
 import { useRecorderStore } from "../../stores/recorder-store";
 import { formatDuration } from "../../services/screen-recorder";
@@ -25,6 +25,27 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   } = useRecorderStore();
 
   const isPaused = status === "paused";
+  // Cancel throws the take away, so it asks first (inline, recording carries on).
+  const [confirmingCancel, setConfirmingCancel] = useState(false);
+
+  // During the 3-2-1 nothing is recorded yet, so cancel needs no confirmation.
+  if (status === "countdown") {
+    return (
+      <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[2147483000]">
+        <div className="flex items-center gap-4 px-5 py-3 bg-background-secondary/95 backdrop-blur-xl border border-border rounded-2xl shadow-2xl">
+          <span className="text-sm font-medium text-text-primary">Starting…</span>
+          <button
+            onClick={onCancel}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-background-tertiary hover:bg-background-elevated rounded-lg text-sm text-text-secondary transition-colors"
+            title="Cancel"
+          >
+            <X size={16} />
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (isControlsMinimized) {
     return (
@@ -87,13 +108,34 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
             <Square size={20} className="text-white fill-white" />
           </button>
 
-          <button
-            onClick={onCancel}
-            className="p-3 bg-background-tertiary hover:bg-background-elevated rounded-xl transition-colors"
-            title="Cancel recording"
-          >
-            <X size={20} className="text-text-muted" />
-          </button>
+          {confirmingCancel ? (
+            <div className="flex items-center gap-2 pl-1">
+              <span className="text-sm text-text-primary whitespace-nowrap">Delete this take?</span>
+              <button
+                onClick={() => {
+                  setConfirmingCancel(false);
+                  onCancel();
+                }}
+                className="px-3 py-2 bg-red-600 hover:bg-red-700 rounded-lg text-sm font-medium text-white transition-colors"
+              >
+                Delete
+              </button>
+              <button
+                onClick={() => setConfirmingCancel(false)}
+                className="px-3 py-2 bg-background-tertiary hover:bg-background-elevated rounded-lg text-sm text-text-secondary transition-colors"
+              >
+                Keep it
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setConfirmingCancel(true)}
+              className="p-3 bg-background-tertiary hover:bg-background-elevated rounded-xl transition-colors"
+              title="Cancel recording"
+            >
+              <X size={20} className="text-text-muted" />
+            </button>
+          )}
         </div>
 
         <div className="w-px h-8 bg-border" />

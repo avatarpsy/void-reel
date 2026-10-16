@@ -1304,7 +1304,7 @@ export const Toolbar: React.FC = () => {
             </button>
           </TooltipTrigger>
           <TooltipContent>
-            <p>Screen Recording</p>
+            <p>Record</p>
           </TooltipContent>
         </Tooltip>
 

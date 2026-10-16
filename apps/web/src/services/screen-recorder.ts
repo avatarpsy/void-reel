@@ -422,6 +422,8 @@ export class ScreenRecorderService {
   private screenStream: MediaStream | null = null;
   private webcamStream: MediaStream | null = null;
   private micStream: MediaStream | null = null;
+  /** Mixes mic + system audio into ONE track (MediaRecorder keeps only one). */
+  private audioMixContext: AudioContext | null = null;
   private startTime: number = 0;
   private pausedDuration: number = 0;
   private pauseStartTime: number = 0;
@@ -458,8 +460,10 @@ export class ScreenRecorderService {
 
     const wantsScreen = mode === "screen" || mode === "both";
     const wantsWebcam = mode === "camera" || mode === "both";
-    // In camera/audio modes the mic IS the audio source; in screen/both it's optional.
-    const wantsMic = options.audio.microphone || mode === "camera" || mode === "audio";
+    // Every mode except screen-only always records the mic (in camera/audio it
+    // IS the audio source; in both it's the voice over the screen). Screen-only
+    // records it when the user turns it on.
+    const wantsMic = options.audio.microphone || mode !== "screen";
 
     const resolution = RESOLUTION_MAP[options.video.resolution];
 
@@ -579,16 +583,23 @@ export class ScreenRecorderService {
       .getVideoTracks()
       .forEach((track) => combinedStream.addTrack(track));
 
-    if (this.screenStream.getAudioTracks().length > 0) {
-      this.screenStream
-        .getAudioTracks()
-        .forEach((track) => combinedStream.addTrack(track));
-    }
-
-    if (this.micStream) {
-      this.micStream
-        .getAudioTracks()
-        .forEach((track) => combinedStream.addTrack(track));
+    // MediaRecorder records only ONE audio track: given system audio and the
+    // mic as two tracks, Chrome keeps the first and the voice is lost. So when
+    // both are present, mix them into a single track first.
+    const systemTracks = this.screenStream.getAudioTracks();
+    const micTracks = this.micStream?.getAudioTracks() ?? [];
+    if (systemTracks.length > 0 && micTracks.length > 0) {
+      const mixed = this.mixAudio([this.screenStream, this.micStream!]);
+      if (mixed) {
+        combinedStream.addTrack(mixed);
+      } else {
+        // No AudioContext: keep the voice rather than the system sound.
+        console.warn("[recorder] could not mix audio; recording the microphone only");
+        combinedStream.addTrack(micTracks[0]);
+      }
+    } else {
+      systemTracks.forEach((track) => combinedStream.addTrack(track));
+      micTracks.forEach((track) => combinedStream.addTrack(track));
     }
 
     const isAudio = this.mode === "audio";
@@ -661,6 +672,27 @@ export class ScreenRecorderService {
     this.emit("start");
   }
 
+  /** Mix the audio of several streams into one track. Null when unavailable. */
+  private mixAudio(streams: MediaStream[]): MediaStreamTrack | null {
+    const Ctx = (window as any).AudioContext || (window as any).webkitAudioContext;
+    if (!Ctx) return null;
+    try {
+      const ctx: AudioContext = new Ctx();
+      const dest = ctx.createMediaStreamDestination();
+      for (const stream of streams) {
+        if (stream.getAudioTracks().length === 0) continue;
+        // Audio-only copy, so the source never holds the screen's video track.
+        ctx.createMediaStreamSource(new MediaStream(stream.getAudioTracks())).connect(dest);
+      }
+      void ctx.resume().catch(() => {/* resumes on its own after a user gesture */});
+      this.audioMixContext = ctx;
+      return dest.stream.getAudioTracks()[0] ?? null;
+    } catch (e) {
+      console.warn("[recorder] audio mix failed:", e);
+      return null;
+    }
+  }
+
   pauseRecording(): void {
     if (this.screenRecorder?.state === "recording") {
       this.screenRecorder.pause();
@@ -705,6 +737,12 @@ export class ScreenRecorderService {
     }
 
     this.isStopping = true;
+    // Measure the take NOW, before the recorders stop: stopping while paused
+    // must not count the current pause as recorded time.
+    const stoppedAt = Date.now();
+    const pausedMs =
+      this.pausedDuration +
+      (this.screenRecorder?.state === "paused" ? stoppedAt - this.pauseStartTime : 0);
 
     if (this.durationInterval) {
       clearInterval(this.durationInterval);
@@ -745,12 +783,14 @@ export class ScreenRecorderService {
     }
 
     await Promise.all(stopPromises);
-    // Snapshot capture health BEFORE cleanup() drops the tracks.
-    if (this.mode !== "audio") {
-      const h = this.getCaptureHealth();
+    // Snapshot capture health BEFORE cleanup() drops the tracks. Only camera
+    // takes are checked: screen capture sends frames only when the screen
+    // changes, so a low frame count there is normal, not a broken take.
+    const h = this.getCaptureHealth();
+    if (h) {
       results.capture = {
         ...h,
-        durationSec: Math.max(0, (Date.now() - this.startTime - this.pausedDuration) / 1000),
+        durationSec: Math.max(0, (stoppedAt - this.startTime - pausedMs) / 1000),
         matchedAspect: this.webcamMatchedAspect,
       };
     }
@@ -787,8 +827,12 @@ export class ScreenRecorderService {
    * do they find a static image. Callers use this to refuse to import a take
    * that never really recorded.
    */
-  getCaptureHealth(): { frames: number | null; width: number; height: number; fps: number | null } {
-    const track = this.screenStream?.getVideoTracks?.()[0];
+  getCaptureHealth(): { frames: number | null; width: number; height: number; fps: number | null } | null {
+    // The CAMERA track: the primary in camera mode, the second file in both.
+    const cameraStream =
+      this.mode === "camera" ? this.screenStream : this.mode === "both" ? this.webcamStream : null;
+    const track = cameraStream?.getVideoTracks?.()[0];
+    if (!track) return null;
     const s = track?.getSettings?.() ?? this.webcamSettings ?? {};
     // `frames` is a non-standard but widely available stat on Chromium.
     const frames = (track as any)?.stats?.totalFrames ?? null;
@@ -820,12 +864,14 @@ export class ScreenRecorderService {
    * screen / camera / both, and IS the primary stream for audio-only mode. A
    * second AudioContext consumer can safely tap the same track while the recorder
    * records it. Returns null when no mic was captured (e.g. screen-only, mic off).
+   * NEVER returns system audio: the prompter must follow the speaker, not
+   * whatever the computer is playing.
    */
   getMicStream(): MediaStream | null {
     if (this.micStream && this.micStream.getAudioTracks().length > 0) {
       return this.micStream;
     }
-    if (this.screenStream && this.screenStream.getAudioTracks().length > 0) {
+    if (this.mode === "audio" && this.screenStream && this.screenStream.getAudioTracks().length > 0) {
       return this.screenStream;
     }
     return null;
@@ -871,6 +917,8 @@ export class ScreenRecorderService {
     this.screenStream?.getTracks().forEach((track) => track.stop());
     this.webcamStream?.getTracks().forEach((track) => track.stop());
     this.micStream?.getTracks().forEach((track) => track.stop());
+    void this.audioMixContext?.close().catch(() => {/* already closed */});
+    this.audioMixContext = null;
 
     this.screenStream = null;
     this.webcamStream = null;
@@ -909,13 +957,33 @@ export class ScreenRecorderService {
     }
   }
 
-  static isSupported(): boolean {
-    const hasDisplayMedia =
-      typeof navigator.mediaDevices?.getDisplayMedia === "function";
-    const hasMediaRecorder = typeof MediaRecorder !== "undefined";
-    const supportsWebm =
-      hasMediaRecorder && MediaRecorder.isTypeSupported("video/webm");
-    return hasDisplayMedia && supportsWebm;
+  /**
+   * Can this browser record in `mode`? Checked per mode: phones have a camera
+   * and a mic but no screen sharing, and that must not block webcam or audio
+   * takes. With no mode, true when ANY mode works.
+   */
+  static isSupported(mode?: RecordingMode): boolean {
+    if (!mode) {
+      return (["screen", "camera", "both", "audio"] as RecordingMode[]).some((m) =>
+        ScreenRecorderService.isSupported(m),
+      );
+    }
+    if (typeof MediaRecorder === "undefined") return false;
+    const canRecord = (types: string[]) => types.some((t) => MediaRecorder.isTypeSupported(t));
+    const videoOk = canRecord(["video/webm", "video/mp4"]);
+    const hasUserMedia = typeof navigator.mediaDevices?.getUserMedia === "function";
+    const hasDisplayMedia = typeof navigator.mediaDevices?.getDisplayMedia === "function";
+    switch (mode) {
+      case "screen":
+        return hasDisplayMedia && videoOk;
+      case "both":
+        return hasDisplayMedia && hasUserMedia && videoOk;
+      case "camera":
+        return hasUserMedia && videoOk;
+      case "audio":
+        return hasUserMedia && canRecord(["audio/webm", "audio/mp4"]);
+    }
+    return false;
   }
 
   static getSupportedFeatures(): {

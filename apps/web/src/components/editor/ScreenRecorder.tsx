@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   Monitor,
   Mic,
@@ -22,6 +22,7 @@ import {
   type WebcamResolution,
   type RecordingMode,
   type WebcamAspect,
+  type RecordingResult,
   WEBCAM_ASPECTS,
 } from "../../services/screen-recorder";
 import { RecordingControls } from "./RecordingControls";
@@ -109,7 +110,12 @@ export const ScreenRecorder: React.FC<ScreenRecorderProps> = ({
   } = useRecorderStore();
 
   const webcamVideoRef = useRef<HTMLVideoElement>(null);
-  const isSupported = ScreenRecorderService.isSupported();
+  // Support is per mode: a phone browser can record webcam and audio but has
+  // no screen sharing, so only the modes this browser can do are offered.
+  const modeOptions = MODE_OPTIONS.filter((m) => ScreenRecorderService.isSupported(m.value));
+  const isSupported = ScreenRecorderService.isSupported(options.mode ?? "screen");
+  /** A camera take that came out as a near-still: the user decides, we never drop it. */
+  const [badTake, setBadTake] = useState<{ result: RecordingResult; message: string } | null>(null);
   const features = ScreenRecorderService.getSupportedFeatures();
 
   // The project's aspect ratio drives webcam capture so the recorded clip
@@ -166,8 +172,8 @@ export const ScreenRecorder: React.FC<ScreenRecorderProps> = ({
   const showScreenSettings = mode === "screen" || mode === "both";
   const showWebcam = mode === "camera" || mode === "both";
   const showAudioOnly = mode === "audio";
-  const micUsed =
-    options.audio.microphone || mode === "camera" || mode === "both" || mode === "audio";
+  // Every mode but screen-only always records the mic; screen-only has a toggle.
+  const micUsed = options.audio.microphone || mode !== "screen";
 
   // Picking a mode keeps the legacy webcam.enabled / microphone flags in sync so
   // the rest of the recorder + previews behave consistently.
@@ -177,7 +183,7 @@ export const ScreenRecorder: React.FC<ScreenRecorderProps> = ({
       webcam: { ...options.webcam, enabled: next === "camera" || next === "both" },
       audio: {
         ...options.audio,
-        microphone: next === "camera" || next === "audio" ? true : options.audio.microphone,
+        microphone: next !== "screen" ? true : options.audio.microphone,
       },
     });
     // Show a live preview (and reveal device names) the moment a media mode is
@@ -207,6 +213,15 @@ export const ScreenRecorder: React.FC<ScreenRecorderProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
 
+  // The saved mode may not work in this browser (screen on a phone): switch to
+  // the first one that does. Runs after the effect above, so its preview wins.
+  useEffect(() => {
+    if (isOpen && !ScreenRecorderService.isSupported(mode) && modeOptions.length > 0) {
+      setMode(modeOptions[0].value);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
+
   useEffect(() => {
     if (!isOpen) {
       if (status === "idle" || status === "error") {
@@ -225,28 +240,10 @@ export const ScreenRecorder: React.FC<ScreenRecorderProps> = ({
     }
   };
 
-  const handleStopRecording = async () => {
-    const result = await stopRecording();
-    if (result) {
-      // A camera can report a healthy track while delivering almost no frames
-      // (a bad capture geometry does exactly this). The file then looks fine —
-      // right size, audio intact — and only reveals itself as a static image
-      // when the user plays it back, by which point the take is gone. Catch it
-      // here, while they can still just record again.
-      const cap = result.capture;
-      if (cap && cap.frames !== null && cap.durationSec > 2) {
-        const fps = cap.frames / cap.durationSec;
-        if (fps < 5) {
-          toast.error(
-            "That take didn't record properly",
-            `Your camera only delivered ${fps.toFixed(1)} frames per second at ${cap.width}×${cap.height}, ` +
-              "so the video would play back as a still image. Try a different camera resolution in the record settings.",
-          );
-          onClose();
-          return;
-        }
-      }
-      // We record at the PROJECT's aspect by default. If the camera had no mode
+  /** Hand a finished take to the editor and close. */
+  const finishTake = (result: RecordingResult) => {
+    const cap = result.capture;
+    // We record at the PROJECT's aspect by default. If the camera had no mode
       // at that aspect it could sustain, say so plainly — the user should know
       // the clip will be framed by the compositor rather than shot that way.
       if (cap && cap.matchedAspect === false && cap.width && cap.height) {
@@ -256,8 +253,33 @@ export const ScreenRecorder: React.FC<ScreenRecorderProps> = ({
             "It'll be fitted to the project frame on the timeline.",
         );
       }
-      onRecordingComplete(result.screenBlob, result.webcamBlob, result.mode);
-      onClose();
+    onRecordingComplete(result.screenBlob, result.webcamBlob, result.mode);
+    onClose();
+  };
+
+  const handleStopRecording = async () => {
+    const result = await stopRecording();
+    if (result) {
+      // A camera can report a healthy track while delivering almost no frames
+      // (a bad capture geometry does exactly this). The file then looks fine —
+      // right size, audio intact — and only reveals itself as a static image
+      // when the user plays it back. Catch it here, while they can still just
+      // record again, but let them keep it: it's their take. `capture` is only
+      // set for camera streams (screen capture sends frames only on change).
+      const cap = result.capture;
+      if (cap && cap.frames !== null && cap.durationSec > 2) {
+        const fps = cap.frames / cap.durationSec;
+        if (fps < 5) {
+          setBadTake({
+            result,
+            message:
+              `Your camera only sent ${fps.toFixed(1)} frames per second at ${cap.width}×${cap.height}, ` +
+              "so the video may play back like a still image. You can keep it, or delete it and try a different camera resolution.",
+          });
+          return;
+        }
+      }
+      finishTake(result);
     }
   };
 
@@ -268,24 +290,58 @@ export const ScreenRecorder: React.FC<ScreenRecorderProps> = ({
 
   if (!isOpen) return null;
 
-  // During countdown the player shows the contained 3-2-1 (InlineRecordingPreview
-  // in Preview.tsx). No fullscreen overlay — keep the editor visible behind it.
-  if (status === "countdown") {
-    return null;
+  if (badTake) {
+    return (
+      <Dialog open onOpenChange={() => {/* a choice is required */}}>
+        <DialogContent className="max-w-md p-6 gap-4 bg-background-secondary border-border">
+          <DialogHeader className="space-y-0">
+            <DialogTitle className="text-base font-bold text-text-primary">
+              This take may not have recorded properly
+            </DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-text-muted">{badTake.message}</p>
+          <div className="flex justify-end gap-3">
+            <button
+              onClick={() => {
+                setBadTake(null);
+                onClose();
+              }}
+              className="px-4 py-2 text-sm text-text-secondary hover:text-text-primary transition-colors"
+            >
+              Delete take
+            </button>
+            <button
+              onClick={() => {
+                const { result } = badTake;
+                setBadTake(null);
+                finishTake(result);
+              }}
+              className="px-4 py-2 bg-primary hover:bg-primary-hover text-white text-sm font-medium rounded-lg transition-colors"
+            >
+              Keep anyway
+            </button>
+          </div>
+        </DialogContent>
+      </Dialog>
+    );
   }
 
-  if (status === "recording" || status === "paused") {
+  if (status === "countdown" || status === "recording" || status === "paused") {
     // The live webcam preview + countdown are rendered INSIDE the editor's
     // player window (InlineRecordingPreview in Preview.tsx) — framed to the
     // project aspect so the user sees exactly what the take will look like on
     // the timeline. No fullscreen overlay. Here we only float the teleprompter
-    // (draggable, speech-tracked) + the top-center controls.
+    // (draggable, speech-tracked) + the top-center controls. Countdown uses the
+    // same tree, so the prompter shows at its start position during the 3-2-1
+    // and stays mounted (and listening) into the take.
     return (
       <>
         {teleprompterEnabled && teleprompterScript.trim() && (
           <Teleprompter
             script={teleprompterScript}
             active={status === "recording"}
+            live
+            holdLabel={status === "countdown" ? "Starting…" : "Paused"}
             onClose={() => setTeleprompter({ enabled: false })}
           />
         )}
@@ -324,11 +380,11 @@ export const ScreenRecorder: React.FC<ScreenRecorderProps> = ({
               />
               <div>
                 <p className="text-sm font-medium text-error">
-                  Screen recording not supported
+                  Recording not supported
                 </p>
                 <p className="text-xs text-text-muted mt-1">
-                  Your browser doesn't support screen recording. Please use
-                  Chrome, Edge, or Firefox.
+                  This browser can't record this way. Please use Chrome, Edge,
+                  or Firefox.
                 </p>
               </div>
             </div>
@@ -355,8 +411,11 @@ export const ScreenRecorder: React.FC<ScreenRecorderProps> = ({
               <Circle size={14} className="text-error fill-error" />
               <span>What to record</span>
             </div>
-            <div className="grid grid-cols-4 gap-2">
-              {MODE_OPTIONS.map(({ value, label, Icon }) => (
+            <div
+              className="grid gap-2"
+              style={{ gridTemplateColumns: `repeat(${Math.max(1, modeOptions.length)}, minmax(0, 1fr))` }}
+            >
+              {modeOptions.map(({ value, label, Icon }) => (
                 <button
                   key={value}
                   onClick={() => setMode(value)}
@@ -468,6 +527,7 @@ export const ScreenRecorder: React.FC<ScreenRecorderProps> = ({
               </button>
               )}
 
+              {mode === "screen" && (
               <button
                 onClick={() =>
                   setAudioOption("microphone", !options.audio.microphone)
@@ -486,6 +546,7 @@ export const ScreenRecorder: React.FC<ScreenRecorderProps> = ({
                 )}
                 <span className="text-sm">Microphone</span>
               </button>
+              )}
             </div>
 
             {micUsed && audioDevices.length > 0 && (
@@ -659,8 +720,9 @@ export const ScreenRecorder: React.FC<ScreenRecorderProps> = ({
                 />
               )}
               <p className="text-[10px] text-text-muted">
-                Overlays the player while you record and auto-scrolls as you
-                speak — adjust the speed and text size live, or pause it.
+                Shows your script over the player while you record and scrolls
+                as you speak. The speed setting is only used when voice follow
+                is off.
               </p>
             </div>
           )}

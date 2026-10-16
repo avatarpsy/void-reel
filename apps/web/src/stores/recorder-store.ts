@@ -63,6 +63,12 @@ interface RecorderState {
   expandControls: () => void;
 }
 
+/**
+ * Bumped by cancel/reset. A countdown that wakes up to a different value was
+ * cancelled while it ran, so it must not start recording.
+ */
+let countdownToken = 0;
+
 export const useRecorderStore = create<RecorderState>((set, get) => {
   screenRecorderService.on("duration", (duration) => {
     set({ duration: duration as number });
@@ -227,9 +233,12 @@ export const useRecorderStore = create<RecorderState>((set, get) => {
         return;
       }
 
+      const token = ++countdownToken;
       set({ status: "countdown" });
 
       await new Promise((resolve) => setTimeout(resolve, 3000));
+      // Cancelled during the countdown: the streams are already released.
+      if (token !== countdownToken || get().status !== "countdown") return;
 
       try {
         await screenRecorderService.startRecording(options);
@@ -267,6 +276,7 @@ export const useRecorderStore = create<RecorderState>((set, get) => {
     },
 
     cancelRecording: () => {
+      countdownToken++;
       screenRecorderService.cancelRecording();
       get().stopPreview();
       set({
@@ -279,6 +289,7 @@ export const useRecorderStore = create<RecorderState>((set, get) => {
     },
 
     reset: () => {
+      countdownToken++;
       screenRecorderService.cancelRecording();
       get().stopPreview();
       set({
