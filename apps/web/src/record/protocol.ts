@@ -10,6 +10,13 @@
  *   recorder → board  { type: 'voidspace:recorder-take',   shotId, url, durationSec, label, keepOpen: true }
  *   board → recorder  { type: 'voidspace:recorder-take-result', shotId, ok, message? }
  *   recorder → board  { type: 'voidspace:recorder-close' }
+ *   recorder → board  { type: 'voidspace:recorder-phone', shotId }             ("Record on your phone")
+ *   board → recorder  { type: 'voidspace:recorder-phone-result', shotId, ok, message? }
+ *
+ * "Record on your phone" asks the board to send this shot (title, lines,
+ * aspect) to the person's phone as a notification. Takes recorded there are
+ * saved by the app and land on the shot by themselves; the recorder only says
+ * whether the request went out.
  *
  * Only messages from our own origin AND from the parent window are read. A take
  * is "on the shot" only once the board answers ok; the board keeps at most
@@ -46,7 +53,8 @@ export type RecorderOutMessage =
       label: string;
       keepOpen: true;
     }
-  | { type: "voidspace:recorder-close" };
+  | { type: "voidspace:recorder-close" }
+  | { type: "voidspace:recorder-phone"; shotId: string };
 
 export function readParams(search: string): RecordParams {
   const q = new URLSearchParams(search);
@@ -94,6 +102,22 @@ export function readTakeResult(data: unknown, shotId: string): TakeResult | null
   if (!data || typeof data !== "object") return null;
   const d = data as Record<string, unknown>;
   if (d.type !== "voidspace:recorder-take-result") return null;
+  if (shotId && d.shotId !== shotId) return null;
+  return {
+    ok: d.ok === true,
+    ...(typeof d.message === "string" && d.message.trim() ? { message: d.message.slice(0, 300) } : {}),
+  };
+}
+
+/** What the recorder says once the shot is on its way to the phone. */
+export const PHONE_SENT_MESSAGE =
+  "Sent to your phone. Open the notification to record — takes you send land on this shot.";
+
+/** The board's answer to "Record on your phone", or null when it is anything else. */
+export function readPhoneResult(data: unknown, shotId: string): TakeResult | null {
+  if (!data || typeof data !== "object") return null;
+  const d = data as Record<string, unknown>;
+  if (d.type !== "voidspace:recorder-phone-result") return null;
   if (shotId && d.shotId !== shotId) return null;
   return {
     ok: d.ok === true,

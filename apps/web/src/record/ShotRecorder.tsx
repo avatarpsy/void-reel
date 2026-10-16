@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Check, Circle, Pause, Play, RotateCcw, Settings, Square, Trash2, X } from "lucide-react";
+import { Check, Circle, Pause, Play, RotateCcw, Settings, Smartphone, Square, Trash2, X } from "lucide-react";
 import { useRecorderStore } from "../stores/recorder-store";
 import {
   ScreenRecorderService,
@@ -16,9 +16,11 @@ import {
   aspectToRecorder,
   isFromParent,
   MAX_SCRIPT,
+  PHONE_SENT_MESSAGE,
   postToParent,
   readInit,
   readParams,
+  readPhoneResult,
   readTakeResult,
   type TakeResult,
 } from "./protocol";
@@ -67,6 +69,8 @@ interface Problem {
 const SCRIPT_DEBOUNCE_MS = 800;
 /** How long to wait for the board to confirm a take before calling it failed. */
 const TAKE_RESULT_TIMEOUT_MS = 20000;
+/** How long "Record on your phone" waits for the board to say it went out. */
+const PHONE_RESULT_TIMEOUT_MS = 15000;
 
 const MODES: { value: RecordingMode; label: string }[] = [
   { value: "camera", label: "Camera" },
@@ -153,6 +157,10 @@ export const ShotRecorder: React.FC = () => {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [problem, setProblem] = useState<Problem | null>(null);
+  /** "Record on your phone": nothing yet, on its way, or the board's answer. */
+  const [phone, setPhone] = useState<{ state: "idle" | "sending" | "done"; ok?: boolean; message?: string }>({
+    state: "idle",
+  });
 
   const takeCounter = useRef(0);
   /** What the last camera request was for, so a failure is explained right. */
@@ -236,9 +244,17 @@ export const ShotRecorder: React.FC = () => {
   const userEditedScript = useRef(false);
   /** Waiting for the board to confirm the take we just sent (one at a time). */
   const takeResultWaiter = useRef<((r: TakeResult) => void) | null>(null);
+  const phoneResultWaiter = useRef<((r: TakeResult) => void) | null>(null);
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
       if (!isFromParent(event)) return;
+      const phoneResult = readPhoneResult(event.data, params.shotId);
+      if (phoneResult) {
+        const resolve = phoneResultWaiter.current;
+        phoneResultWaiter.current = null;
+        resolve?.(phoneResult);
+        return;
+      }
       const result = readTakeResult(event.data, params.shotId);
       if (result) {
         const resolve = takeResultWaiter.current;
@@ -520,6 +536,36 @@ export const ShotRecorder: React.FC = () => {
     return () => window.removeEventListener("keydown", onKey);
   });
 
+  /**
+   * Send this shot to the person's phone. The board does the sending (it has
+   * the shot and the session); the app records there, and its takes land on
+   * this shot by themselves. Lines being typed go first, so the phone gets them.
+   */
+  const sendToPhone = () => {
+    if (phone.state === "sending") return;
+    flushScript();
+    setPhone({ state: "sending" });
+    new Promise<TakeResult>((resolve) => {
+      phoneResultWaiter.current?.({ ok: false });
+      const timer = window.setTimeout(() => {
+        if (phoneResultWaiter.current === done) phoneResultWaiter.current = null;
+        resolve({ ok: false, message: "The board didn't answer. Try again." });
+      }, PHONE_RESULT_TIMEOUT_MS);
+      const done = (r: TakeResult) => {
+        window.clearTimeout(timer);
+        resolve(r);
+      };
+      phoneResultWaiter.current = done;
+      postToParent({ type: "voidspace:recorder-phone", shotId: params.shotId });
+    }).then((r) =>
+      setPhone({
+        state: "done",
+        ok: r.ok,
+        message: r.ok ? PHONE_SENT_MESSAGE : r.message || "Couldn't reach your phone. Try again.",
+      }),
+    );
+  };
+
   const changeMode = (next: RecordingMode) => {
     applyRecorderOptions(next, aspect);
     setView("camera");
@@ -544,6 +590,26 @@ export const ShotRecorder: React.FC = () => {
           <p className="text-[11px] uppercase tracking-wide text-white/45">Record</p>
           <p className="text-sm font-medium truncate text-white/90">{title || "This shot"}</p>
         </div>
+        {embedded && params.boardId && (
+          <button
+            type="button"
+            onClick={sendToPhone}
+            disabled={busy || phone.state === "sending"}
+            className="h-10 px-3 rounded-full flex items-center gap-1.5 bg-white/5 hover:bg-white/10 text-sm disabled:opacity-40"
+            aria-label="Record on your phone"
+            title="Record on your phone"
+          >
+            <Smartphone size={17} />
+            {phone.state === "sending" ? (
+              <span>Sending…</span>
+            ) : (
+              <>
+                <span className="sm:hidden">Phone</span>
+                <span className="hidden sm:inline">Record on phone</span>
+              </>
+            )}
+          </button>
+        )}
         <div className="relative">
           <button
             type="button"
@@ -587,6 +653,25 @@ export const ShotRecorder: React.FC = () => {
           <X size={20} />
         </button>
       </div>
+
+      {phone.state === "done" && phone.message && (
+        <div
+          role="status"
+          className={`mx-4 mb-2 flex items-start gap-2 px-3 py-2 rounded-lg text-xs flex-shrink-0 ${
+            phone.ok ? "bg-emerald-500/15 text-emerald-200" : "bg-amber-500/90 text-black"
+          }`}
+        >
+          <span className="flex-1">{phone.message}</span>
+          <button
+            type="button"
+            onClick={() => setPhone({ state: "idle" })}
+            className="opacity-70 hover:opacity-100"
+            aria-label="Dismiss"
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
 
       {/* Stage */}
       <div ref={areaRef} className="flex-1 min-h-0 flex items-center justify-center px-4">

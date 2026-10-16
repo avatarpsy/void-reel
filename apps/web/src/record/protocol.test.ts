@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { aspectToRecorder, isFromParent, readInit, readParams, readTakeResult } from "./protocol";
+import { aspectToRecorder, isFromParent, readInit, readParams, readPhoneResult, readTakeResult } from "./protocol";
 
 describe("shot recorder protocol", () => {
   it("reads the shot from the url", () => {
@@ -39,6 +39,17 @@ describe("shot recorder protocol", () => {
       .toEqual({ ok: false, message: "Shot was deleted" });
     expect(readTakeResult({ type: "voidspace:recorder-take-result", shotId: "s2", ok: true }, "s1")).toBeNull();
     expect(readTakeResult({ type: "voidspace:recorder-take-result", shotId: "s1", ok: "yes" }, "s1")).toEqual({ ok: false });
+  });
+
+  it("reads the board's answer to record on your phone", () => {
+    expect(readPhoneResult({ type: "voidspace:recorder-phone-result", shotId: "s1", ok: true }, "s1")).toEqual({ ok: true });
+    expect(readPhoneResult({ type: "voidspace:recorder-phone-result", shotId: "s1", ok: false, message: "Your phone is not signed in." }, "s1"))
+      .toEqual({ ok: false, message: "Your phone is not signed in." });
+    expect(readPhoneResult({ type: "voidspace:recorder-phone-result", shotId: "s2", ok: true }, "s1")).toBeNull();
+    expect(readPhoneResult({ type: "voidspace:recorder-take-result", shotId: "s1", ok: true }, "s1")).toBeNull();
+    expect(readPhoneResult({ type: "voidspace:recorder-phone-result", shotId: "s1", ok: 1, message: "  " }, "s1")).toEqual({ ok: false });
+    // A take result is not a phone result, and the other way round.
+    expect(readTakeResult({ type: "voidspace:recorder-phone-result", shotId: "s1", ok: true }, "s1")).toBeNull();
   });
 
   it("caps the script the way the board does", () => {
