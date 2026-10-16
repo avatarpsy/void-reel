@@ -18,10 +18,19 @@ describe("shot recorder protocol", () => {
 
   it("accepts the init for this shot only", () => {
     const msg = { type: "voidspace:recorder-init", shotId: "s1", title: "Intro", script: "Hi there", aspect: "9:16" };
-    expect(readInit(msg, "s1")).toEqual({ shotId: "s1", title: "Intro", script: "Hi there", aspect: "9:16" });
+    expect(readInit(msg, "s1")).toEqual({ shotId: "s1", title: "Intro", script: "Hi there", aspect: "9:16", takeCount: 0 });
     expect(readInit(msg, "s2")).toBeNull();
     expect(readInit({ type: "other" }, "s1")).toBeNull();
-    expect(readInit({ type: "voidspace:recorder-init", shotId: "s1" }, "s1")).toEqual({ shotId: "s1", title: "", script: "", aspect: "" });
+    expect(readInit({ type: "voidspace:recorder-init", shotId: "s1" }, "s1")).toEqual({ shotId: "s1", title: "", script: "", aspect: "", takeCount: 0 });
+  });
+
+  it("numbers on from the takes the shot already has", () => {
+    const init = (takeCount: unknown) => readInit({ type: "voidspace:recorder-init", shotId: "s1", takeCount }, "s1")!.takeCount;
+    expect(init(2)).toBe(2);
+    expect(init(2.7)).toBe(2);
+    expect(init(-1)).toBe(0);
+    expect(init("3")).toBe(0);
+    expect(init(Number.NaN)).toBe(0);
   });
 
   it("reads the board's answer to a take", () => {

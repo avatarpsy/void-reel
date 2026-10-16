@@ -5,7 +5,7 @@
  * a full-screen iframe. Messages (all same-origin, all through window.parent):
  *
  *   recorder → board  { type: 'voidspace:recorder-ready',  shotId }
- *   board → recorder  { type: 'voidspace:recorder-init',   shotId, title, script, aspect }
+ *   board → recorder  { type: 'voidspace:recorder-init',   shotId, title, script, aspect, takeCount? }
  *   recorder → board  { type: 'voidspace:recorder-script', shotId, script }        (debounced edits)
  *   recorder → board  { type: 'voidspace:recorder-take',   shotId, url, durationSec, label, keepOpen: true }
  *   board → recorder  { type: 'voidspace:recorder-take-result', shotId, ok, message? }
@@ -30,6 +30,9 @@ export interface RecorderInit {
   title: string;
   script: string;
   aspect: string;
+  /** Takes the shot already holds, so this session numbers on from them
+   *  ("Take 3", not a second "Take 1"). 0 when the board does not say. */
+  takeCount: number;
 }
 
 export type RecorderOutMessage =
@@ -74,6 +77,10 @@ export function readInit(data: unknown, shotId: string): RecorderInit | null {
     title: typeof d.title === "string" ? d.title.slice(0, 200) : "",
     script: typeof d.script === "string" ? d.script.slice(0, MAX_SCRIPT) : "",
     aspect: typeof d.aspect === "string" ? d.aspect : typeof d.aspect === "number" ? String(d.aspect) : "",
+    takeCount:
+      typeof d.takeCount === "number" && Number.isFinite(d.takeCount) && d.takeCount > 0
+        ? Math.min(999, Math.floor(d.takeCount))
+        : 0,
   };
 }
 

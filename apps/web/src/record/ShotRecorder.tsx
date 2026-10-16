@@ -230,6 +230,9 @@ export const ShotRecorder: React.FC = () => {
       const init = readInit(event.data, params.shotId);
       if (!init) return;
       setTitle(init.title);
+      // A second session on the same shot goes on from its takes ("Take 3"),
+      // instead of adding another "Take 1" beside the first one.
+      takeCounter.current = Math.max(takeCounter.current, init.takeCount);
       if (!userEditedScript.current) {
         setScript(init.script);
         setEditingLines(!init.script.trim());
