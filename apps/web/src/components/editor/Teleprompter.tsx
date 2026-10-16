@@ -242,8 +242,8 @@ export const Teleprompter: React.FC<TeleprompterProps> = ({
   }, [active, settings.pos]);
 
   // ── Speech → script alignment (phonetic + locality + re-anchor) ──────────
-  // Called every 2.6–5 s (each recognizer result) with the recent spoken words. The SpeechTracker aligns them to
-  // the script near the cursor, advances FORWARD past a confidence gate, and
+  // Called every 2.6–5 s (once per recognizer result) with the recent spoken
+  // words. The SpeechTracker aligns them to the script near the cursor, advances FORWARD past a confidence gate, and
   // after a streak of misses re-anchors globally (skip / re-read — which may
   // legitimately jump the read position, incl. backward).
   const onRecognized = useCallback((words: string[]) => {
