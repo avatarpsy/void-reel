@@ -210,6 +210,18 @@ describe('board_read', () => {
     expect(read.shots[0].chosenTakeUrl).toBe('https://x/a.mp4');
   });
 
+  it('writes the person’s on-camera lines through update-shot and reads them back', async () => {
+    const add = await call('voidspace:board-add-shots', { titles: ['Talk'] });
+    const shotId = add.shots[0].id;
+    expect((await call('voidspace:board-read')).shots[0].lines).toBe('');
+    const res = await call('voidspace:board-update-shot', { shotId, lines: 'Hi, I am Nihar.' });
+    expect(res.ok).toBe(true);
+    const read = await call('voidspace:board-read');
+    expect(read.shots[0].lines).toBe('Hi, I am Nihar.');
+    // Narration is a different field and stays untouched.
+    expect(read.shots[0].voiceover).toBe('');
+  });
+
   it('board_choose_take answers with the url that now plays', async () => {
     const add = await call('voidspace:board-add-shots', { titles: ['A'] });
     const shotId = add.shots[0].id;

@@ -32,7 +32,7 @@ import {
 } from '../ui/field-caret';
 import { blockScrollWheel, claimScrollWheel } from '../ui/wheel';
 import {
-  FIELD_SPECS, REF_KIND_LABEL, roleLabel, SHOT_KIND_HINT, SHOT_KIND_LABEL, SHOT_KINDS,
+  FIELD_SPECS, isFieldShown, REF_KIND_LABEL, roleLabel, SHOT_KIND_HINT, SHOT_KIND_LABEL, SHOT_KINDS,
   checkGraphic, chosenTake, formatTime, isTimed, rolesFor, takeAsMedia, takeThumb, trimWindow,
   type MediaRole, type ShotBlockModel, type ShotGraphic, type ShotKind, type ShotMedia,
   type ShotTake,
@@ -1154,6 +1154,7 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
     .field[data-field='action'] .field__text { min-height: 4.4em; }
     .field[data-field='voiceover'] .field__text { min-height: 2.2em; }
     .field[data-field='camera'] .field__text { min-height: 2.2em; }
+    .field[data-field='lines'] .field__text { min-height: 2.2em; }
     /* The legacy CAMERA box is a leftover to empty out, not a control to fill
        in. Dimmed so it reads that way without hiding what it holds. */
     .field[data-field='camera'] { opacity: 0.72; }
@@ -1431,6 +1432,11 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
       white-space: nowrap;
     }
     .shot__gen:hover { background: var(--vs-accent-a, #4a9bd9); color: #fff; }
+    /* Secondary to Generate: same pill, neutral border. */
+    .shot__rec {
+      border-color: var(--vs-border, rgba(15, 23, 42, 0.18));
+      color: var(--vs-text-mute, rgba(26, 26, 46, 0.6));
+    }
     .shot__gen[disabled] {
       opacity: 0.45;
       cursor: default;
@@ -2372,7 +2378,7 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
    * under the caret. Blur is also when the user has finished a thought, which is
    * the right granularity for an undo step.
    */
-  private commit(key: 'title' | 'action' | 'voiceover' | 'camera', el: HTMLElement): void {
+  private commit(key: 'title' | 'action' | 'voiceover' | 'lines' | 'camera', el: HTMLElement): void {
     const value = (el.textContent ?? '').trim();
     if (value !== this.model.props[key]) {
       this.store.captureSync();
@@ -2395,7 +2401,7 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
    * contenteditable is focusable, so the native order runs off the card and into
    * whatever block Lit rendered next — which on a filmstrip is the shot beside
    * this one, and the user is then typing the wrong scene's voiceover. Title →
-   * action → voiceover → camera → out is the order the card is read in.
+   * action → voiceover → your lines → camera → out is the order the card is read in.
    */
   private readonly stopKeys = (e: KeyboardEvent) => {
     e.stopPropagation();
@@ -2956,11 +2962,13 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
           It is hidden on a GRAPHIC either way: a composition is rendered, not
           filmed, and the field feeds motion_prompt — which a graphic never
           reads.
+
+          YOUR LINES follows the same rule: shown once it holds text or the shot
+          has a recorded take, so a board of AI shots never sees it.
         -->
         <div class="fields">
           ${FIELD_SPECS
-            .filter(spec => spec.key !== 'camera'
-              || (!isGraphic && !!(this.model.props.camera ?? '').trim()))
+            .filter(spec => isFieldShown(spec.key, this.model.props, isGraphic))
             .map(spec => html`<div
               class="field"
               data-field=${spec.key}
@@ -3501,6 +3509,17 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
           : 'Write what happens in this shot first — a model has to be told what to film'}
         @click=${(e: Event) => { e.stopPropagation(); this.requestGenerate(); }}
       >▶ Generate</button>`}
+      <!--
+        RECORD YOURSELF. Beside Generate and quieter than it: the take lands
+        on the same strip, so a shot can mix a recording with generations.
+        Not offered on a graphic, which is rendered, not filmed. The page opens
+        the recorder; nothing is written here.
+      -->
+      ${isGraphic ? nothing : html`<button
+        class="shot__gen shot__rec"
+        title="Record yourself for this shot — the take is added beside the others"
+        @click=${(e: Event) => { e.stopPropagation(); this.requestRecord(); }}
+      >● Record</button>`}
       ${warnings.length
         ? html`<span class="shot__warn" title=${warnings.map(w => w.message).join('\n\n')}>
             ⚠ ${warnings.length}
@@ -3992,6 +4011,18 @@ export class ShotBlockComponent extends GfxBlockComponent<ShotBlockModel> {
   private requestGenerate(): void {
     window.parent?.postMessage(
       { type: 'voidspace:shot-generate', shotId: this.model.id },
+      '*',
+    );
+  }
+
+  /**
+   * Ask the host page to open the recorder for this shot. Same split as
+   * `requestGenerate`: the camera, the upload and the take write all happen on
+   * the page, which adds the recording through `board-add-take`.
+   */
+  private requestRecord(): void {
+    window.parent?.postMessage(
+      { type: 'voidspace:shot-record', shotId: this.model.id },
       '*',
     );
   }

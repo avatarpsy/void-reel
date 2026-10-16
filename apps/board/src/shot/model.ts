@@ -804,6 +804,9 @@ export function isSlotRole(role: MediaRole): role is SlotRole {
 export interface ShotFields {
   action: string;
   voiceover: string;
+  /** What the PERSON says on camera when they record this shot themselves —
+   *  their teleprompter text. See the YOUR LINES spec below. */
+  lines: string;
   camera: string;
 }
 
@@ -859,6 +862,20 @@ export const FIELD_SPECS: ReadonlyArray<{
     label: 'NARRATION',
     placeholder: 'A voice over the top, if you want one — spoken separately, added as a separate track on timeline',
   },
+  /**
+   * THE PERSON'S OWN LINES, for a shot they record themselves.
+   *
+   * Not NARRATION (an AI voice laid over the picture) and not SHOT (a
+   * description a video model films). This is what the person reads off the
+   * prompter when they press Record, and the reference the editor cleans the
+   * recording against. Shown only when it holds text or the shot already has a
+   * recorded take — see `isFieldShown` — so an AI-only board never sees it.
+   */
+  {
+    key: 'lines',
+    label: 'YOUR LINES',
+    placeholder: 'What you say on camera when you record this shot',
+  },
   {
     key: 'camera',
     label: 'CAMERA (older shot)',
@@ -866,10 +883,36 @@ export const FIELD_SPECS: ReadonlyArray<{
   },
 ] as const;
 
+/**
+ * WHICH WRITTEN BOXES THE CARD SHOWS.
+ *
+ * ACTION and NARRATION always. The other two appear only when they have
+ * something to say:
+ *   • CAMERA — legacy, shown when it still holds text, never on a graphic.
+ *   • YOUR LINES — shown when it holds text, or when the shot already has a
+ *     take the person recorded (so they can write lines for a re-take).
+ * A pure rule so the card and the tests agree on it.
+ */
+export function isFieldShown(
+  key: keyof ShotFields,
+  shot: { camera?: string; lines?: string; takes?: ReadonlyArray<{ source?: string }> },
+  isGraphic: boolean,
+): boolean {
+  if (key === 'camera') return !isGraphic && !!(shot.camera ?? '').trim();
+  if (key === 'lines') {
+    return !!(shot.lines ?? '').trim()
+      || (shot.takes ?? []).some(t => t?.source === 'recorded');
+  }
+  return true;
+}
+
 type ShotProps = {
   title: string;
   action: string;
   voiceover: string;
+  /** The person's on-camera lines (teleprompter text). '' = none. Read as
+   *  `props.lines ?? ''` — boards made before this have no such key. */
+  lines: string;
   camera: string;
   media: ShotMedia[];
   /**
@@ -1066,6 +1109,7 @@ export const ShotBlockSchema = defineBlockSchema({
     title: '',
     action: '',
     voiceover: '',
+    lines: '',
     camera: '',
     media: [],
     takes: [],

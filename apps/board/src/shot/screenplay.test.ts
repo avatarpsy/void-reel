@@ -91,6 +91,20 @@ describe('compileBoard', () => {
     expect(out.shots[0].voiceover).toBeUndefined();
   });
 
+  it('carries the person’s on-camera lines, and leaves them out when empty', () => {
+    const board = makeTestBoard();
+    const [a, b] = createShots(board.std, board.surfaceId, ['Talk', 'B-roll']);
+    setShotFields(board.std, a, { action: 'Me at my desk', lines: 'Here is   what I learned.' });
+    setShotFields(board.std, b, { action: 'City at night' });
+
+    const out = compileBoard(board.std, HEADER);
+    expect(out.shots[0].lines).toBe('Here is   what I learned.');
+    expect(out.screenplay).toContain('LINES (recorded by the person): Here is what I learned.');
+    expect(out.shots[1].lines).toBeUndefined();
+    // Never narration.
+    expect(out.shots[0].voiceover).toBeUndefined();
+  });
+
   /**
    * THE INVARIANT THAT MATTERS MOST. Under the old model a reference nudged one
    * pixel outside its frame vanished from the compiled video with no warning.
