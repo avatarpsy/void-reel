@@ -26,6 +26,9 @@ export interface DuplicateLayerResult {
 export interface DeserializeProjectResult {
   success: true;
   data: Project;
+  /** What `repairLayerTree` had to fix for this document to open, if anything.
+   *  Non-empty means the caller holds a CHANGED document and should save it. */
+  repairs?: string[];
 }
 
 export interface DeserializeProjectError {
@@ -392,14 +395,97 @@ export function deserializeProject(raw: string | Record<string, unknown>): Deser
 
   const issues = validateLayerTree(parsed.data);
   if (issues.length > 0) {
-    return {
-      success: false,
-      error: issues.join(' '),
-    };
+    // A damaged page list is repairable without guessing at content; refusing
+    // the whole document is what turned one bad reorder into "No project loaded".
+    const repaired = repairLayerTree(parsed.data);
+    const remaining = validateLayerTree(repaired.project);
+    if (repaired.repairs.length === 0 || remaining.length > 0) {
+      return {
+        success: false,
+        error: (remaining.length ? remaining : issues).join(' '),
+      };
+    }
+    return { success: true, data: repaired.project, repairs: repaired.repairs };
   }
 
   return {
     success: true,
     data: parsed.data,
   };
+}
+
+/**
+ * Put a damaged page list back into a shape `validateLayerTree` accepts.
+ *
+ * ── THE DAMAGE THIS EXISTS FOR ───────────────────────────────────────────────
+ * Layer reorders used to act on the SELECTED page whatever page the layer was
+ * on, so "send to back" on a layer from page 2 while page 6 was open appended
+ * that id to page 6 as well. The document then had layers on two pages, failed
+ * validation on load, and the editor opened it as nothing at all.
+ *
+ * Only membership is repaired, never content: no layer is created, edited or
+ * deleted from `layers`.
+ *   - a page reference to a layer that does not exist is dropped;
+ *   - a layer repeated within one page keeps its first position;
+ *   - a root layer listed on several pages stays on ONE. The page that took in
+ *     the intruders is the one sharing the most layers with other pages (one
+ *     bad "send to back" over five pages' backgrounds puts five on it, and one
+ *     on each real page), so each layer stays on the owner page that shares the
+ *     fewest; ties go to the earlier page.
+ *   - an active page that no longer exists falls back to the first page.
+ */
+export function repairLayerTree(project: Project): { project: Project; repairs: string[] } {
+  const repairs: string[] = [];
+  const artboards = project.artboards.map((a) => ({ ...a, layerIds: [...a.layerIds] }));
+
+  for (const artboard of artboards) {
+    const seen = new Set<string>();
+    const kept: string[] = [];
+    for (const id of artboard.layerIds) {
+      if (!project.layers[id]) {
+        repairs.push(`Dropped a reference to missing layer "${id}" from page "${artboard.name}".`);
+        continue;
+      }
+      if (seen.has(id)) {
+        repairs.push(`Removed a repeated listing of layer "${id}" on page "${artboard.name}".`);
+        continue;
+      }
+      seen.add(id);
+      kept.push(id);
+    }
+    artboard.layerIds = kept;
+  }
+
+  const owners = new Map<string, number[]>();
+  artboards.forEach((artboard, index) => {
+    for (const id of artboard.layerIds) {
+      const list = owners.get(id);
+      if (list) list.push(index);
+      else owners.set(id, [index]);
+    }
+  });
+  const shared = [...owners].filter(([, list]) => list.length > 1);
+  if (shared.length) {
+    const sharedCount = artboards.map(() => 0);
+    for (const [, list] of shared) for (const index of list) sharedCount[index] += 1;
+    for (const [id, list] of shared) {
+      const keep = list.reduce((best, index) => (sharedCount[index] < sharedCount[best] ? index : best), list[0]);
+      for (const index of list) {
+        if (index === keep) continue;
+        artboards[index].layerIds = artboards[index].layerIds.filter((x) => x !== id);
+        repairs.push(
+          `Layer "${id}" was listed on pages "${artboards[keep].name}" and "${artboards[index].name}"; kept it on "${artboards[keep].name}".`,
+        );
+      }
+    }
+  }
+
+  let activeArtboardId = project.activeArtboardId;
+  if (activeArtboardId !== null && !artboards.some((a) => a.id === activeArtboardId)) {
+    activeArtboardId = artboards[0]?.id ?? null;
+    repairs.push('The active page no longer existed; opened the first page instead.');
+  }
+
+  if (!repairs.length) return { project, repairs };
+  return { project: { ...project, artboards, activeArtboardId }, repairs };
 }

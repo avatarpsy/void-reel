@@ -88,7 +88,11 @@ export async function openCloudImageProject(id: string, knownDocument?: Project 
    */
   const doc = knownDocument === undefined ? await loadProjectDocument(id) : knownDocument;
   if (doc) {
-    useProjectStore.getState().loadProject(doc);
+    // A document the store refuses must NOT switch to the editor: that showed
+    // "No project loaded" with nothing to retry, and the agent saw no_project.
+    if (!useProjectStore.getState().loadProject(doc)) {
+      throw new Error('This project\'s saved file could not be read. Nothing was changed; reload to try again.');
+    }
     // NOT flattened — this is the real layer tree. Cleared explicitly so the
     // flag from a previously opened flattened project cannot leak onto this
     // one and make the agent apologise for limits that do not apply.
@@ -165,7 +169,7 @@ export async function openImageProjectWithCache(id: string, local: Project | nul
   try { cloud = await loadProjectDocument(id); }
   catch (error) {
     if (!local) throw error;
-    useProjectStore.getState().loadProject(local);
+    if (!useProjectStore.getState().loadProject(local)) throw error;
     useUIStore.getState().setFlattenedProjectId(null);
     useUIStore.getState().setCurrentView('editor');
     setCloudSaveStatus(id, { state: 'error', updatedAt: local.updatedAt || 0,
@@ -173,5 +177,13 @@ export async function openImageProjectWithCache(id: string, local: Project | nul
     return true;
   }
   const document = local && (!cloud || (local.updatedAt || 0) > (cloud.updatedAt || 0)) ? local : cloud;
-  return openCloudImageProject(id, document);
+  const other = document === local ? cloud : local;
+  try {
+    return await openCloudImageProject(id, document);
+  } catch (error) {
+    // The newer copy would not open — try the other one before giving up, so
+    // one unreadable save never hides a readable one.
+    if (!other) throw error;
+    return openCloudImageProject(id, other);
+  }
 }

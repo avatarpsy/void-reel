@@ -84,7 +84,8 @@ interface ProjectState {
 
 interface ProjectActions {
   createProject: (name: string, size: CanvasSize, background?: CanvasBackground) => void;
-  loadProject: (project: Project) => void;
+  /** False when the document could not be opened; the editor is left as it was. */
+  loadProject: (project: Project) => boolean;
   closeProject: () => void;
   setProjectName: (name: string) => void;
 
@@ -170,6 +171,19 @@ interface ProjectActions {
 }
 
 const generateId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+
+/**
+ * The page whose own layer list holds this layer, or null (unknown id, or a
+ * layer inside a group).
+ *
+ * Layer-level operations resolve their page HERE, never from the selected page.
+ * Reorders used to read `selectedArtboardId`, so "send to back" on a layer from
+ * another page appended it to the open page too: one layer on two pages, a
+ * document that failed validation, and a project that reopened as nothing.
+ */
+function pageOfLayer(project: Project, layerId: string): Artboard | null {
+  return project.artboards.find((a) => a.layerIds.includes(layerId)) ?? null;
+}
 
 /**
  * Monotonic revision counter for optimistic concurrency.
@@ -279,10 +293,16 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
       loadProject: (project) => {
         const parsed = deserializeProject(project as unknown as Record<string, unknown>);
         if (!parsed.success) {
+          // Returned, not swallowed: callers used to switch to the editor anyway
+          // and the user got "No project loaded" with no reason and no retry.
           console.error('[project-store] Invalid project:', parsed.error);
-          return;
+          return false;
         }
-        const validated = parsed.data;
+        const repaired = (parsed.repairs?.length ?? 0) > 0;
+        if (repaired) console.warn('[project-store] Repaired project on open:', parsed.repairs);
+        // A repair is a new revision: newer than the damaged copies in this
+        // browser and in the cloud, so neither wins the next open over it.
+        const validated = repaired ? { ...parsed.data, updatedAt: Date.now() } : parsed.data;
         // Reset history to THIS project — otherwise the previous project's
         // undo/redo stacks survive and the first Ctrl+Z applies an inverse from
         // the old project onto this one (cross-project corruption).
@@ -291,8 +311,11 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
           project: validated,
           selectedLayerIds: [],
           selectedArtboardId: validated.activeArtboardId,
-          isDirty: false,
+          // A repaired document differs from what is stored: dirty, so the
+          // autosave writes the repair back instead of re-reading the damage.
+          isDirty: repaired,
         });
+        return true;
       },
 
       closeProject: () => {
@@ -709,10 +732,12 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
 
       addGroupLayer: (childIds) => {
         const id = generateId();
-        const { project, selectedArtboardId } = get();
-        if (!project || !selectedArtboardId || childIds.length === 0) return id;
-        const artboard = project.artboards.find((a) => a.id === selectedArtboardId);
-        if (!artboard) return id;
+        const { project } = get();
+        if (!project || childIds.length === 0) return id;
+        // The group lives on its children's page, and they must share one.
+        const artboard = pageOfLayer(project, childIds[0]);
+        if (!artboard || childIds.some((cid) => !artboard.layerIds.includes(cid))) return id;
+        const selectedArtboardId = artboard.id;
 
         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
         childIds.forEach((childId) => {
@@ -859,16 +884,19 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
 
       duplicateLayer: (layerId) => {
         const { project, selectedArtboardId } = get();
-        if (!project || !selectedArtboardId) return null;
+        if (!project) return null;
+        // The copy goes on the ORIGINAL's page, not whichever page is open.
+        const pageId = pageOfLayer(project, layerId)?.id ?? selectedArtboardId;
+        if (!pageId) return null;
         const newId = generateId();
         // Duplicate IN PLACE (Photoshop Ctrl+J) — same position, stacked directly
         // on top. A non-zero offset made the copy jump, which the user never wants.
-        const duplicated = duplicateLayerInProject(project, selectedArtboardId, layerId, newId, { x: 0, y: 0 });
+        const duplicated = duplicateLayerInProject(project, pageId, layerId, newId, { x: 0, y: 0 });
         if (!duplicated) return null;
-        const artboard = project.artboards.find((a) => a.id === selectedArtboardId);
+        const artboard = project.artboards.find((a) => a.id === pageId);
         const originalIndex = artboard?.layerIds.indexOf(layerId) ?? 0;
         const cmd = new DuplicateLayerCommand(
-          selectedArtboardId,
+          pageId,
           duplicated.project.layers[newId],
           Math.max(originalIndex, 0),
         );
@@ -914,62 +942,74 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
 
       // ── Layer reorder operations ─────────────────────────────────────────
 
+      // Each resolves the layer's OWN page (`pageOfLayer`) and does nothing for a
+      // layer that is not on a page's top-level list — never the selected page.
+
       moveLayerUp: (layerId) => {
-        const { project, selectedArtboardId } = get();
-        if (!project || !selectedArtboardId) return;
-        const artboard = project.artboards.find((a) => a.id === selectedArtboardId);
+        const { project } = get();
+        if (!project) return;
+        const artboard = pageOfLayer(project, layerId);
         if (!artboard) return;
         const index = artboard.layerIds.indexOf(layerId);
         if (index <= 0) return;
         const newIds = [...artboard.layerIds];
         [newIds[index - 1], newIds[index]] = [newIds[index], newIds[index - 1]];
-        const cmd = new ReorderLayerCommand(selectedArtboardId, newIds, artboard.layerIds, 'Move layer up');
+        const cmd = new ReorderLayerCommand(artboard.id, newIds, artboard.layerIds, 'Move layer up');
         const newProject = execCmd(project, cmd);
         set({ project: newProject, isDirty: true });
       },
 
       moveLayerDown: (layerId) => {
-        const { project, selectedArtboardId } = get();
-        if (!project || !selectedArtboardId) return;
-        const artboard = project.artboards.find((a) => a.id === selectedArtboardId);
+        const { project } = get();
+        if (!project) return;
+        const artboard = pageOfLayer(project, layerId);
         if (!artboard) return;
         const index = artboard.layerIds.indexOf(layerId);
-        if (index >= artboard.layerIds.length - 1) return;
+        if (index < 0 || index >= artboard.layerIds.length - 1) return;
         const newIds = [...artboard.layerIds];
         [newIds[index], newIds[index + 1]] = [newIds[index + 1], newIds[index]];
-        const cmd = new ReorderLayerCommand(selectedArtboardId, newIds, artboard.layerIds, 'Move layer down');
+        const cmd = new ReorderLayerCommand(artboard.id, newIds, artboard.layerIds, 'Move layer down');
         const newProject = execCmd(project, cmd);
         set({ project: newProject, isDirty: true });
       },
 
       moveLayerToTop: (layerId) => {
-        const { project, selectedArtboardId } = get();
-        if (!project || !selectedArtboardId) return;
-        const artboard = project.artboards.find((a) => a.id === selectedArtboardId);
+        const { project } = get();
+        if (!project) return;
+        const artboard = pageOfLayer(project, layerId);
         if (!artboard) return;
         const newIds = [layerId, ...artboard.layerIds.filter((id) => id !== layerId)];
-        const cmd = new ReorderLayerCommand(selectedArtboardId, newIds, artboard.layerIds, 'Move layer to top');
+        const cmd = new ReorderLayerCommand(artboard.id, newIds, artboard.layerIds, 'Move layer to top');
         const newProject = execCmd(project, cmd);
         set({ project: newProject, isDirty: true });
       },
 
       moveLayerToBottom: (layerId) => {
-        const { project, selectedArtboardId } = get();
-        if (!project || !selectedArtboardId) return;
-        const artboard = project.artboards.find((a) => a.id === selectedArtboardId);
+        const { project } = get();
+        if (!project) return;
+        const artboard = pageOfLayer(project, layerId);
         if (!artboard) return;
         const newIds = [...artboard.layerIds.filter((id) => id !== layerId), layerId];
-        const cmd = new ReorderLayerCommand(selectedArtboardId, newIds, artboard.layerIds, 'Move layer to bottom');
+        const cmd = new ReorderLayerCommand(artboard.id, newIds, artboard.layerIds, 'Move layer to bottom');
         const newProject = execCmd(project, cmd);
         set({ project: newProject, isDirty: true });
       },
 
       reorderLayers: (layerIds) => {
         const { project, selectedArtboardId } = get();
-        if (!project || !selectedArtboardId) return;
-        const artboard = project.artboards.find((a) => a.id === selectedArtboardId);
+        if (!project) return;
+        const owned = layerIds.map((id) => pageOfLayer(project, id)).find((a) => a);
+        const artboard = owned ?? project.artboards.find((a) => a.id === selectedArtboardId);
         if (!artboard) return;
-        const cmd = new ReorderLayerCommand(selectedArtboardId, layerIds, artboard.layerIds);
+        // A new list for ONE page. The layer panel may add a layer leaving a
+        // group or drop one entering a group, but no id may repeat or come from
+        // another page's list — that is how a layer ended up on two pages.
+        if (new Set(layerIds).size !== layerIds.length) return;
+        if (layerIds.some((id) => {
+          const page = pageOfLayer(project, id);
+          return page !== null && page.id !== artboard.id;
+        })) return;
+        const cmd = new ReorderLayerCommand(artboard.id, layerIds, artboard.layerIds);
         const newProject = execCmd(project, cmd);
         set({ project: newProject, isDirty: true });
       },
@@ -1069,12 +1109,13 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
       },
 
       ungroupLayers: (groupId) => {
-        const { project, selectedArtboardId } = get();
-        if (!project || !selectedArtboardId) return;
+        const { project } = get();
+        if (!project) return;
         const group = project.layers[groupId] as GroupLayer;
         if (!group || group.type !== 'group') return;
-        const artboard = project.artboards.find((a) => a.id === selectedArtboardId);
+        const artboard = pageOfLayer(project, groupId);
         if (!artboard) return;
+        const selectedArtboardId = artboard.id;
         const prevArtboardLayerIds = [...artboard.layerIds];
         const childLayersBefore: Record<string, Layer> = {};
         group.childIds.forEach((childId) => {

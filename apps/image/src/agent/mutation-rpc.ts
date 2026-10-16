@@ -50,6 +50,22 @@ function fontWeight(value: unknown): number | undefined {
   return parsed.data;
 }
 
+/**
+ * The page a layer is actually on, following group parents up to a page's own
+ * list. Layer-level tools resolve the page from the LAYER, never from the
+ * selected page: an agent works across pages without opening them.
+ */
+function pageOfLayerId(project: Project, layerId: string): Artboard | null {
+  let id: string | null = layerId;
+  for (let guard = 0; id && guard < 100; guard++) {
+    const current: string = id;
+    const page = project.artboards.find((a) => a.layerIds.includes(current));
+    if (page) return page;
+    id = project.layers[current]?.parentId ?? null;
+  }
+  return null;
+}
+
 function resolvePage(project: Project, pageId?: string): Artboard | null {
   if (pageId) return project.artboards.find((a) => a.id === pageId) ?? null;
   return activeArtboard(project);
@@ -980,14 +996,33 @@ registerImageMutation('voidspace:img-arrange', 'Arrange layers', (msg: any) => {
   const project = store.project!;
   const action = String(msg?.action ?? '');
   const ids: string[] = Array.isArray(msg?.layerIds) ? msg.layerIds : (msg?.layerId ? [msg.layerId] : []);
-  const page = activeArtboard(project);
-  if (!page) throw new Error('no active page');
 
   const requireIds = () => {
     if (!ids.length) throw new Error(`${action} needs layerId or layerIds`);
     const missing = ids.filter((id) => !project.layers[id]);
     if (missing.length) throw new Error(`unknown layerIds: ${missing.join(', ')}`);
   };
+
+  /**
+   * Stacking order is per page, and each layer is reordered on ITS OWN page.
+   * This used to act on the open page whatever page the layer was on: sending
+   * five pages' backgrounds to the back from page 6 listed all five on page 6
+   * too, left them on top of the text on their own pages, and the document
+   * then failed to reopen.
+   */
+  const requireTopLevel = () => {
+    requireIds();
+    const nested = ids.filter((id) => !project.artboards.some((a) => a.layerIds.includes(id)));
+    if (nested.length) {
+      throw new Error(
+        `${nested.join(', ')} ${nested.length > 1 ? 'are' : 'is'} inside a group; `
+        + 'arrange the group, or ungroup first.',
+      );
+    }
+  };
+  /** Which pages a reorder touched, so the caller can see it stayed on them. */
+  const pagesOf = (list: string[]) =>
+    [...new Set(list.map((id) => pageOfLayerId(project, id)?.id).filter((x): x is string => !!x))];
 
   switch (action) {
     case 'delete':
@@ -1002,44 +1037,50 @@ registerImageMutation('voidspace:img-arrange', 'Arrange layers', (msg: any) => {
     }
 
     case 'group': {
-      requireIds();
+      requireTopLevel();
       if (ids.length < 2) throw new Error('group needs at least two layers');
+      const pages = new Set(ids.map((id) => pageOfLayerId(project, id)?.id));
+      if (pages.size > 1) throw new Error('group needs layers on the same page');
       const groupId = useProjectStore.getState().groupLayers(ids);
+      if (!groupId || !useProjectStore.getState().project!.layers[groupId]) throw new Error('those layers could not be grouped');
       return { groupId };
     }
 
     case 'ungroup':
-      requireIds();
+      requireTopLevel();
       for (const id of ids) useProjectStore.getState().ungroupLayers(id);
       return { ungrouped: ids };
 
     case 'bring_to_front':
-      requireIds();
+      requireTopLevel();
       for (const id of ids) useProjectStore.getState().moveLayerToTop(id);
-      return { layerIds: ids };
+      return { layerIds: ids, pages: pagesOf(ids) };
 
     case 'send_to_back':
-      requireIds();
+      requireTopLevel();
       for (const id of ids) useProjectStore.getState().moveLayerToBottom(id);
-      return { layerIds: ids };
+      return { layerIds: ids, pages: pagesOf(ids) };
 
     case 'bring_forward':
-      requireIds();
+      requireTopLevel();
       for (const id of ids) useProjectStore.getState().moveLayerUp(id);
-      return { layerIds: ids };
+      return { layerIds: ids, pages: pagesOf(ids) };
 
     case 'send_backward':
-      requireIds();
+      requireTopLevel();
       for (const id of ids) useProjectStore.getState().moveLayerDown(id);
-      return { layerIds: ids };
+      return { layerIds: ids, pages: pagesOf(ids) };
 
     case 'align': {
       requireIds();
-      // Aligned against the PAGE — the common intent ("centre the headline").
+      // Aligned against the layer's OWN page — the common intent ("centre the
+      // headline") — whichever page happens to be open.
       const how = String(msg?.align ?? 'center');
-      const W = page.size.width;
-      const H = page.size.height;
       for (const id of ids) {
+        const page = pageOfLayerId(useProjectStore.getState().project!, id) ?? activeArtboard(project);
+        if (!page) throw new Error('no page for layer ' + id);
+        const W = page.size.width;
+        const H = page.size.height;
         const t = useProjectStore.getState().project!.layers[id].transform;
         const patch: Record<string, number> = {};
         if (how.includes('left')) patch.x = 0;

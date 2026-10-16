@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-const m = vi.hoisted(() => ({ load: vi.fn(), flattened: vi.fn(), view: vi.fn(), status: vi.fn() }));
+const m = vi.hoisted(() => ({ load: vi.fn(() => true), flattened: vi.fn(), view: vi.fn(), status: vi.fn() }));
 vi.mock('./voidspace-storage', () => ({ getVoidspaceIdToken: async () => 'test-token' }));
 vi.mock('../stores/project-store', () => ({ useProjectStore: { getState: () => ({ loadProject: m.load }) } }));
 vi.mock('../stores/ui-store', () => ({ useUIStore: { getState: () => ({ setFlattenedProjectId: m.flattened, setCurrentView: m.view }) } }));

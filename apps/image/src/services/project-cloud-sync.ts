@@ -92,7 +92,7 @@ let lastDocKey = '';
  * and it must not be gated on a thumbnail render succeeding. It is also much
  * cheaper — no canvas export, just a serialise and a PUT.
  */
-export async function saveProjectDocument(project: Project | null): Promise<boolean> {
+export async function saveProjectDocument(project: Project | null, opts: { leaving?: boolean } = {}): Promise<boolean> {
   if (!project?.id) return false;
   const key = `${project.id}:${project.updatedAt ?? ''}`;
   if (key === lastDocKey) return true;
@@ -106,14 +106,20 @@ export async function saveProjectDocument(project: Project | null): Promise<bool
   setCloudSaveStatus(project.id, { state: 'saving', updatedAt, message: 'Backing up the editable project…' });
 
   try {
+    const body = JSON.stringify({
+      projectId: project.id,
+      doc: compactProjectDocument(project),
+      updatedAt: project.updatedAt ?? Date.now(),
+    });
     const res = await fetch('/api/studio/image-doc', {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-      body: JSON.stringify({
-        projectId: project.id,
-        doc: compactProjectDocument(project),
-        updatedAt: project.updatedAt ?? Date.now(),
-      }),
+      body,
+      // When the tab is closing, `keepalive` lets the request outlive the page.
+      // Browsers cap keepalive bodies at 64 KB, so a bigger document goes as a
+      // normal request (best effort) — the IndexedDB flush still holds it, and
+      // the next open uploads the newer local copy.
+      keepalive: !!opts.leaving && body.length < 60_000,
     });
     if (!res.ok) {
       const detail = await res.json().catch(() => ({}));
@@ -145,7 +151,7 @@ export async function saveProjectDocument(project: Project | null): Promise<bool
  * No-op when signed out. Safe to call often — it dedupes on (id, updatedAt) and
  * swallows its own errors (a failed mirror must never disrupt editing).
  */
-export async function syncProjectToCloud(project: Project | null): Promise<void> {
+export async function syncProjectToCloud(project: Project | null, opts: { leaving?: boolean } = {}): Promise<void> {
   if (!project || !project.artboards.length) return;
 
   /**
@@ -156,7 +162,9 @@ export async function syncProjectToCloud(project: Project | null): Promise<void>
    * because its picture would not render is the exact failure this whole change
    * exists to remove.
    */
-  void saveProjectDocument(project);
+  void saveProjectDocument(project, opts);
+  // A closing tab has no time to render thumbnails; the document is what matters.
+  if (opts.leaving) return;
 
   const key = `${project.id}:${project.updatedAt ?? ''}`;
   if (key === lastSyncedKey) return;
@@ -165,13 +173,23 @@ export async function syncProjectToCloud(project: Project | null): Promise<void>
   if (!token) return; // not signed in — listing is a cloud feature
 
   const first = project.artboards[0];
+  /**
+   * THE LISTING GOES UP EVEN WHEN THE PICTURES DO NOT.
+   *
+   * A failed cover render used to skip the whole listing, so a project whose
+   * first page would not export (a cross-origin image, a huge artboard) never
+   * got its name, size or page count on the server: the Images tab and
+   * `read_image_project` saw a stub row titled "Untitled". The server keeps the
+   * previous cover and page thumbnails when these are absent.
+   */
   const cover = await artboardThumb(project, first.id, COVER_MAX);
-  if (!cover) return;
 
   const pages: string[] = [];
-  for (const ab of project.artboards.slice(0, MAX_PAGES)) {
-    const t = await artboardThumb(project, ab.id, PAGE_MAX);
-    if (t) pages.push(t);
+  if (cover) {
+    for (const ab of project.artboards.slice(0, MAX_PAGES)) {
+      const t = await artboardThumb(project, ab.id, PAGE_MAX);
+      if (t) pages.push(t);
+    }
   }
 
   try {
@@ -186,12 +204,14 @@ export async function syncProjectToCloud(project: Project | null): Promise<void>
         name: projectDisplayName(project),
         aspectRatio: aspectRatioString(first.size.width, first.size.height),
         pageCount: project.artboards.length,
-        cover,
-        pages,
+        width: first.size.width,
+        height: first.size.height,
+        ...(cover ? { cover, pages } : {}),
         updatedAt: project.updatedAt ?? Date.now(),
       }),
     });
-    if (res.ok) lastSyncedKey = key;
+    // Without a cover this is only half a listing: try again on the next save.
+    if (res.ok && cover) lastSyncedKey = key;
     else console.warn('[project-cloud-sync] mirror failed:', res.status);
   } catch (e) {
     console.warn('[project-cloud-sync] mirror error:', e);
