@@ -8,7 +8,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { makeTestBoard } from '../blocksuite/test-board';
-import { SHOT_GAP, SHOT_W, trimWindow, type ShotMedia } from './model';
+import { SHOT_GAP, SHOT_W, isFieldShown, trimWindow, type ShotMedia } from './model';
 import {
   addMedia, createShots, deleteShot, moveMedia, readShot, readShots,
   normaliseShotTitles,
@@ -217,6 +217,27 @@ describe('shots', () => {
     expect(shot.action).toBe('She turns to the window');
     expect(shot.voiceover).toBe('It had rained all week.');
     expect(shot.camera).toBe('Slow push in, 4s');
+  });
+
+  it('starts with no lines to say, and keeps the ones written', () => {
+    const board = makeTestBoard();
+    const [id] = createShots(board.std, board.surfaceId, ['A']);
+    expect(readShot(board.std, id)!.script).toBe('');
+
+    setShotFields(board.std, id, { script: 'Three things I wish I knew.' });
+    const shot = readShot(board.std, id)!;
+    expect(shot.script).toBe('Three things I wish I knew.');
+    // YOUR LINES is not narration: the voiceover stays empty.
+    expect(shot.voiceover).toBe('');
+  });
+
+  it('reads a board made before YOUR LINES existed as having none', () => {
+    const board = makeTestBoard();
+    const [id] = createShots(board.std, board.surfaceId, ['A']);
+    // Old Yjs docs have no `script` key at all.
+    const block = board.store.getBlock(id)!;
+    board.store.updateBlock(block.model, { script: undefined } as never);
+    expect(readShot(board.std, id)!.script).toBe('');
   });
 
   it('hit-tests a point against the panel that is actually under it', () => {
@@ -507,5 +528,28 @@ describe('normaliseShotTitles', () => {
     createShots(board.std, board.surfaceId, ['SCENE 1 — untitled']);
     expect(normaliseShotTitles(board.std)).toBe(1);
     expect(normaliseShotTitles(board.std)).toBe(0);
+  });
+});
+
+describe('which written boxes the card shows', () => {
+  it('always shows SHOT and NARRATION', () => {
+    expect(isFieldShown('action', {}, false)).toBe(true);
+    expect(isFieldShown('voiceover', {}, true)).toBe(true);
+  });
+
+  it('shows YOUR LINES only when it holds text or the shot has a recorded take', () => {
+    expect(isFieldShown('script', { script: '' }, false)).toBe(false);
+    expect(isFieldShown('script', { script: '   ' }, false)).toBe(false);
+    expect(isFieldShown('script', { script: 'Hello' }, false)).toBe(true);
+    expect(isFieldShown('script', { takes: [{ source: 'generated' }] }, false)).toBe(false);
+    expect(isFieldShown('script', { takes: [{ source: 'generated' }, { source: 'recorded' }] }, false)).toBe(true);
+    // A board made before the field existed: no key, no takes key.
+    expect(isFieldShown('script', {}, false)).toBe(false);
+  });
+
+  it('keeps the legacy CAMERA box for shots that still hold text, never on a graphic', () => {
+    expect(isFieldShown('camera', { camera: '' }, false)).toBe(false);
+    expect(isFieldShown('camera', { camera: 'Slow push in' }, false)).toBe(true);
+    expect(isFieldShown('camera', { camera: 'Slow push in' }, true)).toBe(false);
   });
 });
