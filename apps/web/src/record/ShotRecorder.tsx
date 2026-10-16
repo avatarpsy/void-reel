@@ -179,17 +179,36 @@ export const ShotRecorder: React.FC = () => {
     });
   }, []);
 
+  // The camera open in flight. The first open on a camera probes its modes
+  // (several seconds); Record pressed during it used to start a SECOND
+  // acquisition alongside it, and the take never started — stuck on
+  // "Starting…". Record now waits for this, and the button stays disabled.
+  const openingRef = useRef<Promise<void> | null>(null);
+  const [opening, setOpening] = useState(false);
+
   const openCamera = useCallback(async () => {
-    const st = useRecorderStore.getState();
-    useRecorderStore.setState(st.status === "error" ? { status: "idle", error: null } : { error: null });
-    attemptRef.current = "preview";
-    setProblem(null);
-    const m: RecordingMode = st.options.mode === "both" ? "both" : "camera";
-    if (!ScreenRecorderService.isSupported(m)) {
-      setProblem(await describeCameraProblem("", m, false));
-      return;
+    const run = (async () => {
+      const st = useRecorderStore.getState();
+      useRecorderStore.setState(st.status === "error" ? { status: "idle", error: null } : { error: null });
+      attemptRef.current = "preview";
+      setProblem(null);
+      const m: RecordingMode = st.options.mode === "both" ? "both" : "camera";
+      if (!ScreenRecorderService.isSupported(m)) {
+        setProblem(await describeCameraProblem("", m, false));
+        return;
+      }
+      await useRecorderStore.getState().startPreview(m);
+    })();
+    openingRef.current = run;
+    setOpening(true);
+    try {
+      await run;
+    } finally {
+      if (openingRef.current === run) {
+        openingRef.current = null;
+        setOpening(false);
+      }
     }
-    await useRecorderStore.getState().startPreview(m);
   }, []);
 
   useEffect(() => {
@@ -317,6 +336,7 @@ export const ShotRecorder: React.FC = () => {
     setEditingLines(false);
     setProblem(null);
     flushScript();
+    if (openingRef.current) await openingRef.current.catch(() => {});
     const st = useRecorderStore.getState();
     useRecorderStore.setState(st.status === "error" ? { status: "idle", error: null } : { error: null });
     attemptRef.current = "record";
@@ -758,7 +778,7 @@ export const ShotRecorder: React.FC = () => {
           <button
             type="button"
             onClick={() => void record()}
-            disabled={status === "requesting" || !ScreenRecorderService.isSupported(mode)}
+            disabled={opening || status === "requesting" || !ScreenRecorderService.isSupported(mode)}
             className="w-[72px] h-[72px] rounded-full border-4 border-white/80 flex items-center justify-center disabled:opacity-40"
             aria-label="Record"
             title="Record"
@@ -777,9 +797,11 @@ export const ShotRecorder: React.FC = () => {
                 ? ""
                 : status === "countdown"
                   ? "Get ready…"
-                  : takes.length > 0
-                    ? "Record another take"
-                    : "Tap to record"}
+                  : opening
+                    ? "Opening your camera…"
+                    : takes.length > 0
+                      ? "Record another take"
+                      : "Tap to record"}
         </p>
       </div>
     </div>
