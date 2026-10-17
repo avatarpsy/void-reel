@@ -18,11 +18,38 @@ import {
 import {
   type CellWrite, type ColumnSpec, type TabSpec, SheetError, addColumn, addTabPaced, appendRowsPaced,
   createSheetPaced, deleteColumn, deleteRows, deleteTab, listSheetIds, moveRows, setCellsPaced,
-  setTitle, sheetYBlock, updateColumn, updateTab, readTab, batchSheet,
+  setTitle, sheetYBlock, updateColumn, updateTab, readTab, batchSheet, valueOf,
 } from './ops';
+import { columnFor, postIssues, splitPlatforms } from './post-rules';
+import { tabKind } from './activity';
 import { TEMPLATES, templateTab, type TemplateId } from './templates';
 import { computeTotal, totalsFor } from './totals';
 import type { SheetFocus } from './focus';
+
+/**
+ * On a content-calendar tab, the rows whose caption is too long for one of its
+ * platforms (or whose format a platform cannot post) — the same warnings the
+ * person sees on the caption cell, so the agent can fix them in its next write.
+ */
+function calendarWarnings(std: MountedBoard['std'], blockId: string, tabId: string): Array<{ row: string; warnings: string[] }> {
+  const snap = readTab(std, blockId, tabId);
+  const y = sheetYBlock(std.store, blockId);
+  if (!snap || !y || tabKind(snap.tab, snap.columns) !== 'calendar') return [];
+  const names = snap.columns.map(c => c.name);
+  const col = (f: 'caption' | 'title' | 'format' | 'platforms') => { const i = columnFor(f, names); return i >= 0 ? snap.columns[i] : undefined; };
+  const plat = col('platforms');
+  if (!plat) return [];
+  const cap = col('caption'); const title = col('title'); const fmt = col('format');
+  const out: Array<{ row: string; warnings: string[] }> = [];
+  for (const r of snap.rows) {
+    if (!r.rowId) continue;
+    const text = (c?: typeof plat) => (c ? cellText(valueOf(std, y, snap.tab, r, c), c.type) : '');
+    const issues = postIssues({ platforms: splitPlatforms(text(plat)), format: text(fmt), caption: text(cap), title: text(title) });
+    if (issues.length) out.push({ row: r.rowId, warnings: issues.map(i => i.text) });
+    if (out.length >= 40) break;
+  }
+  return out;
+}
 
 type Fail = { ok: false; reason: string; message: string };
 const fail = (reason: string, message: string): Fail => ({ ok: false, reason, message });
@@ -394,6 +421,7 @@ export function sheetHandlers(ctx: SheetRpcContext): Record<string, (args: Recor
 
     const after = readSheet(doc(), id);
     const tab = after?.tabs.find(t => t.id === tabId) ?? after?.tabs[0];
+    const warnings = tab ? calendarWarnings(board.std, id, tab.id) : [];
     return {
       ok: problems.length === 0 || applied > 0,
       rev: ctx.rev(),
@@ -404,8 +432,10 @@ export function sheetHandlers(ctx: SheetRpcContext): Record<string, (args: Recor
       ...(Object.keys(createdTabs).length ? { createdTabs } : {}),
       ...(conflicts.length ? { conflicts } : {}),
       ...(problems.length ? { problems: problems.slice(0, 40) } : {}),
+      ...(warnings.length ? { warnings } : {}),
       tab: tab ? { id: tab.id, name: tab.name, rows: tab.rows.length, columns: columnBrief(tab) } : null,
       note: `${applied} change(s) applied as one undo step.`
+        + (warnings.length ? ` ${warnings.length} row(s) have a caption too long for a platform or a format it cannot post (see warnings).` : '')
         + (conflicts.length ? ` ${conflicts.length} cell(s) were NOT written because they changed since you read them — re-read those rows and decide again.` : '')
         + (problems.length ? ` ${problems.length} problem(s) listed in problems.` : ''),
     };

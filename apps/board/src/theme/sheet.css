@@ -533,6 +533,15 @@ voidspace-sheet { display: block; width: 100%; height: 100%; }
   width: 14px; height: 14px; border-radius: 50%; display: grid; place-items: center;
   font-size: 10px; font-weight: 800; background: var(--vs-warn); color: #fff; cursor: help;
 }
+/* A caption too long for a platform, or a format it cannot post: a quiet marker, the reason on hover. */
+.vsg-warn {
+  flex: none; margin-left: auto; width: 15px; height: 15px; border-radius: 50%; display: grid; place-items: center;
+  font-size: 10px; font-weight: 800; line-height: 1; color: var(--vs-warn); cursor: help;
+  box-shadow: inset 0 0 0 1.5px currentColor;
+}
+.vsc-card__warn, .vsc-warn { font-size: 12.5px; color: var(--vs-warn); }
+.vsc-warn { margin: -8px 0 14px; }
+.vsc-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; }
 .vsg-modal__note { font-size: 12.5px !important; color: var(--vs-text-mute) !important; margin-top: -6px !important; }
 .vsg-modal__error { color: #e5484d !important; }
 .vsg-field select {

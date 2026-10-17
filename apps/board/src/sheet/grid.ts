@@ -32,13 +32,14 @@ import {
 } from './sheet-data';
 import {
   type CellWrite, type TabSnapshot, SheetError, addColumn, addRows, addRowsPaced, coerce, deleteColumn,
-  deleteRows, moveColumn, moveRows, parseDate, readTab, setCells, setCellsPaced, setRowLink,
-  sheetYBlock, updateColumn, updateTab, STATUS_COLORS,
+  deleteRows, duplicateRows, moveColumn, moveRows, parseDate, readTab, setCells, setCellsPaced, setRowLink,
+  sheetYBlock, splitByPlatform, updateColumn, updateTab, STATUS_COLORS,
 } from './ops';
+import { type PostIssue, columnFor, postIssues, splitPlatforms } from './post-rules';
 import { parseDelimited, toDelimited } from './csv';
 import { type TotalKind, TOTAL_LABEL, computeTotal, totalsFor } from './totals';
 import { toast } from '../ui/toast';
-import { MONTH, prettyDate } from './format';
+import { MONTH, prettyDate, prettyDateShort } from './format';
 import {
   type SheetActivity, type TabKind, ActivityPoller, createEpisodeBoard, episodeFields, listSeries,
   ownBoardId, readyRows, rowValues, runAsSeries, sendRowForApproval, tabKind, type SeriesChoice,
@@ -150,6 +151,10 @@ export class SheetGrid {
   private actCols: ActCol[] = [];
   private activity: SheetActivity | null = null;
   private notes = new Map<string, RowNote>();
+  /** On a calendar tab: the columns a post's checks read (caption, platforms…). */
+  private post: Partial<Record<'caption' | 'title' | 'format' | 'platforms' | 'date', SheetColumn>> = {};
+  /** Per-render memo of each row's caption/format warnings. */
+  private issueMemo = new Map<string, PostIssue[]>();
   private poller: ActivityPoller | null = null;
   private sending = false;
   /** A clipboard key was pressed and its native event has not arrived yet. */
@@ -320,6 +325,17 @@ export class SheetGrid {
       this.colV?.measure();
     }
     this.poller?.setTarget(this.blockId, kind ? this.snap.tab : null);
+    this.post = {};
+    const all = this.snap.columns;
+    const names = all.map(c => c.name);
+    const dateCol = all.find(c => c.type === 'date');
+    if (dateCol) this.post.date = dateCol;
+    if (tabKind(this.snap.tab, all) === 'calendar') {
+      for (const f of ['caption', 'title', 'format', 'platforms'] as const) {
+        const i = columnFor(f, names);
+        if (i >= 0) this.post[f] = all[i];
+      }
+    }
     let rows = this.snap.rows;
     const colById = new Map(this.snap.columns.map(c => [c.id, c] as const));
     for (const f of this.view.filters) {
@@ -1080,6 +1096,7 @@ export class SheetGrid {
 
   private renderNow(): void {
     if (this.dirty) this.refresh();
+    this.issueMemo.clear();
     this.rowV.setOptions({ ...this.rowV.options, count: this.rows.length });
     this.colV.setOptions({ ...this.colV.options, count: this.cols.length + this.actCols.length });
     this.rowV._willUpdate();
@@ -1214,10 +1231,12 @@ export class SheetGrid {
       const showFill = fillCorner && !this.edit && !this.drag;
       const disabled = col.bind && row.removed;
       const fillPreview = this.drag?.kind === 'fill' && r > g.r1 && r <= (this.drag.to as number) && c >= g.c0 && c <= g.c1;
+      const warn = this.cellIssues(row, col);
       return html`<div class="vsg-cell vsg-t-${col.type} ${frozen ? 'is-frozen' : ''} ${frozen && c === f - 1 ? 'is-frozen-edge' : ''} ${inSel && multi ? 'is-range' : ''} ${active ? 'is-active' : ''} ${hit ? 'is-hit' : ''} ${isActiveHit ? 'is-hit-now' : ''} ${disabled ? 'is-disabled' : ''} ${fillPreview ? 'is-fill' : ''}"
           role="gridcell" aria-selected=${inSel ? 'true' : 'false'} data-r=${r} data-c=${c}
           style="width:${this.widthOf(col)}px;${frozen ? `left:${frozenLeft[c]}px;` : ''}">
         ${this.cellContent(row, col)}
+        ${warn.length ? html`<span class="vsg-warn" title=${warn.join('\n')} aria-label=${warn.join(' ')}>!</span>` : nothing}
         ${showFill ? html`<span class="vsg-fill" data-fill title="Drag to fill down"></span>` : nothing}
       </div>`;
     };
@@ -1488,6 +1507,54 @@ export class SheetGrid {
         <button type="button" class="vsg-tool vsg-tool--primary" @click=${() => { this.close(); if (row) void this.sendRows([row], true); }}>Send again</button>
       </div>
     </div></div>`;
+  }
+
+  /** A calendar row's warnings: a caption too long for a platform, a format it cannot post. */
+  private rowIssues(row: DisplayRow): PostIssue[] {
+    const p = this.post;
+    if (!p.platforms || !row.rowId) return [];
+    const hit = this.issueMemo.get(row.key);
+    if (hit) return hit;
+    const text = (c?: SheetColumn) => (c ? cellText(this.value(row, c), c.type) : '');
+    const out = postIssues({ platforms: splitPlatforms(text(p.platforms)), format: text(p.format), caption: text(p.caption), title: text(p.title) });
+    this.issueMemo.set(row.key, out);
+    return out;
+  }
+
+  /** The warnings to mark on this cell, if it is the caption, title or format cell. */
+  private cellIssues(row: DisplayRow, col: SheetColumn): string[] {
+    const p = this.post;
+    const field = col === p.caption ? 'caption' : col === p.title ? 'title' : col === p.format ? 'format' : null;
+    if (!field) return [];
+    return this.rowIssues(row).filter(i => i.field === field).map(i => i.text);
+  }
+
+  /** Copies of rows right below them; `days` moves their dates on (a post that repeats). */
+  private duplicate(keys: string[], days = 0): void {
+    if (!this.guard()) return;
+    const ids = this.rowsFor(keys).map(r => r.rowId!);
+    const made = this.run(() => duplicateRows(this.std.store, this.blockId, this.tabId, ids, { days }));
+    if (!made?.length) return;
+    const first = this.post.date ? this.value({ key: made[0]!, rowId: made[0]! } as DisplayRow, this.post.date) : null;
+    const when = days && typeof first === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(first) ? ` for ${prettyDateShort(first)}` : '';
+    toast(made.length === 1 ? `Added a copy${when}.` : `Added ${made.length} copies${days ? `, ${days === 7 ? 'a week' : days === 1 ? 'a day' : `${days} days`} later` : ''}.`, 'info');
+  }
+
+  /** One row per platform: a copy for each platform, right below, so each caption can fit its platform. */
+  private splitRows(keys: string[]): void {
+    const col = this.post.platforms;
+    if (!this.guard() || !col) return;
+    const ids = this.rowsFor(keys).map(r => r.rowId!);
+    const res = this.run(() => splitByPlatform(this.std.store, this.blockId, this.tabId, ids, col.id));
+    if (!res) return;
+    toast(res.added ? `Split into ${res.rows} rows — edit each caption for its platform.` : 'Each row already has one platform.', 'info');
+  }
+
+  /** How many of these rows list more than one platform. */
+  private multiPlatform(keys: string[]): number {
+    const col = this.post.platforms;
+    if (!col) return 0;
+    return this.rowsFor(keys).filter(r => String(this.value(r, col) ?? '').split(/\s*,\s*/).filter(Boolean).length > 1).length;
   }
 
   private rowsFor(keys: string[]): DisplayRow[] {
@@ -1846,10 +1913,17 @@ export class SheetGrid {
     const planned = keys.filter(k => { const d = this.rows.find(x2 => x2.key === k); return d && !d.shotId && d.rowId; });
     const linked = keys.filter(k => { const d = this.rows.find(x2 => x2.key === k); return d?.shotId && !d.removed; });
     const word = n === 1 ? 'row' : `${n} rows`;
+    const stored = !shotsTab && keys.some(k => this.rows.find(x2 => x2.key === k)?.rowId);
+    const split = this.kind === 'calendar' || this.post.platforms ? this.multiPlatform(keys) : 0;
     return html`<div class="vsg-pop vsg-menu" role="menu" style=${this.place(x, y, 240)}>
       ${ro ? html`<div class="vsg-menu__title">View only</div>` : html`
         <button type="button" role="menuitem" @click=${() => { this.run(() => addRows(this.std.store, this.blockId, this.tabId, 1, { beforeKey: row?.rowId ?? null })); this.close(); }} ?disabled=${!row?.rowId || !!this.view.sort}>Insert row above</button>
         <button type="button" role="menuitem" @click=${() => { this.run(() => addRows(this.std.store, this.blockId, this.tabId, 1, { afterKey: row?.rowId ?? null })); this.close(); }} ?disabled=${!row?.rowId || !!this.view.sort}>Insert row below</button>
+        ${stored ? html`<button type="button" role="menuitem" @click=${() => { this.close(); this.duplicate(keys); }}>Duplicate ${word}</button>` : nothing}
+        ${stored && this.post.date ? html`<button type="button" role="menuitem" @click=${() => { this.close(); this.duplicate(keys, 1); }}>Duplicate +1 day</button>
+          <button type="button" role="menuitem" @click=${() => { this.close(); this.duplicate(keys, 7); }}>Duplicate +1 week<em>For a post that repeats every week.</em></button>` : nothing}
+        ${split ? html`<button type="button" role="menuitem" @click=${() => { this.close(); this.splitRows(keys); }}>One row per platform<em>A copy for each platform, so each caption fits it.</em></button>` : nothing}
+        ${stored || split ? html`<hr />` : nothing}
         ${this.opts.onMakeCards && (planned.length || !shotsTab) ? html`<button type="button" role="menuitem" @click=${() => { this.opts.onMakeCards?.(keys); this.close(); }}>
           Make ${n === 1 ? 'a card' : `${n} cards`} from ${n === 1 ? 'this row' : 'these rows'}<em>Adds shot cards. Never removes any.</em></button>` : nothing}
         ${this.kind === 'calendar' ? html`<button type="button" role="menuitem" @click=${() => { const rs = this.rowsFor(keys); this.close(); void this.sendRows(rs); }}>

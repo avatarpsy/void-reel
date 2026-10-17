@@ -775,6 +775,105 @@ export function moveRows(std: BlockStdScope, blockId: string, tabId: string, key
   });
 }
 
+/**
+ * A row's cells as a copy should start: the same plan, never the same POST. A
+ * "Post link" column is left empty, and a Status of Posted or Scheduled starts
+ * again as Draft — the copy has not been posted. `days` moves every date on.
+ */
+function copiedCells(y: Y.Map<unknown>, cols: SheetColumn[], fromRow: string, days: number): Map<string, CellValue> {
+  const cells = sub(y, 'cells');
+  const out = new Map<string, CellValue>();
+  for (const c of cols) {
+    let v = (cells.get(cellKey(fromRow, c.id)) as CellValue | undefined) ?? null;
+    if (v === null) continue;
+    const name = c.name.trim().toLowerCase();
+    if (c.type === 'url' && /^(post link|link to post|live link|published link|post url)$/.test(name)) continue;
+    if (c.type === 'status' && name === 'status' && /^(posted|scheduled)$/i.test(String(v))) v = 'Draft';
+    if (days && c.type === 'date' && typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v)) {
+      const d = new Date(`${v}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + days);
+      v = d.toISOString().slice(0, 10);
+    }
+    out.set(c.id, v);
+  }
+  return out;
+}
+
+function checkRowRoom(y: Y.Map<unknown>, tabId: string, adding: number): void {
+  const now = readRows(y, tabId).length;
+  if (now + adding > SHEET_LIMITS.rowsPerTab) {
+    throw new SheetError('too_many_rows', `A tab can have up to ${SHEET_LIMITS.rowsPerTab.toLocaleString('en')} rows.`);
+  }
+}
+
+/**
+ * Copies of rows, as one undo step: the copies go right below the last of
+ * them, in the same order. `days` moves their dates on (+1 day, +7 a week) —
+ * the quick way to plan a post that repeats. Returns the new row ids.
+ */
+export function duplicateRows(store: Store, blockId: string, tabId: string, rowIds: string[], opts: { days?: number } = {}): string[] {
+  return transactSheet(store, () => {
+    const y = needSheet(store, blockId);
+    const list = readRows(y, tabId);
+    const want = new Set(rowIds);
+    const src = list.filter(r => want.has(r.id));
+    if (!src.length) return [];
+    checkRowRoom(y, tabId, src.length);
+    const last = list.indexOf(src.at(-1)!);
+    const keys = generateNKeysBetween(list[last]!.order, list[last + 1]?.order ?? null, src.length);
+    const cols = readColumns(y, tabId);
+    const rowMap = sub(y, 'rows');
+    const cells = sub(y, 'cells');
+    const ids = src.map((r, i) => {
+      const id = newId('r');
+      rowMap.set(id, toYMap({ tabId, order: keys[i]! }));
+      for (const [colId, v] of copiedCells(y, cols, r.id, opts.days ?? 0)) cells.set(cellKey(id, colId), v);
+      return id;
+    });
+    if (cells.size > SHEET_LIMITS.cells) throw new SheetError('too_many_cells', `A sheet can hold up to ${SHEET_LIMITS.cells.toLocaleString('en')} filled cells.`);
+    return ids;
+  });
+}
+
+/**
+ * ONE ROW PER PLATFORM, as one undo step. A row whose platforms column says
+ * "Instagram, TikTok, X" keeps Instagram; a copy for TikTok and one for X go
+ * right below it with the same date, time, format, hook, caption, media and
+ * notes, so each caption can be written for its own platform. Rows with one
+ * platform (or none) are left as they are. Returns how many rows the split
+ * rows are now, and how many were added.
+ */
+export function splitByPlatform(store: Store, blockId: string, tabId: string, rowIds: string[], platformColId: string): { rows: number; added: number } {
+  return transactSheet(store, () => {
+    const y = needSheet(store, blockId);
+    const list = readRows(y, tabId);
+    const cols = readColumns(y, tabId);
+    if (!cols.some(c => c.id === platformColId)) throw new SheetError('not_found', 'This tab has no Platforms column.');
+    const cells = sub(y, 'cells');
+    const rowMap = sub(y, 'rows');
+    const want = new Set(rowIds);
+    const plans = list.flatMap((r, i) => {
+      if (!want.has(r.id)) return [];
+      const parts = String(cells.get(cellKey(r.id, platformColId)) ?? '').split(/\s*,\s*/).map(s => s.trim()).filter(Boolean);
+      return parts.length > 1 ? [{ r, i, parts }] : [];
+    });
+    const added = plans.reduce((n, p) => n + p.parts.length - 1, 0);
+    if (!added) return { rows: 0, added: 0 };
+    checkRowRoom(y, tabId, added);
+    for (const { r, i, parts } of plans) {
+      const copy = copiedCells(y, cols, r.id, 0);
+      const keys = generateNKeysBetween(r.order, list[i + 1]?.order ?? null, parts.length - 1);
+      cells.set(cellKey(r.id, platformColId), parts[0]!);
+      parts.slice(1).forEach((platform, j) => {
+        const id = newId('r');
+        rowMap.set(id, toYMap({ tabId, order: keys[j]! }));
+        for (const [colId, v] of copy) cells.set(cellKey(id, colId), colId === platformColId ? platform : v);
+      });
+    }
+    if (cells.size > SHEET_LIMITS.cells) throw new SheetError('too_many_cells', `A sheet can hold up to ${SHEET_LIMITS.cells.toLocaleString('en')} filled cells.`);
+    return { rows: plans.length + added, added };
+  });
+}
+
 /** Link a stored row to a shot or a board (or clear it with null). */
 export function setRowLink(store: Store, blockId: string, rowId: string, link: RowLink | null): void {
   transactSheet(store, () => {

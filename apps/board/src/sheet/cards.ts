@@ -13,8 +13,9 @@ import { live } from 'lit/directives/live.js';
 import * as Y from 'yjs';
 
 import { type CellValue, type DisplayRow, type SheetColumn, MULTI_SEPARATOR, cellText, formatDuration, readTabs } from './sheet-data';
-import { SheetError, addRows, readTab, setCells, sheetYBlock, valueOf, type TabSnapshot } from './ops';
-import { prettyDate } from './format';
+import { SheetError, addRows, duplicateRows, readTab, setCells, sheetYBlock, splitByPlatform, valueOf, type TabSnapshot } from './ops';
+import { prettyDate, prettyDateShort } from './format';
+import { type PostIssue, columnFor, postIssues, splitPlatforms } from './post-rules';
 import { toast } from '../ui/toast';
 import { type SheetActivity, ActivityPoller, ownBoardId, rowValues, sendRowForApproval, tabKind } from './activity';
 
@@ -35,6 +36,8 @@ export class SheetCards {
   private poller: ActivityPoller;
   private sending = '';
   private notes = new Map<string, string>();
+  /** On a calendar tab: the columns a post's checks read. */
+  private post: Partial<Record<'caption' | 'title' | 'format' | 'platforms', SheetColumn>> = {};
 
   constructor(host: HTMLElement, opts: { std: BlockStdScope; blockId: string; tabId: string; readonly: boolean; onTab: (tabId: string) => void }) {
     this.host = host; this.std = opts.std; this.blockId = opts.blockId; this.tabId = opts.tabId; this.readonly = opts.readonly; this.onTab = opts.onTab;
@@ -84,6 +87,14 @@ export class SheetCards {
     this.snap = readTab(this.std, this.blockId, this.tabId);
     const kind = this.snap && ownBoardId() ? tabKind(this.snap.tab, this.snap.columns) : null;
     this.poller.setTarget(this.blockId, kind ? this.snap!.tab : null);
+    this.post = {};
+    if (this.snap && tabKind(this.snap.tab, this.snap.columns) === 'calendar') {
+      const names = this.snap.columns.map(c => c.name);
+      for (const f of ['caption', 'title', 'format', 'platforms'] as const) {
+        const i = columnFor(f, names);
+        if (i >= 0) this.post[f] = this.snap.columns[i];
+      }
+    }
     render(this.view(), this.host);
   }
 
@@ -98,6 +109,39 @@ export class SheetCards {
     if (st?.episode) bits.push(html`<span class="vsg-chip" data-c="blue">${st.episode.episode ? `Ep ${st.episode.episode} · ` : ''}${st.episode.status}</span>${links && st.episode.editorUrl ? html`<a class="vsg-link" href=${st.episode.editorUrl} target="_top">Open editor</a>` : nothing}`);
     if (author) bits.push(html`<span class="vsc-card__author">Edited by ${author.name}. Episodes from it ask before spending.</span>`);
     return bits.length ? html`<span class="vsc-card__status">${bits}</span>` : nothing;
+  }
+
+  /** A calendar row's warnings: a caption too long for a platform, a format it cannot post. */
+  private issues(row: DisplayRow): PostIssue[] {
+    const p = this.post;
+    if (!p.platforms || !row.rowId) return [];
+    const text = (c?: SheetColumn) => (c ? cellText(this.value(row, c), c.type) : '');
+    return postIssues({ platforms: splitPlatforms(text(p.platforms)), format: text(p.format), caption: text(p.caption), title: text(p.title) });
+  }
+
+  private duplicate(row: DisplayRow, days: number): void {
+    if (this.readonly || !row.rowId) return;
+    try {
+      const [id] = duplicateRows(this.std.store, this.blockId, this.tabId, [row.rowId], { days });
+      if (!id) return;
+      const dateCol = this.snap?.columns.find(c => c.type === 'date');
+      const d = dateCol && this.y ? this.y.get('prop:cells') : null;
+      const first = d instanceof Y.Map && dateCol ? d.get(`${id}:${dateCol.id}`) : null;
+      this.openKey = id;
+      toast(days && typeof first === 'string' ? `Added a copy for ${prettyDateShort(first)}.` : 'Added a copy.', 'info');
+      this.schedule();
+    } catch (e) { toast(e instanceof SheetError ? e.message : 'The row could not be copied.', 'error'); }
+  }
+
+  private split(row: DisplayRow): void {
+    const col = this.post.platforms;
+    if (this.readonly || !row.rowId || !col) return;
+    try {
+      const res = splitByPlatform(this.std.store, this.blockId, this.tabId, [row.rowId], col.id);
+      this.openKey = null;
+      toast(`Split into ${res.rows} rows — edit each caption for its platform.`, 'info');
+      this.schedule();
+    } catch (e) { toast(e instanceof SheetError ? e.message : 'The row could not be split.', 'error'); }
   }
 
   private async send(row: DisplayRow): Promise<void> {
@@ -143,6 +187,7 @@ export class SheetCards {
     return html`<button type="button" class="vsc-card" @click=${() => { this.openKey = r.key; this.schedule(); }}>
       <span class="vsc-card__title"><span class="vsc-card__n">${i + 1}</span>${title || html`<span style="color:var(--vs-text-mute);font-weight:500">Untitled</span>`}${r.removed ? ' (shot removed)' : ''}</span>
       ${fields.map(f => html`<span class="vsc-card__field"><b>${f.c.name}</b><span>${this.show(f.c, f.v)}</span></span>`)}
+      ${this.issues(r).map(i => html`<span class="vsc-card__warn">${i.text}</span>`)}
       ${this.status(r, false)}
     </button>`;
   }
@@ -167,41 +212,22 @@ export class SheetCards {
   private editor(row: DisplayRow, cols: SheetColumn[]): TemplateResult {
     const ro = this.readonly || !!row.removed;
     const close = () => { this.openKey = null; this.schedule(); };
-    const field = (c: SheetColumn): TemplateResult => {
-      const v = this.value(row, c);
-      const label = html`<span>${c.name}</span>`;
-      const commit = (val: unknown) => this.write(row, c, val);
-      switch (c.type) {
-        case 'checkbox':
-          return html`<label class="vsc-field" style="flex-direction:row;align-items:center;gap:10px">
-            <input type="checkbox" .checked=${live(v === true)} ?disabled=${ro} @change=${(e: Event) => commit((e.target as HTMLInputElement).checked)} />${label}</label>`;
-        case 'status': {
-          const chosen = new Set(String(v ?? '').split(/\s*,\s*/).filter(Boolean));
-          return html`<div class="vsc-field">${label}<div class="vsc-choices">${(c.options ?? []).map(o => html`<button type="button" ?disabled=${ro}
-              aria-pressed=${chosen.has(o.label) ? 'true' : 'false'}
-              @click=${() => {
-                if (c.multi) { if (chosen.has(o.label)) chosen.delete(o.label); else chosen.add(o.label); commit([...chosen].join(MULTI_SEPARATOR)); }
-                else commit(chosen.has(o.label) ? null : o.label);
-              }}><span class="vsg-chip" data-c=${o.color}>${o.label}</span></button>`)}</div></div>`;
-        }
-        case 'longtext':
-          return html`<label class="vsc-field">${label}<textarea ?disabled=${ro} .value=${live(String(v ?? ''))} @change=${(e: Event) => commit((e.target as HTMLTextAreaElement).value)}></textarea></label>`;
-        case 'date':
-          return html`<label class="vsc-field">${label}<input type="date" ?disabled=${ro} .value=${live(/^\d{4}-\d{2}-\d{2}$/.test(String(v ?? '')) ? String(v) : '')} @change=${(e: Event) => commit((e.target as HTMLInputElement).value || null)} /></label>`;
-        case 'time':
-          return html`<label class="vsc-field">${label}<input type="time" ?disabled=${ro} .value=${live(/^\d{2}:\d{2}$/.test(String(v ?? '')) ? String(v) : '')} @change=${(e: Event) => commit((e.target as HTMLInputElement).value || null)} /></label>`;
-        case 'number':
-          return html`<label class="vsc-field">${label}<input inputmode="decimal" ?disabled=${ro} .value=${live(v === null ? '' : String(v))} @change=${(e: Event) => commit((e.target as HTMLInputElement).value)} /></label>`;
-        case 'duration':
-          return html`<label class="vsc-field">${label}<input inputmode="numeric" placeholder="m:ss" ?disabled=${ro} .value=${live(typeof v === 'number' ? formatDuration(v) : String(v ?? ''))} @change=${(e: Event) => commit((e.target as HTMLInputElement).value)} /></label>`;
-        case 'url': case 'media':
-          return html`<label class="vsc-field">${label}<input type="url" inputmode="url" placeholder="https://" ?disabled=${ro} .value=${live(String(v ?? ''))} @change=${(e: Event) => commit((e.target as HTMLInputElement).value)} /></label>`;
-        case 'link':
-          return html`<div class="vsc-field">${label}<div>${cellText(v, c.type) || '—'}</div></div>`;
-        default:
-          return html`<label class="vsc-field">${label}<input ?disabled=${ro} .value=${live(String(v ?? ''))} @change=${(e: Event) => commit((e.target as HTMLInputElement).value)} /></label>`;
-      }
+    const issues = this.issues(row);
+    const p = this.post;
+    const warnFor = (c: SheetColumn) => {
+      const f = c === p.caption ? 'caption' : c === p.title ? 'title' : c === p.format ? 'format' : null;
+      const list = f ? issues.filter(i => i.field === f) : [];
+      return list.length ? html`<p class="vsc-warn">${list.map(i => i.text).join(' ')}</p>` : nothing;
     };
+    const platforms = p.platforms ? String(this.value(row, p.platforms) ?? '').split(/\s*,\s*/).filter(Boolean).length : 0;
+    const hasDate = !!this.snap?.columns.some(c => c.type === 'date');
+    const field = (c: SheetColumn): TemplateResult => html`${this.field(row, c, ro)}${warnFor(c)}`;
+    const actions = !ro && row.rowId && !row.shotId ? html`<div class="vsc-actions">
+        <button type="button" class="vsg-tool" @click=${() => this.duplicate(row, 0)}>Duplicate</button>
+        ${hasDate ? html`<button type="button" class="vsg-tool" @click=${() => this.duplicate(row, 1)}>Duplicate +1 day</button>
+          <button type="button" class="vsg-tool" @click=${() => this.duplicate(row, 7)}>Duplicate +1 week</button>` : nothing}
+        ${platforms > 1 ? html`<button type="button" class="vsg-tool" @click=${() => this.split(row)}>One row per platform</button>` : nothing}
+      </div>` : nothing;
     return html`<div class="vsc-sheet-back" @click=${(e: Event) => { if (e.target === e.currentTarget) close(); }}>
       <div class="vsc-sheet" role="dialog" aria-label="Edit row">
         <div class="vsc-sheet__grab"></div>
@@ -214,7 +240,44 @@ export class SheetCards {
               ${this.sending === row.rowId ? 'Sending…' : 'Send for approval'}</button></p>`
           : nothing}
         ${cols.map(field)}
+        ${actions}
       </div>
     </div>`;
+  }
+
+  private field(row: DisplayRow, c: SheetColumn, ro: boolean): TemplateResult {
+    const v = this.value(row, c);
+    const label = html`<span>${c.name}</span>`;
+    const commit = (val: unknown) => this.write(row, c, val);
+    switch (c.type) {
+      case 'checkbox':
+        return html`<label class="vsc-field" style="flex-direction:row;align-items:center;gap:10px">
+          <input type="checkbox" .checked=${live(v === true)} ?disabled=${ro} @change=${(e: Event) => commit((e.target as HTMLInputElement).checked)} />${label}</label>`;
+      case 'status': {
+        const chosen = new Set(String(v ?? '').split(/\s*,\s*/).filter(Boolean));
+        return html`<div class="vsc-field">${label}<div class="vsc-choices">${(c.options ?? []).map(o => html`<button type="button" ?disabled=${ro}
+            aria-pressed=${chosen.has(o.label) ? 'true' : 'false'}
+            @click=${() => {
+              if (c.multi) { if (chosen.has(o.label)) chosen.delete(o.label); else chosen.add(o.label); commit([...chosen].join(MULTI_SEPARATOR)); }
+              else commit(chosen.has(o.label) ? null : o.label);
+            }}><span class="vsg-chip" data-c=${o.color}>${o.label}</span></button>`)}</div></div>`;
+      }
+      case 'longtext':
+        return html`<label class="vsc-field">${label}<textarea ?disabled=${ro} .value=${live(String(v ?? ''))} @change=${(e: Event) => commit((e.target as HTMLTextAreaElement).value)}></textarea></label>`;
+      case 'date':
+        return html`<label class="vsc-field">${label}<input type="date" ?disabled=${ro} .value=${live(/^\d{4}-\d{2}-\d{2}$/.test(String(v ?? '')) ? String(v) : '')} @change=${(e: Event) => commit((e.target as HTMLInputElement).value || null)} /></label>`;
+      case 'time':
+        return html`<label class="vsc-field">${label}<input type="time" ?disabled=${ro} .value=${live(/^\d{2}:\d{2}$/.test(String(v ?? '')) ? String(v) : '')} @change=${(e: Event) => commit((e.target as HTMLInputElement).value || null)} /></label>`;
+      case 'number':
+        return html`<label class="vsc-field">${label}<input inputmode="decimal" ?disabled=${ro} .value=${live(v === null ? '' : String(v))} @change=${(e: Event) => commit((e.target as HTMLInputElement).value)} /></label>`;
+      case 'duration':
+        return html`<label class="vsc-field">${label}<input inputmode="numeric" placeholder="m:ss" ?disabled=${ro} .value=${live(typeof v === 'number' ? formatDuration(v) : String(v ?? ''))} @change=${(e: Event) => commit((e.target as HTMLInputElement).value)} /></label>`;
+      case 'url': case 'media':
+        return html`<label class="vsc-field">${label}<input type="url" inputmode="url" placeholder="https://" ?disabled=${ro} .value=${live(String(v ?? ''))} @change=${(e: Event) => commit((e.target as HTMLInputElement).value)} /></label>`;
+      case 'link':
+        return html`<div class="vsc-field">${label}<div>${cellText(v, c.type) || '—'}</div></div>`;
+      default:
+        return html`<label class="vsc-field">${label}<input ?disabled=${ro} .value=${live(String(v ?? ''))} @change=${(e: Event) => commit((e.target as HTMLInputElement).value)} /></label>`;
+    }
   }
 }

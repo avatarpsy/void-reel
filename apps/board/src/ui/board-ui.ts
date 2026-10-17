@@ -101,6 +101,7 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
         </p>
         <p class="vs-board-guide__lead" data-sheet-choices hidden>
           <button type="button" class="vs-board-btn" data-sheet-template="content-calendar"><span>Content calendar</span></button>
+          <button type="button" class="vs-board-btn" data-sheet-template="brand-deals"><span>Brand deals</span></button>
           <button type="button" class="vs-board-btn" data-sheet-template="season-plan"><span>Season plan</span></button>
           <button type="button" class="vs-board-btn" data-sheet-template="blank"><span>Blank sheet</span></button>
         </p>
