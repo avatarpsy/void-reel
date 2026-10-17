@@ -39,6 +39,10 @@ import { parseDelimited, toDelimited } from './csv';
 import { type TotalKind, TOTAL_LABEL, computeTotal, totalsFor } from './totals';
 import { toast } from '../ui/toast';
 import { MONTH, prettyDate } from './format';
+import {
+  type SheetActivity, type TabKind, ActivityPoller, createEpisodeBoard, episodeFields, listSeries,
+  ownBoardId, readyRows, rowValues, runAsSeries, sendRowForApproval, tabKind, type SeriesChoice,
+} from './activity';
 import { readShots } from '../shot/shots';
 import { readParsed } from '../shot/screenplay-doc';
 import { decodeMediaRef, isMediaRef } from '../board/media-ref';
@@ -79,7 +83,15 @@ type Popover =
   | { kind: 'filter'; x: number; y: number }
   | { kind: 'hidden'; x: number; y: number }
   | { kind: 'delete-linked'; keys: string[] }
-  | { kind: 'rename'; col: string; value: string; x: number; y: number };
+  | { kind: 'rename'; col: string; value: string; x: number; y: number }
+  | { kind: 'series'; choices: SeriesChoice[] | null; busy?: boolean; error?: string }
+  | { kind: 'repost'; rowKey: string };
+
+/** A read-only column drawn from Activity (never stored in the sheet). */
+interface ActCol { id: 'post' | 'episode' | 'board'; name: string; width: number }
+
+/** What happened when a row was last sent, until the next status read. */
+interface RowNote { tone: 'ok' | 'warn' | 'error'; text: string }
 
 export interface GridOptions {
   std: BlockStdScope;
@@ -134,6 +146,14 @@ export class SheetGrid {
   private widthsPreview = new Map<string, number>();
   private drag: null | { kind: 'select' | 'fill' | 'col-move' | 'row-move' | 'resize'; [k: string]: unknown } = null;
   private dropAt: { kind: 'col' | 'row'; index: number } | null = null;
+  private kind: TabKind = null;
+  private actCols: ActCol[] = [];
+  private activity: SheetActivity | null = null;
+  private notes = new Map<string, RowNote>();
+  private poller: ActivityPoller | null = null;
+  private sending = false;
+  /** A clipboard key was pressed and its native event has not arrived yet. */
+  private clipExpect: 'c' | 'x' | 'v' | null = null;
 
   private scroller!: HTMLElement;
   private sink!: HTMLTextAreaElement;
@@ -182,7 +202,7 @@ export class SheetGrid {
       count: 0,
       horizontal: true,
       getScrollElement: () => this.scroller,
-      estimateSize: i => this.widthOf(this.cols[i]),
+      estimateSize: i => (i < this.cols.length ? this.widthOf(this.cols[i]) : this.actCols[i - this.cols.length]?.width ?? 160),
       overscan: 3,
       scrollMargin: GUTTER_W,
       rangeExtractor: range => {
@@ -206,6 +226,8 @@ export class SheetGrid {
     });
     this.cleanup.push(() => sub.unsubscribe());
 
+    this.poller = new ActivityPoller(data => { this.activity = data; this.schedule(); });
+    this.cleanup.push(() => this.poller?.destroy());
     this.bindEvents();
     this.refresh();
     this.renderNow();
@@ -288,6 +310,16 @@ export class SheetGrid {
     }
     if (!this.snap) { this.cols = []; this.rows = []; return; }
     this.cols = this.snap.columns.filter(c => !c.hidden);
+    // The read-only "from Activity" columns — the owner's own board only.
+    const kind = ownBoardId() ? tabKind(this.snap.tab, this.snap.columns) : null;
+    if (kind !== this.kind) {
+      this.kind = kind;
+      this.actCols = kind === 'calendar' ? [{ id: 'post', name: 'Post', width: 240 }]
+        : kind === 'episodes' ? [{ id: 'episode', name: 'Episode', width: 230 }, { id: 'board', name: 'Board', width: 130 }]
+        : [];
+      this.colV?.measure();
+    }
+    this.poller?.setTarget(this.blockId, kind ? this.snap.tab : null);
     let rows = this.snap.rows;
     const colById = new Map(this.snap.columns.map(c => [c.id, c] as const));
     for (const f of this.view.filters) {
@@ -461,6 +493,21 @@ export class SheetGrid {
       out.push(line);
     }
     return toDelimited(out, '\t');
+  }
+
+  /** Copy, cut or paste through the async Clipboard API (see onKey). */
+  private async clipFallback(k: 'c' | 'x' | 'v'): Promise<void> {
+    try {
+      if (k === 'v') {
+        const text = await navigator.clipboard.readText();
+        if (text) await this.paste(text);
+        return;
+      }
+      await navigator.clipboard.writeText(this.copyText());
+      if (k === 'x') this.clearRange();
+    } catch {
+      toast(k === 'v' ? 'Paste with Ctrl+V after clicking a cell, or allow clipboard access.' : 'Copy did not work here. Allow clipboard access and try again.', 'info');
+    }
   }
 
   private async paste(text: string): Promise<void> {
@@ -677,13 +724,15 @@ export class SheetGrid {
       const text = this.sink.value; this.sink.value = '';
       if (text) this.startEdit(text);
     });
-    on(this.sink, 'copy', e => { e.preventDefault(); e.stopPropagation(); e.clipboardData?.setData('text/plain', this.copyText()); });
+    on(this.sink, 'copy', e => { this.clipExpect = null; e.preventDefault(); e.stopPropagation(); e.clipboardData?.setData('text/plain', this.copyText()); });
     on(this.sink, 'cut', e => {
+      this.clipExpect = null;
       e.preventDefault(); e.stopPropagation();
       e.clipboardData?.setData('text/plain', this.copyText());
       this.clearRange();
     });
     on(this.sink, 'paste', e => {
+      this.clipExpect = null;
       e.preventDefault(); e.stopPropagation();
       const text = e.clipboardData?.getData('text/plain') ?? '';
       if (text) void this.paste(text);
@@ -740,7 +789,16 @@ export class SheetGrid {
     if (this.pop && k === 'Escape') { stop(); this.pop = null; this.schedule(); return; }
     if (mod && !e.altKey && (k === 'z' || k === 'Z')) { stop(); if (e.shiftKey) this.std.store.redo(); else this.std.store.undo(); return; }
     if (mod && !e.altKey && k === 'y') { stop(); this.std.store.redo(); return; }
-    if (mod && (k === 'c' || k === 'x' || k === 'v')) { e.stopPropagation(); return; } // real clipboard events follow
+    if (mod && !e.shiftKey && (k === 'c' || k === 'x' || k === 'v' || k === 'C' || k === 'X' || k === 'V')) {
+      // The browser's own copy/cut/paste events normally follow this key and
+      // carry the clipboard (handled on the sink). Some hosts deliver the key
+      // without them; then the async Clipboard API does the same job.
+      e.stopPropagation();
+      this.clipExpect = k.toLowerCase() as 'c' | 'x' | 'v';
+      const expected = this.clipExpect;
+      setTimeout(() => { if (this.clipExpect === expected) { this.clipExpect = null; void this.clipFallback(expected); } }, 80);
+      return;
+    }
     if (mod && k === 'a') { stop(); this.sel = { r: this.rows.length - 1, c: this.cols.length - 1, ar: 0, ac: 0 }; this.schedule(); return; }
     if (mod && k === 'd') { stop(); this.fillDown(); return; }
     if (mod && k === 'f') { stop(); this.host.querySelector<HTMLInputElement>('[data-search]')?.focus(); return; }
@@ -1023,7 +1081,7 @@ export class SheetGrid {
   private renderNow(): void {
     if (this.dirty) this.refresh();
     this.rowV.setOptions({ ...this.rowV.options, count: this.rows.length });
-    this.colV.setOptions({ ...this.colV.options, count: this.cols.length });
+    this.colV.setOptions({ ...this.colV.options, count: this.cols.length + this.actCols.length });
     this.rowV._willUpdate();
     this.colV._willUpdate();
     render(this.toolbar(), this.host.querySelector<HTMLElement>('[data-toolbar]')!);
@@ -1084,6 +1142,8 @@ export class SheetGrid {
       <span class="vsg-count">${shown === total ? `${total.toLocaleString('en')} row${total === 1 ? '' : 's'}` : `${shown.toLocaleString('en')} of ${total.toLocaleString('en')} rows`}</span>
       ${planned && this.opts.onMakeCards && !this.readonly ? html`<button type="button" class="vsg-tool" title="Turn rows with no card into shot cards on the board"
           @click=${() => this.opts.onMakeCards?.(this.snap!.rows.filter(r => !r.shotId && r.rowId).map(r => r.key))}>Make ${planned} card${planned === 1 ? '' : 's'}</button>` : nothing}
+      ${!this.readonly && this.kind === 'calendar' ? this.calendarTools() : nothing}
+      ${!this.readonly && this.kind === 'episodes' ? this.episodeTools() : nothing}
       ${this.readonly ? html`<span class="vsg-badge">View only</span>` : html`<button type="button" class="vsg-tool vsg-tool--primary" @click=${() => this.addRow()}>+ Row</button>`}`;
   }
 
@@ -1105,7 +1165,7 @@ export class SheetGrid {
     const rows = this.rows;
     const vRows = this.rowV.getVirtualItems();
     const vCols = this.colV.getVirtualItems();
-    const totalW = GUTTER_W + cols.reduce((n, c) => n + this.widthOf(c), 0) + 56;
+    const totalW = GUTTER_W + cols.reduce((n, c) => n + this.widthOf(c), 0) + this.actCols.reduce((n, a) => n + a.width, 0) + 56;
     const bodyH = rows.length * ROW_H;
     const f = this.frozenCount();
     const frozenLeft: number[] = [];
@@ -1174,7 +1234,7 @@ export class SheetGrid {
                @click=${() => { this.sel = { r: Math.max(0, rows.length - 1), c: Math.max(0, cols.length - 1), ar: 0, ac: 0 }; this.focusSink(); this.schedule(); }}></div>
           ${Array.from({ length: f }, (_, c) => headCell(c))}
           ${spacer ? html`<div class="vsg-spacer" style="width:${spacer}px"></div>` : nothing}
-          ${free.map(v => headCell(v.index))}
+          ${free.map(v => (v.index < cols.length ? headCell(v.index) : this.actHead(this.actCols[v.index - cols.length]!)))}
           ${this.readonly ? nothing : html`<button type="button" class="vsg-addcol" title="Add a column" aria-label="Add a column"
               @click=${() => { const id = this.run(() => addColumn(this.std.store, this.blockId, this.tabId, { name: `Column ${cols.length + 1}` })); if (id) { this.dirty = true; requestAnimationFrame(() => { const hr = this.host.getBoundingClientRect(); this.pop = { kind: 'rename', col: id, value: `Column ${cols.length + 1}`, x: Math.min(hr.width - 280, 200), y: HEADER_H + 40 }; this.schedule(); }); } }}>+</button>`}
           ${this.dropAt?.kind === 'col' ? html`<div class="vsg-drop vsg-drop--col" style="left:${this.dropX()}px"></div>` : nothing}
@@ -1199,12 +1259,14 @@ export class SheetGrid {
               <div class="vsg-cell vsg-gutter is-frozen ${rowSel ? 'is-sel' : ''}" data-gutter=${r} data-r=${r} style="left:0;width:${GUTTER_W}px"
                    title=${row.removed ? 'This shot was removed from the board' : this.readonly ? '' : 'Drag to move. Right-click for more.'}>
                 <span class="vsg-rownum">${row.removed ? '!' : r + 1}</span>
+                ${row.rowId && this.activity?.authors[row.rowId] ? html`<span class="vsg-author" title=${`Edited by ${this.activity.authors[row.rowId]!.name}. Episodes made from this row ask before they spend credits.`}>${initials(this.activity.authors[row.rowId]!.name)}</span>` : nothing}
+                ${row.rowId && this.notes.get(row.rowId)?.tone === 'warn' ? html`<span class="vsg-rowwarn" title=${this.notes.get(row.rowId)!.text}>!</span>` : nothing}
                 ${!row.shotId && shotsTab && row.rowId ? html`<span class="vsg-planned" title="Planned: no card yet">•</span>` : nothing}
                 ${this.readonly ? nothing : html`<span class="vsg-grip" aria-hidden="true"></span>`}
               </div>
               ${Array.from({ length: f }, (_, c) => bodyCell(row, r, c))}
               ${spacer ? html`<div class="vsg-spacer" style="width:${spacer}px"></div>` : nothing}
-              ${free.map(vc => bodyCell(row, r, vc.index))}
+              ${free.map(vc => (vc.index < cols.length ? bodyCell(row, r, vc.index) : this.actCell(row, this.actCols[vc.index - cols.length]!)))}
             </div>`;
           })}
           ${this.dropAt?.kind === 'row' ? html`<div class="vsg-drop vsg-drop--row" style="top:${this.dropAt.index * ROW_H}px;width:${totalW}px"></div>` : nothing}
@@ -1213,7 +1275,7 @@ export class SheetGrid {
           <div class="vsg-fcell vsg-gutter is-frozen" style="left:0;width:${GUTTER_W}px"></div>
           ${Array.from({ length: f }, (_, c) => this.footCell(c, frozenLeft[c]!, true, c === f - 1))}
           ${spacer ? html`<div class="vsg-spacer" style="width:${spacer}px"></div>` : nothing}
-          ${free.map(vc => this.footCell(vc.index, 0, false, false))}
+          ${free.map(vc => (vc.index < cols.length ? this.footCell(vc.index, 0, false, false) : html`<div class="vsg-fcell vsg-act" style="width:${this.actCols[vc.index - cols.length]!.width}px"></div>`))}
         </div>
       </div>`;
   }
@@ -1236,6 +1298,198 @@ export class SheetGrid {
         title="${TOTAL_LABEL[kind]} — click to change" @click=${() => this.cycleTotal(col)}>
       ${text ? html`<span>${text}</span>` : html`<span class="vsg-fhint">${TOTAL_LABEL[kind] === 'No total' ? '' : TOTAL_LABEL[kind]}</span>`}
     </div>`;
+  }
+
+  // ── from Activity ───────────────────────────────────────────────────────────
+
+  private actHead(a: ActCol): TemplateResult {
+    return html`<div class="vsg-hcell vsg-act" role="columnheader" style="width:${a.width}px"
+        title="From your Activity board. Read only: it shows what happened to each row.">
+      <span class="vsg-hicon" aria-hidden="true">◎</span><span class="vsg-hname">${a.name}</span><span class="vsg-actbadge">Activity</span>
+    </div>`;
+  }
+
+  private actCell(row: DisplayRow, a: ActCol): TemplateResult {
+    const st = row.rowId ? this.activity?.rows[row.rowId] : undefined;
+    const note = row.rowId ? this.notes.get(row.rowId) : undefined;
+    const top = (href: string, label: string) => html`<a class="vsg-link vsg-actlink" href=${href} target="_top" rel="noopener">${label}</a>`;
+    let inner: TemplateResult | typeof nothing = nothing;
+    if (a.id === 'post') {
+      if (note && note.tone !== 'ok') {
+        inner = html`<span class="vsg-note vsg-note--${note.tone}" title=${note.text}>${note.text}</span>`;
+      } else if (st?.post) {
+        const s = st.post.status;
+        const color = /posted/i.test(s) ? 'green' : /fail|reject/i.test(s) ? 'red' : /approved|scheduled/i.test(s) ? 'amber' : /posting/i.test(s) ? 'blue' : 'purple';
+        inner = html`<span class="vsg-chip" data-c=${color}>${s}</span>${/waiting/i.test(s) ? top('/approvals', 'Review') : nothing}`;
+      } else if (note) {
+        inner = html`<span class="vsg-chip" data-c="purple">${note.text}</span>${/waiting/i.test(note.text) ? top('/approvals', 'Review') : nothing}`;
+      }
+    } else if (a.id === 'episode') {
+      const e = st?.episode;
+      if (e) {
+        const color = e.status === 'Done' ? 'green' : /fail|stopped/i.test(e.status) ? 'red' : e.status === 'Needs you' ? 'amber' : /making|queued|retrying/i.test(e.status) ? 'blue' : 'grey';
+        inner = html`<span class="vsg-chip" data-c=${color}>${e.episode ? `Ep ${e.episode} · ` : ''}${e.status}</span>${e.editorUrl ? top(e.editorUrl, 'Open editor') : nothing}`;
+      }
+    } else if (a.id === 'board' && row.link?.kind === 'board') {
+      inner = top(`/ai/board?board=${encodeURIComponent(row.link.boardId)}`, 'Open board');
+    }
+    return html`<div class="vsg-cell vsg-act" style="width:${a.width}px">${inner}</div>`;
+  }
+
+  private rowRef(row: DisplayRow): { boardId: string; sheetId: string; tabId: string; rowId: string } | null {
+    const boardId = ownBoardId();
+    return boardId && row.rowId ? { boardId, sheetId: this.blockId, tabId: this.tabId, rowId: row.rowId } : null;
+  }
+
+  /** Send calendar rows for approval, one draft each. Nothing posts until approved. */
+  private async sendRows(rows: DisplayRow[], again = false): Promise<void> {
+    if (!this.guard() || this.sending || !this.snap) return;
+    const cols = this.snap.columns;
+    this.sending = true;
+    this.schedule();
+    let sent = 0; let needs = 0; let failed = 0;
+    try {
+      for (const row of rows) {
+        const ref = this.rowRef(row);
+        if (!ref) continue;
+        const res = await sendRowForApproval(ref, rowValues(cols, c => this.value(row, c)), again);
+        if (res.kind === 'sent' || res.kind === 'unchanged') {
+          sent++;
+          this.notes.set(row.rowId!, { tone: 'ok', text: res.kind === 'sent' ? 'Waiting for your approval' : 'Approved, scheduled' });
+        } else if (res.kind === 'missing') {
+          needs++;
+          this.notes.set(row.rowId!, { tone: 'warn', text: `Needs ${res.missing.join(', ')}` });
+        } else if (res.kind === 'posted') {
+          if (rows.length === 1) this.pop = { kind: 'repost', rowKey: row.key };
+          else this.notes.set(row.rowId!, { tone: 'ok', text: 'Already posted' });
+        } else {
+          failed++;
+          this.notes.set(row.rowId!, { tone: 'error', text: res.message });
+        }
+        this.schedule();
+      }
+    } finally { this.sending = false; this.schedule(); }
+    const bits = [
+      sent ? `${sent} sent for your approval` : '',
+      needs ? `${needs} need${needs === 1 ? 's' : ''} more (see the Post column)` : '',
+      failed ? `${failed} could not be sent` : '',
+    ].filter(Boolean);
+    if (bits.length) toast(`${bits.join(' · ')}.${sent ? ' Nothing posts until you approve it.' : ''}`, needs || failed ? 'error' : 'info');
+    await this.poller?.refresh();
+  }
+
+  private sendableReady(): DisplayRow[] {
+    if (!this.snap) return [];
+    return readyRows(this.snap.rows, this.snap.columns, (r, c) => this.value(r, c)).filter(r => {
+      const s = this.activity?.rows[r.rowId!]?.post?.draftStatus ?? '';
+      return !s || ['rejected', 'failed', 'failed_permanent', 'error'].includes(s);
+    });
+  }
+
+  /** One empty board per row that has none, linked from the row. Only adds. */
+  private async makeEpisodeBoards(rows: DisplayRow[]): Promise<void> {
+    if (!this.guard() || !this.snap) return;
+    const todo = rows.filter(r => r.rowId && r.link?.kind !== 'board');
+    if (!todo.length) { toast('Every one of those rows already has a board.', 'info'); return; }
+    const sheetTitle = String(sheetYBlock(this.std.store, this.blockId)?.get('prop:title') ?? '');
+    let made = 0;
+    for (const row of todo) {
+      const f = episodeFields(this.snap.columns, c => this.value(row, c));
+      const title = [sheetTitle || this.snap.tab.name, f.n ? `Ep ${f.n}` : '', f.title].filter(Boolean).join(' · ');
+      const boardId = await createEpisodeBoard(title, f.logline);
+      if (!boardId) { toast('A board could not be made. Check your connection and try again.', 'error'); break; }
+      this.run(() => setRowLink(this.std.store, this.blockId, row.rowId!, { kind: 'board', boardId }));
+      made++;
+    }
+    if (made) toast(`Made ${made} episode board${made === 1 ? '' : 's'}. Each row links to its board.`, 'info');
+  }
+
+  private openSeries(): void {
+    this.pop = { kind: 'series', choices: null };
+    this.schedule();
+    void listSeries().then(choices => { if (this.pop?.kind === 'series') { this.pop = { ...this.pop, choices }; this.schedule(); } });
+  }
+
+  private seriesModal(choices: SeriesChoice[] | null, busy: boolean, error?: string): TemplateResult {
+    const tab = this.snap?.tab;
+    const sheetTitle = String(sheetYBlock(this.std.store, this.blockId)?.get('prop:title') ?? '') || tab?.name || 'Series';
+    const following = this.activity?.series ?? [];
+    const soon = new Date(Date.now() + 60 * 60 * 1000);
+    const local = new Date(soon.getTime() - soon.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+    const q = <T extends HTMLElement>(s: string) => this.host.querySelector<T>(s);
+    const submit = async () => {
+      const link = q<HTMLSelectElement>('[data-series-link]')?.value ?? '';
+      const boardId = ownBoardId();
+      if (!boardId || !tab) return;
+      const when = q<HTMLInputElement>('[data-series-when]')?.value;
+      const input = link
+        ? { boardId, sheetId: this.blockId, tabId: tab.id, loopId: link }
+        : {
+          boardId, sheetId: this.blockId, tabId: tab.id,
+          title: q<HTMLInputElement>('[data-series-title]')?.value || sheetTitle,
+          repeat: ((q<HTMLSelectElement>('[data-series-repeat]')?.value as 'daily' | 'weekly') || 'weekly'),
+          ...(when ? { when: new Date(when).toISOString() } : {}),
+        };
+      this.pop = { kind: 'series', choices, busy: true }; this.schedule();
+      const res = await runAsSeries(input);
+      if (!res.ok) { this.pop = { kind: 'series', choices, error: res.message }; this.schedule(); return; }
+      this.close();
+      toast(res.message, 'info');
+      await this.poller?.refresh();
+    };
+    const linkable = (choices ?? []).filter(c => !(c.plan?.sheetId === this.blockId && c.plan?.tabId === tab?.id));
+    return html`<div class="vsg-modal-back"><div class="vsg-modal" role="dialog" aria-label="Run as a series">
+      <h3>Run "${tab?.name ?? ''}" as a series</h3>
+      <p>Each time it runs, the agent makes one episode from the next row that has no episode yet, on its own board.
+        It asks before it spends credits and before anything is posted. It stops when the rows run out.</p>
+      ${following.length ? html`<p class="vsg-modal__note">Already following this tab: ${following.map(s => s.title).join(', ')}.</p>` : nothing}
+      <label class="vsg-field"><span>Series</span>
+        <select data-series-link>
+          <option value="">Start a new series</option>
+          ${linkable.map(c => html`<option value=${c.loopId}>Use "${c.title}"</option>`)}
+        </select>
+      </label>
+      <label class="vsg-field"><span>Name</span><input data-series-title .value=${sheetTitle} maxlength="120" @keydown=${(e: KeyboardEvent) => e.stopPropagation()} /></label>
+      <label class="vsg-field"><span>How often</span>
+        <select data-series-repeat><option value="weekly">One episode a week</option><option value="daily">One episode a day</option></select></label>
+      <label class="vsg-field"><span>First episode</span><input data-series-when type="datetime-local" .value=${local} @keydown=${(e: KeyboardEvent) => e.stopPropagation()} /></label>
+      ${error ? html`<p class="vsg-modal__error" role="alert">${error}</p>` : nothing}
+      <div class="vsg-row-actions">
+        <button type="button" class="vsg-tool" @click=${() => this.close()}>Cancel</button>
+        <button type="button" class="vsg-tool vsg-tool--primary" ?disabled=${busy || choices === null} @click=${() => { void submit(); }}>${busy ? 'Setting up…' : 'Run as a series'}</button>
+      </div>
+    </div></div>`;
+  }
+
+  private repostModal(rowKey: string): TemplateResult {
+    const row = this.rows.find(r => r.key === rowKey);
+    return html`<div class="vsg-modal-back"><div class="vsg-modal" role="alertdialog" aria-label="Post again">
+      <h3>This row was already posted</h3>
+      <p>Send it for approval again only if you want a second post.</p>
+      <div class="vsg-row-actions">
+        <button type="button" class="vsg-tool" @click=${() => this.close()}>Cancel</button>
+        <button type="button" class="vsg-tool vsg-tool--primary" @click=${() => { this.close(); if (row) void this.sendRows([row], true); }}>Send again</button>
+      </div>
+    </div></div>`;
+  }
+
+  private rowsFor(keys: string[]): DisplayRow[] {
+    return keys.map(k => this.rows.find(r => r.key === k)).filter((r): r is DisplayRow => !!r?.rowId);
+  }
+
+  private calendarTools(): TemplateResult {
+    const n = this.sendableReady().length;
+    return html`<button type="button" class="vsg-tool" ?disabled=${!n || this.sending}
+        title="Send every row with Status Ready for your approval. Nothing posts until you approve it."
+        @click=${() => { void this.sendRows(this.sendableReady()); }}>${this.sending ? 'Sending…' : n ? `Send ${n} Ready row${n === 1 ? '' : 's'} for approval` : 'No Ready rows to send'}</button>`;
+  }
+
+  private episodeTools(): TemplateResult {
+    const n = this.snap?.rows.filter(r => r.rowId && r.link?.kind !== 'board').length ?? 0;
+    const following = this.activity?.series ?? [];
+    return html`${n ? html`<button type="button" class="vsg-tool" title="One empty board per row that has none. Only adds."
+        @click=${() => { void this.makeEpisodeBoards(this.snap!.rows); }}>Make episode boards (${n})</button>` : nothing}
+      <button type="button" class="vsg-tool ${following.length ? 'is-on' : ''}" @click=${() => this.openSeries()}>${following.length ? `Series: ${following[0]!.title}` : 'Run as a series…'}</button>`;
   }
 
   private cellContent(row: DisplayRow, col: SheetColumn): TemplateResult | string | typeof nothing {
@@ -1343,6 +1597,8 @@ export class SheetGrid {
       case 'hidden': return this.hiddenPop(p.x, p.y);
       case 'delete-linked': return this.deleteLinkedModal(p.keys);
       case 'rename': return this.renamePop(p.col, p.value, p.x, p.y);
+      case 'series': return this.seriesModal(p.choices, !!p.busy, p.error);
+      case 'repost': return this.repostModal(p.rowKey);
     }
   }
 
@@ -1579,7 +1835,11 @@ export class SheetGrid {
         <button type="button" role="menuitem" @click=${() => { this.run(() => addRows(this.std.store, this.blockId, this.tabId, 1, { afterKey: row?.rowId ?? null })); this.close(); }} ?disabled=${!row?.rowId || !!this.view.sort}>Insert row below</button>
         ${this.opts.onMakeCards && (planned.length || !shotsTab) ? html`<button type="button" role="menuitem" @click=${() => { this.opts.onMakeCards?.(keys); this.close(); }}>
           Make ${n === 1 ? 'a card' : `${n} cards`} from ${n === 1 ? 'this row' : 'these rows'}<em>Adds shot cards. Never removes any.</em></button>` : nothing}
-        ${row?.link && !shotsTab ? html`<button type="button" role="menuitem" @click=${() => { this.run(() => setRowLink(this.std.store, this.blockId, row.rowId!, null)); this.close(); }}>Unlink from its card</button>` : nothing}
+        ${this.kind === 'calendar' ? html`<button type="button" role="menuitem" @click=${() => { const rs = this.rowsFor(keys); this.close(); void this.sendRows(rs); }}>
+          Send ${n === 1 ? 'this row' : `${n} rows`} for approval<em>Makes a post you approve on its card. Nothing posts before that.</em></button>` : nothing}
+        ${this.kind === 'episodes' ? html`<button type="button" role="menuitem" @click=${() => { const rs = this.rowsFor(keys); this.close(); void this.makeEpisodeBoards(rs); }}>
+          Make ${n === 1 ? 'an episode board' : `${n} episode boards`}<em>An empty board for each row that has none. Only adds.</em></button>` : nothing}
+        ${row?.link?.kind === 'shot' && !shotsTab ? html`<button type="button" role="menuitem" @click=${() => { this.run(() => setRowLink(this.std.store, this.blockId, row.rowId!, null)); this.close(); }}>Unlink from its card</button>` : nothing}
         <hr />
         <button type="button" role="menuitem" class="is-danger" @click=${() => {
           if (linked.length && shotsTab) { this.pop = { kind: 'delete-linked', keys }; this.schedule(); return; }

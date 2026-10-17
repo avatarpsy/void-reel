@@ -22,7 +22,7 @@ export async function uploadSharedMedia(projectId: string, blob: Blob): Promise<
   return result.url;
 }
 export type SharedRole = 'owner' | 'editor' | 'viewer';
-export interface SharedMetadata { userId?: string | null; id: string; kind: 'image' | 'video' | 'board'; title: string; role: SharedRole; revision: number; epoch: number }
+export interface SharedMetadata { userId?: string | null; id: string; kind: 'image' | 'video' | 'board'; title: string; role: SharedRole; revision: number; epoch: number; /** The owner's own id for the source (owner only). */ sourceId?: string }
 export function sharedNotice(state: string, message: string) {
   document.querySelectorAll<HTMLElement>('[data-collaboration-status]').forEach(el => { el.textContent = message; el.title = message; });
   window.parent.postMessage({ type: 'voidspace:collaboration-status', state, message }, location.origin);

@@ -59,7 +59,7 @@ export function computeTotal(col: SheetColumn, values: CellValue[], kind: TotalK
       return [...counts].sort((a, b) => {
         const ia = order.indexOf(a[0]); const ib = order.indexOf(b[0]);
         return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib) || b[1] - a[1];
-      }).map(([k, n]) => `${k} ${n}`).join(' · ');
+      }).map(([k, n]) => `${n} ${k}`).join(' · ');
     }
   }
 }

@@ -60,6 +60,8 @@ export function templateTab(id: TemplateId, opts: { rows?: number } = {}): { tit
         title: 'Season plan',
         tab: {
           name: 'Season 1',
+          // One row per episode: what a series follows (SHEETS_PLAN.md).
+          binding: { kind: 'episodes' },
           columns: [
             { name: 'Episode', type: 'number', width: 90 },
             { name: 'Title', type: 'text', width: 200 },

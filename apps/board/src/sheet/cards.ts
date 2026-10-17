@@ -16,6 +16,7 @@ import { type CellValue, type DisplayRow, type SheetColumn, MULTI_SEPARATOR, cel
 import { SheetError, addRows, readTab, setCells, sheetYBlock, valueOf, type TabSnapshot } from './ops';
 import { prettyDate } from './format';
 import { toast } from '../ui/toast';
+import { type SheetActivity, ActivityPoller, ownBoardId, rowValues, sendRowForApproval, tabKind } from './activity';
 
 export class SheetCards {
   private host: HTMLElement;
@@ -30,6 +31,10 @@ export class SheetCards {
   private frame = 0;
   private cleanup: Array<() => void> = [];
   private onTab: (tabId: string) => void;
+  private activity: SheetActivity | null = null;
+  private poller: ActivityPoller;
+  private sending = '';
+  private notes = new Map<string, string>();
 
   constructor(host: HTMLElement, opts: { std: BlockStdScope; blockId: string; tabId: string; readonly: boolean; onTab: (tabId: string) => void }) {
     this.host = host; this.std = opts.std; this.blockId = opts.blockId; this.tabId = opts.tabId; this.readonly = opts.readonly; this.onTab = opts.onTab;
@@ -40,6 +45,8 @@ export class SheetCards {
     this.cleanup.push(() => this.y?.unobserveDeep(repaint));
     const sub = this.std.store.slots.blockUpdated.subscribe(e => { if ((e as { flavour?: string }).flavour === 'voidspace:shot') repaint(); });
     this.cleanup.push(() => sub.unsubscribe());
+    this.poller = new ActivityPoller(d => { this.activity = d; this.schedule(); });
+    this.cleanup.push(() => this.poller.destroy());
     this.renderNow();
   }
 
@@ -75,7 +82,37 @@ export class SheetCards {
 
   private renderNow(): void {
     this.snap = readTab(this.std, this.blockId, this.tabId);
+    const kind = this.snap && ownBoardId() ? tabKind(this.snap.tab, this.snap.columns) : null;
+    this.poller.setTarget(this.blockId, kind ? this.snap!.tab : null);
     render(this.view(), this.host);
+  }
+
+  /** The Activity line for a row: its post or its episode, in plain words. */
+  private status(r: DisplayRow, links = true): TemplateResult | typeof nothing {
+    const st = r.rowId ? this.activity?.rows[r.rowId] : undefined;
+    const note = r.rowId ? this.notes.get(r.rowId) : undefined;
+    const author = r.rowId ? this.activity?.authors[r.rowId] : undefined;
+    const bits: TemplateResult[] = [];
+    if (note) bits.push(html`<span>${note}</span>`);
+    else if (st?.post) bits.push(html`<span class="vsg-chip" data-c="purple">${st.post.status}</span>${links && /waiting/i.test(st.post.status) ? html`<a class="vsg-link" href="/approvals" target="_top">Review</a>` : nothing}`);
+    if (st?.episode) bits.push(html`<span class="vsg-chip" data-c="blue">${st.episode.episode ? `Ep ${st.episode.episode} · ` : ''}${st.episode.status}</span>${links && st.episode.editorUrl ? html`<a class="vsg-link" href=${st.episode.editorUrl} target="_top">Open editor</a>` : nothing}`);
+    if (author) bits.push(html`<span class="vsc-card__author">Edited by ${author.name}. Episodes from it ask before spending.</span>`);
+    return bits.length ? html`<span class="vsc-card__status">${bits}</span>` : nothing;
+  }
+
+  private async send(row: DisplayRow): Promise<void> {
+    const boardId = ownBoardId();
+    if (!boardId || !row.rowId || !this.snap || this.sending) return;
+    this.sending = row.rowId; this.schedule();
+    const res = await sendRowForApproval({ boardId, sheetId: this.blockId, tabId: this.tabId, rowId: row.rowId },
+      rowValues(this.snap.columns, c => this.value(row, c)));
+    this.sending = '';
+    if (res.kind === 'sent' || res.kind === 'unchanged') this.notes.set(row.rowId, 'Waiting for your approval');
+    else if (res.kind === 'missing') this.notes.set(row.rowId, `Needs ${res.missing.join(', ')}`);
+    else this.notes.set(row.rowId, res.message);
+    toast(res.message, res.kind === 'sent' || res.kind === 'unchanged' ? 'info' : 'error');
+    this.schedule();
+    await this.poller.refresh();
   }
 
   private view(): TemplateResult {
@@ -106,6 +143,7 @@ export class SheetCards {
     return html`<button type="button" class="vsc-card" @click=${() => { this.openKey = r.key; this.schedule(); }}>
       <span class="vsc-card__title"><span class="vsc-card__n">${i + 1}</span>${title || html`<span style="color:var(--vs-text-mute);font-weight:500">Untitled</span>`}${r.removed ? ' (shot removed)' : ''}</span>
       ${fields.map(f => html`<span class="vsc-card__field"><b>${f.c.name}</b><span>${this.show(f.c, f.v)}</span></span>`)}
+      ${this.status(r, false)}
     </button>`;
   }
 
@@ -170,6 +208,11 @@ export class SheetCards {
         <div class="vsc-sheet__head"><b>${ro ? 'Row' : 'Edit row'}</b><button type="button" class="vsg-tool" @click=${close}>Done</button></div>
         ${row.removed ? html`<p class="vsc-note">This shot was removed from the board.</p>` : nothing}
         ${ro && !row.removed ? html`<p class="vsc-note">This board is open to view only.</p>` : nothing}
+        ${this.status(row)}
+        ${!ro && row.rowId && this.snap && ownBoardId() && tabKind(this.snap.tab, this.snap.columns) === 'calendar'
+          ? html`<p class="vsc-send"><button type="button" class="vsg-tool vsg-tool--primary" ?disabled=${!!this.sending} @click=${() => { void this.send(row); }}>
+              ${this.sending === row.rowId ? 'Sending…' : 'Send for approval'}</button></p>`
+          : nothing}
         ${cols.map(field)}
       </div>
     </div>`;

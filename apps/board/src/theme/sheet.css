@@ -439,7 +439,7 @@
 .vsc-card__n { color: var(--vs-text-mute); font-weight: 500; font-size: 12px; font-variant-numeric: tabular-nums; }
 .vsc-card__field { display: flex; gap: 10px; font-size: 13px; min-width: 0; }
 .vsc-card__field b { flex: none; width: 34%; font-weight: 500; color: var(--vs-text-mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.vsc-card__field > span:has(.vsg-chip) { display: flex !important; flex-wrap: wrap; gap: 4px; }
+.vsc-card__field > span:has(.vsg-chip) { display: flex !important; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px; -webkit-line-clamp: unset; }
 .vsc-card__field span { min-width: 0; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .vsc-empty { text-align: center; padding: 48px 16px; color: var(--vs-text-dim); display: flex; flex-direction: column; gap: 8px; align-items: center; }
 .vsc-empty b { color: var(--vs-text); font-size: 16px; }
@@ -510,3 +510,36 @@ voidspace-sheet { display: block; width: 100%; height: 100%; }
   .vs-sheet-main { padding: 0; }
   .vs-sheet-tabs { padding: 6px 12px 10px; }
 }
+
+/* ── From Activity (sheet/activity.ts): read-only, so drawn quieter ──────── */
+.vsg-hcell.vsg-act { background: color-mix(in srgb, var(--vsg-head), var(--vsg-accent) 6%); }
+.vsg-actbadge {
+  flex: none; font-size: 10px; font-weight: 600; letter-spacing: 0.02em; padding: 2px 6px; border-radius: 99px;
+  background: var(--vsg-range); color: var(--vsg-accent);
+}
+.vsg-cell.vsg-act { background: color-mix(in srgb, var(--vsg-bg), var(--vsg-accent) 3%); cursor: default; gap: 8px; }
+.vsg-fcell.vsg-act { cursor: default; }
+.vsg-actlink { font-size: 12px; white-space: nowrap; }
+.vsg-note { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vsg-note--warn { color: var(--vs-warn); }
+.vsg-note--error { color: #e5484d; }
+.vsg-author {
+  position: absolute; right: 3px; top: 50%; transform: translateY(-50%);
+  width: 16px; height: 16px; border-radius: 50%; display: grid; place-items: center;
+  font-size: 8px; font-weight: 700; background: var(--chip-amber); color: var(--chip-amber-ink); cursor: help;
+}
+.vsg-rowwarn {
+  position: absolute; left: 3px; top: 50%; transform: translateY(-50%);
+  width: 14px; height: 14px; border-radius: 50%; display: grid; place-items: center;
+  font-size: 10px; font-weight: 800; background: var(--vs-warn); color: #fff; cursor: help;
+}
+.vsg-modal__note { font-size: 12.5px !important; color: var(--vs-text-mute) !important; margin-top: -6px !important; }
+.vsg-modal__error { color: #e5484d !important; }
+.vsg-field select {
+  height: 32px; box-sizing: border-box; padding: 0 9px; border: 1px solid var(--vsg-line-strong); border-radius: 7px;
+  background: var(--vsg-bg); color: var(--vs-text); font: inherit; font-size: 13px;
+}
+.vsg-modal .vsg-field { padding: 4px 0; }
+.vsc-card__status { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12.5px; }
+.vsc-card__author { font-size: 12px; color: var(--vs-warn); }
+.vsc-send { margin: 4px 0 12px; }

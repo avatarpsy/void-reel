@@ -227,6 +227,12 @@ async function boot(): Promise<void> {
     const readOnly = (cloud as ReturnType<typeof installSharedSync>).metadata?.role === 'viewer';
 
     board.store.readonly = readOnly;
+    // The owner of a shared board still owns its season plan and calendar:
+    // the sheet's Activity columns and actions talk about their own board.
+    {
+      const meta = (cloud as ReturnType<typeof installSharedSync>).metadata;
+      if (meta?.role === 'owner' && meta.sourceId) void import('./sheet/activity').then(m => m.setSharedOwnerBoard(meta.sourceId!));
+    }
     window.addEventListener('collaboration-role', event => {
       const nextReadOnly = (event as CustomEvent).detail === 'viewer';
       // A viewer has no editing chrome or draft persistence. Mount those only
