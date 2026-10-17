@@ -22,6 +22,9 @@ import './theme/screenplay-focus.css';
 // AFTER the screenplay's, and dependent on it: the overlay shell and the whole
 // print unwrapping are shared, and only the typography differs.
 import './theme/document-view.css';
+// Sheets: the grid, the phone cards and the canvas card. Global for the same
+// reason as the screenplay page — culled blocks lose their Lit styles.
+import './theme/sheet.css';
 
 import { IndexeddbPersistence } from 'y-indexeddb';
 import * as Y from 'yjs';
@@ -56,6 +59,9 @@ import { installPen } from './ui/pen';
 import { installSpine } from './ui/spine';
 import { installToasts, toast } from './ui/toast';
 import { installViewportAnchor, installPaneShift } from './ui/viewport';
+import { installSheetFocus, type SheetFocus } from './sheet/focus';
+import { setSheetPacer, SheetError } from './sheet/ops';
+import { installSheetDrop } from './sheet/drop';
 
 /** Replace the boot overlay with a message the user can act on. Reachable before
  *  any chrome exists, so it writes into the overlay rather than a toast. */
@@ -232,6 +238,10 @@ async function boot(): Promise<void> {
     if (readOnly) {
       document.getElementById('board-boot')?.setAttribute('hidden', '');
       installSpacePan(board, root); installViewportAnchor(root); installFrameTitleScale(board.std);
+      // A viewer can still open a sheet full size — read only.
+      installToasts(root);
+      const viewerSheets = installSheetFocus(board, root, { makeCards: () => {} });
+      openDeepLink(board, { sheets: viewerSheets });
       return;
     }
   }
@@ -283,7 +293,16 @@ async function boot(): Promise<void> {
   let documentView: ReturnType<typeof installDocumentView> | null = null;
   let documentFocus: ReturnType<typeof installDocumentFocus> | null = null;
 
+  /**
+   * A shared board saves through /changes, which refuses anything over 700 KB
+   * (and a 413 stops syncing for good) — so big sheet writes go in chunks with a
+   * save after each. See `setSheetPacer` in sheet/ops.ts.
+   */
+  setSheetPacer({ shared: !!sharedId, flush: () => cloud.flush() });
+  let sheets: SheetFocus | null = null;
+
   installBoardRpc(board, {
+    sheets: () => sheets,
     flushCloud: () => cloud.flush(),
     screenplay: () => screenplay,
     document: () => documentView,
@@ -392,11 +411,26 @@ async function boot(): Promise<void> {
   // does not replace the canvas — the note being written IS the document, so
   // this frames the real editor rather than rebuilding one.
   documentFocus = installDocumentFocus(board, chromeHost);
+  // A sheet at full size: the grid (or row cards on a phone), its tabs, Download.
+  sheets = installSheetFocus(board, chromeHost, {
+    makeCards: (blockId, tabId, rowKeys) => {
+      void import('./sheet/to-cards').then(({ makeCardsFromRows }) => {
+        try {
+          const r = makeCardsFromRows(board.std, board.surfaceId, blockId, tabId, rowKeys);
+          toast(r.note, 'info');
+        } catch (e) {
+          toast(e instanceof SheetError ? e.message : 'Those cards could not be made.', 'error');
+        }
+      });
+    },
+  });
   // Dropping a .md or .txt makes a DOCUMENT rather than a file card. Only
   // the formats that need no parser — see import-drop.ts.
   // Not stored: this module has no teardown path — the board lives for the
   // life of the page, which is why nothing else installed here is disposed
   // either. A disposer kept in a variable nobody calls is worse than none.
+  // Before the document drop: a dropped .xlsx/.csv/.tsv becomes a SHEET.
+  installSheetDrop(board, root, id => sheets?.open(id));
   installDocumentDrop(board, root);
   // Which box is what: a PDF/DOCX/TEXT/SCREENPLAY tag on each document's
   // corner. See document/tags.ts for why it is an attribute and not an overlay.
@@ -461,6 +495,9 @@ async function boot(): Promise<void> {
     window.parent?.postMessage({ type: 'voidspace:board-hotkey', key: 'toggle-voice' }, '*');
   }, true);
 
+  // `&open=<blockId>` — a shared link that lands in a sheet, document or script.
+  openDeepLink(board, { sheets, screenplay });
+
   // Handshake: the parent's bridge waits for this before dispatching any RPC,
   // so a tool call can never land on a half-mounted editor.
   window.parent?.postMessage(
@@ -495,6 +532,26 @@ async function boot(): Promise<void> {
     meta: boardMeta,
     docBytes: () => Y.encodeStateAsUpdate(ydoc).byteLength,
     cloud,
+  });
+}
+
+/**
+ * `&open=<blockId>` (and `&tab=<tabId>` for a sheet) opens that block full size
+ * once the board is on screen: a sheet's focus mode, the screenplay's, or a
+ * document's. Unknown ids are ignored — a stale link still opens the board.
+ */
+function openDeepLink(
+  board: MountedBoard,
+  modes: { sheets: SheetFocus | null; screenplay?: { open(): void } | null },
+): void {
+  const id = params.get('open');
+  if (!id) return;
+  requestAnimationFrame(() => {
+    const block = board.store.getBlock(id);
+    if (!block) return;
+    if (block.flavour === 'voidspace:sheet') modes.sheets?.open(id, params.get('tab') ?? undefined);
+    else if (block.flavour === 'voidspace:screenplay') modes.screenplay?.open();
+    else if (block.flavour === 'affine:note') void import('./document/toolbar').then(m => m.requestOpenDocument(id));
   });
 }
 

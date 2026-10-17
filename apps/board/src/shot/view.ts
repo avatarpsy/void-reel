@@ -28,6 +28,8 @@ import { ScreenplayBlockComponent } from './screenplay-block';
 import { DraftBlockSchemaExtension } from './draft-block';
 import { DraftBlockComponent } from './draft-card';
 import { ShotBlockComponent } from './shot-block';
+import { SheetBlockSchemaExtension } from '../sheet/model';
+import { SheetBlockComponent } from '../sheet/block';
 
 /**
  * TEACH THE SURFACE WHICH OF OUR BLOCKS MAY LIVE ON IT.
@@ -64,6 +66,8 @@ const SurfaceWithShots: BlockSchemaType = {
       'voidspace:screenplay',
       // The scratch pad: a designed block being previewed before it is saved.
       'voidspace:blockdraft',
+      // A spreadsheet: its cells live in this block's own Y.Map (sheet/model.ts).
+      'voidspace:sheet',
     ],
   },
 };
@@ -79,6 +83,7 @@ export const shotStoreExtensions: ExtensionType[] = [
   ShotBlockSchemaExtension,
   ScreenplayBlockSchemaExtension,
   DraftBlockSchemaExtension,
+  SheetBlockSchemaExtension,
   // AFTER the surface's own registration — see above.
   SurfaceWithShotsExtension,
 ];
@@ -97,6 +102,9 @@ export class ShotViewExtension extends ViewExtensionProvider {
     if (!customElements.get('voidspace-blockdraft')) {
       customElements.define('voidspace-blockdraft', DraftBlockComponent);
     }
+    if (!customElements.get('voidspace-sheet')) {
+      customElements.define('voidspace-sheet', SheetBlockComponent);
+    }
   }
 
   override setup(context: ViewExtensionContext): void {
@@ -108,5 +116,6 @@ export class ShotViewExtension extends ViewExtensionProvider {
     context.register(
       BlockViewExtension('voidspace:blockdraft', literal`voidspace-blockdraft`),
     );
+    context.register(BlockViewExtension('voidspace:sheet', literal`voidspace-sheet`));
   }
 }

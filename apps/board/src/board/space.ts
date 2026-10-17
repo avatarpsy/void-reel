@@ -399,6 +399,8 @@ export function oversizeIds(std: BlockStdScope, shotW: number, shotH: number): s
   for (const model of gfx.gfxElements as GfxModel[]) {
     const flavour = (model as unknown as { flavour?: string }).flavour;
     if (flavour && OWNED_FLAVOURS.has(flavour)) continue;
+    // A sheet's card is a fixed preview size by design (`metrics.ts`), not mess.
+    if (flavour === 'voidspace:sheet') continue;
     if (isLayoutInert(model)) continue;
     const box = boundsOf(model);
     if (!box) continue;

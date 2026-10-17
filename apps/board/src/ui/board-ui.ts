@@ -95,6 +95,14 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
           <button type="button" class="vs-board-btn" data-act="first-shot">
             ${ICONS.plus}<span>Start a storyboard</span>
           </button>
+          <button type="button" class="vs-board-btn" data-act="first-sheet">
+            ${ICONS.list}<span>Plan in a sheet</span>
+          </button>
+        </p>
+        <p class="vs-board-guide__lead" data-sheet-choices hidden>
+          <button type="button" class="vs-board-btn" data-sheet-template="content-calendar"><span>Content calendar</span></button>
+          <button type="button" class="vs-board-btn" data-sheet-template="season-plan"><span>Season plan</span></button>
+          <button type="button" class="vs-board-btn" data-sheet-template="blank"><span>Blank sheet</span></button>
         </p>
       </div>
     </div>`;
@@ -215,7 +223,15 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
     -->
     <button type="button" class="vs-board-btn" data-act="open-note-doc"
       title="Open it full screen — rename, write and export it there" hidden>
-      ${ICONS.expand}<span>Open in focus</span>
+      ${ICONS.expand}<span data-open-label>Open in focus</span>
+    </button>
+    <!--
+      A TABLE IN A DOCUMENT CAN BECOME A SHEET: sorting, filters, types,
+      totals, Excel export. Shown only when the selected document has one.
+    -->
+    <button type="button" class="vs-board-btn" data-act="table-to-sheet"
+      title="Make a sheet from the table in this document. The document is not changed." hidden>
+      ${ICONS.list}<span>Make a sheet from its table</span>
     </button>
     <div class="vs-board-sel" data-sel hidden></div>`;
 
@@ -384,11 +400,33 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
   });
 
   const onClick = (e: MouseEvent) => {
+    const tpl = (e.target as HTMLElement).closest<HTMLElement>('[data-sheet-template]')?.dataset.sheetTemplate;
+    if (tpl) {
+      void (async () => {
+        try {
+          const [{ templateTab }, { createSheetPaced }, { requestOpenSheet }] = await Promise.all([
+            import('../sheet/templates'), import('../sheet/ops'), import('../sheet/block'),
+          ]);
+          const t = templateTab(tpl as never);
+          const { blockId } = await createSheetPaced(board.std, board.surfaceId, { title: t.title, tabs: [t.tab], at: { x: 0, y: 0 } });
+          requestOpenSheet(container, blockId);
+        } catch (err) {
+          console.error('[board-ui] new sheet failed:', err);
+        }
+      })();
+      return;
+    }
     const act = (e.target as HTMLElement).closest<HTMLElement>('[data-act]')?.dataset.act;
     if (!act) return;
     switch (act) {
       // Only the empty state raises this now — the toolbar button is gone.
       case 'first-shot': addShot(); break;
+      // A sheet: which kind is one more click, right here.
+      case 'first-sheet': {
+        const choices = empty.querySelector<HTMLElement>('[data-sheet-choices]');
+        if (choices) choices.hidden = !choices.hidden;
+        break;
+      }
       case 'undo': board.store.undo(); break;
       case 'share': window.parent.postMessage({ type: 'voidspace:share-project' }, location.origin); break;
       case 'history': window.parent.postMessage({ type: 'voidspace:collaboration-history-open' }, location.origin); break;
@@ -433,8 +471,30 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
       // Same arrangement: the bar raises the intent, the overlay owns itself.
       // A screenplay and a document open the same way from the same button;
       // only the overlay that answers differs.
+      case 'table-to-sheet': {
+        const noteId = tableBtn.dataset.noteId ?? '';
+        void (async () => {
+          try {
+            const [{ documentTables, readDocumentTable }, { tableToTab }, { createSheetPaced }, { requestOpenSheet }, { listDocuments }] = await Promise.all([
+              import('../sheet/rpc'), import('../sheet/import'), import('../sheet/ops'), import('../sheet/block'), import('../document/sections'),
+            ]);
+            const tables = documentTables(board, noteId);
+            if (!tables.length) return;
+            const docTitle = listDocuments(board).find(d => d.noteId === noteId)?.title || 'Table';
+            const tabs = tables.map((t, i) => tableToTab(tables.length > 1 ? `Table ${i + 1}` : 'Table', readDocumentTable(board, t.tableId) ?? []));
+            const { blockId } = await createSheetPaced(board.std, board.surfaceId, { title: docTitle, tabs });
+            requestOpenSheet(container, blockId);
+          } catch (err) {
+            const { toast } = await import('./toast');
+            toast((err as Error)?.message ?? 'That table could not be made into a sheet.', 'error');
+          }
+        })();
+        break;
+      }
       case 'open-note-doc':
-        if (openDocBtn.dataset.kind === 'screenplay') {
+        if (openDocBtn.dataset.kind === 'sheet') {
+          container.dispatchEvent(new CustomEvent('voidspace-open-sheet', { bubbles: true, detail: { blockId: openDocBtn.dataset.noteId } }));
+        } else if (openDocBtn.dataset.kind === 'screenplay') {
           container.dispatchEvent(new CustomEvent('voidspace-open-screenplay', { bubbles: true }));
         } else {
           requestOpenDocument(openDocBtn.dataset.noteId ?? '');
@@ -533,6 +593,8 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
    */
   const selEl = bar.querySelector<HTMLElement>('[data-sel]')!;
   const openDocBtn = bar.querySelector<HTMLElement>('[data-act="open-note-doc"]')!;
+  const openLabel = openDocBtn.querySelector<HTMLElement>('[data-open-label]')!;
+  const tableBtn = bar.querySelector<HTMLElement>('[data-act="table-to-sheet"]')!;
   /**
    * Which notes are documents, recomputed per selection change.
    *
@@ -578,10 +640,20 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
      * is gone; selecting either offers the same action in the same place.
      */
     const soleScript = soleFlavour === 'voidspace:screenplay';
-    openDocBtn.hidden = !soleNote && !soleScript;
-    openDocBtn.dataset.noteId = soleNote ?? '';
-    openDocBtn.dataset.kind = soleScript ? 'screenplay' : 'note';
-    docSelected = !!soleNote || soleScript;
+    const soleSheet = soleFlavour === 'voidspace:sheet' ? ids[0]! : null;
+    openDocBtn.hidden = !soleNote && !soleScript && !soleSheet;
+    openDocBtn.dataset.noteId = soleNote ?? soleSheet ?? '';
+    openDocBtn.dataset.kind = soleSheet ? 'sheet' : soleScript ? 'screenplay' : 'note';
+    openLabel.textContent = soleSheet ? 'Open sheet' : 'Open in focus';
+    // A document holding a table can become a sheet.
+    const hasTable = !!soleNote && board.store.getBlocksByFlavour('affine:table').some(t => {
+      let p = board.store.getParent(t.id);
+      while (p && p.flavour !== 'affine:note') p = board.store.getParent(p.id);
+      return p?.id === soleNote;
+    });
+    tableBtn.hidden = !hasTable;
+    tableBtn.dataset.noteId = soleNote ?? '';
+    docSelected = !!soleNote || soleScript || !!soleSheet;
     applyPin();
 
     const media = ids.filter(id => {

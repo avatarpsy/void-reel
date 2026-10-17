@@ -35,6 +35,7 @@ import { listDocuments, outline, readSections } from '../document/sections';
 import type { MountedBoard } from '../blocksuite/editor';
 import type { DocumentView } from '../ui/document-view';
 import type { DocumentFocus } from '../ui/document-focus';
+import { sheetCatalogue, sheetHandlers } from '../sheet/rpc';
 import { saveDocument, uploadDocument } from '../board/document-export';
 import { placeMarkdownDocument } from '../document/note-io';
 import { placeAsset } from '../board/asset-media';
@@ -245,6 +246,9 @@ export const READ_ONLY_RPC: ReadonlySet<string> = new Set([
   'voidspace:board-fit',
   'voidspace:board-lock',
   'voidspace:board-library-changed',
+  // Sheets: reading one, and writing a file of one, change nothing on the board.
+  'voidspace:board-sheet-read',
+  'voidspace:board-sheet-export',
 ]);
 
 function checkWritable(board: MountedBoard): { ok: true } | ReturnType<typeof fail> {
@@ -450,6 +454,11 @@ function fullDigest(board: MountedBoard, shotIds?: readonly string[]) {
      * documents the same per-turn cost as a board of short ones.
      */
     documents: listDocuments(board).slice(0, 40),
+    /**
+     * THE SHEETS ON THIS BOARD, one line each (tabs and row counts, never the
+     * cells — `sheet_read` reads those, bounded).
+     */
+    sheets: sheetCatalogue(board).slice(0, 20),
     /**
      * THE SCRIPT AS A MAP, NOT AS A DOCUMENT.
      *
@@ -727,6 +736,8 @@ export interface BoardRpcOptions {
    * document" and they are not interchangeable.
    */
   documentFocus?: () => DocumentFocus | null;
+  /** The sheet focus overlay. Lazy, like the others. */
+  sheets?: () => import('../sheet/focus').SheetFocus | null;
 }
 
 export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {}): () => void {
@@ -861,6 +872,8 @@ export function installBoardRpc(board: MountedBoard, opts: BoardRpcOptions = {})
       : fail('not_found', `No shot with id ${id}. Call board_read for the current ids.`);
 
   const handlers: Record<string, (args: Record<string, unknown>) => unknown | Promise<unknown>> = {
+    // The sheet tools — see sheet/rpc.ts.
+    ...sheetHandlers({ board, rev: () => rev, sheets: () => opts.sheets?.() ?? null }),
     /** Read the board. Cheap, no side effects — the agent may call it freely. */
     'voidspace:board-read': args => digest(board, {
       // No `detail` means the page asking for its own state — whole, as before.

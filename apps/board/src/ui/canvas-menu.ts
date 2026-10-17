@@ -43,6 +43,8 @@ const ICONS: Record<string, string> = {
   // A page with lines on it — the same glyph the document chrome uses, so the
   // thing you make here and the thing you open later look like each other.
   doc: '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 1.8h5L12.2 5v9.2H4z"/><path d="M9 1.8V5h3.2"/><path d="M6 8.4h4M6 10.8h3"/></svg>',
+  // A grid: the sheet's own glyph.
+  sheet: '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="1.8" y="2.6" width="12.4" height="10.8" rx="1.6"/><path d="M1.8 6.2h12.4M1.8 9.8h12.4M6 2.6v10.8"/></svg>',
 };
 
 /**
@@ -97,6 +99,8 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
   container.append(menu);
 
   let refIds: string[] = [];
+  /** Where the right-click landed, in board units — a new sheet goes there. */
+  let clickAt: { x: number; y: number } | null = null;
 
   /**
    * THE LAST SELECTION OF TWO OR MORE, remembered when the user built it.
@@ -256,6 +260,11 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
         <span class="vs-canvas-menu__icon">${ICONS.doc}</span>
         <span class="vs-canvas-menu__label">Document</span>
         <span class="vs-canvas-menu__hint">write a page — export as PDF or Word</span>
+      </button>
+      <button type="button" class="vs-canvas-menu__item" data-make="sheet">
+        <span class="vs-canvas-menu__icon">${ICONS.sheet}</span>
+        <span class="vs-canvas-menu__label">Sheet</span>
+        <span class="vs-canvas-menu__hint">a table — posts, a season, a shot list</span>
       </button>`;
 
     return head + rows + note + writing;
@@ -265,7 +274,7 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
     // Our own chrome — the asset panel, the toolbar, the inspector — keeps the
     // browser's menu. This is the CANVAS gesture only.
     const target = e.target as HTMLElement | null;
-    if (target?.closest('.vs-assets, .vs-board-bar, .vs-media-inspector, .vs-canvas-menu')) return;
+    if (target?.closest('.vs-assets, .vs-board-bar, .vs-media-inspector, .vs-canvas-menu, .vs-focus')) return;
     // Inside a note or a card title the user is editing text, and a right-click
     // there wants spellcheck and paste, not a generation menu.
     if (target?.isContentEditable || target?.closest('input, textarea, [contenteditable="true"]')) return;
@@ -301,6 +310,11 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
     const clickedId = onCanvas.has(hitId) ? hitId : '';
     refIds = chooseReferences(remembered, clickedId, selectedImages(board));
     menu.innerHTML = render(refIds.length);
+    try {
+      const vp = (document.querySelector('affine-edgeless-root') as unknown as { gfx?: { viewport?: { toModelCoord?(x: number, y: number): [number, number] } } } | null)?.gfx?.viewport;
+      const p = vp?.toModelCoord?.(e.clientX, e.clientY);
+      clickAt = p ? { x: Math.round(p[0]), y: Math.round(p[1]) } : null;
+    } catch { clickAt = null; }
 
     // Positioned against the viewport and nudged back inside it, so a
     // right-click near the bottom-right corner does not open a menu that is
@@ -346,6 +360,38 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
           requestOpenDocument(noteId, { focusName: true });
         } catch (err) {
           console.error('[canvas-menu] new document failed:', err);
+        }
+      })();
+      return;
+    }
+
+    if (target.closest<HTMLElement>('[data-make="sheet"]')) {
+      // One more choice, in place: which kind of sheet.
+      void import('../sheet/templates').then(({ TEMPLATES }) => {
+        menu.innerHTML = '<div class="vs-canvas-menu__head">New sheet</div>' + TEMPLATES.map(t => `
+          <button type="button" class="vs-canvas-menu__item" data-sheet-template="${t.id}">
+            <span class="vs-canvas-menu__icon">${ICONS.sheet}</span>
+            <span class="vs-canvas-menu__label">${t.label}</span>
+            <span class="vs-canvas-menu__hint">${t.hint}</span>
+          </button>`).join('');
+      });
+      return;
+    }
+    const tpl = target.closest<HTMLElement>('[data-sheet-template]')?.dataset.sheetTemplate;
+    if (tpl) {
+      const at = clickAt ?? undefined;
+      close();
+      void (async () => {
+        try {
+          const [{ templateTab }, { createSheetPaced }, { requestOpenSheet }] = await Promise.all([
+            import('../sheet/templates'), import('../sheet/ops'), import('../sheet/block'),
+          ]);
+          const t = templateTab(tpl as never);
+          const { blockId } = await createSheetPaced(board.std, board.surfaceId, { title: t.title, tabs: [t.tab], at });
+          requestOpenSheet(container, blockId);
+        } catch (err) {
+          const { toast } = await import('./toast');
+          toast((err as Error)?.message ?? 'The sheet could not be made.', 'error');
         }
       })();
       return;

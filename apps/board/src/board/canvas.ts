@@ -58,6 +58,7 @@ import type { BoardWorkspace } from '../blocksuite/workspace';
  * the agent the board would resolve overlaps for it. Imports go one way:
  * `canvas.ts` → `space.ts`, never back.
  */
+import { readSheet } from '../sheet/sheet-data';
 import {
   type Box, OWNED_FLAVOURS, PUSH_GAP, bboxOf, boundsOf, collisionCount, isLayoutInert,
   moveDown, overlaps, oversizeIds, ownedBand, thinkingOrigin,
@@ -357,6 +358,7 @@ function kindOf(model: { flavour?: string; type?: string }): string {
       'voidspace:shot': 'shot',
       'voidspace:screenplay': 'screenplay',
       'voidspace:blockdraft': 'block-draft',
+      'voidspace:sheet': 'sheet',
     } as Record<string, string>)[flavour] ?? flavour;
   }
   return model.type ?? 'unknown';
@@ -582,6 +584,8 @@ export interface CanvasDigest {
   frames: string[];
   /** The opening words of each text-bearing element, in reading order. */
   notes: string[];
+  /** One line per sheet — "Sheet 'Season 1' · id … · 3 tabs · 24 rows · 7 linked". Never the cells. */
+  sheets?: string[];
   /**
    * IS THE BOARD A MESS? Two numbers, and they are the agent's only way to know.
    *
@@ -609,6 +613,22 @@ const DIGEST_FRAMES = 16;
 const DIGEST_NOTES = 24;
 const DIGEST_NOTE_CHARS = 90;
 
+/** The per-turn line for each sheet. Pure reads of the Y.Doc (`sheet-data.ts`). */
+function sheetDigestLines(std: BlockStdScope): string[] {
+  const out: string[] = [];
+  const doc = std.store.doc.spaceDoc;
+  for (const b of std.store.getBlocksByFlavour('voidspace:sheet')) {
+    const sheet = readSheet(doc, b.id);
+    if (!sheet) continue;
+    const rows = sheet.tabs.reduce((n, t) => n + t.rows.length, 0);
+    const linked = sheet.tabs.reduce((n, t) => n + t.rows.filter(r => r.link).length, 0);
+    const tabs = sheet.tabs.map(t => `${t.name}${t.binding?.kind === 'shots' ? ' (shot list)' : ''}`).slice(0, 6).join(', ');
+    out.push(`Sheet '${sheet.title.slice(0, 60)}' · id ${b.id} · ${sheet.tabs.length} tab${sheet.tabs.length === 1 ? '' : 's'} (${tabs}) · ${rows} row${rows === 1 ? '' : 's'}${linked ? ` · ${linked} linked` : ''}`);
+    if (out.length >= 10) break;
+  }
+  return out;
+}
+
 export function canvasDigest(std: BlockStdScope): CanvasDigest {
   const kinds: Record<string, number> = {};
   const frames: string[] = [];
@@ -622,6 +642,8 @@ export function canvasDigest(std: BlockStdScope): CanvasDigest {
     if (item.owned) continue;
     total++;
     kinds[item.kind] = (kinds[item.kind] ?? 0) + 1;
+    // A sheet gets its own line below (tabs, rows, links), not a note's.
+    if (item.kind === 'sheet') continue;
 
     const text = item.text.trim();
     if (!text) continue;
@@ -640,6 +662,7 @@ export function canvasDigest(std: BlockStdScope): CanvasDigest {
     kinds,
     frames,
     notes,
+    sheets: sheetDigestLines(std),
     tidy: {
       collisions: collisionCount(std),
       oversize: oversizeIds(std, SHOT_W, SHOT_H).length,
@@ -1438,6 +1461,12 @@ export function editCanvas(std: BlockStdScope, ops: EditOp[]): EditResult {
 
       if (!model) {
         problems.push(`Nothing on the canvas with id ${op.id}.`);
+        continue;
+      }
+      if (block?.flavour === 'voidspace:sheet' && op.op !== 'move') {
+        problems.push(
+          `${op.id} is a sheet — it has its own tools. Use sheet_write to change it (moving it is fine).`,
+        );
         continue;
       }
       if (block && OWNED_FLAVOURS.has(block.flavour)) {

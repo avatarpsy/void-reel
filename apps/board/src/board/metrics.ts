@@ -133,6 +133,17 @@ export function cardBox(
   return kind === 'audio' ? audioBox(size) : fit(natural, size);
 }
 
+/**
+ * A SHEET on the canvas — a read-only preview of its first rows.
+ *
+ * 1000 wide is the clean-document width, so a sheet beside a document reads as
+ * a page of the same set; 640 tall holds the tab strip, a header and about a
+ * dozen rows, which is enough to recognise a sheet without turning the canvas
+ * into a spreadsheet. Editing happens in focus mode (`sheet/focus.ts`).
+ */
+export const SHEET_W = 1000;
+export const SHEET_H = 640;
+
 /** Is this box bigger than a shot card? The signal `canvasDigest` reports as
  *  `oversize`, so the agent can notice its own mess rather than being the last
  *  to know. Kept here because the threshold is a size decision. */
