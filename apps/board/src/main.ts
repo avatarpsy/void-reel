@@ -63,6 +63,9 @@ import { installSheetFocus, type SheetFocus } from './sheet/focus';
 import { setSheetPacer, SheetError } from './sheet/ops';
 import { installSheetDrop } from './sheet/drop';
 import { setSharedOwnerBoard } from './sheet/activity';
+import { setShareContext } from './ui/copy-link';
+import { checkSharedBlocks } from './ui/board-capacity';
+import { GfxControllerIdentifier } from '@blocksuite/std/gfx';
 
 /** Replace the boot overlay with a message the user can act on. Reachable before
  *  any chrome exists, so it writes into the overlay rather than a toast. */
@@ -233,6 +236,16 @@ async function boot(): Promise<void> {
     {
       const meta = (cloud as ReturnType<typeof installSharedSync>).metadata;
       if (meta?.role === 'owner' && meta.sourceId) setSharedOwnerBoard(meta.sourceId);
+      // "Copy link" on a shared board copies the project link, which everyone it is shared with can open.
+      setShareContext({ projectId: sharedId, metadata: meta as never });
+    }
+    // A shared board holds at most 20,000 blocks; say so before it gets there.
+    {
+      const blocks = ydoc.getMap('blocks');
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const check = () => { timer = null; checkSharedBlocks(blocks.size); };
+      check();
+      blocks.observe(() => { if (!timer) timer = setTimeout(check, 2000); });
     }
     window.addEventListener('collaboration-role', event => {
       const nextReadOnly = (event as CustomEvent).detail === 'viewer';
@@ -248,6 +261,7 @@ async function boot(): Promise<void> {
       // A viewer can still open a sheet full size — read only.
       installToasts(root);
       const viewerSheets = installSheetFocus(board, root, { makeCards: () => {} });
+      installLinkHandling(board, { sheets: viewerSheets });
       openDeepLink(board, { sheets: viewerSheets });
       return;
     }
@@ -503,8 +517,11 @@ async function boot(): Promise<void> {
   }, true);
 
   // `&open=<blockId>` — a shared link that lands in a sheet, document or script.
-  openDeepLink(board, { sheets, screenplay });
+  installLinkHandling(board, { sheets, screenplay, documents: true });
+  openDeepLink(board, { sheets, screenplay, documents: true });
 
+  // How long a board took to open, readable by anyone measuring it.
+  try { performance.mark('voidspace:board-ready'); } catch { /* fine */ }
   // Handshake: the parent's bridge waits for this before dispatching any RPC,
   // so a tool call can never land on a half-mounted editor.
   window.parent?.postMessage(
@@ -533,32 +550,75 @@ async function boot(): Promise<void> {
        *  someone reintroduces bytes-in-document. */
       docBytes(): number;
       cloud: typeof cloud;
+      /** A document from markdown, placed the way the agent and the right-click menu place one. */
+      placeMarkdown(markdown: string): Promise<{ noteId: string }>;
     };
   }).__board = Object.assign(board, {
     shots,
     meta: boardMeta,
     docBytes: () => Y.encodeStateAsUpdate(ydoc).byteLength,
     cloud,
+    placeMarkdown: (markdown: string) => import('./document/note-io')
+      .then(m => m.placeMarkdownDocument(board, markdown, { width: 800 })),
   });
+}
+
+type OpenModes = { sheets: SheetFocus | null; screenplay?: { open(): void } | null; documents?: boolean };
+
+/**
+ * Open one block full size: a sheet's focus mode, the screenplay's, or a
+ * document's. A sheet that is open is closed first, so a link clicked inside
+ * one lands on the thing it names. A viewer (no document focus mode) is taken
+ * to the document on the canvas instead.
+ *
+ * Returns false when the block is not on this board.
+ */
+function openBlock(board: MountedBoard, modes: OpenModes, id: string, tab?: string): boolean {
+  const block = board.store.getBlock(id);
+  if (!block) return false;
+  if (block.flavour === 'voidspace:sheet') { modes.sheets?.open(id, tab); return true; }
+  if (modes.sheets?.isOpen()) modes.sheets.close();
+  if (block.flavour === 'voidspace:screenplay' && modes.screenplay) { modes.screenplay.open(); return true; }
+  if (block.flavour === 'affine:note' && modes.documents) {
+    void import('./document/toolbar').then(m => m.requestOpenDocument(id));
+    return true;
+  }
+  // No focus mode for it here (a viewer, or a block that has none): show it on the canvas.
+  try {
+    const box = JSON.parse(String((block.model as unknown as { xywh?: string }).xywh ?? '')) as number[];
+    const vp = board.std.get(GfxControllerIdentifier).viewport as unknown as {
+      setViewportByBound?(b: { x: number; y: number; w: number; h: number }, p?: number[], smooth?: boolean): void;
+    };
+    if (box.length === 4) vp.setViewportByBound?.({ x: box[0]! - 40, y: box[1]! - 40, w: box[2]! + 80, h: box[3]! + 80 }, [0, 0, 0, 0], false);
+  } catch { /* the board still opened */ }
+  return true;
+}
+
+/** A sheet's link cell asks for a block on this board (see sheet/doc-link-board.ts). */
+function installLinkHandling(board: MountedBoard, modes: OpenModes): void {
+  document.addEventListener('voidspace-open-block', (e) => {
+    const d = (e as CustomEvent<{ blockId?: string; tab?: string }>).detail;
+    if (!d?.blockId) return;
+    if (!openBlock(board, modes, d.blockId, d.tab)) toast('That document was removed from this board.', 'info');
+  });
+  // Typed titles and pasted board links in link cells become links (sheet/ops.ts `coerce`).
+  void Promise.all([import('./sheet/ops'), import('./sheet/doc-link-board')])
+    .then(([ops, links]) => ops.setLinkResolver(v => links.resolveLinkInput(board.std, v)));
 }
 
 /**
  * `&open=<blockId>` (and `&tab=<tabId>` for a sheet) opens that block full size
  * once the board is on screen: a sheet's focus mode, the screenplay's, or a
- * document's. Unknown ids are ignored — a stale link still opens the board.
+ * document's. An id that is not on the board still opens the board, and says
+ * the document was removed.
  */
-function openDeepLink(
-  board: MountedBoard,
-  modes: { sheets: SheetFocus | null; screenplay?: { open(): void } | null },
-): void {
+function openDeepLink(board: MountedBoard, modes: OpenModes): void {
   const id = params.get('open');
   if (!id) return;
   requestAnimationFrame(() => {
-    const block = board.store.getBlock(id);
-    if (!block) return;
-    if (block.flavour === 'voidspace:sheet') modes.sheets?.open(id, params.get('tab') ?? undefined);
-    else if (block.flavour === 'voidspace:screenplay') modes.screenplay?.open();
-    else if (block.flavour === 'affine:note') void import('./document/toolbar').then(m => m.requestOpenDocument(id));
+    if (!openBlock(board, modes, id, params.get('tab') ?? undefined)) {
+      toast('That document is no longer on this board. It may have been deleted.', 'info');
+    }
   });
 }
 

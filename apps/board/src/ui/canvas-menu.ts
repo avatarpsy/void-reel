@@ -28,6 +28,7 @@ import { GfxControllerIdentifier } from '@blocksuite/std/gfx';
 
 import { readCanvas } from '../board/canvas';
 import type { MountedBoard } from '../blocksuite/editor';
+import { copyBlockLink } from './copy-link';
 
 /** What the user can ask for, and what to call it. */
 const KINDS = [
@@ -44,6 +45,7 @@ const ICONS: Record<string, string> = {
   // thing you make here and the thing you open later look like each other.
   doc: '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 1.8h5L12.2 5v9.2H4z"/><path d="M9 1.8V5h3.2"/><path d="M6 8.4h4M6 10.8h3"/></svg>',
   // A grid: the sheet's own glyph.
+  link: '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M6.5 9.5l3-3"/><path d="M7 4.5l1.2-1.2a2.6 2.6 0 0 1 3.7 3.7L10.7 8.2"/><path d="M9 11.5l-1.2 1.2a2.6 2.6 0 0 1-3.7-3.7L5.3 7.8"/></svg>',
   sheet: '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="1.8" y="2.6" width="12.4" height="10.8" rx="1.6"/><path d="M1.8 6.2h12.4M1.8 9.8h12.4M6 2.6v10.8"/></svg>',
 };
 
@@ -221,10 +223,21 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
    * library — because right-clicking empty canvas to add a picture is the other
    * half of the same intention.
    */
-  function render(count: number): string {
-    const head = count
+  function render(count: number, linkable: { id: string; kind: string } | null = null): string {
+    /**
+     * A document, sheet or script under the cursor: its link first. Access
+     * follows the board, so this is the board's link landing on that block.
+     */
+    const link = linkable ? `
+      <button type="button" class="vs-canvas-menu__item" data-copy-link="${linkable.id}">
+        <span class="vs-canvas-menu__icon">${ICONS.link}</span>
+        <span class="vs-canvas-menu__label">Copy link</span>
+        <span class="vs-canvas-menu__hint">to this ${linkable.kind} — opens it full size</span>
+      </button>
+      <div class="vs-canvas-menu__sep"></div>` : '';
+    const head = link + (count
       ? `<div class="vs-canvas-menu__head">Generate from ${count} image${count === 1 ? '' : 's'}</div>`
-      : '<div class="vs-canvas-menu__head">Add to the board</div>';
+      : '<div class="vs-canvas-menu__head">Add to the board</div>');
     const rows = KINDS.map(k => `
       <button type="button" class="vs-canvas-menu__item" data-kind="${k.kind}">
         <span class="vs-canvas-menu__icon">${ICONS[k.kind]}</span>
@@ -309,7 +322,7 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
     );
     const clickedId = onCanvas.has(hitId) ? hitId : '';
     refIds = chooseReferences(remembered, clickedId, selectedImages(board));
-    menu.innerHTML = render(refIds.length);
+    menu.innerHTML = render(refIds.length, linkableAt(target, onCanvas));
     try {
       const vp = (document.querySelector('affine-edgeless-root') as unknown as { gfx?: { viewport?: { toModelCoord?(x: number, y: number): [number, number] } } } | null)?.gfx?.viewport;
       const p = vp?.toModelCoord?.(e.clientX, e.clientY);
@@ -327,8 +340,40 @@ export function installCanvasMenu(board: MountedBoard, container: HTMLElement): 
     menu.style.top = `${Math.max(8, y)}px`;
   };
 
+  /**
+   * The document, sheet or script under the cursor. A press inside a note
+   * lands on one of its paragraphs (which carry their own block ids), so this
+   * walks out to the block the canvas owns.
+   */
+  function linkableAt(target: HTMLElement | null, onCanvas: Set<string>): { id: string; kind: string } | null {
+    let el = target?.closest<HTMLElement>('[data-block-id]') ?? null;
+    while (el) {
+      const id = el.dataset.blockId ?? '';
+      if (onCanvas.has(id)) {
+        const flavour = board.store.getBlock(id)?.flavour;
+        if (flavour === 'voidspace:sheet') return { id, kind: 'sheet' };
+        if (flavour === 'voidspace:screenplay') return { id, kind: 'script' };
+        if (flavour === 'affine:note') {
+          const model: any = board.store.getBlock(id)?.model;
+          const hasText = (model?.children ?? []).some((c: any) => String(c?.text?.toString?.() ?? '').trim());
+          return hasText ? { id, kind: 'document' } : null;
+        }
+        return null;
+      }
+      el = el.parentElement?.closest<HTMLElement>('[data-block-id]') ?? null;
+    }
+    return null;
+  }
+
   const onMenuClick = (e: MouseEvent) => {
     const target = e.target as HTMLElement;
+
+    const copyId = target.closest<HTMLElement>('[data-copy-link]')?.dataset.copyLink;
+    if (copyId) {
+      close();
+      void copyBlockLink(copyId);
+      return;
+    }
 
     /**
      * A DOCUMENT IS MADE HERE, not across the frame boundary.

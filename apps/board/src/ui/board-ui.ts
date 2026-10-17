@@ -26,6 +26,7 @@ import { createShots, readShots } from '../shot/shots';
 import { installBoardFullscreen, installChromeAutohide } from './chrome-autohide';
 import { fitBoard } from './viewport';
 import { requestOpenDocument } from '../document/toolbar';
+import { copyBlockLink } from './copy-link';
 import type { MountedBoard } from '../blocksuite/editor';
 
 const ICONS = {
@@ -225,6 +226,11 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
     <button type="button" class="vs-board-btn" data-act="open-note-doc"
       title="Open it full screen — rename, write and export it there" hidden>
       ${ICONS.expand}<span data-open-label>Open in focus</span>
+    </button>
+    <!-- Its link: the board's link, landing on this block. Access follows the board. -->
+    <button type="button" class="vs-board-btn" data-act="copy-block-link"
+      title="Copy a link that opens this full size. People who can open this board can open it." hidden>
+      <span>Copy link</span>
     </button>
     <!--
       A TABLE IN A DOCUMENT CAN BECOME A SHEET: sorting, filters, types,
@@ -492,6 +498,12 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
         })();
         break;
       }
+      case 'copy-block-link': {
+        const id = openDocBtn.dataset.noteId || (openDocBtn.dataset.kind === 'screenplay'
+          ? board.store.getBlocksByFlavour('voidspace:screenplay')[0]?.id ?? '' : '');
+        if (id) void copyBlockLink(id);
+        break;
+      }
       case 'open-note-doc':
         if (openDocBtn.dataset.kind === 'sheet') {
           container.dispatchEvent(new CustomEvent('voidspace-open-sheet', { bubbles: true, detail: { blockId: openDocBtn.dataset.noteId } }));
@@ -596,6 +608,7 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
   const openDocBtn = bar.querySelector<HTMLElement>('[data-act="open-note-doc"]')!;
   const openLabel = openDocBtn.querySelector<HTMLElement>('[data-open-label]')!;
   const tableBtn = bar.querySelector<HTMLElement>('[data-act="table-to-sheet"]')!;
+  const linkBtn = bar.querySelector<HTMLElement>('[data-act="copy-block-link"]')!;
   /**
    * Which notes are documents, recomputed per selection change.
    *
@@ -646,6 +659,7 @@ export function installBoardUi(board: MountedBoard, container: HTMLElement): () 
     openDocBtn.dataset.noteId = soleNote ?? soleSheet ?? '';
     openDocBtn.dataset.kind = soleSheet ? 'sheet' : soleScript ? 'screenplay' : 'note';
     openLabel.textContent = soleSheet ? 'Open sheet' : 'Open in focus';
+    linkBtn.hidden = openDocBtn.hidden;
     // A document holding a table can become a sheet.
     const hasTable = !!soleNote && board.store.getBlocksByFlavour('affine:table').some(t => {
       let p = board.store.getParent(t.id);

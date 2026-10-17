@@ -272,7 +272,10 @@ const STYLES_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
 </styleSheet>`;
 
-function sheetXml(tab: SheetJsonTab): { xml: string; links: string[] } {
+/** A link cell as a title and (when it opens somewhere) a web address. */
+export type LinkResolver = (value: string) => { text: string; url?: string } | null;
+
+function sheetXml(tab: SheetJsonTab, resolveLink?: LinkResolver): { xml: string; links: string[] } {
   const cols = tab.columns.filter(c => !c.hidden);
   const lines: string[] = [];
   const links: Array<{ ref: string; url: string }> = [];
@@ -293,8 +296,13 @@ function sheetXml(tab: SheetJsonTab): { xml: string; links: string[] } {
     }
     if (type === 'duration' && typeof v === 'number') return `<c r="${ref}" s="4"><v>${v / 86400}</v></c>`;
     if (typeof v === 'number') return `<c r="${ref}"><v>${v}</v></c>`;
-    const s = String(v);
+    let s = String(v);
     if (type === 'url' && /^https?:\/\//i.test(s)) links.push({ ref, url: s });
+    if (type === 'link' && resolveLink) {
+      // A document link: its title, clickable in Excel.
+      const r = resolveLink(s);
+      if (r) { s = r.text; if (r.url) links.push({ ref, url: r.url }); }
+    }
     const style = type === 'longtext' ? ' s="5"' : '';
     return `<c r="${ref}" t="inlineStr"${style}><is><t xml:space="preserve">${esc(s)}</t></is></c>`;
   };
@@ -337,12 +345,12 @@ ${links.length ? `<hyperlinks>${links.map((l, i) => `<hyperlink ref="${l.ref}" r
 }
 
 /** A workbook from the sheet's tabs. Returns the file's bytes. */
-export async function writeXlsx(tabs: SheetJsonTab[], title = 'Sheet'): Promise<Uint8Array> {
+export async function writeXlsx(tabs: SheetJsonTab[], title = 'Sheet', resolveLink?: LinkResolver): Promise<Uint8Array> {
   const names = sheetNames(tabs.map(t => t.name));
   const files: Array<{ name: string; data: string }> = [];
   const sheetEntries: string[] = [];
   tabs.forEach((tab, i) => {
-    const { xml, links } = sheetXml(tab);
+    const { xml, links } = sheetXml(tab, resolveLink);
     files.push({ name: `xl/worksheets/sheet${i + 1}.xml`, data: xml });
     if (links.length) {
       files.push({

@@ -25,6 +25,7 @@ import { tabKind } from './activity';
 import { TEMPLATES, templateTab, type TemplateId } from './templates';
 import { computeTotal, totalsFor } from './totals';
 import type { SheetFocus } from './focus';
+import { linkLabel, resolveLinkInput } from './doc-link-board';
 
 /**
  * On a content-calendar tab, the rows whose caption is too long for one of its
@@ -152,6 +153,10 @@ export function sheetHandlers(ctx: SheetRpcContext): Record<string, (args: Recor
   const { board } = ctx;
   const doc = () => board.store.doc.spaceDoc;
 
+  /** A cell as the agent reads it: a link cell says what it links to, by title. */
+  const text = (v: CellValue, c: { type: ColumnType }): string =>
+    c.type === 'link' && typeof v === 'string' && v ? linkLabel(board.std, v).text : cellText(v, c.type);
+
   const readHandler = (args: Record<string, unknown>) => {
     const id = sheetIdOf(args);
     if (!id) {
@@ -190,12 +195,12 @@ export function sheetHandlers(ctx: SheetRpcContext): Record<string, (args: Recor
     }
     if (conds.length) {
       rows = rows.filter(r => conds.every(([c, v]) => {
-        const text = cellText(r.values[c.id] ?? null, c.type).toLowerCase();
-        return c.multi ? text.split(/\s*,\s*/).includes(v) : text === v;
+        const t = text(r.values[c.id] ?? null, c).toLowerCase();
+        return c.multi ? t.split(/\s*,\s*/).includes(v) : t === v;
       }));
     }
     const search = String(args.search ?? '').trim().toLowerCase();
-    if (search) rows = rows.filter(r => tab.columns.some(c => cellText(r.values[c.id] ?? null, c.type).toLowerCase().includes(search)));
+    if (search) rows = rows.filter(r => tab.columns.some(c => text(r.values[c.id] ?? null, c).toLowerCase().includes(search)));
     const matched = rows.length;
     const from = Math.max(0, Math.floor(Number(args.from) || 0));
     const count = Math.max(1, Math.min(5000, Math.floor(Number(args.count) || 5000)));
@@ -214,7 +219,7 @@ export function sheetHandlers(ctx: SheetRpcContext): Record<string, (args: Recor
     let used = header.length;
     let shown = 0;
     for (const r of rows) {
-      const line = [r.id + (r.removed ? ' (shot removed)' : ''), ...cols.map(c => clip(cellText(r.values[c.id] ?? null, c.type)).replace(/\t/g, ' ').replace(/\r?\n/g, ' ⏎ '))].join('\t');
+      const line = [r.id + (r.removed ? ' (shot removed)' : ''), ...cols.map(c => clip(text(r.values[c.id] ?? null, c)).replace(/\t/g, ' ').replace(/\r?\n/g, ' ⏎ '))].join('\t');
       if (used + line.length + 1 > budget && shown > 0) break;
       lines.push(line); used += line.length + 1; shown++;
     }
@@ -289,6 +294,11 @@ export function sheetHandlers(ctx: SheetRpcContext): Record<string, (args: Recor
             if (t !== tabId) { await flush(); tabId = t; }
           }
           const snap = () => readTab(board.std, id, tabId);
+          /** A link cell's input that names nothing — said, so the agent can fix it. */
+          const checkLink = (c: { type: ColumnType; name: string } | undefined, v: unknown) => {
+            if (c?.type !== 'link' || typeof v !== 'string' || !v.trim()) return;
+            if (!resolveLinkInput(board.std, v)) problems.push(`"${v.slice(0, 80)}" in ${c.name} is not the title of a document, sheet or script on this board, a shot ("Shot 3") or a Voidspace link, so it was written as plain text.`);
+          };
           const col = (want: unknown) => {
             const s = snap(); const w = String(want ?? '').trim().toLowerCase();
             return s?.columns.find(c => c.id === want) ?? s?.columns.find(c => c.name.toLowerCase() === w) ?? (createdColumns[String(want)] ? s?.columns.find(c => c.id === createdColumns[String(want)]) : undefined);
@@ -299,6 +309,7 @@ export function sheetHandlers(ctx: SheetRpcContext): Record<string, (args: Recor
               const row = s ? resolveRow(s.rows, raw.row) : null;
               if (!c) { problems.push(`No column "${String(raw.column ?? raw.col)}".`); break; }
               if (!row) { problems.push(`No row "${String(raw.row)}".`); break; }
+              checkLink(c, raw.value);
               pending.push({ row, col: c.id, value: raw.value, ...(raw.expect !== undefined ? { expect: raw.expect } : {}) });
               break;
             }
@@ -309,6 +320,7 @@ export function sheetHandlers(ctx: SheetRpcContext): Record<string, (args: Recor
               const expect = (raw.expect && typeof raw.expect === 'object') ? raw.expect as Record<string, unknown> : {};
               for (const [k, v] of Object.entries(values)) {
                 const c = col(k); if (!c) { problems.push(`No column "${k}".`); continue; }
+                checkLink(c, v);
                 pending.push({ row, col: c.id, value: v, ...(k in expect ? { expect: expect[k] } : {}) });
               }
               break;
@@ -321,6 +333,7 @@ export function sheetHandlers(ctx: SheetRpcContext): Record<string, (args: Recor
               const unknown = new Set<string>();
               for (const r of rows) if (!Array.isArray(r)) for (const k of Object.keys(r)) if (!s?.columns.some(c => c.name.toLowerCase() === k.toLowerCase() || c.id === k)) unknown.add(k);
               if (unknown.size) problems.push(`Ignored unknown column(s): ${[...unknown].join(', ')}. Add them with add_column first.`);
+              for (const r of rows) if (!Array.isArray(r)) for (const [k, v] of Object.entries(r)) checkLink(col(k), v);
               const ids = await appendRowsPaced(board.store, id, tabId, rows, { merge: true });
               if (raw.after) {
                 const after = s ? resolveRow(s.rows, raw.after) : null;

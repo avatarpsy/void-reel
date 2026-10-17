@@ -41,6 +41,7 @@ import { saveDocument, uploadDocument } from '../board/document-export';
 
 import type { MountedBoard } from '../blocksuite/editor';
 import type { RenderedDocument } from '../document';
+import { copyBlockLink } from './copy-link';
 
 export interface DocumentFocus {
   /** Fly to this note and put the document chrome up. */
@@ -173,6 +174,7 @@ export function installDocumentFocus(
           with the reason you would pick it.
         -->
         <div class="vs-focus__actions">
+          <button type="button" class="vs-focus__btn" data-act="copy-link" title="Copy a link to this document. People who can open this board can open it.">Copy link</button>
           <div class="vs-focus__menu-wrap">
             <button type="button" class="vs-focus__btn vs-focus__btn--primary"
                     data-act="menu" aria-haspopup="menu" aria-expanded="false">
@@ -402,6 +404,7 @@ export function installDocumentFocus(
     const act = (e.target as HTMLElement).closest<HTMLElement>('[data-act]')?.dataset.act;
     if (!act) return;
     if (act === 'close') { close(); return; }
+    if (act === 'copy-link') { if (noteId) void copyBlockLink(noteId); return; }
     if (act === 'menu') { setMenu(menuEl()?.hidden !== false); return; }
     // `.catch` and not `void`: exportAs rethrows for its agent caller, and an
     // unhandled rejection here would log an error for a failure the user has

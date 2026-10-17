@@ -318,6 +318,9 @@
 .vsg-file { flex: none; display: inline-grid; place-items: center; width: 26px; height: 22px; border-radius: 4px; background: var(--vsg-head); font-size: 11px; color: var(--vs-text-dim); }
 .vsg-ref { overflow: hidden; text-overflow: ellipsis; color: var(--vs-text); }
 .vsg-ref::before { content: '⇢ '; color: var(--vs-text-mute); }
+.vsg-doclink { display: inline-block; max-width: 100%; white-space: nowrap; text-decoration: none; cursor: pointer; color: var(--vsg-accent); }
+.vsg-doclink:hover { text-decoration: underline; }
+.vsg-ref.is-gone { color: var(--vs-text-mute); font-style: italic; }
 
 .vsg-fill {
   position: absolute; right: -1px; bottom: -1px; width: 8px; height: 8px;
@@ -387,6 +390,8 @@
 .vsg-picker__empty { padding: 10px; color: var(--vs-text-mute); font-size: 12.5px; }
 .vsg-picker__clear { border: 0; background: transparent; color: var(--vs-text-mute); font: inherit; font-size: 12px; padding: 6px 9px; text-align: left; cursor: pointer; border-top: 1px solid var(--vsg-line); }
 .vsg-picker__clear:hover { color: var(--vs-text); }
+.vsg-picker__sec { padding: 8px 9px 3px; font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--vs-text-mute); }
+.vsg-picker__hint { padding: 0 9px; font-size: 11.5px; color: var(--vs-text-mute); }
 .vsg-tick { width: 14px; flex: none; color: var(--vsg-accent); font-weight: 700; text-align: center; }
 
 .vsg-cal { padding: 10px; }

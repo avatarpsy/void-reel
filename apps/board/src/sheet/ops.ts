@@ -245,6 +245,14 @@ export function parseBool(raw: unknown): boolean | null {
  * A value as this column stores it. Never throws: text that is not a valid
  * date in a date column stays as the text (like Excel), so nothing typed is lost.
  */
+/**
+ * How a link cell's input becomes its stored value (a pasted board link, a
+ * document's title, "Shot 3"). Set by the board at boot (doc-link-board.ts);
+ * without it, link cells keep what they were given.
+ */
+let linkResolver: ((value: string) => string | null) | null = null;
+export function setLinkResolver(fn: ((value: string) => string | null) | null): void { linkResolver = fn; }
+
 export function coerce(value: unknown, type: ColumnType): CellValue {
   if (value === null || value === undefined) return null;
   if (typeof value === 'string' && !value.trim() && type !== 'longtext' && type !== 'text') return null;
@@ -275,6 +283,10 @@ export function coerce(value: unknown, type: ColumnType): CellValue {
         return `${pad(Math.floor(mins / 60) % 24)}:${pad(mins % 60)}`;
       }
       return parseTime(String(value)) ?? String(value);
+    }
+    case 'link': {
+      const text = typeof value === 'string' ? value : String(value);
+      return (linkResolver ? linkResolver(text) : null) ?? text;
     }
     default:
       return typeof value === 'string' ? value : String(value);

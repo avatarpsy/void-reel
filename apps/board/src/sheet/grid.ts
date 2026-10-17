@@ -47,6 +47,8 @@ import {
 import { readShots } from '../shot/shots';
 import { readParsed } from '../shot/screenplay-doc';
 import { decodeMediaRef, isMediaRef } from '../board/media-ref';
+import { type LinkTarget, boardTargets, linkLabel as docLinkLabel, onLinkTitles, openLinkValue, resolveLinkInput } from './doc-link-board';
+import { isDocValue, parseVoidspaceLink } from './doc-link';
 
 import { unsafeSVG } from 'lit/directives/unsafe-svg.js';
 const LINK_ICON = unsafeSVG('<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M6.5 9.5l3-3"/><path d="M7 4.5l1.2-1.2a2.6 2.6 0 0 1 3.7 3.7L10.7 8.2"/><path d="M9 11.5l-1.2 1.2a2.6 2.6 0 0 1-3.7-3.7L5.3 7.8"/></svg>');
@@ -59,7 +61,7 @@ export const GUTTER_W = 48;
 export const TYPE_LABEL: Record<ColumnType, string> = {
   text: 'Text', longtext: 'Long text', number: 'Number', duration: 'Duration', date: 'Date',
   time: 'Time', status: 'Status', person: 'Person', checkbox: 'Checkbox', url: 'Link (web)',
-  media: 'Picture or clip', link: 'Shot or board',
+  media: 'Picture or clip', link: 'Document or shot',
 };
 
 const TYPE_ICON: Record<ColumnType, string> = {
@@ -233,6 +235,8 @@ export class SheetGrid {
 
     this.poller = new ActivityPoller(data => { this.activity = data; this.schedule(); });
     this.cleanup.push(() => this.poller?.destroy());
+    // A document on another board gets its title a moment after it is drawn.
+    this.cleanup.push(onLinkTitles(() => this.schedule()));
     this.bindEvents();
     this.refresh();
     this.renderNow();
@@ -410,14 +414,7 @@ export class SheetGrid {
   }
 
   private linkLabel(v: string): string {
-    if (v.startsWith('shot:')) {
-      const id = v.slice(5);
-      const shots = readShots(this.std);
-      const i = shots.findIndex(s => s.id === id);
-      return i < 0 ? 'Shot removed' : `Shot ${i + 1}${shots[i]!.title ? ` · ${shots[i]!.title}` : ''}`;
-    }
-    if (v.startsWith('board:')) return 'Board';
-    return v;
+    return docLinkLabel(this.std, v).text;
   }
 
   // ── geometry helpers ───────────────────────────────────────────────────────
@@ -754,6 +751,8 @@ export class SheetGrid {
       if (text) void this.paste(text);
     });
     on(this.host, 'pointerdown', e => this.onPointerDown(e));
+    // A document link opens on pointerdown; its href is only there for the cursor and screen readers.
+    on(this.host, 'click', e => { if ((e.target as HTMLElement).closest?.('[data-doclink]')) e.preventDefault(); });
     on(this.host, 'dblclick', e => {
       const cell = (e.target as HTMLElement).closest<HTMLElement>('[data-r][data-c]');
       if (!cell || (e.target as HTMLElement).closest('.vsg-check')) return;
@@ -929,6 +928,12 @@ export class SheetGrid {
     if (check) { this.focusSink(); this.startEdit(); return; }
     const link = t.closest<HTMLAnchorElement>('a[data-open]');
     if (link && (e.ctrlKey || e.metaKey || wasActive)) { window.open(link.href, '_blank', 'noopener'); }
+    const docLink = t.closest<HTMLElement>('[data-doclink]');
+    if (docLink && !e.shiftKey && e.button === 0) {
+      this.focusSink(); this.schedule();
+      openLinkValue(this.std, docLink.dataset.doclink!, { newTab: e.ctrlKey || e.metaKey });
+      return;
+    }
     const col = this.cols[c];
     if (wasActive && !e.shiftKey && col && (col.type === 'status' || col.type === 'link' || col.type === 'date' || col.bind === 'shot.sceneKey')) {
       this.startEdit();
@@ -1623,8 +1628,14 @@ export class SheetGrid {
           ? html`<img class="vsg-thumb" src=${src} alt="" loading="lazy" @error=${(e: Event) => { (e.target as HTMLElement).replaceWith(Object.assign(document.createElement('span'), { className: 'vsg-file', textContent: '▣' })); }} />`
           : html`<span class="vsg-file" title=${String(v)}>${src ? '▶' : '▣'}</span><span class="vsg-text vsg-dim">${String(v).split('/').pop()?.split('?')[0]}</span>`;
       }
-      case 'link':
-        return html`<span class="vsg-ref">${this.linkLabel(String(v))}</span>`;
+      case 'link': {
+        const s = String(v);
+        const l = docLinkLabel(this.std, s);
+        // A document, sheet, script or board: a real link — one click opens it.
+        return isDocValue(s) || s.startsWith('board:')
+          ? html`<a class="vsg-ref vsg-doclink ${l.gone ? 'is-gone' : ''}" data-doclink=${s} href="#" title=${l.gone ? l.text : 'Open (Ctrl+click: new tab)'}>${l.text}</a>`
+          : html`<span class="vsg-ref ${l.gone ? 'is-gone' : ''}">${l.text}</span>`;
+      }
       case 'longtext':
         return html`<span class="vsg-text">${String(v).split('\n')[0]}${String(v).includes('\n') ? ' …' : ''}</span>`;
       default:
@@ -1846,33 +1857,56 @@ export class SheetGrid {
     </div>`;
   }
 
+  /** The picker's list, built once per open cell (a board can hold thousands of documents). */
+  private linkItems: { key: string; items: Array<{ value: string; label: string; kind: string }> } | null = null;
+
   private linkPicker(r: number, c: number, x: number, y: number, query: string): TemplateResult {
     const col = this.cols[c];
     if (!col) return html``;
     const scenes = col.bind === 'shot.sceneKey';
     const q = query.trim().toLowerCase();
-    const items = scenes
-      ? readParsed(this.std).scenes.map((s, i) => ({ value: s.key, label: `${i + 1}. ${s.heading}` }))
-      : readShots(this.std).map((s, i) => ({ value: `shot:${s.id}`, label: `Shot ${i + 1}${s.title ? ` · ${s.title}` : ''}` }));
-    const shown = items.filter(it => !q || it.label.toLowerCase().includes(q)).slice(0, 200);
-    const pick = (v: string | null) => { this.writeCell(r, c, v); this.close(); };
+    const key = `${this.tabId}:${r}:${c}:${scenes}`;
+    if (this.linkItems?.key !== key) {
+      const items = scenes
+        ? readParsed(this.std).scenes.map((s, i) => ({ value: s.key, label: `${i + 1}. ${s.heading}`, kind: '' }))
+        : [
+          ...boardTargets(this.std, { sheet: this.blockId, tab: this.tabId }).map((t: LinkTarget) => ({ value: t.value, label: t.label, kind: t.kind })),
+          ...readShots(this.std).map((s, i) => ({ value: `shot:${s.id}`, label: `Shot ${i + 1}${s.title ? ` · ${s.title}` : ''}`, kind: 'Shot' })),
+        ];
+      this.linkItems = { key, items };
+    }
+    const items = this.linkItems.items;
+    // "Paste a link": a link to a document on any of the user's boards.
+    const pasted = !scenes && /^(https?:\/\/|\/|voidspace\.ai)/i.test(query.trim()) ? query.trim() : '';
+    const pastedValue = pasted ? resolveLinkInput(this.std, pasted) : null;
+    const pastedKind = pasted ? parseVoidspaceLink(pasted, location.host)?.kind : undefined;
+    const shown = pasted ? [] : items.filter(it => !q || it.label.toLowerCase().includes(q)).slice(0, 200);
+    const pick = (v: string | null) => { this.linkItems = null; this.writeCell(r, c, v); this.close(); };
     requestAnimationFrame(() => { const i = this.host.querySelector<HTMLInputElement>('[data-pick]'); if (i && document.activeElement !== i) i.focus(); });
-    return html`<div class="vsg-pop vsg-picker" style=${this.place(x, y, 300)}>
-      <input data-pick class="vsg-picker__q" placeholder=${scenes ? 'Find a scene' : 'Find a shot'} .value=${live(query)}
+    const section = (kind: string, i: number) => (!scenes && kind && shown[i - 1]?.kind !== kind)
+      ? html`<div class="vsg-picker__sec">${kind === 'Shot' ? 'Shots' : kind === 'Script' ? 'Script' : `${kind}s`}</div>` : nothing;
+    return html`<div class="vsg-pop vsg-picker" style=${this.place(x, y, 320)}>
+      <input data-pick class="vsg-picker__q" placeholder=${scenes ? 'Find a scene' : 'Find a document, or paste a link'} .value=${live(query)}
         @input=${(e: Event) => { this.pop = { kind: 'link', r, c, x, y, query: (e.target as HTMLInputElement).value }; this.schedule(); }}
         @keydown=${(e: KeyboardEvent) => {
           e.stopPropagation();
-          if (e.key === 'Escape') this.close();
+          if (e.key === 'Escape') { this.linkItems = null; this.close(); }
           if (e.key === 'Enter') {
+            if (pasted) { if (pastedValue) pick(pastedValue); return; }
             const ql = (e.target as HTMLInputElement).value.trim().toLowerCase();
             const hit = items.find(it => !ql || it.label.toLowerCase().includes(ql));
             if (hit) pick(hit.value);
           }
         }} />
       <div class="vsg-picker__list">
-        ${shown.map(it => html`<button type="button" @click=${() => pick(it.value)}>${it.label}</button>`)}
-        ${!shown.length ? html`<div class="vsg-picker__empty">${scenes ? 'No scenes yet. Write the screenplay first.' : 'No shots on this board yet.'}</div>` : nothing}
+        ${pasted ? (pastedValue
+          ? html`<button type="button" @click=${() => pick(pastedValue)}><span class="vsg-tick">↵</span>Use this link · ${this.linkLabel(pastedValue)}</button>`
+          : html`<div class="vsg-picker__empty">${pastedKind === 'board' ? 'That is this board. Pick a document from the list instead.' : 'That is not a link to a Voidspace document. Copy one with "Copy link" on a document.'}</div>`)
+          : nothing}
+        ${shown.map((it, i) => html`${section(it.kind, i)}<button type="button" @click=${() => pick(it.value)}>${it.label}</button>`)}
+        ${!pasted && !shown.length ? html`<div class="vsg-picker__empty">${scenes ? 'No scenes yet. Write the screenplay first.' : q ? 'Nothing on this board matches.' : 'No documents or shots on this board yet.'}</div>` : nothing}
       </div>
+      ${scenes ? nothing : html`<div class="vsg-picker__hint">Paste a link to a document on any of your boards.</div>`}
       <button type="button" class="vsg-picker__clear" @click=${() => pick(null)}>Clear</button>
     </div>`;
   }

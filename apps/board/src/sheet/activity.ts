@@ -60,7 +60,8 @@ export function ownBoardId(): string | null {
   return id && id !== 'scratch' ? id : null;
 }
 
-async function api(path: string, init: RequestInit = {}): Promise<{ status: number; body: any }> {
+/** A signed-in call to the site's API from inside the board. Also used by sheet links. */
+export async function api(path: string, init: RequestInit = {}): Promise<{ status: number; body: any }> {
   // A shared board's page hands out tokens through the collaboration channel.
   const token = new URLSearchParams(location.search).get('shared')
     ? await parentToken().catch(() => null)

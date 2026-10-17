@@ -31,6 +31,7 @@ import { createScreenplayEditor, type ScreenplayEditor } from '../shot/screenpla
 import { screenplayView, shotsByScene } from '../shot/screenplay-view';
 import type { MountedBoard } from '../blocksuite/editor';
 import { toast } from './toast';
+import { copyBlockLink } from './copy-link';
 
 const ESC_HTML: Record<string, string> = {
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;',
@@ -260,6 +261,7 @@ export function installScreenplayFocus(
           <span data-hint></span>
         </div>
         <div class="vs-focus__actions">
+          <button type="button" class="vs-focus__btn" data-act="copy-link" title="Copy a link to this script. People who can open this board can open it.">Copy link</button>
           <div class="vs-focus__menu-wrap">
             <button type="button" class="vs-focus__btn vs-focus__btn--primary"
                     data-act="menu" aria-haspopup="menu" aria-expanded="false">
@@ -314,6 +316,7 @@ export function installScreenplayFocus(
   el.addEventListener('click', e => {
     const act = (e.target as HTMLElement).closest<HTMLElement>('[data-act]')?.dataset.act;
     if (act === 'close') { close(); return; }
+    if (act === 'copy-link') { const sp = board.store.getBlocksByFlavour('voidspace:screenplay')[0]; if (sp) void copyBlockLink(sp.id); return; }
     if (act === 'menu') { setMenu(menuEl()?.hidden !== false); return; }
     // `.catch` because exportPdf is async; the toast has already spoken.
     if (act === 'pdf') { setMenu(false); exportPdf().catch(() => {}); return; }

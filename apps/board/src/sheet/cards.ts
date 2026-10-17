@@ -17,6 +17,8 @@ import { SheetError, addRows, duplicateRows, readTab, setCells, sheetYBlock, spl
 import { prettyDate, prettyDateShort } from './format';
 import { type PostIssue, columnFor, postIssues, splitPlatforms } from './post-rules';
 import { toast } from '../ui/toast';
+import { linkLabel as docLinkLabel, openLinkValue, resolveLinkInput } from './doc-link-board';
+import { isDocValue } from './doc-link';
 import { type SheetActivity, ActivityPoller, ownBoardId, rowValues, sendRowForApproval, tabKind } from './activity';
 
 export class SheetCards {
@@ -284,8 +286,16 @@ export class SheetCards {
         return html`<label class="vsc-field">${label}<input inputmode="numeric" placeholder="m:ss" ?disabled=${ro} .value=${live(typeof v === 'number' ? formatDuration(v) : String(v ?? ''))} @change=${(e: Event) => commit((e.target as HTMLInputElement).value)} /></label>`;
       case 'url': case 'media':
         return html`<label class="vsc-field">${label}<input type="url" inputmode="url" placeholder="https://" ?disabled=${ro} .value=${live(String(v ?? ''))} @change=${(e: Event) => commit((e.target as HTMLInputElement).value)} /></label>`;
-      case 'link':
-        return html`<div class="vsc-field">${label}<div>${cellText(v, c.type) || '—'}</div></div>`;
+      case 'link': {
+        const raw = v === null ? '' : String(v);
+        const l = raw ? docLinkLabel(this.std, raw) : null;
+        const openable = isDocValue(raw) || raw.startsWith('board:');
+        return html`<div class="vsc-field">${label}
+          ${openable ? html`<a class="vsg-doclink ${l?.gone ? 'is-gone' : ''}" href="#" @click=${(e: Event) => { e.preventDefault(); openLinkValue(this.std, raw); }}>${l?.text}</a>` : html`<div>${l?.text || '—'}</div>`}
+          ${ro || c.bind ? nothing : html`<input placeholder="Paste a link, or type a document name" .value=${live('')}
+            @change=${(e: Event) => { const t = (e.target as HTMLInputElement).value.trim(); if (!t) return; if (!resolveLinkInput(this.std, t)) { toast('No document with that name on this board, and that is not a Voidspace link.', 'info'); return; } commit(t); }} />`}
+        </div>`;
+      }
       default:
         return html`<label class="vsc-field">${label}<input ?disabled=${ro} .value=${live(String(v ?? ''))} @change=${(e: Event) => commit((e.target as HTMLInputElement).value)} /></label>`;
     }

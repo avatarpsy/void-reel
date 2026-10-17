@@ -24,6 +24,8 @@
  */
 import * as Y from 'yjs';
 
+import { BOARD_BYTES_CAP, checkBoardBytes } from '../ui/board-capacity';
+
 import { getParentToken } from './parent-auth';
 
 const IDLE_MS = 2_000;
@@ -121,6 +123,9 @@ export function installCloudSync(opts: CloudSyncOptions): CloudSync {
     if (saving) { await saving; if (!dirty) return; }
     dirty = false;
     const bytes = Y.encodeStateAsUpdate(doc);
+    // Over the server's limit the upload can only be refused: keep it on this
+    // device, say so (ui/board-capacity.ts), and try again after the next change.
+    if (checkBoardBytes(bytes.byteLength) === 'full') { dirty = true; return; }
     const url = `${apiBase}/api/board/doc?board=${encodeURIComponent(boardId)}`
       + `&shots=${encodeURIComponent(String(opts.shotCount()))}`;
     saving = (async () => {
@@ -139,6 +144,7 @@ export function installCloudSync(opts: CloudSyncOptions): CloudSync {
       // Any other failure leaves the board marked dirty again, so the next tick
       // retries. Losing a snapshot to a flaky network must not lose the work:
       // IndexedDB still holds it, and the next successful save carries it up.
+      if (res?.status === 413) checkBoardBytes(BOARD_BYTES_CAP + 1);
       if (!res || !res.ok) dirty = true;
     })().finally(() => { saving = null; });
     await saving;

@@ -10,7 +10,8 @@
 import type { MountedBoard } from '../blocksuite/editor';
 import { enterFocusMode } from '../ui/focus-lock';
 import { toast } from '../ui/toast';
-import { readSheet, readTabs, type SheetJsonTab } from './sheet-data';
+import { copyBlockLink } from '../ui/copy-link';
+import { readSheet, readTabs, type CellValue, type ColumnType, type SheetJsonTab } from './sheet-data';
 import { SheetError, addTabPaced, deleteTab, moveTab, readTab, setTitle, sheetYBlock, updateTab } from './ops';
 import { lastTab, rememberTab } from './block';
 import { TEMPLATES, templateTab, type TemplateId } from './templates';
@@ -49,16 +50,38 @@ export async function buildSheetFile(
     const { cellText } = await import('./sheet-data');
     const tab = tabs[0]!;
     const cols = tab.columns.filter(c => !c.hidden);
-    const rows = [cols.map(c => c.name), ...tab.rows.map(r => cols.map(c => cellText(r.values[c.id] ?? null, c.type)))];
+    const link = cols.some(c => c.type === 'link') ? await exportLinkResolver(board) : null;
+    const text = (v: CellValue, type: ColumnType) => (type === 'link' && typeof v === 'string' && v && link ? link(v)?.text ?? v : cellText(v, type));
+    const rows = [cols.map(c => c.name), ...tab.rows.map(r => cols.map(c => text(r.values[c.id] ?? null, c.type)))];
     // A BOM so Excel opens UTF-8 (names in Hindi, Tamil, emoji) correctly.
     const blob = new Blob(['﻿' + toDelimited(rows)], { type: 'text/csv;charset=utf-8' });
     const name = sheet.tabs.length > 1 ? `${sheet.title} - ${tab.name}` : sheet.title;
     return { blob, fileName: sheetFileName(name, 'csv'), bytes: blob.size, tabs: 1, rows: tab.rows.length };
   }
   const { writeXlsx } = await import('./xlsx');
-  const bytes = await writeXlsx(tabs, sheet.title);
+  const bytes = await writeXlsx(tabs, sheet.title, await exportLinkResolver(board));
   const blob = new Blob([bytes as BlobPart], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
   return { blob, fileName: sheetFileName(sheet.title, 'xlsx'), bytes: blob.size, tabs: tabs.length, rows: tabs.reduce((n, t) => n + t.rows.length, 0) };
+}
+
+/**
+ * Link cells in an export: the linked title, and a web address that opens it
+ * (this board's link, or the other board's). Shots have no address of their own.
+ */
+async function exportLinkResolver(board: MountedBoard): Promise<(v: string) => { text: string; url?: string } | null> {
+  const [{ linkLabel, isHere }, { parseDocValue, docPath }, { linkBuilder }] = await Promise.all([
+    import('./doc-link-board'), import('./doc-link'), import('../ui/copy-link'),
+  ]);
+  const build = await linkBuilder({ allowEditLink: false });
+  return (v: string) => {
+    const text = linkLabel(board.std, v).text;
+    if (v.startsWith('board:')) return { text, url: `${location.origin}/ai/board?board=${encodeURIComponent(v.slice(6))}` };
+    const ref = parseDocValue(v);
+    if (!ref) return { text };
+    if (isHere(ref)) return board.store.getBlock(ref.block) ? { text, url: build(ref.block, ref.tab).url } : { text };
+    const path = docPath(ref);
+    return { text, ...(path ? { url: location.origin + path } : {}) };
+  };
 }
 
 export function saveBlob(blob: Blob, fileName: string): void {
@@ -184,6 +207,7 @@ export function installSheetFocus(
         <div class="vs-focus__actions">
           ${readonly() ? '' : `<button type="button" class="vs-focus__btn" data-act="import" title="Add tabs from an Excel or CSV file">Import</button>
           <input type="file" data-file hidden style="display:none" accept=".xlsx,.xlsm,.csv,.tsv,.txt,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />`}
+          <button type="button" class="vs-focus__btn" data-act="copy-link" title="Copy a link to this tab. People who can open this board can open it.">Copy link</button>
           <div class="vs-focus__menu-wrap">
             <button type="button" class="vs-focus__btn vs-focus__btn--primary" data-act="menu" aria-haspopup="menu" aria-expanded="false">
               Download <span class="vs-focus__caret">&#9662;</span>
@@ -253,6 +277,7 @@ export function installSheetFocus(
     const run = (fn: () => void) => { try { fn(); } catch (err) { toast(err instanceof SheetError ? err.message : 'That did not work.', 'error'); } };
     switch (act) {
       case 'close': close(); return;
+      case 'copy-link': if (blockId) void copyBlockLink(blockId, tabId || undefined); return;
       case 'menu': setMenu(q<HTMLElement>('[data-menu]')?.hidden === false ? null : 'download'); return;
       case 'xlsx': setMenu(null); void download('xlsx'); return;
       case 'csv': setMenu(null); void download('csv'); return;
@@ -389,7 +414,8 @@ export function installSheetFocus(
 
   const onOpen = (e: Event) => {
     const id = (e as CustomEvent).detail?.blockId;
-    if (typeof id === 'string') open(id);
+    const tab = (e as CustomEvent).detail?.tab;
+    if (typeof id === 'string') open(id, typeof tab === 'string' ? tab : undefined);
   };
   container.addEventListener('voidspace-open-sheet', onOpen);
 
