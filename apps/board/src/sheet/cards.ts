@@ -183,7 +183,17 @@ export class SheetCards {
 
   private card(r: DisplayRow, i: number, cols: SheetColumn[], titleCol: SheetColumn | undefined): TemplateResult {
     const title = titleCol ? cellText(this.value(r, titleCol), titleCol.type) : '';
-    const fields = cols.filter(c => c !== titleCol).map(c => ({ c, v: this.value(r, c) })).filter(f => f.v !== null && f.v !== '').slice(0, 5);
+    // Five fields at most. Status is never dropped; on a calendar, Date, Time and
+    // Platforms come first, then Status, then whatever else is filled.
+    const filled = cols.filter(c => c !== titleCol).map(c => ({ c, v: this.value(r, c) })).filter(f => f.v !== null && f.v !== '');
+    const rank = (c: SheetColumn) => {
+      const n = c.name.trim().toLowerCase();
+      if (this.post.platforms) { const i = ['date', 'time', 'platforms', 'platform', 'status'].indexOf(n); if (i >= 0) return i; }
+      return n === 'status' ? 5 : 10;
+    };
+    const order = filled.map((f, i) => ({ f, i, k: rank(f.c) }));
+    const keep = new Set([...order].sort((a, b) => a.k - b.k || a.i - b.i).slice(0, 5).map(o => o.i));
+    const fields = order.filter(o => keep.has(o.i)).map(o => o.f);
     return html`<button type="button" class="vsc-card" @click=${() => { this.openKey = r.key; this.schedule(); }}>
       <span class="vsc-card__title"><span class="vsc-card__n">${i + 1}</span>${title || html`<span style="color:var(--vs-text-mute);font-weight:500">Untitled</span>`}${r.removed ? ' (shot removed)' : ''}</span>
       ${fields.map(f => html`<span class="vsc-card__field"><b>${f.c.name}</b><span>${this.show(f.c, f.v)}</span></span>`)}

@@ -778,9 +778,10 @@ export function moveRows(std: BlockStdScope, blockId: string, tabId: string, key
 /**
  * A row's cells as a copy should start: the same plan, never the same POST. A
  * "Post link" column is left empty, and a Status of Posted or Scheduled starts
- * again as Draft — the copy has not been posted. `days` moves every date on.
+ * again as Draft — the copy has not been posted (a duplicate's Ready too: it is a
+ * new post nobody has checked yet). `days` moves every date on.
  */
-function copiedCells(y: Y.Map<unknown>, cols: SheetColumn[], fromRow: string, days: number): Map<string, CellValue> {
+function copiedCells(y: Y.Map<unknown>, cols: SheetColumn[], fromRow: string, days: number, opts: { fresh?: boolean } = {}): Map<string, CellValue> {
   const cells = sub(y, 'cells');
   const out = new Map<string, CellValue>();
   for (const c of cols) {
@@ -788,7 +789,9 @@ function copiedCells(y: Y.Map<unknown>, cols: SheetColumn[], fromRow: string, da
     if (v === null) continue;
     const name = c.name.trim().toLowerCase();
     if (c.type === 'url' && /^(post link|link to post|live link|published link|post url)$/.test(name)) continue;
-    if (c.type === 'status' && name === 'status' && /^(posted|scheduled)$/i.test(String(v))) v = 'Draft';
+    // A duplicate is a new post (fresh): Ready also starts again as Draft. A split
+    // copy is the same post on another platform, so Ready stays Ready.
+    if (c.type === 'status' && name === 'status' && (opts.fresh ? /^(ready|posted|scheduled)$/i : /^(posted|scheduled)$/i).test(String(v))) v = 'Draft';
     if (days && c.type === 'date' && typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v)) {
       const d = new Date(`${v}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + days);
       v = d.toISOString().slice(0, 10);
@@ -826,7 +829,7 @@ export function duplicateRows(store: Store, blockId: string, tabId: string, rowI
     const ids = src.map((r, i) => {
       const id = newId('r');
       rowMap.set(id, toYMap({ tabId, order: keys[i]! }));
-      for (const [colId, v] of copiedCells(y, cols, r.id, opts.days ?? 0)) cells.set(cellKey(id, colId), v);
+      for (const [colId, v] of copiedCells(y, cols, r.id, opts.days ?? 0, { fresh: true })) cells.set(cellKey(id, colId), v);
       return id;
     });
     if (cells.size > SHEET_LIMITS.cells) throw new SheetError('too_many_cells', `A sheet can hold up to ${SHEET_LIMITS.cells.toLocaleString('en')} filled cells.`);

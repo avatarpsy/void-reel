@@ -1550,6 +1550,13 @@ export class SheetGrid {
     toast(res.added ? `Split into ${res.rows} rows — edit each caption for its platform.` : 'Each row already has one platform.', 'info');
   }
 
+  /** A content calendar or a brand deals tab: its rows are posts and deals, never shot cards. */
+  private planTab(): boolean {
+    const cols = this.snap?.columns ?? [];
+    return this.kind === 'calendar' || (!!this.snap && tabKind(this.snap.tab, cols) === 'calendar')
+      || (cols.some(c => /^brand$/i.test(c.name.trim())) && cols.some(c => /^deliverables?$/i.test(c.name.trim())));
+  }
+
   /** How many of these rows list more than one platform. */
   private multiPlatform(keys: string[]): number {
     const col = this.post.platforms;
@@ -1924,7 +1931,7 @@ export class SheetGrid {
           <button type="button" role="menuitem" @click=${() => { this.close(); this.duplicate(keys, 7); }}>Duplicate +1 week<em>For a post that repeats every week.</em></button>` : nothing}
         ${split ? html`<button type="button" role="menuitem" @click=${() => { this.close(); this.splitRows(keys); }}>One row per platform<em>A copy for each platform, so each caption fits it.</em></button>` : nothing}
         ${stored || split ? html`<hr />` : nothing}
-        ${this.opts.onMakeCards && (planned.length || !shotsTab) ? html`<button type="button" role="menuitem" @click=${() => { this.opts.onMakeCards?.(keys); this.close(); }}>
+        ${this.opts.onMakeCards && !this.planTab() && (planned.length || !shotsTab) ? html`<button type="button" role="menuitem" @click=${() => { this.opts.onMakeCards?.(keys); this.close(); }}>
           Make ${n === 1 ? 'a card' : `${n} cards`} from ${n === 1 ? 'this row' : 'these rows'}<em>Adds shot cards. Never removes any.</em></button>` : nothing}
         ${this.kind === 'calendar' ? html`<button type="button" role="menuitem" @click=${() => { const rs = this.rowsFor(keys); this.close(); void this.sendRows(rs); }}>
           Send ${n === 1 ? 'this row' : `${n} rows`} for approval<em>Makes a post you approve on its card. Nothing posts before that.</em></button>` : nothing}

@@ -509,6 +509,12 @@ voidspace-sheet { display: block; width: 100%; height: 100%; }
 @media (max-width: 640px) {
   .vs-sheet-main { padding: 0; }
   .vs-sheet-tabs { padding: 6px 12px 10px; }
+  /* The name gets its own full-width line under the buttons, never cut to "Content calen". */
+  .vs-sheet-focus .vs-focus__bar { flex-wrap: wrap; row-gap: 8px; }
+  .vs-sheet-focus .vs-focus__actions { margin-left: auto; }
+  .vs-sheet-focus .vs-focus__title { order: 3; flex: 1 0 100%; }
+  .vs-sheet-focus .vs-focus__name { width: 100%; font-size: 17px; }
+  .vs-sheet-focus .vs-focus__title [data-hint] { display: none; }
 }
 
 /* ── From Activity (sheet/activity.ts): read-only, so drawn quieter ──────── */
