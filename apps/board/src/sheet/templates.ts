@@ -63,7 +63,7 @@ export function templateTab(id: TemplateId, opts: { rows?: number } = {}): { tit
           // One row per episode: what a series follows (SHEETS_PLAN.md).
           binding: { kind: 'episodes' },
           columns: [
-            { name: 'Episode', type: 'number', width: 90 },
+            { name: 'Episode', type: 'number', width: 116 },
             { name: 'Title', type: 'text', width: 200 },
             { name: 'Logline', type: 'longtext', width: 280 },
             { name: 'Beats', type: 'longtext', width: 300 },

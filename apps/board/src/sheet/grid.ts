@@ -1391,8 +1391,8 @@ export class SheetGrid {
   /** One empty board per row that has none, linked from the row. Only adds. */
   private async makeEpisodeBoards(rows: DisplayRow[]): Promise<void> {
     if (!this.guard() || !this.snap) return;
-    const todo = rows.filter(r => r.rowId && r.link?.kind !== 'board');
-    if (!todo.length) { toast('Every one of those rows already has a board.', 'info'); return; }
+    const todo = this.boardless(rows);
+    if (!todo.length) { toast('Give a row a title or logline first. Rows that already have a board are skipped.', 'info'); return; }
     const sheetTitle = String(sheetYBlock(this.std.store, this.blockId)?.get('prop:title') ?? '');
     let made = 0;
     for (const row of todo) {
@@ -1406,6 +1406,17 @@ export class SheetGrid {
     if (made) toast(`Made ${made} episode board${made === 1 ? '' : 's'}. Each row links to its board.`, 'info');
   }
 
+  /** Rows that would get a board: no board yet, and planned (a title or a logline). Empty
+   *  template rows make no board, so "Make episode boards (10)" never means 10 blank boards. */
+  private boardless(rows: DisplayRow[]): DisplayRow[] {
+    if (!this.snap) return [];
+    return rows.filter(r => {
+      if (!r.rowId || r.link?.kind === 'board') return false;
+      const f = episodeFields(this.snap!.columns, c => this.value(r, c));
+      return !!(String(f.title || '').trim() || String(f.logline || '').trim());
+    });
+  }
+
   private openSeries(): void {
     this.pop = { kind: 'series', choices: null };
     this.schedule();
@@ -1414,7 +1425,11 @@ export class SheetGrid {
 
   private seriesModal(choices: SeriesChoice[] | null, busy: boolean, error?: string): TemplateResult {
     const tab = this.snap?.tab;
-    const sheetTitle = String(sheetYBlock(this.std.store, this.blockId)?.get('prop:title') ?? '') || tab?.name || 'Series';
+    // A season tab inside a bigger sheet ("Content calendar" + "Season 1") is named after the tab.
+    const yb = sheetYBlock(this.std.store, this.blockId);
+    const sheetName = String(yb?.get('prop:title') ?? '');
+    const tabCount = yb ? readTabs(yb).length : 1;
+    const sheetTitle = (tabCount > 1 ? tab?.name : sheetName) || sheetName || tab?.name || 'Series';
     const following = this.activity?.series ?? [];
     const soon = new Date(Date.now() + 60 * 60 * 1000);
     const local = new Date(soon.getTime() - soon.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
@@ -1487,7 +1502,7 @@ export class SheetGrid {
   }
 
   private episodeTools(): TemplateResult {
-    const n = this.snap?.rows.filter(r => r.rowId && r.link?.kind !== 'board').length ?? 0;
+    const n = this.snap ? this.boardless(this.snap.rows).length : 0;
     const following = this.activity?.series ?? [];
     return html`${n ? html`<button type="button" class="vsg-tool" title="One empty board per row that has none. Only adds."
         @click=${() => { void this.makeEpisodeBoards(this.snap!.rows); }}>Make episode boards (${n})</button>` : nothing}
