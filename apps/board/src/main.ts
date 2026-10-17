@@ -62,6 +62,7 @@ import { installViewportAnchor, installPaneShift } from './ui/viewport';
 import { installSheetFocus, type SheetFocus } from './sheet/focus';
 import { setSheetPacer, SheetError } from './sheet/ops';
 import { installSheetDrop } from './sheet/drop';
+import { setSharedOwnerBoard } from './sheet/activity';
 
 /** Replace the boot overlay with a message the user can act on. Reachable before
  *  any chrome exists, so it writes into the overlay rather than a toast. */
@@ -231,7 +232,7 @@ async function boot(): Promise<void> {
     // the sheet's Activity columns and actions talk about their own board.
     {
       const meta = (cloud as ReturnType<typeof installSharedSync>).metadata;
-      if (meta?.role === 'owner' && meta.sourceId) void import('./sheet/activity').then(m => m.setSharedOwnerBoard(meta.sourceId!));
+      if (meta?.role === 'owner' && meta.sourceId) setSharedOwnerBoard(meta.sourceId);
     }
     window.addEventListener('collaboration-role', event => {
       const nextReadOnly = (event as CustomEvent).detail === 'viewer';

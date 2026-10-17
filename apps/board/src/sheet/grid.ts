@@ -315,7 +315,7 @@ export class SheetGrid {
     if (kind !== this.kind) {
       this.kind = kind;
       this.actCols = kind === 'calendar' ? [{ id: 'post', name: 'Post', width: 240 }]
-        : kind === 'episodes' ? [{ id: 'episode', name: 'Episode', width: 230 }, { id: 'board', name: 'Board', width: 130 }]
+        : kind === 'episodes' ? [{ id: 'episode', name: 'Episode', width: 230 }, { id: 'board', name: 'Board', width: 160 }]
         : [];
       this.colV?.measure();
     }
@@ -1291,7 +1291,9 @@ export class SheetGrid {
   private footCell(c: number, left: number, frozen: boolean, edge: boolean): TemplateResult {
     const col = this.cols[c]!;
     const kinds = totalsFor(col.type);
-    const kind = this.view.totals[col.id] ?? kinds[0]!;
+    // A numbering column (Episode, #) has nothing worth summing by default.
+    const fallback = /^(episode|ep|#|no\.?|number)$/i.test(col.name.trim()) ? 'none' : kinds[0]!;
+    const kind = this.view.totals[col.id] ?? fallback;
     const text = computeTotal(col, this.rows.map(r => this.value(r, col)), kind);
     return html`<div class="vsg-fcell ${frozen ? 'is-frozen' : ''} ${edge ? 'is-frozen-edge' : ''}"
         style="width:${this.widthOf(col)}px;${frozen ? `left:${left}px;` : ''}"
